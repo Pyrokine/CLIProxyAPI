@@ -45,7 +45,7 @@ switch ($choice) {
 
         # Get Version Information
         $VERSION = (git describe --tags --always --dirty)
-        $COMMIT  = (git rev-parse --short HEAD)
+        $COMMIT  = (git rev-parse HEAD)
         $BUILD_DATE = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
         Write-Host "Building with the following info:"

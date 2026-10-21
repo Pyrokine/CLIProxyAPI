@@ -27,6 +27,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
@@ -743,6 +744,7 @@ type BaseAPIHandler struct {
 	ImageArtifactURLBuilder ImageArtifactURLBuilder
 	TranslatorPluginHooks   sdktranslator.PluginHooks
 	UsageManager            *coreusage.Manager
+	InferenceAdmission      *executionregistry.Admission
 
 	apiKeyPolicyMu    sync.RWMutex
 	apiKeyPolicyStore coreusage.APIKeyReservationStore
@@ -1188,7 +1190,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 	newCtx = coreusage.WithManager(newCtx, h.UsageManager)
 	newCtx = sdktranslator.WithPluginHooks(newCtx, h.TranslatorPluginHooks)
 	newCtx = context.WithValue(newCtx, handlerContextKey{}, handler)
+	newCtx, releaseInference, _ := h.InferenceAdmission.Acquire(newCtx, requestCtx)
 	return newCtx, func(params ...any) {
+		defer releaseInference()
 		var cause error
 		if len(params) == 1 {
 			cause, _ = params[0].(error)
@@ -1390,6 +1394,11 @@ func (h *BaseAPIHandler) executeNonStream(
 	skipPluginID string,
 	execFn func(context.Context, []string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error),
 ) ([]byte, http.Header, *ErrorMessage) {
+	ctx, releaseInference, admissionErr := h.InferenceAdmission.Acquire(ctx, nil)
+	if admissionErr != nil {
+		return nil, nil, &ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: admissionErr}
+	}
+	defer releaseInference()
 	executionID := newExecutionRequestID()
 	ctx, providers, normalizedModel, reservation, errMsg := h.prepareAPIKeyExecution(
 		ctx, handlerType, modelName, allowImageModel, executionID,
@@ -1571,6 +1580,19 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 	requestQuery url.Values,
 	skipPluginID string,
 ) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *ErrorMessage) {
+	ctx, releaseInference, admissionErr := h.InferenceAdmission.Acquire(ctx, nil)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			releaseInference()
+		}
+	}()
+	if admissionErr != nil {
+		errs := make(chan *ErrorMessage, 1)
+		errs <- &ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: admissionErr}
+		close(errs)
+		return nil, nil, errs
+	}
 	requireTransportTerminal := coreexecutor.StreamDeliveryAcknowledgement(ctx)
 	executionID := newExecutionRequestID()
 	ctx, providers, normalizedModel, reservation, errMsg := h.prepareAPIKeyExecution(
@@ -1741,7 +1763,9 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		responseHeaders <- cloneHeader(upstreamHeaders)
 	}
 
+	handedOff = true
 	go func() {
+		defer releaseInference()
 		completionOutcome := pluginapi.RequestCompletionSucceeded
 		completionStatus := http.StatusOK
 		var completionErr error

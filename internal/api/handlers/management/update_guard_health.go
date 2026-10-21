@@ -2,7 +2,6 @@ package management
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -13,9 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/gin-gonic/gin"
 )
@@ -115,6 +112,15 @@ func probeUpdatePrivateHealth(
 		!strings.EqualFold(normalizeUpdateHealthVersion(payload.Version), normalizeUpdateHealthVersion(expectedVersion)) {
 		return fmt.Errorf("private health identity mismatch")
 	}
+	if session.SchemaVersion == updateGuardStateSchemaVersion {
+		expectedIdentity := session.TargetIdentity
+		if expectedVersion == session.PreviousVersion {
+			expectedIdentity = session.PreviousIdentity
+		}
+		if payload.Identity == nil || *payload.Identity != expectedIdentity {
+			return fmt.Errorf("private health executable identity mismatch")
+		}
+	}
 	return nil
 }
 
@@ -151,7 +157,10 @@ func newUpdateGuardHTTPClient(session updateGuardSession) (*http.Client, error) 
 			ServerName: serverName,
 		}
 	}
-	return &http.Client{Timeout: updateGuardHTTPTimeout, Transport: transport}, nil
+	return &http.Client{
+		Timeout: updateGuardHTTPTimeout, Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}, nil
 }
 
 func updateHealthCertificateName(certPEM []byte) (string, error) {
@@ -177,35 +186,8 @@ func updateHealthCertificateName(certPEM []byte) (string, error) {
 
 // GetUpdateHealth authenticates the update guard on a direct loopback connection.
 func (h *Handler) GetUpdateHealth(c *gin.Context) {
-	if h == nil || h.stateStore == nil || c == nil || c.Request == nil {
-		if c != nil {
-			c.AbortWithStatus(http.StatusServiceUnavailable)
-		}
-		return
-	}
-	client := access.ResolveClientAddress(c.Request, nil)
-	if !client.DirectLoopback {
-		c.AbortWithStatus(http.StatusForbidden)
-		return
-	}
-	values := c.Request.Header.Values(updateHealthTokenHeader)
-	if len(values) != 1 {
-		c.AbortWithStatus(http.StatusUnauthorized)
-		return
-	}
-	provided := strings.TrimSpace(values[0])
-	ctx, cancel := context.WithTimeout(c.Request.Context(), updateGuardHTTPTimeout)
-	defer cancel()
-	token, err := h.stateStore.loadUpdateHealthToken(ctx)
-	if err != nil || token == nil || !isUpdateHealthToken(token.Token) ||
-		token.ExpiresUnix != token.ExpiresAt.Unix() || !time.Now().Before(token.ExpiresAt) ||
-		len(provided) != len(token.Token) || subtle.ConstantTimeCompare([]byte(provided), []byte(token.Token)) != 1 {
-		c.AbortWithStatus(http.StatusUnauthorized)
-		return
-	}
-	session, err := h.stateStore.loadUpdateSession(ctx)
-	if err != nil || session == nil || session.AttemptID != token.AttemptID || !isActiveUpdatePhase(session.Phase) {
-		c.AbortWithStatus(http.StatusUnauthorized)
+	session, _, ok := h.authenticateUpdateGuard(c)
+	if !ok {
 		return
 	}
 	version := buildinfo.Version
@@ -217,9 +199,23 @@ func (h *Handler) GetUpdateHealth(c *gin.Context) {
 	if strings.EqualFold(normalizeUpdateHealthVersion(version), normalizeUpdateHealthVersion(expectedVersion)) {
 		version = expectedVersion
 	}
-	c.Header("Cache-Control", "no-store")
-	c.JSON(
-		http.StatusOK,
-		updateHealthResponse{Status: "ok", Version: version, AttemptID: session.AttemptID},
-	)
+	response := updateHealthResponse{Status: "ok", Version: version, AttemptID: session.AttemptID}
+	if session.SchemaVersion == updateGuardStateSchemaVersion {
+		if buildinfo.UpdateProtocol != fmt.Sprint(updateGuardStateSchemaVersion) {
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
+		executable, err := currentUpdateExecutablePath()
+		if err != nil {
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
+		identity, err := readUpdateArtifact(executable, buildinfo.Version, buildinfo.Commit)
+		if err != nil {
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
+		response.Identity = &identity
+	}
+	c.JSON(http.StatusOK, response)
 }

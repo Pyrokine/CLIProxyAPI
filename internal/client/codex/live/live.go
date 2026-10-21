@@ -22,6 +22,7 @@ import (
 	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	"github.com/gin-gonic/gin"
@@ -62,6 +63,11 @@ type Handler struct {
 	mediaRelayConfig     config.CodexLiveMediaRelayConfig
 	mediaRelayConfigured bool
 	mediaLimiter         *mediaSessionLimiter
+	inferenceAdmission   *executionregistry.Admission
+}
+
+func (h *Handler) SetInferenceAdmission(admission *executionregistry.Admission) {
+	h.inferenceAdmission = admission
 }
 
 // NewHandler creates a Codex live session handler.
@@ -435,13 +441,27 @@ func (h *Handler) Handle(c *gin.Context) {
 	sessionStored := false
 	if success && h.sessions != nil {
 		if callID != "" {
+			releaseInference, errAdmission := h.inferenceAdmission.Retain(c.Request.Context())
+			if errAdmission != nil {
+				writeLiveError(c, http.StatusServiceUnavailable, errAdmission.Error())
+				return
+			}
+			resources := &liveSessionResources{}
+			defer func() {
+				if !sessionStored {
+					_ = resources.close()
+					releaseInference()
+				}
+			}()
 			clientMetadata := logging.GetClientRequestMetadata(ctx)
 			session := liveSession{
-				authID:          selected.ID,
-				model:           model,
-				media:           mediaSession,
-				sessionID:       clientMetadata.SessionID,
-				parentSessionID: clientMetadata.ParentSessionID,
+				authID:           selected.ID,
+				model:            model,
+				media:            mediaSession,
+				resources:        resources,
+				releaseInference: releaseInference,
+				sessionID:        clientMetadata.SessionID,
+				parentSessionID:  clientMetadata.ParentSessionID,
 			}
 			session.ownerPrincipal, session.ownerProvider = requestOwner(c)
 			if principal, ok := c.Get(ClientSecretPrincipalContextKey); ok {

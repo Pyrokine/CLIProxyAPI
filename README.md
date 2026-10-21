@@ -70,6 +70,17 @@ compatible image
 
 Before exposing the service outside localhost, read the [production deployment guide](docs/production-deployment.md)
 
+### Safe self-update
+
+A systemd self-update pauses new inference before replacing the executable. Accepted HTTP uploads and SSE responses finish naturally; Responses WebSockets are counted per turn, so idle sockets do not block an update. Existing realtime media sessions remain active until the session ends.
+The drain waits up to two minutes. On timeout, inference admission resumes and the update reports failure while existing streams continue. Management and health queries remain available; new inference receives 503 with `Retry-After`.
+
+Each update binds the release tag, full commit SHA, executable SHA-256, OS, architecture, and update protocol marker. Candidates must support the current pause-and-recovery protocol; older-protocol releases are rejected before installation while previous artifacts remain eligible for controlled rollback.
+A fresh drain confirmation commits the admission pause through installation, health checks, or recovery. Restarted processes restore the installation pause before listening.
+The guard has a five-minute runtime limit. Admission resumes after the server verifies that the guard has exited and no restart job remains pending. A failed systemd query keeps admission paused. If the state database is unavailable, restore persistence and restart the service before resuming inference.
+
+Health checks and rollback verify the same artifact identities. Backups are isolated by update attempt and removed only after a successful update. Failed recovery retains its backup and session identity and blocks another update until recovery is verified. Legacy sessions can recover their original backup path, with incomplete identity evidence reported as requiring manual verification.
+
 ## Documentation
 
 - [User guide](https://help.router-for.me/)
@@ -102,7 +113,7 @@ builds for Linux AMD64 and ARM64
 ## Version and release behavior
 
 Local source and Docker builds resolve the displayed version through `git describe --tags --always --dirty`. Release builds
-embed the release version, short commit SHA, and UTC build date through linker flags. Without release metadata, the server
+embed the release version, full commit SHA, and UTC build date through linker flags. Without release metadata, the server
 reports `dev`, `none`, and `unknown`
 
 Local augmented releases use tags in the form `v<upstream>-aug.N`; the first local release based on a new upstream version

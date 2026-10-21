@@ -55,6 +55,7 @@ type liveSession struct {
 	homeSelection         *auth.HomeDispatchSelection
 	media                 mediaRelaySession
 	resources             *liveSessionResources
+	releaseInference      func()
 	token                 uint64
 }
 
@@ -129,6 +130,9 @@ func (s *sessionStore) put(callID string, session liveSession) liveSession {
 		}
 		if previous.session.homeSelection != session.homeSelection {
 			endHomeSelection(previous.session, "session_replaced")
+		}
+		if previous.session.resources != session.resources && previous.session.releaseInference != nil {
+			previous.session.releaseInference()
 		}
 	}
 	return session
@@ -249,6 +253,9 @@ func (s *sessionStore) peek(callID string) (liveSession, bool) {
 }
 
 func endLiveSession(session liveSession, reason string) error {
+	if session.releaseInference != nil {
+		defer session.releaseInference()
+	}
 	var closeErrors []error
 	if session.resources != nil {
 		if errClose := session.resources.close(); errClose != nil {

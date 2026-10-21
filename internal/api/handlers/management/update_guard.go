@@ -16,6 +16,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -27,6 +28,10 @@ const (
 	updateGuardAttemptFlag       = "--update-attempt"
 	updateHealthTokenHeader      = "X-CPA-Update-Token"
 	updateHealthPath             = "/v0/management/update-health"
+	updateDrainPath              = "/v0/management/update-drain"
+	updateGuardDrainTimeout      = 2 * time.Minute
+	updateGuardRuntimeLimit      = 5 * time.Minute
+	updateGuardReconcileInterval = 5 * time.Second
 	updateGuardDownloadTimeout   = 7 * time.Minute
 	updateGuardHealthTimeout     = 60 * time.Second
 	updateGuardClaimTimeout      = 10 * time.Second
@@ -41,7 +46,6 @@ const (
 
 type updateGuardHost struct {
 	ExecutablePath    string
-	BackupPath        string
 	StateDBPath       string
 	ServiceUnit       string
 	HealthBaseURL     string
@@ -53,15 +57,19 @@ type updateGuardRuntime struct {
 	sleep             func(context.Context, time.Duration) error
 	runCommand        func(context.Context, string, ...string) error
 	currentExecutable func() (string, error)
+	identify          func(string, string, string) (updateArtifactIdentity, error)
 	install           func(updateGuardSession) error
 	restore           func(updateGuardSession) error
 	newHTTPClient     func(updateGuardSession) (*http.Client, error)
+	quiescent         func(context.Context, updateGuardSession) (bool, error)
+	drain             func(context.Context, updateGuardSession, string, string) (executionregistry.DrainConfirmation, error)
 }
 
 type updateHealthResponse struct {
-	Status    string `json:"status"`
-	Version   string `json:"version"`
-	AttemptID string `json:"attempt_id"`
+	Status    string                  `json:"status"`
+	Version   string                  `json:"version"`
+	AttemptID string                  `json:"attempt_id"`
+	Identity  *updateArtifactIdentity `json:"identity,omitempty"`
 }
 
 func realUpdateGuardRuntime() updateGuardRuntime {
@@ -81,10 +89,52 @@ func realUpdateGuardRuntime() updateGuardRuntime {
 			return exec.CommandContext(ctx, name, args...).Run()
 		},
 		currentExecutable: currentUpdateExecutablePath,
+		identify:          readUpdateArtifact,
 		install:           installUpdateCandidate,
 		restore:           restoreUpdateBackup,
 		newHTTPClient:     newUpdateGuardHTTPClient,
+		quiescent:         updateGuardQuiescent,
+		drain:             requestUpdateDrain,
 	}
+}
+
+func updateGuardQuiescent(ctx context.Context, session updateGuardSession) (bool, error) {
+	if session.GuardUnit != updateGuardUnit(session.AttemptID) || session.ServiceUnit != defaultUpdateServiceUnit {
+		return false, fmt.Errorf("invalid update service identity")
+	}
+	for index, unit := range []string{session.GuardUnit, session.ServiceUnit} {
+		output, err := exec.CommandContext(ctx, "systemctl", "show", "--no-pager",
+			"--property=LoadState", "--property=ActiveState", "--property=Job", unit).Output()
+		if err != nil {
+			return false, fmt.Errorf("inspect update service state: %w", err)
+		}
+		ready, err := updateUnitQuiescent(string(output), index == 0)
+		if err != nil || !ready {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func updateUnitQuiescent(output string, guard bool) (bool, error) {
+	properties := make(map[string]string, 3)
+	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
+		name, value, ok := strings.Cut(line, "=")
+		if ok {
+			properties[name] = strings.TrimSpace(value)
+		}
+	}
+	job, hasJob := properties["Job"]
+	if !hasJob || properties["LoadState"] == "" || properties["ActiveState"] == "" {
+		return false, fmt.Errorf("incomplete update service state")
+	}
+	if job != "" {
+		return false, nil
+	}
+	if guard {
+		return properties["ActiveState"] == "inactive" || properties["ActiveState"] == "failed", nil
+	}
+	return properties["LoadState"] == "loaded" && properties["ActiveState"] == "active", nil
 }
 
 func generateUpdateAttemptID() (string, error) {
@@ -220,7 +270,6 @@ func (h *Handler) resolveUpdateGuardHost(cfg *config.Config) (updateGuardHost, e
 	}
 	return updateGuardHost{
 		ExecutablePath:    executablePath,
-		BackupPath:        executablePath + ".bak",
 		StateDBPath:       stateDBPath,
 		ServiceUnit:       defaultUpdateServiceUnit,
 		HealthBaseURL:     scheme + "://127.0.0.1:" + strconv.Itoa(cfg.Port),
@@ -244,7 +293,7 @@ func newUpdateGuardSession(
 		Phase:             updatePhaseDownloading,
 		Percent:           0,
 		ExecutablePath:    host.ExecutablePath,
-		BackupPath:        host.BackupPath,
+		BackupPath:        updateBackupPath(host.ExecutablePath, attemptID),
 		StateDBPath:       host.StateDBPath,
 		ServiceUnit:       host.ServiceUnit,
 		GuardUnit:         updateGuardUnit(attemptID),
@@ -262,6 +311,7 @@ func (h *Handler) beginPersistentUpdate(
 	cfg *config.Config,
 	targetVersion string,
 	automatic bool,
+	attemptID string,
 ) (updateGuardSession, error) {
 	host, err := h.resolveUpdateGuardHost(cfg)
 	if err != nil {
@@ -271,12 +321,25 @@ func (h *Handler) beginPersistentUpdate(
 	if err = h.reconcileStaleUpdateSession(ctx, runtime); err != nil {
 		return updateGuardSession{}, err
 	}
-	attemptID, err := generateUpdateAttemptID()
-	if err != nil {
-		return updateGuardSession{}, err
+	if attemptID == "" {
+		attemptID, err = generateUpdateAttemptID()
+		if err != nil {
+			return updateGuardSession{}, err
+		}
 	}
 	now := runtime.now()
 	session := newUpdateGuardSession(host, attemptID, targetVersion, automatic, now)
+	session.OriginInstance = h.inferenceAdmission.InstanceID()
+	if session.OriginInstance == "" {
+		return updateGuardSession{}, fmt.Errorf("inference admission is unavailable")
+	}
+	session.PreviousIdentity, err = readUpdateArtifact(host.ExecutablePath, buildinfo.Version, buildinfo.Commit)
+	if err != nil {
+		return updateGuardSession{}, err
+	}
+	if err = validateUpdateArtifact(session.PreviousIdentity, session.PreviousVersion, true); err != nil {
+		return updateGuardSession{}, err
+	}
 	if err = validateUpdateGuardSession(session, host.StateDBPath, host.ExecutablePath, false, now); err != nil {
 		return updateGuardSession{}, err
 	}
@@ -306,7 +369,9 @@ func RunUpdateGuardCommand(args []string) (bool, int) {
 		return true, 1
 	}
 	defer func() { _ = store.Close() }()
-	if err = runUpdateGuard(context.Background(), store, attemptID, realUpdateGuardRuntime()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), updateGuardRuntimeLimit)
+	defer cancel()
+	if err = runUpdateGuard(ctx, store, attemptID, realUpdateGuardRuntime()); err != nil {
 		log.WithError(err).Error("update guard failed")
 		return true, 1
 	}

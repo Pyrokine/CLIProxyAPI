@@ -17,7 +17,7 @@ func validateUpdateGuardSession(
 	requireCandidate bool,
 	now time.Time,
 ) error {
-	if session.SchemaVersion != updateGuardStateSchemaVersion || !isUpdateAttemptID(session.AttemptID) {
+	if (session.SchemaVersion != 1 && session.SchemaVersion != updateGuardStateSchemaVersion) || !isUpdateAttemptID(session.AttemptID) {
 		return fmt.Errorf("invalid update session identity")
 	}
 	if !validVersion.MatchString(session.TargetVersion) || !validBuildVersion.MatchString(session.PreviousVersion) {
@@ -31,12 +31,26 @@ func validateUpdateGuardSession(
 	if filepath.Clean(stateDBPath) != session.StateDBPath || filepath.Clean(executablePath) != session.ExecutablePath {
 		return fmt.Errorf("update session path does not match guard process")
 	}
-	if session.BackupPath != session.ExecutablePath+".bak" ||
+	expectedBackup := updateBackupPath(session.ExecutablePath, session.AttemptID)
+	if session.SchemaVersion == 1 {
+		expectedBackup = session.ExecutablePath + ".bak"
+	}
+	if session.BackupPath != expectedBackup ||
 		session.GuardUnit != updateGuardUnit(session.AttemptID) ||
 		session.ServiceUnit != defaultUpdateServiceUnit {
 		return fmt.Errorf("invalid update session service target")
 	}
 	if requireCandidate {
+		if session.SchemaVersion != updateGuardStateSchemaVersion || session.OriginInstance == "" ||
+			!session.DrainDeadline.After(now) {
+			return fmt.Errorf("update session lacks a current inference drain identity")
+		}
+		if err := validateUpdateArtifact(session.TargetIdentity, session.TargetVersion, false); err != nil {
+			return err
+		}
+		if err := validateUpdateArtifact(session.PreviousIdentity, session.PreviousVersion, true); err != nil {
+			return err
+		}
 		if session.CandidatePath != updateCandidatePath(session.ExecutablePath, session.AttemptID) {
 			return fmt.Errorf("invalid update candidate path")
 		}
@@ -78,6 +92,15 @@ func requireRegularFile(path string) error {
 }
 
 func installUpdateCandidate(session updateGuardSession) error {
+	if session.SchemaVersion != updateGuardStateSchemaVersion {
+		return fmt.Errorf("legacy update session cannot install a candidate")
+	}
+	if err := verifyUpdateArtifactFile(session.CandidatePath, session.TargetIdentity); err != nil {
+		return fmt.Errorf("validate candidate identity: %w", err)
+	}
+	if err := verifyUpdateArtifactFile(session.ExecutablePath, session.PreviousIdentity); err != nil {
+		return fmt.Errorf("validate previous identity: %w", err)
+	}
 	if err := requireRegularFile(session.ExecutablePath); err != nil {
 		return fmt.Errorf("validate current executable: %w", err)
 	}
@@ -87,13 +110,8 @@ func installUpdateCandidate(session updateGuardSession) error {
 	if filepath.Dir(session.CandidatePath) != filepath.Dir(session.ExecutablePath) {
 		return fmt.Errorf("candidate executable is not on the target filesystem")
 	}
-	if info, err := os.Lstat(session.BackupPath); err == nil {
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("backup path is not a regular file")
-		}
-		if err = os.Remove(session.BackupPath); err != nil {
-			return fmt.Errorf("remove previous backup: %w", err)
-		}
+	if _, err := os.Lstat(session.BackupPath); err == nil {
+		return fmt.Errorf("attempt backup already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect previous backup: %w", err)
 	}
@@ -112,6 +130,14 @@ func installUpdateCandidate(session updateGuardSession) error {
 }
 
 func restoreUpdateBackup(session updateGuardSession) error {
+	if session.SchemaVersion == updateGuardStateSchemaVersion {
+		if err := validateUpdateArtifact(session.PreviousIdentity, session.PreviousVersion, true); err != nil {
+			return err
+		}
+		if err := verifyUpdateArtifactFile(session.BackupPath, session.PreviousIdentity); err != nil {
+			return fmt.Errorf("validate backup identity: %w", err)
+		}
+	}
 	if err := requireRegularFile(session.BackupPath); err != nil {
 		return fmt.Errorf("validate update backup: %w", err)
 	}
@@ -138,6 +164,25 @@ func syncDirectory(path string) error {
 		return fmt.Errorf("sync update directory: %w", err)
 	}
 	return nil
+}
+
+func removeUpdateBackup(session updateGuardSession) error {
+	if session.Phase != updatePhaseSucceeded || session.SchemaVersion != updateGuardStateSchemaVersion ||
+		session.BackupPath != updateBackupPath(session.ExecutablePath, session.AttemptID) {
+		return nil
+	}
+	if _, err := os.Lstat(session.BackupPath); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := verifyUpdateArtifactFile(session.BackupPath, session.PreviousIdentity); err != nil {
+		return fmt.Errorf("validate completed attempt backup: %w", err)
+	}
+	if err := os.Remove(session.BackupPath); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(session.BackupPath))
 }
 
 func removeUpdateCandidate(session updateGuardSession) error {

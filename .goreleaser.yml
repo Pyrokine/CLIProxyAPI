@@ -14,7 +14,7 @@ builds:
         main: ./cmd/server/
         binary: cli-proxy-api
         ldflags:
-            - -s -w -X 'main.version={{.Version}}' -X 'main.commit={{.ShortCommit}}' -X 'main.buildDate={{.Date}}'
+            - -s -w -X 'main.version={{.Version}}' -X 'main.commit={{.FullCommit}}' -X 'main.buildDate={{.Date}}' -X 'github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.UpdateProtocol=2'
 archives:
     -   id: "cli-proxy-api"
         formats:

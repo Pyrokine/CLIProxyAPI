@@ -12,4 +12,7 @@ var (
 
 	// BuildDate records when the binary was built in UTC.
 	BuildDate = "unknown"
+
+	// UpdateProtocol 标识发布物支持的更新暂停与身份协议
+	UpdateProtocol = "2"
 )

@@ -46,7 +46,8 @@ type updateState struct {
 }
 
 type updateRequest struct {
-	Version string `json:"version"` // e.g. "v1.3.2"
+	Version   string `json:"version"` // e.g. "v1.3.2"
+	AttemptID string `json:"attempt_id,omitempty"`
 }
 
 type updateCompatibilityResponse struct {
@@ -87,6 +88,7 @@ type githubReleaseAsset struct {
 }
 
 type githubReleaseForUpdate struct {
+	Commit  string               `json:"-"`
 	TagName string               `json:"tag_name"`
 	Assets  []githubReleaseAsset `json:"assets"`
 }
@@ -124,6 +126,21 @@ func (h *Handler) GetUpdateStatus(c *gin.Context) {
 	if session != nil && (status.status == "idle" || status.attemptID == session.AttemptID) {
 		status = updateStateFromSession(*session)
 	}
+	if attemptID := strings.TrimSpace(c.Query("attempt_id")); attemptID != "" {
+		if !isUpdateAttemptID(attemptID) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_update_attempt"})
+			return
+		}
+		if !stateAvailable || stateErr != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "update_state_unavailable"})
+			return
+		}
+		if session == nil || session.AttemptID != attemptID {
+			c.JSON(http.StatusNotFound, gin.H{"error": "update_attempt_not_found", "attempt_id": attemptID})
+			return
+		}
+		status = updateStateFromSession(*session)
+	}
 	response := gin.H{
 		"status":          status.status,
 		"message":         status.message,
@@ -141,6 +158,8 @@ func (h *Handler) GetUpdateStatus(c *gin.Context) {
 		response["result_code"] = session.ResultCode
 		response["failure_count"] = session.FailureCount
 		response["next_retry_at"] = session.NextRetryAt
+		response["target_identity"] = session.TargetIdentity
+		response["previous_identity"] = session.PreviousIdentity
 	}
 	c.JSON(http.StatusOK, response)
 }
@@ -177,6 +196,9 @@ func updateStateFromSession(session updateGuardSession) updateState {
 	case updatePhaseVerifying, updatePhasePreparing:
 		status = "verifying"
 		message = "Verifying and preparing release"
+	case updatePhaseClaimed, updatePhaseDraining:
+		status = "draining"
+		message = "Waiting for active inference to finish"
 	case updatePhaseSucceeded:
 		status = "done"
 		message = "Update completed and passed health checks"
@@ -186,6 +208,9 @@ func updateStateFromSession(session updateGuardSession) updateState {
 	case updatePhaseError, updatePhaseLaunchFailed, updatePhaseTerminalFailure:
 		status = "error"
 		message = "Update failed"
+	}
+	if session.ResultCode == "legacy_recovery_unverified" {
+		message = "Legacy update recovery requires manual executable identity verification"
 	}
 	return updateState{
 		status:    status,
@@ -215,6 +240,11 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 	}
 
 	targetVersion := strings.TrimSpace(req.Version)
+	req.AttemptID = strings.TrimSpace(req.AttemptID)
+	if req.AttemptID != "" && !isUpdateAttemptID(req.AttemptID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_update_attempt"})
+		return
+	}
 	if !validVersion.MatchString(targetVersion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_version", "message": "Version format is invalid"})
 		return
@@ -243,7 +273,7 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 	}
 
 	startCtx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
-	session, err := h.beginPersistentUpdate(startCtx, cfg, targetVersion, false)
+	session, err := h.beginPersistentUpdate(startCtx, cfg, targetVersion, false, req.AttemptID)
 	cancel()
 	if err != nil {
 		status := http.StatusServiceUnavailable
@@ -253,6 +283,10 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 			status = http.StatusConflict
 			code = "update_in_progress"
 			message = "An update is already in progress"
+		} else if errors.Is(err, errUpdateRecoveryRequired) {
+			status = http.StatusConflict
+			code = "update_recovery_required"
+			message = "Previous update recovery is incomplete; verify the retained backup before starting another update"
 		}
 		c.JSON(status, gin.H{"error": code, "message": message})
 		return
@@ -387,6 +421,18 @@ func (h *Handler) performUpdate(repo, proxyURL string, session updateGuardSessio
 		return
 	}
 
+	identity, err := inspectUpdateArtifact(binaryData, "", "")
+	if err == nil {
+		err = validateUpdateArtifact(identity, session.TargetVersion, false)
+	}
+	if err != nil || identity.Commit != release.Commit {
+		if err == nil {
+			err = fmt.Errorf("release executable commit does not match the requested tag")
+		}
+		h.failUpdateBeforeGuard(session, updatePhasePreparing, "identity_failed", 85, err)
+		return
+	}
+	session.TargetIdentity = identity
 	session.CandidatePath = updateCandidatePath(session.ExecutablePath, session.AttemptID)
 	now = time.Now().UTC()
 	updated, err = h.stateStore.transitionUpdateSession(
@@ -395,6 +441,7 @@ func (h *Handler) performUpdate(repo, proxyURL string, session updateGuardSessio
 		updatePhasePreparing,
 		func(next *updateGuardSession) {
 			next.CandidatePath = session.CandidatePath
+			next.TargetIdentity = session.TargetIdentity
 			next.Percent = 85
 			next.UpdatedAt = now
 		},
@@ -613,6 +660,21 @@ func (h *Handler) fetchRelease(
 	if err = json.Unmarshal(body, &release); err != nil {
 		return nil, err
 	}
+	if release.TagName != version {
+		return nil, fmt.Errorf("release tag does not match the requested version")
+	}
+	commitURL := fmt.Sprintf("https://api.github.com/repos/%s/commits/%s", repo, url.PathEscape(version))
+	commitBody, err := githubGet(ctx, client, commitURL)
+	if err != nil {
+		return nil, err
+	}
+	var identity struct {
+		SHA string `json:"sha"`
+	}
+	if err = json.Unmarshal(commitBody, &identity); err != nil || !updateCommitPattern.MatchString(identity.SHA) {
+		return nil, fmt.Errorf("release tag does not resolve to a full commit identity")
+	}
+	release.Commit = identity.SHA
 	return &release, nil
 }
 
@@ -735,7 +797,7 @@ func (h *Handler) tryAutoUpdateCPA(ctx context.Context, cfg *config.Config) {
 		).Warn("cpa auto-update: version is in retry backoff")
 		return
 	}
-	session, err := h.beginPersistentUpdate(ctx, cfg, latest, true)
+	session, err := h.beginPersistentUpdate(ctx, cfg, latest, true, "")
 	if err != nil {
 		if !errors.Is(err, errUpdateInProgress) {
 			log.Warnf("cpa auto-update: update guard unavailable for %s: %v", latest, err)

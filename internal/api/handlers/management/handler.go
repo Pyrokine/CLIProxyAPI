@@ -30,6 +30,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -182,6 +183,7 @@ type Handler struct {
 	modelCatalogRuntimeSync        func(*config.Config) error
 	accountInspection              *accountInspectionService
 	stateStore                     *managementStateStore
+	inferenceAdmission             *executionregistry.Admission
 	internalToken                  string // random token for internal localhost requests (quota scheduler)
 	attemptCleanupCancel           context.CancelFunc
 	attemptCleanupWG               sync.WaitGroup
@@ -191,6 +193,10 @@ type Handler struct {
 
 // Option configures a Handler.
 type Option func(*Handler)
+
+func WithInferenceAdmission(admission *executionregistry.Admission) Option {
+	return func(h *Handler) { h.inferenceAdmission = admission }
+}
 
 // withEnvSecret overrides the management password (default: from MANAGEMENT_PASSWORD env).
 func withEnvSecret(secret string) Option {
@@ -281,7 +287,12 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	}
 	stateStore, err := openManagementStateStore(configFilePath)
 	if err != nil {
-		log.WithError(err).Warn("management state persistence disabled")
+		if h.inferenceAdmission != nil {
+			h.inferenceAdmission.Hold(updateSessionStateKey)
+			log.WithError(err).Error("management state unavailable; inference paused until persistence is restored and the service restarts")
+		} else {
+			log.WithError(err).Warn("management state persistence disabled")
+		}
 	} else {
 		h.stateStore = stateStore
 		h.rateLimitPersistenceAvailable.Store(stateStore != nil)
@@ -296,6 +307,13 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	h.quotaRefreshTasks = newQuotaRefreshTaskService(h)
 	h.accountInspection = newAccountInspectionService(h)
 
+	if h.inferenceAdmission != nil && h.stateStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := h.restoreUpdateAdmission(ctx); err != nil {
+			log.WithError(err).Error("inference paused while update state is unavailable")
+		}
+		cancel()
+	}
 	h.startAttemptCleanup()
 	return h
 }
@@ -394,6 +412,7 @@ func (h *Handler) deleteQuotaEntry(entry quota.EntryState) {
 func (h *Handler) startAttemptCleanup() {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.attemptCleanupCancel = cancel
+	h.startUpdateReconciliation(ctx)
 	h.attemptCleanupWG.Go(func() {
 		ticker := time.NewTicker(attemptCleanupInterval)
 		defer ticker.Stop()

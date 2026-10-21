@@ -55,6 +55,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -591,6 +592,7 @@ func NewServer(
 	authRateLimiter := access.NewAuthRateLimiter()
 	baseHandlers := handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager)
 	baseHandlers.SetUsageManager(optionState.usageManager)
+	baseHandlers.InferenceAdmission = executionregistry.NewAdmission()
 	artifactNamespace := artifact.InstanceNamespace(configFilePath)
 	artifactSigningKey, errArtifactSigningKey := managementHandlers.DeriveArtifactAccessSigningKey(
 		configFilePath,
@@ -659,6 +661,7 @@ func NewServer(
 	}
 	baseHandlers.SetImageArtifactURLBuilder(s)
 	s.codexLiveHandler = codexlive.NewHandler(s.handlers.AuthManager, s.configSnapshot)
+	s.codexLiveHandler.SetInferenceAdmission(baseHandlers.InferenceAdmission)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	// Save initial YAML snapshot
@@ -692,6 +695,7 @@ func NewServer(
 				return nil
 			},
 		),
+		managementHandlers.WithInferenceAdmission(baseHandlers.InferenceAdmission),
 		managementHandlers.WithPluginHost(optionState.pluginHost),
 		managementHandlers.WithUsageQueue(optionState.usageQueue),
 		managementHandlers.WithHomeClientProvider(optionState.homeClientProvider),
@@ -794,6 +798,7 @@ func NewServer(
 	}
 	s.localPassword = optionState.localPassword
 
+	engine.Use(s.inferenceAdmissionMiddleware())
 	engine.Use(s.homeHeartbeatMiddleware())
 	engine.Use(s.exampleAPIKeySafeModeMiddleware())
 
@@ -1009,6 +1014,42 @@ func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
 	c.Abort()
 }
 
+func (s *Server) inferenceAdmissionMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		s.wsRouteMu.Lock()
+		_, dynamicWebsocket := s.wsRoutes[path]
+		s.wsRouteMu.Unlock()
+		if !isExampleAPIKeySafeModeProxyPath(path) && !dynamicWebsocket {
+			c.Next()
+			return
+		}
+		upgrade := strings.EqualFold(c.GetHeader("Upgrade"), "websocket")
+		// 终止媒体会话的控制请求在暂停期间继续可用
+		if strings.HasSuffix(path, "/hangup") || strings.HasSuffix(path, "/reject") {
+			c.Next()
+			return
+		}
+		ctx, release, err := s.handlers.InferenceAdmission.Acquire(c.Request.Context(), nil)
+		if err != nil {
+			c.Header("Retry-After", "5")
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+				"type": "server_error", "code": "update_draining", "message": err.Error(),
+			}})
+			return
+		}
+		// Responses 连接只在实际 turn 中持有租约
+		if upgrade && strings.HasSuffix(path, "/responses") {
+			release()
+			c.Next()
+			return
+		}
+		defer release()
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
+}
+
 func isExampleAPIKeySafeModeProxyPath(path string) bool {
 	switch {
 	case path == "/v1" || strings.HasPrefix(path, "/v1/"):
@@ -1217,6 +1258,7 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", healthHandler)
 	s.engine.HEAD("/healthz", healthHandler)
 	s.engine.GET("/v0/management/update-health", noStoreMiddleware(), s.mgmt.GetUpdateHealth)
+	s.engine.POST("/v0/management/update-drain", noStoreMiddleware(), s.mgmt.PostUpdateDrain)
 	s.engine.POST(
 		"/v1internal:method",
 		s.authPolicyReadLockMiddleware(),

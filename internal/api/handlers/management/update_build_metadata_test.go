@@ -10,6 +10,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 )
 
 func TestUpdateGuardSessionBuildMetadata(t *testing.T) {
@@ -18,7 +19,6 @@ func TestUpdateGuardSessionBuildMetadata(t *testing.T) {
 	executable := filepath.Join(dir, "cli-proxy-api")
 	host := updateGuardHost{
 		ExecutablePath: executable,
-		BackupPath:     executable + ".bak",
 		StateDBPath:    filepath.Join(dir, "management-state.db"),
 		ServiceUnit:    defaultUpdateServiceUnit,
 		HealthBaseURL:  "http://127.0.0.1:8317",
@@ -67,8 +67,8 @@ func TestBeginPersistentUpdatePreservesBuildMetadata(t *testing.T) {
 	t.Cleanup(func() { buildinfo.Version = previous })
 	buildinfo.Version = "v7.2.67-aug.3+dirty.8f1a76e34d62"
 	store := openUpdateGuardTestStore(t)
-	h := &Handler{stateStore: store}
-	session, err := h.beginPersistentUpdate(context.Background(), &config.Config{Port: 8317}, "v7.2.127-aug.1", false)
+	h := &Handler{stateStore: store, inferenceAdmission: executionregistry.NewAdmission()}
+	session, err := h.beginPersistentUpdate(context.Background(), &config.Config{Port: 8317}, "v7.2.127-aug.1", false, "")
 	if err != nil {
 		t.Fatalf("begin persistent update: %v", err)
 	}

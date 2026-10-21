@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 	"github.com/gin-gonic/gin"
 )
 
@@ -55,6 +57,13 @@ func openUpdateGuardTestStore(t *testing.T) *managementStateStore {
 	return store
 }
 
+func updateGuardTestIdentity(data, version string) *updateArtifactIdentity {
+	return &updateArtifactIdentity{
+		Tag: version, Commit: strings.Repeat("a", 40), SHA256: sha256Hex([]byte(data)),
+		OS: goruntime.GOOS, Arch: goruntime.GOARCH, UpdateProtocol: buildinfo.UpdateProtocol,
+	}
+}
+
 func prepareArmedUpdateGuardSession(
 	t *testing.T,
 	store *managementStateStore,
@@ -72,13 +81,15 @@ func prepareArmedUpdateGuardSession(
 	attemptID := "0123456789abcdef0123456789abcdef"
 	host := updateGuardHost{
 		ExecutablePath: executablePath,
-		BackupPath:     executablePath + ".bak",
 		StateDBPath:    store.path,
 		ServiceUnit:    defaultUpdateServiceUnit,
 		HealthBaseURL:  baseURL,
 	}
 	session := newUpdateGuardSession(host, attemptID, targetVersion, false, now)
 	session.PreviousVersion = previousVersion
+	session.OriginInstance = "fixture-instance"
+	session.PreviousIdentity = *updateGuardTestIdentity("old-binary", previousVersion)
+	session.TargetIdentity = *updateGuardTestIdentity("new-binary", targetVersion)
 	session.Phase = updatePhasePreparing
 	session.CandidatePath = updateCandidatePath(executablePath, attemptID)
 	if err := os.WriteFile(session.CandidatePath, []byte("new-binary"), 0o755); err != nil {
@@ -108,9 +119,22 @@ func updateGuardTestRuntime(clock *updateGuardTestClock, executablePath string) 
 		currentExecutable: func() (string, error) {
 			return executablePath, nil
 		},
+		identify: func(path, version, _ string) (updateArtifactIdentity, error) {
+			data, err := os.ReadFile(path)
+			return *updateGuardTestIdentity(string(data), version), err
+		},
 		install:       installUpdateCandidate,
 		restore:       restoreUpdateBackup,
 		newHTTPClient: newUpdateGuardHTTPClient,
+		quiescent:     func(context.Context, updateGuardSession) (bool, error) { return true, nil },
+		drain: func(_ context.Context, session updateGuardSession, _, action string) (executionregistry.DrainConfirmation, error) {
+			if action == "confirm" && session.DrainConfirmation != nil {
+				return *session.DrainConfirmation, nil
+			}
+			return executionregistry.DrainConfirmation{
+				AttemptID: session.AttemptID, InstanceID: session.OriginInstance, Deadline: session.Deadline,
+			}, nil
+		},
 	}
 }
 
@@ -134,6 +158,7 @@ func TestRunUpdateGuardSucceedsAfterThreeHealthSamples(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(
 						updateHealthResponse{
 							Status: "ok", Version: targetVersion, AttemptID: attemptID,
+							Identity: updateGuardTestIdentity("new-binary", targetVersion),
 						},
 					)
 				default:
@@ -217,6 +242,7 @@ func TestRunUpdateGuardRollsBackAfterTargetVersionFailure(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(
 					updateHealthResponse{
 						Status: "ok", Version: version, AttemptID: attemptID,
+						Identity: updateGuardTestIdentity("old-binary", previousVersion),
 					},
 				)
 			},
@@ -336,6 +362,7 @@ func TestRunUpdateGuardRestoresBinaryWhenStateFailsAfterInstall(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(
 						updateHealthResponse{
 							Status: "ok", Version: previousVersion, AttemptID: attemptID,
+							Identity: updateGuardTestIdentity("old-binary", previousVersion),
 						},
 					)
 					return
@@ -562,7 +589,6 @@ func TestUpdateSessionAllowsOnlyOnePendingAttempt(t *testing.T) {
 		ServiceUnit:    defaultUpdateServiceUnit,
 		HealthBaseURL:  "http://127.0.0.1:8317",
 	}
-	host.BackupPath = host.ExecutablePath + ".bak"
 	first := newUpdateGuardSession(
 		host, "0123456789abcdef0123456789abcdef", "v1.0.1", false, now,
 	)
@@ -932,7 +958,6 @@ func TestReconcileStaleDownloadDoesNotRestorePreviousBackup(t *testing.T) {
 	session := newUpdateGuardSession(
 		updateGuardHost{
 			ExecutablePath: executablePath,
-			BackupPath:     backupPath,
 			StateDBPath:    store.path,
 			ServiceUnit:    defaultUpdateServiceUnit,
 			HealthBaseURL:  "http://127.0.0.1:8317",
@@ -942,6 +967,7 @@ func TestReconcileStaleDownloadDoesNotRestorePreviousBackup(t *testing.T) {
 		false,
 		started,
 	)
+	session.PreviousIdentity = *updateGuardTestIdentity("current-binary", buildinfo.Version)
 	if err := store.beginUpdateSession(context.Background(), session); err != nil {
 		t.Fatalf("begin stale update: %v", err)
 	}
@@ -975,9 +1001,13 @@ func TestInstallAndRestoreUpdateCandidate(t *testing.T) {
 	dir := t.TempDir()
 	executablePath := filepath.Join(dir, "cli-proxy-api")
 	session := updateGuardSession{
-		ExecutablePath: executablePath,
-		CandidatePath:  executablePath + ".candidate",
-		BackupPath:     executablePath + ".bak",
+		SchemaVersion:   updateGuardStateSchemaVersion,
+		ExecutablePath:  executablePath,
+		CandidatePath:   executablePath + ".candidate",
+		BackupPath:      updateBackupPath(executablePath, "0123456789abcdef0123456789abcdef"),
+		PreviousVersion: "v1.0.0", TargetVersion: "v1.0.1",
+		PreviousIdentity: *updateGuardTestIdentity("old", "v1.0.0"),
+		TargetIdentity:   *updateGuardTestIdentity("new", "v1.0.1"),
 	}
 	if err := os.WriteFile(session.ExecutablePath, []byte("old"), 0o755); err != nil {
 		t.Fatalf("write executable: %v", err)
@@ -985,7 +1015,7 @@ func TestInstallAndRestoreUpdateCandidate(t *testing.T) {
 	if err := os.WriteFile(session.CandidatePath, []byte("new"), 0o755); err != nil {
 		t.Fatalf("write candidate: %v", err)
 	}
-	if err := os.WriteFile(session.BackupPath, []byte("previous"), 0o755); err != nil {
+	if err := os.WriteFile(executablePath+".bak", []byte("previous"), 0o755); err != nil {
 		t.Fatalf("write previous backup: %v", err)
 	}
 	if err := installUpdateCandidate(session); err != nil {

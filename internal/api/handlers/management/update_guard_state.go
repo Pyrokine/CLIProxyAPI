@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 )
 
 const (
-	updateGuardStateSchemaVersion = 1
+	updateGuardStateSchemaVersion = 2
 	updateSessionStateKey         = "update_session"
 	updateHealthTokenStateKey     = "update_health_token"
 	maxUpdateGuardStateBytes      = 64 * 1024
@@ -21,6 +23,8 @@ const (
 	updatePhasePreparing           = "preparing"
 	updatePhaseLaunching           = "launching"
 	updatePhaseClaimed             = "claimed"
+	updatePhaseDraining            = "draining"
+	updatePhaseReady               = "ready"
 	updatePhaseInstalling          = "installing"
 	updatePhaseRestarting          = "restarting"
 	updatePhaseHealthCheck         = "health_check"
@@ -35,33 +39,39 @@ const (
 )
 
 var (
-	errUpdateInProgress     = errors.New("update is already in progress")
-	errUpdateSessionChanged = errors.New("update session changed")
+	errUpdateInProgress       = errors.New("update is already in progress")
+	errUpdateSessionChanged   = errors.New("update session changed")
+	errUpdateRecoveryRequired = errors.New("previous update recovery requires manual verification")
 )
 
 type updateGuardSession struct {
-	SchemaVersion     int        `json:"schema_version"`
-	AttemptID         string     `json:"attempt_id"`
-	TargetVersion     string     `json:"target_version"`
-	PreviousVersion   string     `json:"previous_version"`
-	Automatic         bool       `json:"automatic"`
-	Phase             string     `json:"phase"`
-	ResultCode        string     `json:"result_code,omitempty"`
-	Percent           int        `json:"percent"`
-	CandidatePath     string     `json:"candidate_path,omitempty"`
-	ExecutablePath    string     `json:"executable_path"`
-	BackupPath        string     `json:"backup_path"`
-	StateDBPath       string     `json:"state_db_path"`
-	ServiceUnit       string     `json:"service_unit"`
-	GuardUnit         string     `json:"guard_unit"`
-	HealthBaseURL     string     `json:"health_base_url"`
-	HealthTLSCertPath string     `json:"health_tls_cert_path,omitempty"`
-	StartedAt         time.Time  `json:"started_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	Deadline          time.Time  `json:"deadline"`
-	DeadlineUnix      int64      `json:"deadline_unix"`
-	FailureCount      int        `json:"failure_count,omitempty"`
-	NextRetryAt       *time.Time `json:"next_retry_at,omitempty"`
+	SchemaVersion     int                                  `json:"schema_version"`
+	AttemptID         string                               `json:"attempt_id"`
+	TargetVersion     string                               `json:"target_version"`
+	PreviousVersion   string                               `json:"previous_version"`
+	OriginInstance    string                               `json:"origin_instance,omitempty"`
+	DrainDeadline     time.Time                            `json:"drain_deadline,omitempty"`
+	DrainConfirmation *executionregistry.DrainConfirmation `json:"drain_confirmation,omitempty"`
+	TargetIdentity    updateArtifactIdentity               `json:"target_identity,omitempty"`
+	PreviousIdentity  updateArtifactIdentity               `json:"previous_identity,omitempty"`
+	Automatic         bool                                 `json:"automatic"`
+	Phase             string                               `json:"phase"`
+	ResultCode        string                               `json:"result_code,omitempty"`
+	Percent           int                                  `json:"percent"`
+	CandidatePath     string                               `json:"candidate_path,omitempty"`
+	ExecutablePath    string                               `json:"executable_path"`
+	BackupPath        string                               `json:"backup_path"`
+	StateDBPath       string                               `json:"state_db_path"`
+	ServiceUnit       string                               `json:"service_unit"`
+	GuardUnit         string                               `json:"guard_unit"`
+	HealthBaseURL     string                               `json:"health_base_url"`
+	HealthTLSCertPath string                               `json:"health_tls_cert_path,omitempty"`
+	StartedAt         time.Time                            `json:"started_at"`
+	UpdatedAt         time.Time                            `json:"updated_at"`
+	Deadline          time.Time                            `json:"deadline"`
+	DeadlineUnix      int64                                `json:"deadline_unix"`
+	FailureCount      int                                  `json:"failure_count,omitempty"`
+	NextRetryAt       *time.Time                           `json:"next_retry_at,omitempty"`
 }
 
 type updateHealthTokenState struct {
@@ -88,6 +98,8 @@ func isActiveUpdatePhase(phase string) bool {
 		updatePhasePreparing,
 		updatePhaseLaunching,
 		updatePhaseClaimed,
+		updatePhaseDraining,
+		updatePhaseReady,
 		updatePhaseInstalling,
 		updatePhaseRestarting,
 		updatePhaseHealthCheck,
@@ -130,7 +142,7 @@ func (s *managementStateStore) loadUpdateSession(ctx context.Context) (*updateGu
 	if err = json.Unmarshal(raw, &session); err != nil {
 		return nil, fmt.Errorf("management state: decode update session: %w", err)
 	}
-	if session.SchemaVersion != updateGuardStateSchemaVersion {
+	if session.SchemaVersion != 1 && session.SchemaVersion != updateGuardStateSchemaVersion {
 		return nil, fmt.Errorf("management state: unsupported update session schema version %d", session.SchemaVersion)
 	}
 	return &session, nil
@@ -153,8 +165,9 @@ func (s *managementStateStore) beginUpdateSession(ctx context.Context, session u
 		ctx,
 		`INSERT INTO state_items(key, value, updated_at) VALUES(?, ?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-		 WHERE COALESCE(json_extract(state_items.value, '$.phase'), '') NOT IN (
-			'downloading', 'verifying', 'preparing', 'launching', 'claimed', 'installing',
+		 WHERE json_extract(state_items.value, '$.attempt_id') != json_extract(excluded.value, '$.attempt_id')
+		 AND COALESCE(json_extract(state_items.value, '$.phase'), '') NOT IN (
+			'downloading', 'verifying', 'preparing', 'launching', 'claimed', 'draining', 'ready', 'installing',
 			'restarting', 'health_check', 'rolling_back', 'rollback_restarting', 'rollback_health_check'
 		 )`,
 		updateSessionStateKey,
@@ -303,7 +316,7 @@ func (s *managementStateStore) loadUpdateHealthToken(ctx context.Context) (*upda
 	if err = json.Unmarshal(raw, &token); err != nil {
 		return nil, fmt.Errorf("management state: decode update health token: %w", err)
 	}
-	if token.SchemaVersion != updateGuardStateSchemaVersion {
+	if token.SchemaVersion != 1 && token.SchemaVersion != updateGuardStateSchemaVersion {
 		return nil, fmt.Errorf(
 			"management state: unsupported update health token schema version %d", token.SchemaVersion,
 		)
@@ -392,7 +405,7 @@ func (s *managementStateStore) loadUpdateFailure(ctx context.Context, version st
 	if err = json.Unmarshal(raw, &failure); err != nil {
 		return nil, fmt.Errorf("management state: decode update failure: %w", err)
 	}
-	if failure.SchemaVersion != updateGuardStateSchemaVersion {
+	if failure.SchemaVersion != 1 && failure.SchemaVersion != updateGuardStateSchemaVersion {
 		return nil, fmt.Errorf("management state: unsupported update failure schema version %d", failure.SchemaVersion)
 	}
 	return &failure, nil
@@ -470,6 +483,9 @@ func normalizeUpdateResultCode(code string) string {
 		"state_failed",
 		"guard_launch_failed",
 		"guard_claim_failed",
+		"drain_failed",
+		"identity_failed",
+		"legacy_recovery_unverified",
 		"install_failed",
 		"restart_failed",
 		"health_failed",

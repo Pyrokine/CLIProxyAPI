@@ -61,6 +61,20 @@ claim session，恢复 pinned credential 或 retained Home selection
 双向转发 sideband 数据帧和控制帧
 ```
 
+## 更新等待
+
+Server 向 HTTP、模型执行和 Live handler 传递同一个 `executionregistry.Admission`，HTTP 在读取请求体前持有租约
+Bootstrap 成功保存 `call_id` 时，通过 `Retain` 为真实会话保留独立租约，HTTP 响应结束只释放外层租约
+Session replacement、过期、失败、hangup 或 shutdown 完成 sideband、media 和 Home selection 的关闭后，才释放会话租约
+
+Direct Realtime WebSocket 在会话期间保持活跃，Responses WebSocket 只在实际 turn 中持有租约，动态 Gemini provider 的空闲连接不计为推理
+已有媒体会话自然结束后才能完成更新等待，等待最长两分钟，超时恢复接收并保留原会话，不通过关闭媒体连接制造完成确认
+
+独立 guard 使用同一次更新的 loopback token 请求等待，安装前再次验证 attempt、进程实例与暂停期限，并将暂停保留到安装结束，旧确认不能用于新实例
+新进程在监听前读取持久化安装阶段并恢复暂停，后台核实确认 guard 已退出、服务没有待执行的重启任务后恢复接收，状态查询失败时保留暂停
+Guard 由 systemd 限制为最长五分钟，后台核实与 Handler 一起启动和关闭，状态数据库保留完整目标与上一版本身份
+发布构建写入更新协议标识，候选文件缺少当前暂停恢复协议时在安装前拒绝，旧协议文件仍可作为上一版本恢复，恢复失败时保留备份和 session，旧 session 的恢复明确标注身份未完整验证
+
 ## 动态配置
 
 `Handler` 保留 `ConfigProvider`，每次 HTTP 和 sideband 请求读取 server 当前配置；media factory 由 `UpdateConfig` 管理

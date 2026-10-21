@@ -24,6 +24,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -1043,7 +1044,8 @@ func shouldExposeResponsesUpstreamError(errMsg *handlers.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
 	}
-	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
+	return errors.Is(errMsg.Error, executionregistry.ErrInferencePaused) ||
+		clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
 }
 
 func shouldReplayResponsesWebsocketPinnedAuthFailure(errMsg *handlers.ErrorMessage) bool {

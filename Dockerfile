@@ -19,7 +19,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w \
       -X 'main.version=${VERSION}' \
       -X 'main.commit=${COMMIT}' \
-      -X 'main.buildDate=${BUILD_DATE}'" \
+      -X 'main.buildDate=${BUILD_DATE}' \
+      -X 'github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.UpdateProtocol=2'" \
     -o ./CLIProxyAPI ./cmd/server/
 
 FROM alpine:3.24.1

@@ -176,7 +176,7 @@ case "$choice" in
 
     # Get Version Information
     VERSION="$(git describe --tags --always --dirty)"
-    COMMIT="$(git rev-parse --short HEAD)"
+    COMMIT="$(git rev-parse HEAD)"
     BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo "Building with the following info:"

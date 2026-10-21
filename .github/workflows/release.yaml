@@ -30,7 +30,7 @@ jobs:
       - name: Generate Build Metadata
         run: |
           echo VERSION=`git describe --tags --always --dirty` >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
+          echo COMMIT=`git rev-parse HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
       - name: Generate release notes
         run: |

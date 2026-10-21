@@ -6,11 +6,72 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
+	log "github.com/sirupsen/logrus"
 )
+
+func (h *Handler) restoreUpdateAdmission(ctx context.Context) error {
+	session, err := h.stateStore.loadUpdateSession(ctx)
+	if err != nil {
+		h.inferenceAdmission.Hold(updateSessionStateKey)
+		return err
+	}
+	if session != nil && (updatePhaseMayHaveInstalledCandidate(session.Phase) || session.Phase == updatePhaseTerminalFailure) {
+		if !h.inferenceAdmission.Hold(session.AttemptID) {
+			return fmt.Errorf("another update already holds inference admission")
+		}
+	}
+	return nil
+}
+
+func (h *Handler) startUpdateReconciliation(ctx context.Context) {
+	if h.inferenceAdmission == nil || h.stateStore == nil {
+		return
+	}
+	h.attemptCleanupWG.Go(func() {
+		ticker := time.NewTicker(updateGuardReconcileInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				err := h.reconcileExpiredUpdate(checkCtx, realUpdateGuardRuntime())
+				cancel()
+				if err != nil && !errors.Is(err, errUpdateInProgress) && !errors.Is(err, errUpdateRecoveryRequired) && ctx.Err() == nil {
+					log.WithError(err).Warn("failed to reconcile expired update")
+				}
+			}
+		}
+	})
+}
+
+func (h *Handler) reconcileExpiredUpdate(ctx context.Context, runtime updateGuardRuntime) error {
+	if h == nil || h.stateStore == nil || h.inferenceAdmission == nil {
+		return nil
+	}
+	session, err := h.stateStore.loadUpdateSession(ctx)
+	if err != nil {
+		return err
+	}
+	if session == nil {
+		h.inferenceAdmission.Resume(updateSessionStateKey)
+		return nil
+	}
+	if isActiveUpdatePhase(session.Phase) {
+		if runtime.now().Unix() <= session.DeadlineUnix {
+			return nil
+		}
+	} else if !h.inferenceAdmission.Paused(session.AttemptID) && !h.inferenceAdmission.Paused(updateSessionStateKey) {
+		return nil
+	}
+	return h.reconcileStaleUpdateSession(ctx, runtime)
+}
 
 func (h *Handler) reconcileStaleUpdateSession(ctx context.Context, runtime updateGuardRuntime) error {
 	if h == nil || h.stateStore == nil {
@@ -20,26 +81,59 @@ func (h *Handler) reconcileStaleUpdateSession(ctx context.Context, runtime updat
 	if err != nil || session == nil {
 		return err
 	}
-	if !isActiveUpdatePhase(session.Phase) {
+	active := isActiveUpdatePhase(session.Phase)
+	now := runtime.now()
+	if active && now.Unix() <= session.DeadlineUnix {
+		return errUpdateInProgress
+	}
+	quiescent, err := runtime.quiescent(ctx, *session)
+	if err != nil {
+		return err
+	}
+	if !quiescent {
+		return errUpdateInProgress
+	}
+	if !active {
+		if session.Phase == updatePhaseTerminalFailure {
+			if _, backupErr := os.Lstat(session.BackupPath); backupErr == nil {
+				return errUpdateRecoveryRequired
+			} else if !errors.Is(backupErr, os.ErrNotExist) {
+				return backupErr
+			}
+		}
 		deleteTokenErr := h.stateStore.deleteUpdateHealthToken(ctx, session.AttemptID)
 		removeCandidateErr := removeUpdateCandidate(*session)
-		return errors.Join(deleteTokenErr, removeCandidateErr)
-	}
-	now := runtime.now()
-	if now.Unix() <= session.DeadlineUnix {
-		return errUpdateInProgress
-	}
-	if session.GuardUnit != "" && runtime.runCommand(
-		ctx, "systemctl", "is-active", "--quiet", session.GuardUnit,
-	) == nil {
-		return errUpdateInProgress
+		removeBackupErr := removeUpdateBackup(*session)
+		h.inferenceAdmission.Resume(session.AttemptID)
+		h.inferenceAdmission.Resume(updateSessionStateKey)
+		return errors.Join(deleteTokenErr, removeCandidateErr, removeBackupErr)
 	}
 	resultPhase := updatePhaseTerminalFailure
 	resultCode := "interrupted"
-	if strings.EqualFold(strings.TrimSpace(buildinfo.Version), session.TargetVersion) {
+	currentPath, currentErr := runtime.currentExecutable()
+	var currentIdentity updateArtifactIdentity
+	if currentErr == nil {
+		currentIdentity, currentErr = runtime.identify(currentPath, buildinfo.Version, buildinfo.Commit)
+	}
+	if session.SchemaVersion == 1 {
+		resultCode = "legacy_recovery_unverified"
+		if strings.EqualFold(normalizeUpdateHealthVersion(buildinfo.Version), normalizeUpdateHealthVersion(session.PreviousVersion)) &&
+			(currentPath == session.ExecutablePath || currentPath == session.BackupPath) &&
+			session.BackupPath == session.ExecutablePath+".bak" && updatePhaseMayHaveInstalledCandidate(session.Phase) {
+			if _, backupErr := os.Lstat(session.BackupPath); backupErr == nil {
+				if restoreErr := runtime.restore(*session); restoreErr != nil {
+					return fmt.Errorf("restore legacy interrupted update: %w", restoreErr)
+				}
+				resultPhase = updatePhaseRolledBack
+			} else if !errors.Is(backupErr, os.ErrNotExist) {
+				return backupErr
+			}
+		}
+	} else if currentErr == nil && currentIdentity == session.TargetIdentity &&
+		updatePhaseMayHaveInstalledCandidate(session.Phase) {
 		resultPhase = updatePhaseSucceeded
 		resultCode = ""
-	} else if strings.EqualFold(strings.TrimSpace(buildinfo.Version), session.PreviousVersion) {
+	} else if currentErr == nil && currentIdentity == session.PreviousIdentity {
 		if updatePhaseMayHaveInstalledCandidate(session.Phase) &&
 			session.CandidatePath == updateCandidatePath(session.ExecutablePath, session.AttemptID) {
 			_, executableErr := os.Stat(session.ExecutablePath)
@@ -67,6 +161,12 @@ func (h *Handler) reconcileStaleUpdateSession(ctx context.Context, runtime updat
 	)
 	if err != nil {
 		return err
+	}
+	if resultPhase == updatePhaseSucceeded || resultPhase == updatePhaseRolledBack {
+		h.inferenceAdmission.Resume(session.AttemptID)
+		h.inferenceAdmission.Resume(updateSessionStateKey)
+	} else {
+		h.inferenceAdmission.Hold(session.AttemptID)
 	}
 	deleteTokenErr := h.stateStore.deleteUpdateHealthToken(ctx, session.AttemptID)
 	removeCandidateErr := removeUpdateCandidate(*updated)
@@ -146,7 +246,8 @@ func armUpdateGuardSession(
 	session.Phase = updatePhaseLaunching
 	session.Percent = 95
 	session.UpdatedAt = now.UTC()
-	session.Deadline = now.Add(updateGuardHealthTimeout).UTC()
+	session.DrainDeadline = now.Add(updateGuardDrainTimeout).UTC()
+	session.Deadline = session.DrainDeadline.Add(updateGuardHealthTimeout).UTC()
 	session.DeadlineUnix = session.Deadline.Unix()
 	token := updateHealthTokenState{
 		SchemaVersion: updateGuardStateSchemaVersion,
@@ -164,6 +265,8 @@ func armUpdateGuardSession(
 func isUpdateGuardClaimedPhase(phase string) bool {
 	switch phase {
 	case updatePhaseClaimed,
+		updatePhaseDraining,
+		updatePhaseReady,
 		updatePhaseInstalling,
 		updatePhaseRestarting,
 		updatePhaseHealthCheck,
@@ -189,7 +292,9 @@ func launchUpdateGuard(
 		"--collect",
 		"--no-block",
 		"--service-type=exec",
-		"--property=KillMode=process",
+		"--property=KillMode=control-group",
+		"--property=RuntimeMaxSec=" + strconv.FormatFloat(updateGuardRuntimeLimit.Seconds(), 'f', 0, 64),
+		"--property=TimeoutStopSec=5",
 		session.ExecutablePath,
 		updateGuardCommandFlag,
 		updateGuardStateDBFlag,

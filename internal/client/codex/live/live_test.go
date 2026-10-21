@@ -680,6 +680,8 @@ type fakeMediaSession struct {
 	closeCount     atomic.Int32
 	err            error
 	closeErr       error
+	closeStarted   chan struct{}
+	closeAllowed   chan struct{}
 }
 
 func (s *fakeMediaSession) AcceptUpstreamAnswer(_ context.Context, answer string) (string, error) {
@@ -703,6 +705,10 @@ func (s *fakeMediaSession) Close() error {
 func (s *fakeMediaSession) CloseWithReason(reason string) error {
 	if s.closed.CompareAndSwap(false, true) {
 		s.closeReason = reason
+		if s.closeStarted != nil {
+			close(s.closeStarted)
+			<-s.closeAllowed
+		}
 		s.closeCount.Add(1)
 	}
 	return s.closeErr
@@ -818,6 +824,79 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	}
 	if _, ok := handler.sessions.peek("call-123"); ok {
 		t.Fatal("completed media session remained stored")
+	}
+}
+
+func TestLiveAdmissionWaitsForMediaClose(t *testing.T) {
+	for _, ending := range []string{"complete", "expire", "replacement", "shutdown"} {
+		t.Run(ending, func(t *testing.T) {
+			responseBody := &trackedResponseBody{Reader: strings.NewReader("v=0\r\no=upstream-answer\r\n")}
+			handler := newLocalLiveHandler(t, &captureExecutor{responseBody: responseBody})
+			admission := executionregistry.NewAdmission()
+			handler.SetInferenceAdmission(admission)
+			media := &fakeMediaSession{
+				downstreamSDP: "v=0\r\no=downstream-answer\r\n",
+				closeStarted:  make(chan struct{}),
+				closeAllowed:  make(chan struct{}),
+			}
+			defer close(media.closeAllowed)
+			installFakeMediaRelay(handler, &fakeMediaRelay{session: media, upstreamOffer: "v=0\r\n"})
+			router := gin.New()
+			router.POST("/v1/live", handler.Handle)
+			ctx, releaseHTTP, err := admission.Acquire(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(`{"sdp":"v=0\r\no=desktop-offer\r\n","model":"gpt-live-1-codex"}`)).WithContext(ctx)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			releaseHTTP()
+			if response.Code != http.StatusCreated {
+				t.Fatalf("bootstrap status=%d body=%s", response.Code, response.Body.String())
+			}
+			session, ok := handler.sessions.peek("call-123")
+			if !ok {
+				t.Fatal("bootstrap did not retain the media session")
+			}
+			closed := make(chan struct{})
+			go func() {
+				defer close(closed)
+				switch ending {
+				case "complete":
+					handler.sessions.complete(session, "test_complete")
+				case "expire":
+					handler.sessions.expire(session.callID, session.token)
+				case "replacement":
+					handler.sessions.put(session.callID, liveSession{authID: "replacement"})
+				case "shutdown":
+					_ = handler.Close()
+				}
+			}()
+			select {
+			case <-media.closeStarted:
+			case <-time.After(time.Second):
+				t.Fatal("media close did not start")
+			}
+			waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			_, err = admission.Drain(waitCtx, "update", time.Now().Add(time.Second))
+			cancel()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("drain completed before media close returned: %v", err)
+			}
+			media.closeAllowed <- struct{}{}
+			select {
+			case <-closed:
+			case <-time.After(time.Second):
+				t.Fatal("session close did not finish")
+			}
+			confirmation, err := admission.Drain(context.Background(), "next-update", time.Now().Add(time.Second))
+			if err != nil || !admission.Confirm(confirmation) {
+				t.Fatalf("finished media kept its lease: %v", err)
+			}
+			admission.Resume("next-update")
+			_ = handler.Close()
+		})
 	}
 }
 

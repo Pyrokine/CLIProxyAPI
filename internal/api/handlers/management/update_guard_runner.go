@@ -46,10 +46,37 @@ func runUpdateGuard(
 	if err != nil {
 		return err
 	}
+	draining, err := store.transitionUpdateSession(ctx, attemptID, updatePhaseClaimed, func(next *updateGuardSession) {
+		next.Phase = updatePhaseDraining
+		next.Percent = 90
+		next.UpdatedAt = runtime.now().UTC()
+	})
+	if err != nil {
+		return finishUpdateGuardFailureCurrent(ctx, store, *session, updatePhaseTerminalFailure, "state_failed", runtime)
+	}
+	session = draining
+	confirmation, drainErr := runtime.drain(ctx, *session, token.Token, "wait")
+	if drainErr != nil || confirmation.AttemptID != session.AttemptID ||
+		confirmation.InstanceID != session.OriginInstance || !confirmation.Deadline.Equal(session.Deadline) ||
+		!runtime.now().Before(confirmation.Deadline) {
+		return finishUpdateGuardFailureCurrent(ctx, store, *session, updatePhaseError, "drain_failed", runtime)
+	}
+	ready, err := store.transitionUpdateSession(ctx, attemptID, updatePhaseDraining, func(next *updateGuardSession) {
+		next.Phase = updatePhaseReady
+		next.DrainConfirmation = &confirmation
+		next.Percent = 95
+		next.UpdatedAt = runtime.now().UTC()
+		next.Deadline = runtime.now().Add(updateGuardHealthTimeout).UTC()
+		next.DeadlineUnix = next.Deadline.Unix()
+	})
+	if err != nil {
+		return finishUpdateGuardFailureCurrent(ctx, store, *session, updatePhaseTerminalFailure, "state_failed", runtime)
+	}
+	session = ready
 	installing, err := store.transitionUpdateSession(
 		ctx,
 		attemptID,
-		updatePhaseClaimed,
+		updatePhaseReady,
 		func(next *updateGuardSession) {
 			next.Phase = updatePhaseInstalling
 			next.UpdatedAt = runtime.now().UTC()
@@ -57,10 +84,15 @@ func runUpdateGuard(
 	)
 	if err != nil {
 		return finishUpdateGuardFailure(
-			ctx, store, *session, updatePhaseClaimed, updatePhaseTerminalFailure, "state_failed", runtime,
+			ctx, store, *session, updatePhaseReady, updatePhaseTerminalFailure, "state_failed", runtime,
 		)
 	}
 	session = installing
+	confirmed, err := runtime.drain(ctx, *session, token.Token, "confirm")
+	if err != nil || session.DrainConfirmation == nil || confirmed != *session.DrainConfirmation ||
+		!runtime.now().Before(confirmed.Deadline) {
+		return finishUpdateGuardFailureCurrent(ctx, store, *session, updatePhaseError, "drain_failed", runtime)
+	}
 	if err = runtime.install(*session); err != nil {
 		return finishUpdateGuardFailure(
 			ctx, store, *session, updatePhaseInstalling, updatePhaseTerminalFailure, "install_failed", runtime,
@@ -247,6 +279,14 @@ func finishUpdateGuardFailure(
 	resultCode string,
 	runtime updateGuardRuntime,
 ) error {
+	var resumeErr error
+	if !updatePhaseMayHaveInstalledCandidate(fromPhase) || fromPhase == updatePhaseInstalling {
+		if token, loadErr := store.loadUpdateHealthToken(ctx); loadErr != nil {
+			resumeErr = loadErr
+		} else if token != nil && token.AttemptID == session.AttemptID {
+			_, resumeErr = runtime.drain(ctx, session, token.Token, "resume")
+		}
+	}
 	now := runtime.now()
 	failure, failureErr := store.recordUpdateFailure(
 		ctx,
@@ -278,6 +318,7 @@ func finishUpdateGuardFailure(
 	removeCandidateErr := removeUpdateCandidate(session)
 	return errors.Join(
 		fmt.Errorf("%s", normalizeUpdateResultCode(resultCode)),
+		resumeErr,
 		deleteTokenErr,
 		removeCandidateErr,
 	)

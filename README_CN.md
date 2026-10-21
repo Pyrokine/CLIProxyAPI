@@ -66,6 +66,18 @@ Compose 会把 `./config` 挂载到 `/CLIProxyAPI/config`，管理接口可以�
 
 将服务开放到本机之外前，先阅读[生产部署指南](docs/production-deployment_CN.md)
 
+### 安全自更新
+
+systemd 自更新在替换程序前暂停新推理，HTTP 上传和 SSE 响应完成后才计为结束，Responses WebSocket 按每次推理计数，空闲连接不阻止更新；已有实时媒体会话保留到会话结束
+等待最长两分钟，超时后恢复接收并报告更新失败，现有流继续执行；暂停期间管理与健康查询保持可用，新推理收到 503 和 `Retry-After`
+
+更新固定目标版本、完整 commit SHA、程序 SHA-256、OS/architecture 与更新协议标识，候选程序必须支持当前暂停恢复协议，旧协议发布物在安装前拒绝，上一版本仍可作为受控回滚备份
+安装前再次确认当前进程已完成等待，确认后持续暂停接收直到安装、验活或恢复结束，新进程在开始监听前恢复安装阶段的暂停
+Guard 最长运行五分钟，服务核实 guard 已退出且重启任务已结束后恢复接收，查询 systemd 状态失败时保留暂停；状态数据库不可用时同样暂停接收，修复持久化后重启服务
+
+验活和回滚继续核对同一身份，备份按更新 attempt 隔离，只清理已成功更新的备份，恢复失败时保留备份与恢复信息，并要求核实后再开始下一次更新
+旧版 session 可按原路径恢复备份，身份信息不足时明确要求人工核实
+
 ## 文档
 
 - [用户手册](https://help.router-for.me/cn/)
@@ -95,7 +107,7 @@ go build ./cmd/server
 ## 版本与发布行为
 
 本地源码构建和 Docker 构建通过 `git describe --tags --always --dirty` 确定显示版本。正式构建通过 linker flags
-写入发布版本、短 commit SHA 和 UTC 构建时间；没有发布元数据时，服务分别显示 `dev`、`none` 和 `unknown`
+写入发布版本、完整 commit SHA 和 UTC 构建时间；没有发布元数据时，服务分别显示 `dev`、`none` 和 `unknown`
 
 本地增强版本使用 `v<upstream>-aug.N` tag；基于新上游版本的首个本地版本从 `aug.1` 开始。所有 tag 都会触发
 GoReleaser，`v*` tag 还会触发多架构 Docker 构建。发布资产前，`CHANGELOG.md` 必须存在与 tag 匹配的条目
