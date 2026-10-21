@@ -1,5 +1,59 @@
 # Changelog
 
+## v8.0.23-aug.5 - 2026-10-22
+
+### Release basis
+
+- Upstream release: v8.0.23 (`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`)
+- Fork point: `09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- Previous local release: v8.0.23-aug.4
+- Paired management panel: CPAM v1.26.0-aug.5
+
+### Fixes
+
+- Check current Codex reset credits independently of subscription queries and ordinary quota refreshes
+- Require at least one currently valid owned credit, preserving eligibility when the applicable count is zero
+- Recheck current credits before consumption and check expiration and credential identity again before submission
+- Exclude explicitly expired and consumed credits from eligibility evidence while retaining optional details and missing, invalid and conflicting count states
+- Keep one reset operation in flight per credential and reject changes to the credential, account or proxy during the operation
+- Clear local quota cooldown only after an explicit upstream confirmation for the same credential, and retain local state on failed or uncertain consumption
+- Bundle CPAM v1.26.0-aug.5 in both Docker architectures
+
+### Compatibility
+
+- Database schemas remain management 4 and usage 9
+- The management API remains `/v0/management` and the existing Go SDK `ResetQuota(context.Context, string)` signature is retained
+- The native read-only check uses the existing quota-fetch endpoint with `purpose: codex_reset_credit`
+- Core and Linux AMD64 native-plugin editions remain separate
+
+### 中文
+
+### 版本依据
+
+- 上游版本：v8.0.23（`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`）
+- 分叉点：`09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- 上一个本地版本：v8.0.23-aug.4
+- 配套管理面板：CPAM v1.26.0-aug.5
+
+### 修复
+
+- Codex 当前重置次数独立核查，订阅查询与普通额度刷新分别处理
+- 当前至少持有一次有效机会才允许重置，适用次数为 0 时保留有效的持有次数资格
+- 消费前重新查询当前次数，发送前再次检查期限与凭证身份
+- 明确过期及已消费的机会不作为资格证据，保留可选明细及次数缺失、非法和冲突状态
+- 同一凭证只处理一个重置操作，期间凭证、账户或代理变化时停止提交
+- 上游明确确认后才清理同一凭证的本地额度冷却，消费失败或结果未知时保留本地状态
+- 两种 Docker 架构均内置 CPAM v1.26.0-aug.5
+
+### 兼容性
+
+- 数据库 schema 保持 management 4／usage 9
+- 管理 API 保持 `/v0/management`，Go SDK 原有 `ResetQuota(context.Context, string)` 签名保持
+- 原生只读核查使用已有 quota-fetch 入口，指定 `purpose: codex_reset_credit`
+- core 与 Linux AMD64 native-plugin 安装包分别提供
+
+Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.4...v8.0.23-aug.5
+
 ## v8.0.23-aug.4 - 2026-10-21
 
 ### Release basis
