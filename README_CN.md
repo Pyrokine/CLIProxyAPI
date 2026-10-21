@@ -80,7 +80,7 @@ Compose 会把 `./config` 挂载到 `/CLIProxyAPI/config`，管理接口可以�
 
 ## 开发检查
 
-根 module 要求 Go 1.27.2；按 `go.mod` 安装依赖，并在提交 Pull Request 前执行基础检查：
+根 module 要求 Go 1.27.3，包含 GO-2026-6809 的标准库证书校验修正；按 `go.mod` 安装依赖，并在提交 Pull Request 前执行基础检查：
 
 ```bash
 go mod verify

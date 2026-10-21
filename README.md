@@ -85,7 +85,7 @@ Before exposing the service outside localhost, read the [production deployment g
 
 ## Development
 
-The root module requires Go 1.27.2. Install dependencies from `go.mod` and run the baseline checks before opening a pull
+The root module requires Go 1.27.3, including the standard-library certificate verification fix for GO-2026-6809. Install dependencies from `go.mod` and run the baseline checks before opening a pull
 request:
 
 ```bash
