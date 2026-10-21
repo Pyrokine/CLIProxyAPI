@@ -83,6 +83,14 @@ Health checks and rollback verify the same artifact identities. Backups are isol
 
 Update compatibility declares whether the running backend supports client-supplied attempt IDs. Install the new management panel before updating an older backend. The first upgrade uses that backend's existing guard; the new update protections apply when the updated backend starts a later upgrade.
 
+### Codex reset-credit checks (v8.0.23-aug.5)
+
+`POST /v0/management/quota/fetch` accepts `{"auth_index":"<credential-index>","provider":"codex","purpose":"codex_reset_credit"}` for a current, read-only native reset-credit check. The response identifies the credential, target generation, check time, availability, and count data. This purpose bypasses plugins, subscription queries, cache publication, and cooldown recovery; existing quota-fetch requests keep their behavior
+
+Resetting requires at least one currently available owned credit. Applicable credits do not replace the owned count, and yesterday's query does not establish today's eligibility. Expiration and explicit consumed states are checked again using current data; optional missing details do not imply permanent validity
+
+`POST /v0/management/reset-quota` checks eligibility again before consuming a credit. Credential and proxy changes, concurrent resets, failed queries, and invalid or conflicting data stop consumption. Local cooldown is cleared only after an explicit upstream confirmation for the same credential. An uncertain result does not trigger an automatic retry
+
 ## Documentation
 
 - [User guide](https://help.router-for.me/)

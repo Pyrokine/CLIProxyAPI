@@ -2337,15 +2337,30 @@ func (m *Manager) completeAuthBindingChange(ctx context.Context, before, after *
 
 // ResetQuota clears quota state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
-	return m.resetRoutingCooldown(ctx, authID, false)
+	var expected *Auth
+	if ctx != nil {
+		var scoped bool
+		expected, scoped = ctx.Value(quotaResetCredentialKey{}).(*Auth)
+		if scoped && expected == nil {
+			return nil, nil, fmt.Errorf("expected quota reset credential is required")
+		}
+	}
+	return m.resetRoutingCooldown(ctx, authID, false, expected)
+}
+
+type quotaResetCredentialKey struct{}
+
+// WithQuotaResetCredential 将本次操作的凭证快照绑定到本地额度清理
+func WithQuotaResetCredential(ctx context.Context, expected *Auth) context.Context {
+	return context.WithValue(ctx, quotaResetCredentialKey{}, expected.Clone())
 }
 
 // ResetCooldown clears local quota and timed retry restrictions without changing upstream quota.
 func (m *Manager) ResetCooldown(ctx context.Context, authID string) (*Auth, []string, error) {
-	return m.resetRoutingCooldown(ctx, authID, true)
+	return m.resetRoutingCooldown(ctx, authID, true, nil)
 }
 
-func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, includeTransient bool) (*Auth, []string, error) {
+func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, includeTransient bool, expected *Auth) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -2372,6 +2387,10 @@ func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, inclu
 	if !ok || auth == nil {
 		m.mu.RUnlock()
 		return nil, nil, nil
+	}
+	if expected != nil && (auth.Generation != expected.Generation || !persistentAuthStateMatches(expected, auth)) {
+		m.mu.RUnlock()
+		return nil, nil, fmt.Errorf("credential changed before local quota reset")
 	}
 	updated := auth.Clone()
 	m.mu.RUnlock()

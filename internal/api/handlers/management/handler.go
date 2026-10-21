@@ -172,6 +172,7 @@ type Handler struct {
 	postAuthHook                   coreauth.PostAuthHook
 	postAuthPersistHook            coreauth.PostAuthHook
 	quotaScheduler                 *quota.Scheduler
+	quotaResetInFlight             sync.Map
 	metaQuotaGeneration            atomic.Uint64
 	quotaRefreshTasks              *quotaRefreshTaskService
 	pluginHost                     pluginRuntimeHost

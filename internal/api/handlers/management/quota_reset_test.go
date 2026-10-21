@@ -158,6 +158,7 @@ func TestResetQuotaConsumesCodexResetCredit(t *testing.T) {
 	}
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	attachCodexResetProbe(t, h, auth, nil)
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	request := httptest.NewRequest(
@@ -204,6 +205,9 @@ func TestCodexResetRequiresConfirmedResponse(t *testing.T) {
 		{name: "upstream unavailable", body: `{"code":"reset"}`, upstreamStatus: http.StatusServiceUnavailable, wantStatus: http.StatusBadGateway},
 		{name: "missing code", body: `{}`, wantStatus: http.StatusBadGateway},
 		{name: "invalid response", body: `not-json`, wantStatus: http.StatusBadGateway},
+		{name: "trailing response data", body: `{"code":"reset"} invalid`, wantStatus: http.StatusBadGateway},
+		{name: "multiple response documents", body: `{"code":"reset"}{"code":"no_credit"}`, wantStatus: http.StatusBadGateway},
+		{name: "oversized response", body: `{"code":"reset","padding":"` + strings.Repeat("x", 16<<10) + `"}`, wantStatus: http.StatusBadGateway},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -230,6 +234,7 @@ func TestCodexResetRequiresConfirmedResponse(t *testing.T) {
 				t.Fatal(err)
 			}
 			h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+			attachCodexResetProbe(t, h, auth, nil)
 			recorder := httptest.NewRecorder()
 			ginCtx, _ := gin.CreateTestContext(recorder)
 			ginCtx.Request = httptest.NewRequest(
@@ -296,6 +301,7 @@ func TestResetQuotaFailurePreservesCodexCooldown(t *testing.T) {
 				manager.SetStore(&failingDevinAuthStore{err: errors.New("fixture persistence failed")})
 			}
 			handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+			attachCodexResetProbe(t, handler, auth, nil)
 			recorder := httptest.NewRecorder()
 			ginCtx, _ := gin.CreateTestContext(recorder)
 			ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/reset-quota",

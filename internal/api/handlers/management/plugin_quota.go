@@ -15,6 +15,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	"github.com/gin-gonic/gin"
@@ -50,6 +51,7 @@ type credentialQuotaRequest struct {
 	AuthIndexPascal *string `json:"AuthIndex"`
 	PluginID        string  `json:"plugin_id"`
 	Provider        string  `json:"provider"`
+	Purpose         string  `json:"purpose"`
 }
 
 func (r credentialQuotaRequest) resolveAuthIndex() string {
@@ -100,6 +102,22 @@ func (h *Handler) FetchCredentialQuota(c *gin.Context) {
 	auth := h.authByIndex(authIndex)
 	if auth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth_not_found"})
+		return
+	}
+	if body.Purpose != "" {
+		if body.Purpose != quota.CodexResetCreditProbePurpose || strings.TrimSpace(body.PluginID) != "" ||
+			(body.Provider != "" && !strings.EqualFold(strings.TrimSpace(body.Provider), "codex")) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_native_quota_probe_purpose"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), defaultAPICallTimeout)
+		defer cancel()
+		probe, errProbe := h.probeCodexResetCredits(ctx, h.configSnapshot(), auth)
+		if errProbe != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to check Codex reset credits: %v", errProbe)})
+			return
+		}
+		c.JSON(http.StatusOK, probe)
 		return
 	}
 

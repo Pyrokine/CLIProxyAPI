@@ -199,22 +199,37 @@ func fetchCodexQuotaResultContext(
 		},
 	)
 	observedAt := time.Now().UTC()
-	if err != nil {
-		return quota.FetchResult{}, fmt.Errorf("codex usage request failed: %w", err)
-	}
-	if resp == nil {
-		return quota.FetchResult{}, errors.New("codex usage returned empty response")
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return quota.FetchResult{}, fmt.Errorf("codex usage returned status %d", resp.StatusCode)
-	}
-
+	resetCreditProbe := quota.IsCodexResetCreditProbe(ctx)
 	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(resp.Body, &payload); err != nil {
-		return quota.FetchResult{}, fmt.Errorf("codex usage payload is invalid: %w", err)
+	var usageError error
+	switch {
+	case err != nil:
+		usageError = fmt.Errorf("codex usage request failed: %w", err)
+	case resp == nil:
+		usageError = errors.New("codex usage returned empty response")
+	case resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices:
+		usageError = fmt.Errorf("codex usage returned status %d", resp.StatusCode)
+	default:
+		if errDecode := json.Unmarshal(resp.Body, &payload); errDecode != nil {
+			usageError = fmt.Errorf("codex usage payload is invalid: %w", errDecode)
+		} else if payload == nil {
+			usageError = errors.New("codex usage returned null payload")
+		}
 	}
-	if payload == nil {
-		return quota.FetchResult{}, errors.New("codex usage returned null payload")
+	if usageError != nil && !resetCreditProbe {
+		return quota.FetchResult{}, usageError
+	}
+	if resetCreditProbe {
+		creditPayload := make(map[string]json.RawMessage)
+		for _, field := range []string{"rate_limit_reset_credits", "rateLimitResetCredits"} {
+			if value, exists := payload[field]; exists {
+				creditPayload[field] = value
+			}
+		}
+		if usageError != nil {
+			creditPayload["usage_error"] = json.RawMessage(`"codex usage query failed"`)
+		}
+		payload = creditPayload
 	}
 
 	partialErrors := make([]string, 0, 2)
@@ -241,6 +256,13 @@ func fetchCodexQuotaResultContext(
 	if resetCreditsError != "" {
 		partialErrors = append(partialErrors, resetCreditsError)
 		payload["rate_limit_reset_credits_error"] = json.RawMessage(strconv.Quote(resetCreditsError))
+	}
+	if resetCreditProbe {
+		data, errEncode := json.Marshal(payload)
+		if errEncode != nil {
+			return quota.FetchResult{}, errEncode
+		}
+		return newQuotaFetchResult(data, "codex_reset_credits", observedAt, resetCreditsError), nil
 	}
 
 	subscriptionError := ""
