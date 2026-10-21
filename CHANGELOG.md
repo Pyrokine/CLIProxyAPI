@@ -1,5 +1,61 @@
 # Changelog
 
+## v8.0.23-aug.4 - 2026-10-21
+
+### Release basis
+
+- Upstream release: v8.0.23 (`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`)
+- Fork point: `09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- Previous local release: v8.0.23-aug.3
+- Paired management panel: CPAM v1.26.0-aug.4
+
+### Fixes
+
+- Wait for accepted inference to finish before a systemd update, including uploads, streaming responses, WebSocket turns and live media sessions; restore admission when a pre-installation wait fails
+- Keep inference paused through installation and process restart, and resume after the update guard exits and pending service jobs finish
+- Verify release tag, full commit, executable SHA-256, platform and update protocol before installation and during health checks and recovery
+- Retain recovery backups and reject another update when recovery is incomplete
+- Accept client-supplied update attempt IDs and declare this capability to the management panel
+- Use Go 1.27.3 for the certificate verification security fix
+- Bundle CPAM v1.26.0-aug.4 in both Docker architectures
+
+### Compatibility
+
+- Database schemas remain management 4 and usage 9; this patch adds no schema migration
+- The Go SDK module remains `/v6` and the management API remains `/v0/management`
+- Core and Linux AMD64 native-plugin editions remain separate
+- Update the management panel first when upgrading from an older backend; the first upgrade is still performed by that backend's existing guard
+- Releases without the current update protocol remain eligible as previous-version recovery artifacts and are rejected as new installation candidates
+
+### 中文
+
+### 版本依据
+
+- 上游版本：v8.0.23（`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`）
+- 分叉点：`09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- 上一个本地版本：v8.0.23-aug.3
+- 配套管理面板：CPAM v1.26.0-aug.4
+
+### 修复
+
+- systemd 更新等待已接收的推理结束，覆盖上传、流式响应、WebSocket 推理和实时媒体会话，安装前等待失败时恢复接收
+- 安装和进程重启期间持续暂停接收，更新守护程序退出且服务任务结束后恢复
+- 安装前及验活、恢复时核对目标版本、完整 commit、程序 SHA-256、平台与更新协议
+- 恢复未完成时保留备份，并阻止下一次更新覆盖恢复信息
+- 接受客户端提供的更新 attempt ID，并向管理面板声明该能力
+- 使用 Go 1.27.3 修复证书校验安全问题
+- 两种 Docker 架构均内置 CPAM v1.26.0-aug.4
+
+### 兼容性
+
+- 数据库 schema 保持 management 4／usage 9，本补丁不增加迁移
+- Go SDK module 保持 `/v6`，管理 API 保持 `/v0/management`
+- core 与 Linux AMD64 native-plugin 安装包分别提供
+- 从旧后端升级时先更新管理面板，首次升级仍由旧后端的守护程序执行
+- 缺少当前更新协议的旧发布物可作为上一版本恢复备份，作为新安装候选时会被拒绝
+
+Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.3...v8.0.23-aug.4
+
 ## v8.0.23-aug.3 - 2026-10-20
 
 ### Release basis
