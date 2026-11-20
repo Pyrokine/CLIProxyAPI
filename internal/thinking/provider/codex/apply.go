@@ -16,7 +16,9 @@ import (
 // Codex-specific behavior:
 //   - Output format: reasoning.effort (string: low/medium/high/xhigh)
 //   - Level-only mode: no numeric budget support
-//   - Some models support ZeroAllowed (gpt-5.1, gpt-5.2)
+//   - Some models support ZeroAllowed (`gpt-5.1`, `gpt-5.2`)
+//
+//goland:noinspection GrazieInspection
 type Applier struct{}
 
 var _ thinking.ProviderApplier = (*Applier)(nil)

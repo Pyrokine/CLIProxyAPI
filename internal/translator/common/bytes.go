@@ -56,7 +56,7 @@ func EchoRequestFields(dest []byte, req gjson.Result, prefix string) []byte {
 		case 'f':
 			dest, _ = sjson.SetBytes(dest, target, v.Float())
 		case 'v':
-			dest, _ = sjson.SetBytes(dest, target, v.Value())
+			dest, _ = sjson.SetRawBytes(dest, target, []byte(gjson.Get(v.Raw, "@ugly").Raw))
 		}
 	}
 	return dest

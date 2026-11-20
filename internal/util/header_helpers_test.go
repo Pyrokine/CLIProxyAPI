@@ -22,7 +22,8 @@ func TestDynamicCustomHeadersPreserveRequestBoundary(t *testing.T) {
 	}
 	before := incoming.Clone()
 	ApplyCustomHeadersFromAttrs(req, attrs, incoming)
-	if req.Header.Get("X-Copy") != "original" || req.Header.Get("X-Session") != "canonical-session" || req.Header.Get("X-Template") != "prefix:canonical-session/canonical-session" {
+	if req.Header.Get("X-Copy") != "original" || req.Header.Get("X-Session") != "canonical-session" ||
+		req.Header.Get("X-Template") != "prefix:canonical-session/canonical-session" {
 		t.Fatalf("dynamic expansion = %v", req.Header)
 	}
 	for _, key := range []string{"X-Missing", "Authorization", "X-Credential", "X-Cookie"} {
@@ -37,7 +38,11 @@ func TestDynamicCustomHeadersPreserveRequestBoundary(t *testing.T) {
 
 func TestDynamicSessionExplicitClearOverridesGinParent(t *testing.T) {
 	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())
-	ginContext.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(WithSessionID(context.Background(), "parent-session"))
+	ginContext.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(
+		WithSessionID(
+			context.Background(), "parent-session",
+		),
+	)
 	ginContext.Request.Header.Set("X-Client", "from-gin")
 	parent := WithGinContext(context.Background(), ginContext)
 	for _, cleared := range []bool{false, true} {
@@ -49,7 +54,9 @@ func TestDynamicSessionExplicitClearOverridesGinParent(t *testing.T) {
 			}
 		}
 		req := httptest.NewRequest(http.MethodGet, "https://example.test", nil).WithContext(ctx)
-		ApplyCustomHeadersFromAttrs(req, map[string]string{"header:X-Session": "$CPA-SESSION-ID", "header:X-Copy": "$X-Client"})
+		ApplyCustomHeadersFromAttrs(
+			req, map[string]string{"header:X-Session": "$CPA-SESSION-ID", "header:X-Copy": "$X-Client"},
+		)
 		want := "parent-session"
 		if cleared {
 			want = ""
@@ -61,12 +68,16 @@ func TestDynamicSessionExplicitClearOverridesGinParent(t *testing.T) {
 }
 
 func TestDynamicHeadersDoNotReuseOutgoingHeaders(t *testing.T) {
-	req := &http.Request{Header: http.Header{
-		"X-Source":  {"outgoing-only"},
-		"X-Copy":    {"stale-copy"},
-		"X-Session": {"stale-session"},
-	}}
-	ApplyCustomHeadersFromAttrs(req, map[string]string{"header:X-Copy": "$X-Source", "header:X-Session": "$CPA-SESSION-ID"}, nil)
+	req := &http.Request{
+		Header: http.Header{
+			"X-Source":  {"outgoing-only"},
+			"X-Copy":    {"stale-copy"},
+			"X-Session": {"stale-session"},
+		},
+	}
+	ApplyCustomHeadersFromAttrs(
+		req, map[string]string{"header:X-Copy": "$X-Source", "header:X-Session": "$CPA-SESSION-ID"}, nil,
+	)
 	if req.Header.Get("X-Copy") != "" || req.Header.Get("X-Session") != "" {
 		t.Fatalf("missing caller values retained stale dynamic headers: %v", req.Header)
 	}
@@ -84,11 +95,13 @@ func TestDynamicHeadersDoNotReuseOutgoingHeaders(t *testing.T) {
 }
 
 func TestApplyCredentialHeaderReplacesAndClearsStaleCredentials(t *testing.T) {
-	req := &http.Request{Header: http.Header{
-		"Authorization":  {"Bearer stale"},
-		"X-Api-Key":      {"stale-claude"},
-		"X-Goog-Api-Key": {"stale-gemini"},
-	}}
+	req := &http.Request{
+		Header: http.Header{
+			"Authorization":  {"Bearer stale"},
+			"X-Api-Key":      {"stale-claude"},
+			"X-Goog-Api-Key": {"stale-gemini"},
+		},
+	}
 	ApplyCredentialHeader(req, "Authorization", " Bearer current ")
 	if req.Header.Get("Authorization") != "Bearer current" ||
 		req.Header.Get("X-Api-Key") != "" || req.Header.Get("X-Goog-Api-Key") != "" {

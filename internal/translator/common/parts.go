@@ -51,7 +51,11 @@ func (d *UserTurnDrops) Err() error {
 
 // RejectDroppedInteractionsUserAttachments checks each consecutive user run against its target part converter.
 // preferNativeParts matches targets that consume parts instead of content when both are present.
-func RejectDroppedInteractionsUserAttachments(input gjson.Result, preferNativeParts bool, convertPart func(gjson.Result, bool) []byte) error {
+func RejectDroppedInteractionsUserAttachments(
+	input gjson.Result,
+	preferNativeParts bool,
+	convertPart func(gjson.Result, bool) []byte,
+) error {
 	var drops UserTurnDrops
 	sendable := 0
 	endTurn := func() {
@@ -121,7 +125,9 @@ func RejectDroppedInteractionsUserAttachments(input gjson.Result, preferNativePa
 			if !native || parts.IsArray() {
 				converted := convertPart(part, native)
 				if len(converted) > 0 {
-					if text := gjson.GetBytes(converted, "text"); !text.Exists() || strings.TrimSpace(text.String()) != "" {
+					if text := gjson.GetBytes(
+						converted, "text",
+					); !text.Exists() || strings.TrimSpace(text.String()) != "" {
 						turnSendable++
 						return
 					}
@@ -172,7 +178,9 @@ func GeminiPartIsSendable(part []byte) bool {
 	if !text.Exists() || strings.TrimSpace(text.String()) != "" {
 		return true
 	}
-	for _, key := range []string{"functionCall", "functionResponse", "inlineData", "inline_data", "fileData", "file_data"} {
+	for _, key := range []string{
+		"functionCall", "functionResponse", "inlineData", "inline_data", "fileData", "file_data",
+	} {
 		if parsed.Get(key).Exists() {
 			return true
 		}

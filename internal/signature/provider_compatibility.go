@@ -22,6 +22,7 @@ const (
 	providerGeminiBypass Provider = "gemini_bypass"
 	ProviderGPT          Provider = "gpt"
 	providerKimi         Provider = "kimi"
+	providerSWE          Provider = "swe"
 	// providerGrok is target-only because xAI encrypted_content has no reliable provider marker.
 	providerGrok Provider = "grok"
 )
@@ -53,6 +54,7 @@ const (
 	MaxGeminiThoughtSignatureLen        = maxSignatureLen
 )
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type CompatibilityDecision struct {
 	TargetProvider       Provider
 	DetectedProvider     Provider
@@ -66,13 +68,15 @@ type CompatibilityDecision struct {
 
 // SignatureCompatibilityOptions controls compatibility-only signature handling.
 // Strict provider targets should use the zero value.
+//
+//goland:noinspection GoNameStartsWithPackageName
 type SignatureCompatibilityOptions struct {
 	// PreserveUnknownNonEmpty retains an opaque signature only when no known
 	// provider claims it. Known foreign signatures remain incompatible.
 	PreserveUnknownNonEmpty bool
 }
 
-type ClaudeMessagesSanitizeOptions struct {
+type claudeMessagesSanitizeOptions struct {
 	TargetProvider                Provider
 	TargetModel                   string
 	DropEmptyMessages             bool
@@ -106,6 +110,8 @@ func ProviderFromModelName(modelName string) Provider {
 	case strings.Contains(lower, "kimi"), strings.Contains(lower, "moonshot"),
 		strings.HasPrefix(lower, "k2"), strings.HasPrefix(lower, "k3"):
 		return providerKimi
+	case strings.Contains(lower, "swe"):
+		return providerSWE
 	case strings.Contains(lower, "grok"):
 		return providerGrok
 	default:
@@ -135,6 +141,10 @@ func DetectProvider(rawSignature string) Provider {
 				isValidClaudeSignature(unprefixed, true) {
 				return ProviderClaude
 			}
+		case providerSWE:
+			if isValidSWEThinkingSignature(unprefixed) {
+				return providerSWE
+			}
 		case ProviderGPT:
 			if isValidGPTReasoningSignature(unprefixed) {
 				return ProviderGPT
@@ -158,14 +168,26 @@ func DetectProvider(rawSignature string) Provider {
 	if isRecognizedGeminiSignature(sig) {
 		return ProviderGemini
 	}
+	if isValidSWEThinkingSignature(sig) {
+		return providerSWE
+	}
 	if isValidKimiThinkingSignature(sig) {
 		return providerKimi
 	}
 	return providerUnknown
 }
 
-func decideCompatibility(targetProvider Provider, rawSignature string, blockKind BlockKind) CompatibilityDecision {
-	return decideCompatibilityWithOptions(targetProvider, rawSignature, blockKind, SignatureCompatibilityOptions{})
+func decideCompatibility(
+	targetProvider Provider,
+	rawSignature string,
+	blockKind BlockKind,
+) CompatibilityDecision {
+	return decideCompatibilityWithOptions(
+		targetProvider,
+		rawSignature,
+		blockKind,
+		SignatureCompatibilityOptions{},
+	)
 }
 
 func decideCompatibilityWithOptions(
@@ -179,7 +201,11 @@ func decideCompatibilityWithOptions(
 		blockKind = blockKindUnknown
 	}
 	detected := DetectProvider(rawSignature)
-	decision := CompatibilityDecision{TargetProvider: targetProvider, DetectedProvider: detected, BlockKind: blockKind}
+	decision := CompatibilityDecision{
+		TargetProvider:   targetProvider,
+		DetectedProvider: detected,
+		BlockKind:        blockKind,
+	}
 	if targetProvider == ProviderClaude && strings.HasPrefix(PayloadWithoutProviderPrefix(rawSignature), "Q") {
 		decision.Action = actionDropBlock
 		decision.Reason = "Antigravity CAQS wrapper requires Antigravity replay"
@@ -204,7 +230,8 @@ func decideCompatibilityWithOptions(
 	decision.Compatible = false
 	switch targetProvider {
 	case ProviderGemini:
-		if blockKind == BlockKindGeminiFunctionCall || blockKind == BlockKindGeminiModelPart || blockKind == blockKindUnknown {
+		if blockKind == BlockKindGeminiFunctionCall || blockKind == BlockKindGeminiModelPart ||
+			blockKind == blockKindUnknown {
 			decision.Action = actionReplaceWithGeminiBypass
 			decision.ReplacementSignature = GeminiSkipThoughtSignatureValidator
 			decision.Reason = "Gemini can bypass incompatible model-part signatures with the documented sentinel"
@@ -231,7 +258,11 @@ func decideCompatibilityWithOptions(
 	return decision
 }
 
-func CompatibleSignatureForProvider(targetProvider Provider, rawSignature string, blockKind BlockKind) (string, bool) {
+func CompatibleSignatureForProvider(
+	targetProvider Provider,
+	rawSignature string,
+	blockKind BlockKind,
+) (string, bool) {
 	return CompatibleSignatureForProviderWithOptions(
 		targetProvider,
 		rawSignature,
@@ -287,10 +318,19 @@ func splitProviderPrefix(rawSignature string) (Provider, string, bool) {
 
 func providerFromCachePrefix(prefix string) Provider {
 	switch strings.ToLower(strings.TrimSpace(prefix)) {
-	case "claude", "anthropic", "cais", "claude-cais", "claude_cais", "ccmax", "claude-code-max", "claude_code_max":
+	case "claude",
+		"anthropic",
+		"cais",
+		"claude-cais",
+		"claude_cais",
+		"ccmax",
+		"claude-code-max",
+		"claude_code_max":
 		return ProviderClaude
 	case "gemini", "google":
 		return ProviderGemini
+	case "swe":
+		return providerSWE
 	case "openai", "gpt", "codex":
 		return ProviderGPT
 	default:
@@ -320,6 +360,8 @@ func providerMatchesTarget(target, detected Provider) bool {
 		return detected == ProviderClaude
 	case ProviderGPT:
 		return detected == ProviderGPT
+	case providerSWE:
+		return detected == providerSWE
 	case providerKimi:
 		return detected == providerKimi
 	default:
@@ -347,12 +389,21 @@ func normalizeCompatibleSignature(targetProvider Provider, rawSignature string) 
 		if isValidGPTReasoningSignature(payload) {
 			return payload
 		}
+	case providerSWE:
+		if isValidSWEThinkingSignature(payload) {
+			return payload
+		}
 	case providerKimi:
 		if isValidKimiThinkingSignature(payload) {
 			return payload
 		}
 	}
 	return ""
+}
+
+func isValidSWEThinkingSignature(value string) bool {
+	return len(value) <= maxSignatureLen && strings.HasPrefix(value, "sealed.v1.") &&
+		len(value) > len("sealed.v1.")
 }
 
 func IsGeminiBypass(rawSignature string) bool {
@@ -430,7 +481,10 @@ func validateClaudeDoubleLayerSignature(sig string, strict bool) error {
 		return fmt.Errorf("invalid double-layer signature: empty after decode")
 	}
 	if decoded[0] != 'E' {
-		return fmt.Errorf("invalid double-layer signature: inner does not start with 'E', got 0x%02x", decoded[0])
+		return fmt.Errorf(
+			"invalid double-layer signature: inner does not start with 'E', got 0x%02x",
+			decoded[0],
+		)
 	}
 	return validateClaudeSingleLayerSignatureContent(string(decoded), 2, strict)
 }
@@ -558,7 +612,9 @@ func walkClaudeProtobufFields(
 		valueLen := protowire.ConsumeFieldValue(num, typ, msg[offset:])
 		if valueLen < 0 {
 			return fmt.Errorf(
-				"invalid Claude signature: malformed protobuf field %d: %w", num, protowire.ParseError(valueLen),
+				"invalid Claude signature: malformed protobuf field %d: %w",
+				num,
+				protowire.ParseError(valueLen),
 			)
 		}
 		fieldRaw := msg[offset : offset+valueLen]
@@ -573,7 +629,11 @@ func walkClaudeProtobufFields(
 func decodeClaudeVarintField(raw []byte, label string) (uint64, error) {
 	value, n := protowire.ConsumeVarint(raw)
 	if n < 0 {
-		return 0, fmt.Errorf("invalid Claude signature: failed to decode %s: %w", label, protowire.ParseError(n))
+		return 0, fmt.Errorf(
+			"invalid Claude signature: failed to decode %s: %w",
+			label,
+			protowire.ParseError(n),
+		)
 	}
 	return value, nil
 }
@@ -581,7 +641,11 @@ func decodeClaudeVarintField(raw []byte, label string) (uint64, error) {
 func decodeClaudeBytesField(raw []byte, label string) ([]byte, error) {
 	value, n := protowire.ConsumeBytes(raw)
 	if n < 0 {
-		return nil, fmt.Errorf("invalid Claude signature: failed to decode %s: %w", label, protowire.ParseError(n))
+		return nil, fmt.Errorf(
+			"invalid Claude signature: failed to decode %s: %w",
+			label,
+			protowire.ParseError(n),
+		)
 	}
 	return value, nil
 }
@@ -620,7 +684,8 @@ func InspectGPTReasoningSignature(rawSignature string) (int, error) {
 	ciphertextLen := len(decoded) - 1 - 8 - 16 - 32
 	if ciphertextLen <= 0 || ciphertextLen%16 != 0 {
 		return 0, fmt.Errorf(
-			"invalid GPT reasoning signature: ciphertext length %d is not a positive AES block multiple", ciphertextLen,
+			"invalid GPT reasoning signature: ciphertext length %d is not a positive AES block multiple",
+			ciphertextLen,
 		)
 	}
 	return ciphertextLen, nil
@@ -823,6 +888,43 @@ func SanitizeGeminiRequestThoughtSignatures(
 		return payload
 	}
 
+	const maxDiagnosticPositions = 16
+	var positions []log.Fields
+	var actions map[string]int
+	sanitizedCount, droppedSignatures, replacedSignatures := 0, 0, 0
+	recordSanitize := func(
+		contentIndex, partIndex int,
+		decision CompatibilityDecision,
+		rawSignature string,
+		hasSignature bool,
+	) {
+		if !log.IsLevelEnabled(log.DebugLevel) ||
+			(decision.Action == actionDropSignature && decision.BlockKind == BlockKindGeminiFunctionCall &&
+				decision.DetectedProvider == providerGeminiBypass) {
+			return
+		}
+		sanitizedCount++
+		if actions == nil {
+			actions = make(map[string]int)
+		}
+		actions[string(decision.Action)]++
+		switch decision.Action {
+		case actionDropSignature:
+			droppedSignatures++
+		case actionReplaceWithGeminiBypass:
+			replacedSignatures++
+		}
+		if len(positions) < maxDiagnosticPositions {
+			positions = append(
+				positions, log.Fields{
+					"content_index": contentIndex, "part_index": partIndex,
+					"action": string(decision.Action), "block_kind": string(decision.BlockKind),
+					"detected_provider": string(decision.DetectedProvider), "reason": decision.Reason,
+					"has_signature": hasSignature, "signature_length": len(strings.TrimSpace(rawSignature)),
+				},
+			)
+		}
+	}
 	contentsChanged := false
 	contentItems := make([][]byte, 0, int(contents.Get("#").Int()))
 	contents.ForEach(
@@ -852,12 +954,13 @@ func SanitizeGeminiRequestThoughtSignatures(
 						if hasSignature {
 							partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
 							partsChanged = true
-							logGeminiThoughtSignatureSanitize(
-								contentsPath, int(contentIndex.Int()), int(partIndex.Int()), CompatibilityDecision{
-									TargetProvider: ProviderGemini,
-									BlockKind:      BlockKindGeminiModelPart,
-									Action:         actionDropSignature,
-									Reason:         "functionResponse parts cannot replay thought signatures",
+							recordSanitize(
+								int(contentIndex.Int()), int(partIndex.Int()), CompatibilityDecision{
+									TargetProvider:   ProviderGemini,
+									DetectedProvider: DetectProvider(rawSignature),
+									BlockKind:        BlockKindGeminiModelPart,
+									Action:           actionDropSignature,
+									Reason:           "functionResponse parts cannot replay thought signatures",
 								}, rawSignature, true,
 							)
 						}
@@ -892,7 +995,10 @@ func SanitizeGeminiRequestThoughtSignatures(
 					switch {
 					case isFirstFunctionCall:
 						replaySignature = GeminiReplaySignatureOrBypass(rawSignature, blockKind)
-					case hasSignature && decision.Action == actionPreserve && !IsGeminiBypass(PayloadWithoutProviderPrefix(rawSignature)):
+					case hasSignature &&
+						decision.Action ==
+							actionPreserve &&
+						!IsGeminiBypass(PayloadWithoutProviderPrefix(rawSignature)):
 						replaySignature = decision.NormalizedSignature
 					case hasSignature:
 						decision.Action = actionDropSignature
@@ -918,8 +1024,13 @@ func SanitizeGeminiRequestThoughtSignatures(
 					if partChanged {
 						partsChanged = true
 						if decision.Action != actionPreserve {
-							logGeminiThoughtSignatureSanitize(
-								contentsPath, int(contentIndex.Int()), int(partIndex.Int()), decision, rawSignature,
+							recordSanitize(
+								int(
+									contentIndex.Int(),
+								),
+								int(partIndex.Int()),
+								decision,
+								rawSignature,
 								hasSignature,
 							)
 						}
@@ -945,6 +1056,11 @@ func SanitizeGeminiRequestThoughtSignatures(
 	updated, err := sjson.SetRawBytes(payload, contentsPath, joinGeminiSignatureRawArray(contentItems))
 	if err != nil {
 		return payload
+	}
+	if sanitizedCount > 0 {
+		logGeminiThoughtSignatureSanitize(
+			contentsPath, actions, positions, sanitizedCount, droppedSignatures, replacedSignatures,
+		)
 	}
 	return updated
 }
@@ -978,7 +1094,10 @@ func geminiContentsThoughtSignaturesNeedSanitize(contents gjson.Result) bool {
 						firstFunctionCallSeen = true
 					}
 					if isFirstFunctionCall {
-						replaySignature := GeminiReplaySignatureOrBypass(rawSignature, BlockKindGeminiFunctionCall)
+						replaySignature := GeminiReplaySignatureOrBypass(
+							rawSignature,
+							BlockKindGeminiFunctionCall,
+						)
 						needsSanitize = !hasNormalizedGeminiPartThoughtSignature(part, replaySignature)
 						return !needsSanitize
 					}
@@ -990,7 +1109,8 @@ func geminiContentsThoughtSignaturesNeedSanitize(contents gjson.Result) bool {
 						blockKind = BlockKindGeminiFunctionCall
 					}
 					decision := decideCompatibility(ProviderGemini, rawSignature, blockKind)
-					if decision.Action != actionPreserve || IsGeminiBypass(PayloadWithoutProviderPrefix(rawSignature)) {
+					if decision.Action != actionPreserve ||
+						IsGeminiBypass(PayloadWithoutProviderPrefix(rawSignature)) {
 						needsSanitize = true
 						return false
 					}
@@ -1080,9 +1200,11 @@ func ValidateGeminiFunctionCallPairing(payload []byte) error {
 	for contentIndex, content := range contents.Array() {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
-			if len(pending) > 0 {
+			if len(pending) > 0 && content.Get("role").String() == "model" {
 				return fmt.Errorf(
-					"%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, contentIndex,
+					"%s[%d]: content appears before %d pending functionResponse part(s)",
+					contentsPath,
+					contentIndex,
 					len(pending),
 				)
 			}
@@ -1098,7 +1220,11 @@ func ValidateGeminiFunctionCallPairing(payload []byte) error {
 				}
 				calls = append(
 					calls,
-					geminiFunctionCallRef{id: call.Get("id").String(), name: call.Get("name").String(), path: partPath},
+					geminiFunctionCallRef{
+						id:   call.Get("id").String(),
+						name: call.Get("name").String(),
+						path: partPath,
+					},
 				)
 			}
 			if part.Get("functionResponse").Exists() {
@@ -1122,16 +1248,22 @@ func ValidateGeminiFunctionCallPairing(payload []byte) error {
 			continue
 		}
 		if len(responses) == 0 {
-			if len(pending) > 0 {
+			if len(pending) > 0 && content.Get("role").String() == "model" {
 				return fmt.Errorf(
-					"%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, contentIndex,
+					"%s[%d]: content appears before %d pending functionResponse part(s)",
+					contentsPath,
+					contentIndex,
 					len(pending),
 				)
 			}
 			continue
 		}
 		if len(pending) == 0 {
-			return fmt.Errorf("%s[%d]: functionResponse without preceding functionCall", contentsPath, contentIndex)
+			return fmt.Errorf(
+				"%s[%d]: functionResponse without preceding functionCall",
+				contentsPath,
+				contentIndex,
+			)
 		}
 		if len(responses) != len(pending) {
 			return fmt.Errorf(
@@ -1149,8 +1281,11 @@ func ValidateGeminiFunctionCallPairing(payload []byte) error {
 			}
 			if call.id != "" && responseID != call.id {
 				return fmt.Errorf(
-					"%s: functionResponse.id %q does not match functionCall.id %q at %s", responseRef.path, responseID,
-					call.id, call.path,
+					"%s: functionResponse.id %q does not match functionCall.id %q at %s",
+					responseRef.path,
+					responseID,
+					call.id,
+					call.path,
 				)
 			}
 			if responseName == "" {
@@ -1177,24 +1312,22 @@ func geminiContents(payload []byte) (gjson.Result, string) {
 
 func logGeminiThoughtSignatureSanitize(
 	contentsPath string,
-	contentIndex, partIndex int,
-	decision CompatibilityDecision,
-	rawSignature string,
-	hasSignature bool,
+	actions map[string]int,
+	positions []log.Fields,
+	sanitizedCount, droppedSignatures, replacedSignatures int,
 ) {
 	log.WithFields(
 		log.Fields{
-			"component":         "signature_sanitizer",
-			"target_provider":   string(ProviderGemini),
-			"action":            string(decision.Action),
-			"reason":            decision.Reason,
-			"contents_path":     contentsPath,
-			"content_index":     contentIndex,
-			"part_index":        partIndex,
-			"block_kind":        string(decision.BlockKind),
-			"detected_provider": string(decision.DetectedProvider),
-			"has_signature":     hasSignature,
-			"signature_length":  len(strings.TrimSpace(rawSignature)),
+			"component":           "signature_sanitizer",
+			"target_provider":     string(ProviderGemini),
+			"actions":             actions,
+			"contents_path":       contentsPath,
+			"sanitized_count":     sanitizedCount,
+			"dropped_signatures":  droppedSignatures,
+			"replaced_signatures": replacedSignatures,
+			"positions":           positions,
+			"omitted_positions":   sanitizedCount - len(positions),
+			"reason":              "incompatible thought signatures sanitized before upstream",
 		},
 	).Debug("gemini request: sanitized thoughtSignature before upstream")
 }

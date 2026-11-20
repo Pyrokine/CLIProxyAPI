@@ -2,6 +2,7 @@ package signature
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -53,7 +54,8 @@ func TestDecideCompatibilityPreservesNativeSignatures(t *testing.T) {
 		t.Run(
 			tc.name, func(t *testing.T) {
 				decision := decideCompatibility(tc.provider, tc.sig, tc.kind)
-				if !decision.Compatible || decision.Action != actionPreserve || decision.NormalizedSignature == "" {
+				if !decision.Compatible || decision.Action != actionPreserve ||
+					decision.NormalizedSignature == "" {
 					t.Fatalf("decision = %+v, want native preserve", decision)
 				}
 			},
@@ -72,7 +74,9 @@ func TestSignatureCompatibilityRejectsNestedProviderPrefixes(t *testing.T) {
 			if got := DetectProvider(raw); got != providerUnknown {
 				t.Fatalf("nested prefix provider = %v, want unknown", got)
 			}
-			if normalized, ok := CompatibleSignatureForProvider(ProviderClaude, raw, BlockKindClaudeThinking); ok || normalized != "" {
+			if normalized, ok := CompatibleSignatureForProvider(
+				ProviderClaude, raw, BlockKindClaudeThinking,
+			); ok || normalized != "" {
 				t.Fatal("native Claude accepted nested prefix")
 			}
 			if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(raw); ok || normalized != "" {
@@ -98,7 +102,8 @@ func TestDecideCompatibilityCrossProviderActions(t *testing.T) {
 		t.Fatalf("GPT target with Claude signature action = %s, want drop block", decision.Action)
 	}
 	decision := decideCompatibility(ProviderGemini, gptSig, BlockKindGeminiFunctionCall)
-	if decision.Action != actionReplaceWithGeminiBypass || decision.ReplacementSignature != GeminiSkipThoughtSignatureValidator {
+	if decision.Action != actionReplaceWithGeminiBypass ||
+		decision.ReplacementSignature != GeminiSkipThoughtSignatureValidator {
 		t.Fatalf("Gemini target with GPT signature decision = %+v, want skip sentinel replacement", decision)
 	}
 }
@@ -149,7 +154,12 @@ func TestCompatibleSignatureForProviderWithOptionsPreservesOnlyUnknownNonEmpty(t
 			BlockKindGPTReasoning,
 			options,
 		); ok || normalized != "" {
-			t.Fatalf("compatibility accepted invalid known-prefix signature %q: %q, %v", signature, normalized, ok)
+			t.Fatalf(
+				"compatibility accepted invalid known-prefix signature %q: %q, %v",
+				signature,
+				normalized,
+				ok,
+			)
 		}
 	}
 	gptSignature := validGPTReasoningSignatureForTest()
@@ -164,16 +174,13 @@ func TestCompatibleSignatureForProviderWithOptionsPreservesOnlyUnknownNonEmpty(t
 }
 
 func TestSanitizeClaudeMessagesForClaudeUpstreamDropsIncompatibleBlocksAndToolSignatures(t *testing.T) {
-	payload := []byte(`{
-		"messages":[{
-			"role":"assistant",
-			"content":[
-				{"type":"thinking","thinking":"x","signature":"skip_thought_signature_validator"},
-				{"type":"tool_use","id":"toolu_1","name":"Read","input":{},"signature":"skip_thought_signature_validator","extra_content":{"google":{"thought_signature":"skip_thought_signature_validator"}},"model":"gemini-3-pro"},
-				{"type":"text","text":"visible"}
-			]
-		}]
-	}`)
+	payload := []byte(("{\n\t\t\"messages\":[{\n\t\t\t\"role\":\"assistant\",\n\t\t\t\"content" +
+		"\":[\n\t\t\t\t{\"type\":\"thinking\",\"thinking\":\"x\",\"signature\":" +
+		"\"skip_thought_signature_validator\"},\n\t\t\t\t{\"type\":\"tool_use\"" +
+		`,"id":"toolu_1","name":"Read","input":{},"signature":"skip_thought_sig` +
+		`nature_validator","extra_content":{"google":{"thought_signature":"skip` +
+		"_thought_signature_validator\"}},\"model\":\"gemini-3-pro\"},\n\t\t\t" +
+		"\t{\"type\":\"text\",\"text\":\"visible\"}\n\t\t\t]\n\t\t}]\n\t}"))
 
 	out, report := SanitizeClaudeMessagesForClaudeUpstream(payload, "claude-opus-4-7")
 	if report.DroppedBlocks != 1 || report.DroppedSignatures == 0 {
@@ -222,7 +229,8 @@ func TestSanitizeGeminiRequestThoughtSignaturesPreservesNativeAndReplacesInvalid
 }
 
 func TestSanitizeGeminiRequestThoughtSignaturesParallelSyntheticOnlyFirstGetsBypass(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"first","args":{}}},{"functionCall":{"name":"second","args":{}}}]}]}`)
+	input := []byte((`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"first",` +
+		`"args":{}}},{"functionCall":{"name":"second","args":{}}}]}]}`))
 
 	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
 
@@ -250,7 +258,13 @@ func TestSanitizeGeminiRequestThoughtSignaturesLeavesUnsignedThoughtUnsigned(t *
 }
 
 func TestSanitizeGeminiRequestThoughtSignaturesNormalizesDuplicateCanonicalField(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{}},"thoughtSignature":"` + GeminiSkipThoughtSignatureValidator + `","thoughtSignature":"bad","thoughtSignature":"worse"}]}]}`)
+	input := []byte(
+		(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f",` +
+			`"args":{}},"thoughtSignature":` +
+			`"`) +
+			GeminiSkipThoughtSignatureValidator +
+			`","thoughtSignature":"bad","thoughtSignature":"worse"}]}]}`,
+	)
 
 	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
 
@@ -265,7 +279,9 @@ func TestSanitizeGeminiRequestThoughtSignaturesNormalizesDuplicateCanonicalField
 }
 
 func TestSanitizeGeminiRequestThoughtSignaturesReusesUnsignedFunctionResponsePayload(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"result":"ok"}}}]}]}`)
+	input := []byte(
+		`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"result":"ok"}}}]}]}`,
+	)
 
 	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
 
@@ -312,7 +328,13 @@ func TestGeminiField2ServerToolEnvelopeIsRecognized(t *testing.T) {
 	if provider := DetectProvider(signature); provider != ProviderGemini {
 		t.Fatalf("DetectProvider = %q, want %q", provider, ProviderGemini)
 	}
-	payload := []byte(`{"contents":[{"role":"model","parts":[{"toolCall":{"id":"search-1"},"thoughtSignature":"` + signature + `"}]}]}`)
+	payload := []byte(
+		(`{"contents":[{"role":"model","parts":[{"toolCall":{"id":"search-1"},` +
+			`"thoughtSignature":` +
+			`"`) +
+			signature +
+			`"}]}]}`,
+	)
 	if err := validateGeminiThoughtSignatures(payload, false); err != nil {
 		t.Fatalf("valid server-tool envelope was rejected: %v", err)
 	}
@@ -337,7 +359,13 @@ func TestGeminiField2ServerToolEnvelopeRejectsMalformedPayloads(t *testing.T) {
 				if isRecognizedGeminiSignature(signature) {
 					t.Fatalf("malformed server-tool envelope was recognized: %s", signature)
 				}
-				payload := []byte(`{"contents":[{"role":"model","parts":[{"toolResponse":{"id":"search-1"},"thoughtSignature":"` + signature + `"}]}]}`)
+				payload := []byte(
+					(`{"contents":[{"role":"model","parts":[{"toolResponse":{"id":` +
+						`"search-1"},"thoughtSignature":` +
+						`"`) +
+						signature +
+						`"}]}]}`,
+				)
 				if err := validateGeminiThoughtSignatures(payload, false); err == nil {
 					t.Fatal("malformed server-tool envelope passed strict validation")
 				}
@@ -361,13 +389,17 @@ func TestSanitizeGeminiRequestThoughtSignaturesPreservesServerToolParts(t *testi
 	if got := gjson.GetBytes(output, "contents.0.parts.1.thought_signature").String(); got != opaqueToolSignature {
 		t.Fatalf("tool_response signature = %q, want %q", got, opaqueToolSignature)
 	}
-	if got := gjson.GetBytes(output, "contents.0.parts.2.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+	if got := gjson.GetBytes(
+		output, "contents.0.parts.2.thoughtSignature",
+	).String(); got != GeminiSkipThoughtSignatureValidator {
 		t.Fatalf("functionCall signature = %q, want bypass; output=%s", got, output)
 	}
 }
 
 func TestSanitizeGeminiRequestThoughtSignaturesReusesServerToolPayload(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"model","parts":[{"toolCall":{"id":"search-1"},"thoughtSignature":"opaque"}]}]}`)
+	input := []byte(
+		`{"contents":[{"role":"model","parts":[{"toolCall":{"id":"search-1"},"thoughtSignature":"opaque"}]}]}`,
+	)
 	output := SanitizeGeminiRequestThoughtSignatures(input, "contents")
 	if &output[0] != &input[0] {
 		t.Fatal("unchanged server-tool payload was copied")
@@ -375,14 +407,20 @@ func TestSanitizeGeminiRequestThoughtSignaturesReusesServerToolPayload(t *testin
 }
 
 func TestValidateGeminiThoughtSignaturesAllowsUnsignedParallelSibling(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{}},"thoughtSignature":"skip_thought_signature_validator"},{"functionCall":{"id":"call-2","name":"read_file","args":{}}}]}]}`)
+	input := []byte((`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","` +
+		`name":"read_file","args":{}},"thoughtSignature":"skip_thought_signatur` +
+		`e_validator"},{"functionCall":{"id":"call-2","name":"read_file","args"` +
+		`:{}}}]}]}`))
 	if err := validateGeminiThoughtSignatures(input, true); err != nil {
 		t.Fatalf("unsigned parallel sibling should be valid: %v", err)
 	}
 }
 
 func TestValidateGeminiFunctionCallPairingValidParallelGroup(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"weather","args":{}}},{"functionCall":{"id":"call-2","name":"weather","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"weather","response":{}}},{"functionResponse":{"id":"call-2","name":"weather","response":{}}}]}]}`)
+	input := []byte((`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"weather","` +
+		`args":{}}},{"functionCall":{"id":"call-2","name":"weather","args":{}}}]},{"role":"user","parts":[{"` +
+		`functionResponse":{"id":"call-1","name":"weather","response":{}}},{"functionResponse":{"id":"call-2"` +
+		`,"name":"weather","response":{}}}]}]}`))
 	if err := ValidateGeminiFunctionCallPairing(input); err != nil {
 		t.Fatalf("valid pairing failed: %v", err)
 	}
@@ -403,16 +441,46 @@ func TestValidateGeminiFunctionCallPairingAllowsServerToolBlocks(t *testing.T) {
 var benchmarkSanitizedGeminiRequest []byte
 
 func BenchmarkSanitizeGeminiRequestThoughtSignaturesNormalizedHistory(b *testing.B) {
-	payload := strings.Repeat("x", 8<<20)
-	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"value":"` + payload + `"}},"thoughtSignature":"` + GeminiSkipThoughtSignatureValidator + `"}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}}}]}]}`)
-	output := SanitizeGeminiRequestThoughtSignatures(input, "contents")
-	if &output[0] != &input[0] {
-		b.Fatal("normalized payload was copied")
+	for _, turns := range []int{1, 16, 64} {
+		b.Run(
+			fmt.Sprintf("turns_%d", turns), func(b *testing.B) {
+				input := normalizedGeminiSignatureHistory(turns, 8<<20)
+				output := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+				if !gjson.ValidBytes(output) || gjson.GetBytes(output, "contents.#").Int() != int64(turns*2) {
+					b.Fatal("normalized history is incomplete")
+				}
+				if len(output) == 0 || &output[0] != &input[0] {
+					b.Fatal("normalized payload was copied")
+				}
+				b.ReportAllocs()
+				b.SetBytes(int64(len(input)))
+				b.ResetTimer()
+				for b.Loop() {
+					benchmarkSanitizedGeminiRequest = SanitizeGeminiRequestThoughtSignatures(input, "contents")
+				}
+			},
+		)
 	}
-	b.ReportAllocs()
-	b.SetBytes(int64(len(input)))
-	b.ResetTimer()
-	for b.Loop() {
-		benchmarkSanitizedGeminiRequest = SanitizeGeminiRequestThoughtSignatures(input, "contents")
+}
+
+func normalizedGeminiSignatureHistory(turns, totalPayloadBytes int) []byte {
+	payload := strings.Repeat("x", totalPayloadBytes/turns)
+	var builder strings.Builder
+	builder.Grow(totalPayloadBytes + turns*256)
+	builder.WriteString(`{"contents":[`)
+	for i := range turns {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(`{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"value":"`)
+		builder.WriteString(payload)
+		builder.WriteString(`"}},"thoughtSignature":"`)
+		builder.WriteString(GeminiSkipThoughtSignatureValidator)
+		builder.WriteString(
+			`"}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup",` +
+				`"response":{"result":"ok"}}}]}`,
+		)
 	}
+	builder.WriteString(`]}`)
+	return []byte(builder.String())
 }

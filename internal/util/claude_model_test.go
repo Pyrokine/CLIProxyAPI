@@ -2,6 +2,48 @@ package util
 
 import "testing"
 
+func TestEnsureClaudeModelIDPrefix(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
+	for _, tc := range []struct{ name, id, want string }{
+		{"empty", "", ""},
+		{"already has claude prefix", "claude-sonnet-4-6", "claude-sonnet-4-6"},
+		{"contains claude mid-string is reversed", "my-claude-custom", "claude-fable-5-dd-motsuc-edualc-ym"},
+		{"uppercase Claude prefix is reversed", "Claude-Opus-4", "claude-fable-5-dd-4-supO-edualC"},
+		{"gpt model is reversed", "gpt-4o", "claude-fable-5-dd-o4-tpg"},
+		{"gemini model is reversed", "gemini-2.5-pro", "claude-fable-5-dd-orp-5.2-inimeg"},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				if got := ensureClaudeModelIDPrefix(tc.id); got != tc.want {
+					t.Fatalf("EnsureClaudeModelIDPrefix(%q) = %q, want %q", tc.id, got, tc.want)
+				}
+			},
+		)
+	}
+}
+
+func TestResolveClaudeModelIDPrefix(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
+	for _, tc := range []struct{ name, id, want string }{
+		{"empty", "", ""},
+		{"plain claude id unchanged", "claude-sonnet-4-6", "claude-sonnet-4-6"},
+		{"non encoded id unchanged", "gpt-4o", "gpt-4o"},
+		{"encoded gpt model", "claude-fable-5-dd-o4-tpg", "gpt-4o"},
+		{"encoded gemini model", "claude-fable-5-dd-orp-5.2-inimeg", "gemini-2.5-pro"},
+		{"empty encoded body unchanged", "claude-fable-5-dd-", "claude-fable-5-dd-"},
+		{"preserves thinking suffix", "claude-fable-5-dd-o4-tpg(high)", "gpt-4o(high)"},
+		{"round trip", ensureClaudeModelIDPrefix("custom-model-x"), "custom-model-x"},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				if got := resolveClaudeModelIDPrefix(tc.id); got != tc.want {
+					t.Fatalf("ResolveClaudeModelIDPrefix(%q) = %q, want %q", tc.id, got, tc.want)
+				}
+			},
+		)
+	}
+}
+
 func TestIsClaudeThinkingModel(t *testing.T) {
 	tests := []struct {
 		name     string

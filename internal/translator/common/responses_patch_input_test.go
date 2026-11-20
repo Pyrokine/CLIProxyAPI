@@ -21,8 +21,12 @@ func TestResponsesPatchInputFragments(t *testing.T) {
 			first, errFirst := decoder.Push(arguments[:boundary])
 			second, errSecond := decoder.Push(arguments[boundary:])
 			tail, errFinish := decoder.Finish(arguments)
-			if errFirst != nil || errSecond != nil || errFinish != nil || first+second+tail != patch || decoder.Input() != patch {
-				t.Fatalf("boundary=%d first=%q second=%q tail=%q errors=%v/%v/%v", boundary, first, second, tail, errFirst, errSecond, errFinish)
+			if errFirst != nil || errSecond != nil || errFinish != nil || first+second+tail != patch ||
+				decoder.Input() != patch {
+				t.Fatalf(
+					"boundary=%d first=%q second=%q tail=%q errors=%v/%v/%v", boundary, first, second, tail, errFirst,
+					errSecond, errFinish,
+				)
 			}
 			if repeat, errRepeat := decoder.Finish(arguments); errRepeat != nil || repeat != "" {
 				t.Fatalf("repeat finish: %q %v", repeat, errRepeat)

@@ -82,18 +82,10 @@ func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry
 		result, _ = sjson.DeleteBytes(result, "output_config.effort")
 		return deleteEmptyClaudeOutputConfig(result), nil
 	case thinking.ModeNone:
-		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
-		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result, _ = sjson.DeleteBytes(result, "thinking.display")
-		result, _ = sjson.DeleteBytes(result, "output_config.effort")
-		return deleteEmptyClaudeOutputConfig(result), nil
+		return disableClaudeThinking(body, modelInfo), nil
 	case thinking.ModeBudget:
 		if config.Budget == 0 {
-			result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
-			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-			result, _ = sjson.DeleteBytes(result, "thinking.display")
-			result, _ = sjson.DeleteBytes(result, "output_config.effort")
-			return deleteEmptyClaudeOutputConfig(result), nil
+			return disableClaudeThinking(body, modelInfo), nil
 		}
 
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
@@ -104,6 +96,17 @@ func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry
 	default:
 		return body, nil
 	}
+}
+
+func disableClaudeThinking(body []byte, modelInfo *registry.ModelInfo) []byte {
+	result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
+	result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+	result, _ = sjson.DeleteBytes(result, "thinking.display")
+	effort := gjson.GetBytes(result, "output_config.effort").String()
+	if modelInfo.ID != "claude-haiku-5-5" || (effort != "low" && effort != "medium" && effort != "high") {
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+	}
+	return deleteEmptyClaudeOutputConfig(result)
 }
 
 func deleteEmptyClaudeOutputConfig(body []byte) []byte {

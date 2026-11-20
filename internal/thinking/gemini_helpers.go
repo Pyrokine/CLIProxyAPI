@@ -12,7 +12,9 @@ const (
 )
 
 // ApplyGeminiLevelFormat applies level-based thinking configuration using the given JSON path prefix.
-// Used by gemini, gemini-cli, and antigravity providers which share identical logic but differ in JSON paths.
+// Used by `gemini`, `gemini-cli`, and `antigravity` providers which share identical logic but differ in JSON paths.
+//
+//goland:noinspection GrazieInspection
 func ApplyGeminiLevelFormat(body []byte, config Config, prefix string) ([]byte, error) {
 	result, _ := sjson.DeleteBytes(body, prefix+".thinkingBudget")
 	result, _ = sjson.DeleteBytes(result, prefix+".thinking_budget")

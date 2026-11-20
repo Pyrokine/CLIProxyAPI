@@ -7,13 +7,29 @@ func TranslateRequestByFormatName(from, to Format, model string, rawJSON []byte,
 	return TranslateRequest(from, to, model, rawJSON, stream)
 }
 
+// HasRequestTransformerByFormatName 按协议名查询请求转换能力
+func HasRequestTransformerByFormatName(from, to Format) bool {
+	return HasRequestTransformer(from, to)
+}
+
 // HasResponseTransformerByFormatName reports whether a response translator exists between two schemas.
 func HasResponseTransformerByFormatName(from, to Format) bool {
 	return HasResponseTransformer(from, to)
 }
 
+// HasStreamResponseTransformerByFormatName 按协议名查询流式响应转换能力
+func HasStreamResponseTransformerByFormatName(from, to Format) bool {
+	return HasStreamResponseTransformer(from, to)
+}
+
+// HasNonStreamResponseTransformerByFormatName 按协议名查询非流式响应转换能力
+func HasNonStreamResponseTransformerByFormatName(from, to Format) bool {
+	return HasNonStreamResponseTransformer(from, to)
+}
+
 // TranslateStreamByFormatName converts streaming responses between schemas by their string identifiers.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func TranslateStreamByFormatName(
 	ctx context.Context,
 	from, to Format,
@@ -36,7 +52,8 @@ func TranslateNonStreamByFormatName(
 }
 
 // TranslateTokenCountByFormatName converts token counts between schemas by their string identifiers.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func TranslateTokenCountByFormatName(ctx context.Context, from, to Format, count int64, rawJSON []byte) []byte {
 	return TranslateTokenCount(ctx, from, to, count, rawJSON)
 }

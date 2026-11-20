@@ -3,6 +3,7 @@ package common
 import "testing"
 
 func TestNormalizeOpenAIFileData(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	tests := []struct {
 		name         string
 		filename     string

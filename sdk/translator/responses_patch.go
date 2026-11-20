@@ -24,7 +24,9 @@ type responseTranslationError struct {
 	err error
 }
 
-func (e *responseTranslationError) Error() string   { return e.err.Error() }
+func (e *responseTranslationError) Error() string { return e.err.Error() }
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *responseTranslationError) Unwrap() error   { return e.err }
 func (e *responseTranslationError) StatusCode() int { return http.StatusBadGateway }
 
@@ -51,7 +53,11 @@ func prepareResponsesPatchRequest(from, to Format, body []byte) ([]byte, error) 
 	return translatorcommon.NormalizeResponsesPatchTools(body)
 }
 
-func prepareResponsesPatchResponse(from, to Format, original []byte, param *any) (*responsesPatchTranslation, []byte, *any) {
+func prepareResponsesPatchResponse(from, to Format, original []byte, param *any) (
+	*responsesPatchTranslation,
+	[]byte,
+	*any,
+) {
 	if to != FormatOpenAIResponse || from == FormatCodex || from == FormatOpenAIResponse {
 		return nil, original, param
 	}
@@ -79,6 +85,7 @@ func prepareResponsesPatchResponse(from, to Format, original []byte, param *any)
 	return state, state.original, &state.inner
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *responsesPatchTranslation) CanFinalizeResponseStream() bool {
 	if s == nil || s.closed || s.err != nil {
 		return false
@@ -104,13 +111,15 @@ func (s *responsesPatchTranslation) fail(err error) []byte {
 	s.bridge = nil
 	s.inner = nil
 	s.closed = true
-	payload, _ := json.Marshal(map[string]any{
-		"type": "response.failed",
-		"response": map[string]any{
-			"status": "failed",
-			"error":  map[string]string{"code": "invalid_tool_arguments", "message": s.err.Error()},
+	payload, _ := json.Marshal(
+		map[string]any{
+			"type": "response.failed",
+			"response": map[string]any{
+				"status": "failed",
+				"error":  map[string]string{"code": "invalid_tool_arguments", "message": s.err.Error()},
+			},
 		},
-	})
+	)
 	return payload
 }
 
@@ -130,7 +139,9 @@ func (s *responsesPatchTranslation) event(payload []byte) ([][]byte, error) {
 		return nil, fmt.Errorf("apply_patch response ended before a JSON terminal event")
 	}
 	for _, field := range []string{"tools", "tool_choice"} {
-		if value := gjson.GetBytes(s.client, field); value.Exists() && gjson.GetBytes(payload, "response."+field).Exists() {
+		if value := gjson.GetBytes(s.client, field); value.Exists() && gjson.GetBytes(
+			payload, "response."+field,
+		).Exists() {
 			payload, _ = sjson.SetRawBytes(payload, "response."+field, []byte(value.Raw))
 		}
 	}
@@ -145,7 +156,8 @@ func (s *responsesPatchTranslation) event(payload []byte) ([][]byte, error) {
 			}
 		}
 	}
-	if kind == "response.completed" || kind == "response.done" || kind == "response.incomplete" || responsesPatchFailure(kind) {
+	if kind == "response.completed" || kind == "response.done" || kind == "response.incomplete" ||
+		responsesPatchFailure(kind) {
 		s.closed = true
 		s.bridge = nil
 	}
@@ -194,11 +206,11 @@ func (s *responsesPatchTranslation) stream(frames [][]byte) [][]byte {
 			out = append(out, events...)
 			continue
 		}
-		for _, raw := range bytes.Split(bytes.ReplaceAll(frame, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
+		for raw := range bytes.SplitSeq(bytes.ReplaceAll(frame, []byte("\r\n"), []byte("\n")), []byte("\n\n")) {
 			var data [][]byte
-			for _, line := range bytes.Split(raw, []byte("\n")) {
-				if bytes.HasPrefix(line, []byte("data:")) {
-					data = append(data, bytes.TrimPrefix(bytes.TrimPrefix(line, []byte("data:")), []byte(" ")))
+			for line := range bytes.SplitSeq(raw, []byte("\n")) {
+				if after, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+					data = append(data, bytes.TrimPrefix(after, []byte(" ")))
 				}
 			}
 			if len(data) == 0 {
@@ -237,7 +249,11 @@ func (s *responsesPatchTranslation) nonStream(body []byte) []byte {
 	if s.err != nil {
 		return s.fail(s.err)
 	}
-	if upstreamError := gjson.GetBytes(body, "error"); (upstreamError.Exists() && upstreamError.Type != gjson.Null) || gjson.GetBytes(body, "status").String() == "failed" {
+	if upstreamError := gjson.GetBytes(
+		body, "error",
+	); (upstreamError.Exists() && upstreamError.Type != gjson.Null) || gjson.GetBytes(
+		body, "status",
+	).String() == "failed" {
 		s.closed = true
 		s.bridge = nil
 		return body

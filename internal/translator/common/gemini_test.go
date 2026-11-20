@@ -104,9 +104,16 @@ func TestMergeAdjacentGeminiUserContentsPreservesToolBoundaries(t *testing.T) {
 
 func TestSplitGeminiFunctionResponseTurnsCombinesParallelResults(t *testing.T) {
 	contents := [][]byte{
-		[]byte(`{"role":"model","parts":[{"functionCall":{"name":"first","id":"a"}},{"function_call":{"name":"second","id":"b"}}]}`),
-		[]byte(`{"role":"user","turn_metadata":"preserved","parts":[{"functionResponse":{"id":"a","name":"first","response":{"result":1},"extra":"kept"}}]}`),
-		[]byte(`{"role":"user","parts":[{"function_response":{"id":"b","name":"second","response":{"result":2}}}]}`),
+		[]byte(
+			(`{"role":"model","parts":[{"functionCall":{"name":"first","id":"a"}},` +
+				`{"function_call":{"name":"second","id":` +
+				`"b"}}]}`),
+		),
+		[]byte((`{"role":"user","turn_metadata":"preserved","parts":[{"functionResponse` +
+			`":{"id":"a","name":"first","response":{"result":1},"extra":"kept"}}]}`)),
+		[]byte(
+			`{"role":"user","parts":[{"function_response":{"id":"b","name":"second","response":{"result":2}}}]}`,
+		),
 	}
 	result := MergeAdjacentGeminiUserContents(SplitGeminiFunctionResponseTurns(contents))
 	if len(result) != 2 || string(result[0]) != string(contents[0]) {

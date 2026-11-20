@@ -232,7 +232,8 @@ func TestClaudeSchemaMissesRequired(t *testing.T) {
 		},
 		{
 			name: "nested incomplete",
-			schema: `{"type":"object","properties":{"outer":{"type":"object","properties":{"inner":{"type":"string"}}}},` +
+			schema: (`{"type":"object","properties":{"outer":{"type":"object","properties":` +
+				`{"inner":{"type":"string"}}}},`) +
 				`"required":["outer"]}`,
 			want: true,
 		},

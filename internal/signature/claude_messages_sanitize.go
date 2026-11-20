@@ -10,7 +10,7 @@ import (
 
 func sanitizeClaudeMessagesSignaturesForModel(payload []byte, targetModel string) ([]byte, SanitizeReport) {
 	return sanitizeClaudeMessagesSignaturesForTarget(
-		payload, ClaudeMessagesSanitizeOptions{
+		payload, claudeMessagesSanitizeOptions{
 			TargetProvider:    ProviderFromModelName(targetModel),
 			TargetModel:       targetModel,
 			DropEmptyMessages: true,
@@ -25,7 +25,7 @@ func SanitizeClaudeMessagesForClaudeUpstream(
 ) ([]byte, SanitizeReport) {
 	preserveThinking := len(preserveThinkingBlocks) > 0 && preserveThinkingBlocks[0]
 	return sanitizeClaudeMessagesSignaturesForTarget(
-		payload, ClaudeMessagesSanitizeOptions{
+		payload, claudeMessagesSanitizeOptions{
 			TargetProvider:                ProviderClaude,
 			TargetModel:                   targetModel,
 			DropEmptyMessages:             true,
@@ -36,7 +36,7 @@ func SanitizeClaudeMessagesForClaudeUpstream(
 	)
 }
 
-func sanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessagesSanitizeOptions) (
+func sanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts claudeMessagesSanitizeOptions) (
 	[]byte,
 	SanitizeReport,
 ) {
@@ -99,7 +99,8 @@ func sanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				keptParts = append(keptParts, part.Raw)
 				continue
 			}
-			if targetProvider == ProviderClaude && isEmptyClaudeThinkingPlaceholder(part) && !opts.DropEmptyThinkingPlaceholders {
+			if targetProvider == ProviderClaude && isEmptyClaudeThinkingPlaceholder(part) &&
+				!opts.DropEmptyThinkingPlaceholders {
 				keptParts = append(keptParts, part.Raw)
 				continue
 			}
@@ -156,144 +157,6 @@ func sanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 	}
 	output, _ := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(keptMessages, ",")+"]"))
 	return output, report
-}
-
-// CollapseConsecutiveClaudeThinkingBlocks keeps only the latest thinking block
-// in each uninterrupted assistant sequence. Other content types remain separators.
-func CollapseConsecutiveClaudeThinkingBlocks(payload []byte) []byte {
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.IsArray() {
-		return payload
-	}
-
-	messageItems := messages.Array()
-	updatedMessages := make([]string, 0, len(messageItems))
-	modified := false
-	for _, message := range messageItems {
-		content := message.Get("content")
-		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") || !content.IsArray() {
-			updatedMessages = append(updatedMessages, message.Raw)
-			continue
-		}
-
-		parts := content.Array()
-		keptParts := make([]string, 0, len(parts))
-		messageModified := false
-		for _, part := range parts {
-			if part.Get("type").String() == "thinking" && len(keptParts) > 0 &&
-				gjson.Get(keptParts[len(keptParts)-1], "type").String() == "thinking" {
-				keptParts[len(keptParts)-1] = part.Raw
-				messageModified = true
-				continue
-			}
-			keptParts = append(keptParts, part.Raw)
-		}
-		if !messageModified {
-			updatedMessages = append(updatedMessages, message.Raw)
-			continue
-		}
-
-		updated, err := sjson.SetRaw(message.Raw, "content", "["+strings.Join(keptParts, ",")+"]")
-		if err != nil {
-			updatedMessages = append(updatedMessages, message.Raw)
-			continue
-		}
-		updatedMessages = append(updatedMessages, updated)
-		modified = true
-	}
-	if !modified {
-		return payload
-	}
-	updated, err := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(updatedMessages, ",")+"]"))
-	if err != nil {
-		return payload
-	}
-	return updated
-}
-
-// StripTrailingClaudeThinkingBlocks removes trailing thinking and
-// redacted_thinking blocks from the final assistant message. An assistant
-// message containing only those blocks is removed.
-func StripTrailingClaudeThinkingBlocks(payload []byte) []byte {
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.IsArray() {
-		return payload
-	}
-	messageItems := messages.Array()
-	if len(messageItems) == 0 {
-		return payload
-	}
-
-	lastIndex := len(messageItems) - 1
-	lastMessage := messageItems[lastIndex]
-	if !strings.EqualFold(strings.TrimSpace(lastMessage.Get("role").String()), "assistant") {
-		return payload
-	}
-	content := lastMessage.Get("content")
-	if !content.IsArray() {
-		return payload
-	}
-	parts := content.Array()
-	end := len(parts)
-	for end > 0 {
-		partType := strings.TrimSpace(parts[end-1].Get("type").String())
-		if partType != "thinking" && partType != "redacted_thinking" {
-			break
-		}
-		end--
-	}
-	if end == len(parts) {
-		return payload
-	}
-
-	updatedMessages := make([]string, 0, len(messageItems))
-	for _, message := range messageItems[:lastIndex] {
-		updatedMessages = append(updatedMessages, message.Raw)
-	}
-	if end > 0 {
-		remaining := make([]string, 0, end)
-		for _, part := range parts[:end] {
-			remaining = append(remaining, part.Raw)
-		}
-		updatedLast, err := sjson.SetRaw(lastMessage.Raw, "content", "["+strings.Join(remaining, ",")+"]")
-		if err != nil {
-			return payload
-		}
-		updatedMessages = append(updatedMessages, updatedLast)
-	}
-
-	updated, err := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(updatedMessages, ",")+"]"))
-	if err != nil {
-		return payload
-	}
-	return updated
-}
-
-// StripTrailingClaudeAssistantPrefill removes the final assistant message.
-// Callers decide whether the target model supports assistant prefill.
-func StripTrailingClaudeAssistantPrefill(payload []byte) []byte {
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.IsArray() {
-		return payload
-	}
-	messageItems := messages.Array()
-	if len(messageItems) == 0 {
-		return payload
-	}
-	lastMessage := messageItems[len(messageItems)-1]
-	if !strings.EqualFold(strings.TrimSpace(lastMessage.Get("role").String()), "assistant") {
-		return payload
-	}
-
-	updatedMessages := make([]string, 0, len(messageItems)-1)
-	for _, message := range messageItems[:len(messageItems)-1] {
-		updatedMessages = append(updatedMessages, message.Raw)
-	}
-	updated, err := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(updatedMessages, ",")+"]"))
-	if err != nil {
-		return payload
-	}
-	return updated
 }
 
 func stripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {

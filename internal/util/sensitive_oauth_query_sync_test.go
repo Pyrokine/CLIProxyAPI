@@ -6,7 +6,9 @@ import (
 )
 
 func TestMaskSensitiveQueryHidesOAuthRedirectSecrets(t *testing.T) {
-	masked := MaskSensitiveQuery("code=long-authorization-code&state=nonce-state-12345&%63ode=encoded-secret&source=plugin")
+	masked := MaskSensitiveQuery(
+		"code=long-authorization-code&state=nonce-state-12345&%63ode=encoded-secret&source=plugin",
+	)
 	values, err := url.ParseQuery(masked)
 	if err != nil {
 		t.Fatal(err)

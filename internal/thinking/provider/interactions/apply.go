@@ -10,12 +10,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// Applier implements thinking.ProviderApplier for the native Interactions API.
-type Applier struct{}
+// applier implements thinking.ProviderApplier for the native Interactions API.
+type applier struct{}
 
 // newApplier creates a new Interactions thinking applier.
-func newApplier() *Applier {
-	return &Applier{}
+func newApplier() *applier {
+	return &applier{}
 }
 
 func init() {
@@ -23,8 +23,9 @@ func init() {
 }
 
 // Apply writes thinking configuration using native Interactions generation_config fields.
-func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
+func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
+	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone &&
+		config.Mode != thinking.ModeAuto {
 		return body, nil
 	}
 	if len(body) == 0 || !gjson.ValidBytes(body) {

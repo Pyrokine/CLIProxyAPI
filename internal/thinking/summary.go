@@ -185,7 +185,8 @@ func applySummaryConfigForProvider(
 	config SummaryConfig,
 ) []byte {
 	normalized := strings.ToLower(strings.TrimSpace(format))
-	if config.Mode == SummaryUnspecified || !summaryFormatSupported(normalized) || len(body) == 0 || !gjson.ValidBytes(body) {
+	if config.Mode == SummaryUnspecified || !summaryFormatSupported(normalized) || len(body) == 0 ||
+		!gjson.ValidBytes(body) {
 		return body
 	}
 
@@ -323,11 +324,13 @@ func isOpenRouterProvider(provider string) bool {
 	if provider == "openrouter" {
 		return true
 	}
-	return slices.Contains(strings.FieldsFunc(
-		provider, func(r rune) bool {
-			return r == '-' || r == '_' || r == '/' || r == '.' || r == ':'
-		},
-	), "openrouter")
+	return slices.Contains(
+		strings.FieldsFunc(
+			provider, func(r rune) bool {
+				return r == '-' || r == '_' || r == '/' || r == '.' || r == ':'
+			},
+		), "openrouter",
+	)
 }
 
 func extractOpenAIExplicitSummaryConfig(body []byte) (SummaryConfig, bool) {
@@ -473,7 +476,8 @@ func interactionsSummaryConfig(body []byte, path string) (SummaryConfig, bool) {
 // The exact model-aware summary pass can then activate enabled thinking with a
 // valid budget, or leave thinking absent when max_tokens cannot accommodate it.
 func stripInferredClaudeSummaryActivation(body []byte, modelInfo *registry.ModelInfo) []byte {
-	if modelInfo == nil || modelInfo.Thinking == nil || len(modelInfo.Thinking.Levels) > 0 || modelInfo.Thinking.Min <= 0 {
+	if modelInfo == nil || modelInfo.Thinking == nil || len(modelInfo.Thinking.Levels) > 0 ||
+		modelInfo.Thinking.Min <= 0 {
 		return body
 	}
 	if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()), "adaptive") {

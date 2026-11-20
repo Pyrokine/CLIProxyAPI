@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"net/http"
 	"regexp"
 	"strings"
@@ -10,6 +11,9 @@ import (
 )
 
 var cpaSessionHeaderVariable = regexp.MustCompile(`(?i)\$CPA-SESSION-ID`)
+
+// SessionIDResolver 按当前请求提取会话，处理请求前完成初始化
+var SessionIDResolver func(context.Context, http.Header) string
 
 var credentialHeaderNames = [...]string{"Authorization", "X-Api-Key", "X-Goog-Api-Key"}
 
@@ -77,11 +81,38 @@ func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string, clien
 				r.Header.Del(name)
 			}
 			sessionID := SessionIDFromContext(ctx)
+			if sessionID == "" && !HasExplicitSessionID(ctx) {
+				if resolver := SessionIDResolver; resolver != nil {
+					sessionID = resolver(ctx, incoming)
+				}
+			}
+			if sessionID == "" && !HasExplicitSessionID(ctx) {
+				for _, candidate := range []struct{ header, prefix string }{
+					{"X-Claude-Code-Session-Id", "claude:"},
+					{"Session-Id", "codex:"},
+					{"X-Session-ID", "header:"},
+					{"X-Session-Affinity", "affinity:"},
+				} {
+					for key, values := range incoming {
+						if strings.EqualFold(key, candidate.header) && len(values) > 0 {
+							if value := strings.TrimSpace(values[0]); value != "" {
+								sessionID = candidate.prefix + value
+								break
+							}
+						}
+					}
+					if sessionID != "" {
+						break
+					}
+				}
+			}
 			if sessionID == "" {
 				delete(headers, name)
 				continue
 			}
-			headers[name] = cpaSessionHeaderVariable.ReplaceAllStringFunc(value, func(string) string { return sessionID })
+			headers[name] = cpaSessionHeaderVariable.ReplaceAllStringFunc(
+				value, func(string) string { return sessionID },
+			)
 		} else if variable, dynamic := strings.CutPrefix(value, "$"); dynamic {
 			variable = strings.TrimSpace(variable)
 			delete(headers, name)

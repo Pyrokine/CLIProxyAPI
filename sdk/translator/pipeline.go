@@ -19,6 +19,8 @@ type RequestEnvelope struct {
 }
 
 // ResponseEnvelope represents a response in the translation pipeline.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ResponseEnvelope struct {
 	Format Format
 	Model  string
@@ -28,15 +30,23 @@ type ResponseEnvelope struct {
 }
 
 // RequestMiddleware decorates request translation.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type RequestMiddleware func(ctx context.Context, req RequestEnvelope, next RequestHandler) (RequestEnvelope, error)
 
 // ResponseMiddleware decorates response translation.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ResponseMiddleware func(ctx context.Context, resp ResponseEnvelope, next ResponseHandler) (ResponseEnvelope, error)
 
 // RequestHandler performs request translation between formats.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type RequestHandler func(ctx context.Context, req RequestEnvelope) (RequestEnvelope, error)
 
 // ResponseHandler performs response translation between formats.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ResponseHandler func(ctx context.Context, resp ResponseEnvelope) (ResponseEnvelope, error)
 
 // Pipeline orchestrates request/response transformation with middleware support.
@@ -55,6 +65,8 @@ func NewPipeline(registry *Registry) *Pipeline {
 }
 
 // UseRequest adds request middleware executed in registration order.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (p *Pipeline) UseRequest(mw RequestMiddleware) {
 	if mw != nil {
 		p.requestMiddleware = append(p.requestMiddleware, mw)
@@ -62,6 +74,8 @@ func (p *Pipeline) UseRequest(mw RequestMiddleware) {
 }
 
 // UseResponse adds response middleware executed in registration order.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (p *Pipeline) UseResponse(mw ResponseMiddleware) {
 	if mw != nil {
 		p.responseMiddleware = append(p.responseMiddleware, mw)
@@ -69,6 +83,8 @@ func (p *Pipeline) UseResponse(mw ResponseMiddleware) {
 }
 
 // TranslateRequest applies middleware and registry transformations.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (p *Pipeline) TranslateRequest(ctx context.Context, from, to Format, req RequestEnvelope) (
 	RequestEnvelope,
 	error,
@@ -91,6 +107,8 @@ func (p *Pipeline) TranslateRequest(ctx context.Context, from, to Format, req Re
 }
 
 // TranslateResponse applies middleware and registry transformations.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (p *Pipeline) TranslateResponse(
 	ctx context.Context,
 	from, to Format,

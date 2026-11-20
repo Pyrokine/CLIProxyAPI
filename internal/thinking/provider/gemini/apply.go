@@ -9,6 +9,8 @@
 //   - ModeAuto: Always uses thinkingBudget=-1 (both Gemini 2.5 and 3.x)
 //   - len(Levels) > 0: Uses thinkingLevel (Gemini 3.x discrete levels)
 //   - len(Levels) == 0: Uses thinkingBudget (Gemini 2.5)
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (

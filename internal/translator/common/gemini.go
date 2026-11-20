@@ -119,8 +119,8 @@ func geminiContentParts(content []byte) [][]byte {
 	return rawParts
 }
 
-// ContentHasGeminiFunctionCall reports whether a content turn contains a tool call.
-func ContentHasGeminiFunctionCall(content []byte) bool {
+// contentHasGeminiFunctionCall reports whether a content turn contains a tool call.
+func contentHasGeminiFunctionCall(content []byte) bool {
 	for _, part := range gjson.GetBytes(content, "parts").Array() {
 		if part.Get("functionCall").Exists() || part.Get("function_call").Exists() {
 			return true
@@ -156,7 +156,11 @@ func SplitGeminiFunctionResponseTurns(contents [][]byte) [][]byte {
 		responseTurn, responseErr := sjson.SetRawBytes(content, "parts", JoinRawArray(responses))
 		otherTurn, otherErr := sjson.SetRawBytes(content, "parts", JoinRawArray(other))
 		if responseErr != nil || otherErr != nil {
-			log.WithFields(log.Fields{"response_error": responseErr, "other_error": otherErr}).Warn("Gemini tool response turn could not be separated")
+			log.WithFields(
+				log.Fields{
+					"response_error": responseErr, "other_error": otherErr,
+				},
+			).Warn("Gemini tool response turn could not be separated")
 			split = append(split, content)
 			continue
 		}
@@ -172,7 +176,7 @@ func SplitGeminiFunctionResponseTurns(contents [][]byte) [][]byte {
 		}
 		previousModelCalledTool := len(ordered) > 0 &&
 			gjson.GetBytes(ordered[len(ordered)-1], "role").String() == "model" &&
-			ContentHasGeminiFunctionCall(ordered[len(ordered)-1])
+			contentHasGeminiFunctionCall(ordered[len(ordered)-1])
 		end := index
 		for end < len(split) && gjson.GetBytes(split[end], "role").String() == "user" {
 			end++
@@ -211,23 +215,25 @@ func SplitGeminiFunctionResponseTurns(contents [][]byte) [][]byte {
 	return ordered
 }
 
-// ContainsJSONRef reports whether a schema reference appears in a nested function result.
-func ContainsJSONRef(value gjson.Result) bool {
+// containsJSONRef reports whether a schema reference appears in a nested function result.
+func containsJSONRef(value gjson.Result) bool {
 	if !value.IsObject() && !value.IsArray() {
 		return false
 	}
 	found := false
-	value.ForEach(func(key, child gjson.Result) bool {
-		if value.IsObject() && key.String() == "$ref" && child.Type == gjson.String {
-			found = true
-			return false
-		}
-		if ContainsJSONRef(child) {
-			found = true
-			return false
-		}
-		return true
-	})
+	value.ForEach(
+		func(key, child gjson.Result) bool {
+			if value.IsObject() && key.String() == "$ref" && child.Type == gjson.String {
+				found = true
+				return false
+			}
+			if containsJSONRef(child) {
+				found = true
+				return false
+			}
+			return true
+		},
+	)
 	return found
 }
 
@@ -237,7 +243,7 @@ func SetGeminiFunctionResponseResult(part []byte, path string, result gjson.Resu
 		part, _ = sjson.SetBytes(part, path, "")
 		return part
 	}
-	if ContainsJSONRef(result) {
+	if containsJSONRef(result) {
 		target := path
 		if strings.HasSuffix(path, "response") {
 			target += ".result"

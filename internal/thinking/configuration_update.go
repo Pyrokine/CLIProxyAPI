@@ -19,14 +19,16 @@ func stripConfigurationUpdates(body []byte) ([]byte, error) {
 	}
 	kept := make([]string, 0, len(input.Array()))
 	removed := false
-	input.ForEach(func(_, item gjson.Result) bool {
-		if item.Get("type").String() == "configuration_update" {
-			removed = true
-		} else {
-			kept = append(kept, item.Raw)
-		}
-		return true
-	})
+	input.ForEach(
+		func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "configuration_update" {
+				removed = true
+			} else {
+				kept = append(kept, item.Raw)
+			}
+			return true
+		},
+	)
 	if !removed {
 		return body, nil
 	}

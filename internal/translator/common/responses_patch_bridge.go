@@ -10,7 +10,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const patchFunctionParameters = `{"type":"object","properties":{"input":{"type":"string","description":"The complete apply_patch patch text."}},"required":["input"],"additionalProperties":false}`
+const patchFunctionParameters = `{"type":"object","properties":{"input":{"type":"string","description":"The ` +
+	`complete apply_patch patch text."}},"required":["input"],"additionalProperties":false}`
 
 // NormalizeResponsesPatchTools 使用现有声明优先级，将 freeform patch 转为函数参数
 // 原始声明保留在 ResponsesPatchBridge 中，普通同名函数不参与转换
@@ -34,7 +35,10 @@ func NormalizeResponsesPatchTools(body []byte) ([]byte, error) {
 			if tool.Get("type").String() == "namespace" {
 				for _, key := range []string{"tools", "children"} {
 					if nested := tool.Get(key); nested.IsArray() {
-						children := rewrite(nested, joinResponsesNamespace(namespace, tool.Get("name").String()))
+						children := rewrite(
+							nested,
+							joinResponsesNamespace(namespace, tool.Get("name").String()),
+						)
 						raw, _ = sjson.SetRawBytes(raw, key, children)
 						break
 					}
@@ -42,12 +46,19 @@ func NormalizeResponsesPatchTools(body []byte) ([]byte, error) {
 			} else {
 				declaration, err := identity.ResolveDeclaration(responsesDeclarationName(tool), namespace)
 				if err == nil && affected[declaration.QualifiedName] {
-					if declaration.Raw != tool.Raw || declaration.Namespace != namespace || seen[declaration.QualifiedName] {
+					if declaration.Raw !=
+						tool.Raw ||
+						declaration.Namespace !=
+							namespace ||
+						seen[declaration.QualifiedName] {
 						continue
 					}
 					seen[declaration.QualifiedName] = true
 					if declaration.Kind == ResponsesCustomTool {
-						description := strings.ReplaceAll(tool.Get("description").String(), "This is a FREEFORM tool, so do not wrap the patch in JSON.", "")
+						description := strings.ReplaceAll(
+							tool.Get("description").String(),
+							"This is a FREEFORM tool, so do not wrap the patch in JSON.", "",
+						)
 						description = strings.TrimSpace(description) + `
 Call this function with a JSON object whose input field contains the complete patch text.
 Use the Codex apply_patch format, not a conventional git unified diff.
@@ -86,8 +97,12 @@ Example input:
 	var choice func(gjson.Result) []byte
 	choice = func(tool gjson.Result) []byte {
 		raw := []byte(tool.Raw)
-		declaration, err := identity.ResolveDeclaration(tool.Get("name").String(), tool.Get("namespace").String())
-		if err == nil && declaration.Kind == ResponsesCustomTool && declaration.Name == "apply_patch" && tool.Get("type").String() == "custom" {
+		declaration, err := identity.ResolveDeclaration(
+			tool.Get("name").String(),
+			tool.Get("namespace").String(),
+		)
+		if err == nil && declaration.Kind == ResponsesCustomTool && declaration.Name == "apply_patch" &&
+			tool.Get("type").String() == "custom" {
 			raw, _ = sjson.SetBytes(raw, "type", "function")
 		}
 		for i, nested := range tool.Get("tools").Array() {
@@ -105,14 +120,18 @@ Example input:
 		if strings.TrimSpace(item.Get("name").String()) == "apply_patch" {
 			return true
 		}
-		declaration, err := identity.ResolveDeclaration(item.Get("name").String(), item.Get("namespace").String())
+		declaration, err := identity.ResolveDeclaration(
+			item.Get("name").String(),
+			item.Get("namespace").String(),
+		)
 		return err == nil && declaration.Name == "apply_patch"
 	}
 	patchCalls := make(map[string]bool)
 	for _, item := range gjson.GetBytes(body, "input").Array() {
 		if patchHistory(item) {
 			callID := item.Get("call_id")
-			if callID.Type != gjson.String || strings.TrimSpace(callID.String()) == "" || patchCalls[callID.String()] {
+			if callID.Type != gjson.String || strings.TrimSpace(callID.String()) == "" ||
+				patchCalls[callID.String()] {
 				return nil, fmt.Errorf("invalid apply_patch history call ID")
 			}
 			patchCalls[callID.String()] = true
@@ -140,7 +159,10 @@ Example input:
 		path := fmt.Sprintf("input.%d", i)
 		body, _ = sjson.SetBytes(body, path+".type", "function_call")
 		body, _ = sjson.SetBytes(body, path+".arguments", WrapResponsesCustomToolInput(item.Get("input")))
-		body, _ = sjson.SetBytes(body, path+".name", QualifyResponsesNamespaceToolName(item.Get("namespace").String(), item.Get("name").String()))
+		body, _ = sjson.SetBytes(
+			body, path+".name",
+			QualifyResponsesNamespaceToolName(item.Get("namespace").String(), item.Get("name").String()),
+		)
 		body, _ = sjson.DeleteBytes(body, path+".namespace")
 		body, _ = sjson.DeleteBytes(body, path+".input")
 	}
@@ -187,7 +209,10 @@ func NewResponsesPatchBridge(body []byte) *ResponsesPatchBridge {
 	identity := NewResponsesToolIdentity(body)
 	for _, declaration := range identity.Declarations() {
 		if declaration.Name == "apply_patch" && declaration.Kind == ResponsesCustomTool {
-			return &ResponsesPatchBridge{identity: identity, byItem: make(map[string]*responsesPatchCall), byCall: make(map[string]*responsesPatchCall), byIndex: make(map[int64]*responsesPatchCall)}
+			return &ResponsesPatchBridge{
+				identity: identity, byItem: make(map[string]*responsesPatchCall),
+				byCall: make(map[string]*responsesPatchCall), byIndex: make(map[int64]*responsesPatchCall),
+			}
 		}
 	}
 	return nil
@@ -205,8 +230,25 @@ func (b *ResponsesPatchBridge) fail() error {
 
 func (b *ResponsesPatchBridge) lookup(event, item gjson.Result) (*responsesPatchCall, error) {
 	var call *responsesPatchCall
+	index := event.Get("output_index")
+	ordinary := false
+	if index.Type == gjson.Number && index.Int() >= 0 && index.Float() == float64(index.Int()) {
+		if declaration, err := b.identity.ResolveDeclaration(
+			item.Get("name").String(), item.Get("namespace").String(),
+		); err == nil {
+			ordinary = declaration.Name != "apply_patch" || declaration.Kind != ResponsesCustomTool
+		}
+		if known := b.byIndex[index.Int()]; known != nil && known.declaration.QualifiedName != "" &&
+			!known.isPatch() {
+			ordinary = true
+		}
+	}
 	match := func(candidate *responsesPatchCall) bool {
 		if candidate == nil {
+			return true
+		}
+		if ordinary && candidate.index != index.Int() && candidate.declaration.QualifiedName != "" &&
+			!candidate.isPatch() {
 			return true
 		}
 		if call != nil && call != candidate {
@@ -215,8 +257,11 @@ func (b *ResponsesPatchBridge) lookup(event, item gjson.Result) (*responsesPatch
 		call = candidate
 		return true
 	}
-	for _, value := range []gjson.Result{event.Get("item_id"), item.Get("id"), event.Get("call_id"), item.Get("call_id")} {
-		if value.Exists() && (value.Type != gjson.String || (value.String() != "" && strings.TrimSpace(value.String()) == "")) {
+	for _, value := range []gjson.Result{
+		event.Get("item_id"), item.Get("id"), event.Get("call_id"), item.Get("call_id"),
+	} {
+		if value.Exists() &&
+			(value.Type != gjson.String || (value.String() != "" && strings.TrimSpace(value.String()) == "")) {
 			return nil, b.fail()
 		}
 	}
@@ -231,7 +276,8 @@ func (b *ResponsesPatchBridge) lookup(event, item gjson.Result) (*responsesPatch
 		}
 	}
 	if index := event.Get("output_index"); index.Exists() {
-		if index.Type != gjson.Number || index.Int() < 0 || index.Float() != float64(index.Int()) || !match(b.byIndex[index.Int()]) {
+		if index.Type != gjson.Number || index.Int() < 0 || index.Float() != float64(index.Int()) ||
+			!match(b.byIndex[index.Int()]) {
 			return nil, b.fail()
 		}
 	}
@@ -282,7 +328,8 @@ func (b *ResponsesPatchBridge) call(event, item gjson.Result) (*responsesPatchCa
 		}
 		call.namespace = namespace
 	}
-	if call.isPatch() && (call.kind != "function_call" || (call.namespace != "" && call.namespace != call.declaration.Namespace)) {
+	if call.isPatch() &&
+		(call.kind != "function_call" || (call.namespace != "" && call.namespace != call.declaration.Namespace)) {
 		return nil, b.fail()
 	}
 	if index := event.Get("output_index"); index.Exists() {
@@ -352,7 +399,12 @@ func (b *ResponsesPatchBridge) addedEvent(call *responsesPatchCall, item, protot
 	return b.itemEvent("response.output_item.added", call, item, prototype)
 }
 
-func (b *ResponsesPatchBridge) inputEvent(kind string, call *responsesPatchCall, text string, prototype []byte) []byte {
+func (b *ResponsesPatchBridge) inputEvent(
+	kind string,
+	call *responsesPatchCall,
+	text string,
+	prototype []byte,
+) []byte {
 	raw := bytes.Clone(prototype)
 	if len(raw) == 0 {
 		raw = []byte(`{}`)
@@ -390,7 +442,9 @@ func (b *ResponsesPatchBridge) snapshot(call *responsesPatchCall, arguments gjso
 		return nil
 	}
 	var input ResponsesPatchInput
-	if _, err := input.Finish(arguments.String()); err != nil || !strings.HasPrefix(input.Input(), call.input.Input()) || (call.input.phase == patchInputComplete && input.Input() != call.input.Input()) {
+	if _, err := input.Finish(arguments.String()); err != nil || !strings.HasPrefix(
+		input.Input(), call.input.Input(),
+	) || (call.input.phase == patchInputComplete && input.Input() != call.input.Input()) {
 		return b.fail()
 	}
 	if call.snapshot != "" {
@@ -403,7 +457,10 @@ func (b *ResponsesPatchBridge) snapshot(call *responsesPatchCall, arguments gjso
 	return nil
 }
 
-func (b *ResponsesPatchBridge) finish(call *responsesPatchCall, arguments gjson.Result, prototype []byte) ([][]byte, error) {
+func (b *ResponsesPatchBridge) finish(call *responsesPatchCall, arguments gjson.Result, prototype []byte) (
+	[][]byte,
+	error,
+) {
 	if err := b.snapshot(call, arguments, true); err != nil {
 		return nil, err
 	}
@@ -421,7 +478,9 @@ func (b *ResponsesPatchBridge) finish(call *responsesPatchCall, arguments gjson.
 		events = append(events, b.inputEvent("response.custom_tool_call_input.delta", call, tail, prototype))
 	}
 	if !call.inputDone {
-		events = append(events, b.inputEvent("response.custom_tool_call_input.done", call, call.input.Input(), prototype))
+		events = append(
+			events, b.inputEvent("response.custom_tool_call_input.done", call, call.input.Input(), prototype),
+		)
 		call.inputDone = true
 	}
 	return events, nil
@@ -579,7 +638,11 @@ func (b *ResponsesPatchBridge) transform(event []byte) ([][]byte, error) {
 		}
 		return events, nil
 	case "response.completed", "response.done", "response.incomplete":
-		var output [][]byte
+		type indexedOutput struct {
+			index int64
+			raw   []byte
+		}
+		var output []indexedOutput
 		seen := make(map[*responsesPatchCall]bool)
 		for _, call := range b.byIndex {
 			seen[call] = false
@@ -598,13 +661,13 @@ func (b *ResponsesPatchBridge) transform(event []byte) ([][]byte, error) {
 			if known != nil && known.kind != "" && item.Get("type").String() != known.kind {
 				return nil, b.fail()
 			}
-			if item.Get("type").String() != "function_call" && item.Get("type").String() != "custom_tool_call" {
-				output = append(output, []byte(item.Raw))
-				continue
-			}
 			outputIndex := int64(index)
 			if known != nil && known.index >= 0 {
 				outputIndex = known.index
+			}
+			if item.Get("type").String() != "function_call" && item.Get("type").String() != "custom_tool_call" {
+				output = append(output, indexedOutput{index: outputIndex, raw: []byte(item.Raw)})
+				continue
 			}
 			indexed, _ := sjson.SetBytes([]byte(`{}`), "output_index", outputIndex)
 			call, err := b.call(gjson.ParseBytes(indexed), item)
@@ -612,7 +675,7 @@ func (b *ResponsesPatchBridge) transform(event []byte) ([][]byte, error) {
 				return nil, err
 			}
 			if call == nil || !call.isPatch() {
-				output = append(output, []byte(item.Raw))
+				output = append(output, indexedOutput{index: outputIndex, raw: []byte(item.Raw)})
 				continue
 			}
 			if seen[call] || !call.identityReady() {
@@ -637,10 +700,13 @@ func (b *ResponsesPatchBridge) transform(event []byte) ([][]byte, error) {
 			events = append(events, completed...)
 			call.completedItem = b.restoreItem([]byte(item.Raw), call)
 			if !call.itemDone {
-				events = append(events, b.itemEvent("response.output_item.done", call, call.completedItem, event))
+				events = append(
+					events,
+					b.itemEvent("response.output_item.done", call, call.completedItem, event),
+				)
 				call.itemDone = true
 			}
-			output = append(output, call.completedItem)
+			output = append(output, indexedOutput{index: call.index, raw: call.completedItem})
 		}
 		var missing []*responsesPatchCall
 		for call, included := range seen {
@@ -659,9 +725,14 @@ func (b *ResponsesPatchBridge) transform(event []byte) ([][]byte, error) {
 		}
 		sort.Slice(missing, func(i, j int) bool { return missing[i].index < missing[j].index })
 		for _, call := range missing {
-			output = append(output, call.completedItem)
+			output = append(output, indexedOutput{index: call.index, raw: call.completedItem})
 		}
-		event, _ = sjson.SetRawBytes(event, "response.output", JoinRawArray(output))
+		sort.SliceStable(output, func(i, j int) bool { return output[i].index < output[j].index })
+		parts := make([][]byte, 0, len(output))
+		for _, item := range output {
+			parts = append(parts, item.raw)
+		}
+		event, _ = sjson.SetRawBytes(event, "response.output", JoinRawArray(parts))
 	}
 	events = append(events, event)
 	return events, nil

@@ -128,7 +128,8 @@ func TestGeminiToolCallQueuePreservesPendingCallsAcrossUnknownExplicitResult(t *
 }
 
 func TestDeduplicateToolResultsByRawIDUsesLastValueAtFirstPosition(t *testing.T) {
-	items := gjson.Parse(`[
+	items := gjson.Parse(
+		`[
 		{"type":"tool_result","raw_id":"call.a","value":"first"},
 		{"type":"text","text":"between"},
 		{"type":"tool_result","raw_id":"call_a","value":"separate"},
@@ -136,14 +137,17 @@ func TestDeduplicateToolResultsByRawIDUsesLastValueAtFirstPosition(t *testing.T)
 		{"type":"tool_result","raw_id":"call.a","value":"last"},
 		{"type":"tool_result","raw_id":"","value":"empty-one"},
 		{"type":"tool_result","raw_id":"","value":"empty-two"}
-	]`).Array()
+	]`,
+	).Array()
 
-	deduplicated := DeduplicateToolResultsByRawID(items, func(item gjson.Result) (string, bool) {
-		if item.Get("type").String() != "tool_result" {
-			return "", false
-		}
-		return item.Get("raw_id").String(), true
-	})
+	deduplicated := DeduplicateToolResultsByRawID(
+		items, func(item gjson.Result) (string, bool) {
+			if item.Get("type").String() != "tool_result" {
+				return "", false
+			}
+			return item.Get("raw_id").String(), true
+		},
+	)
 	if len(deduplicated) != 6 {
 		t.Fatalf("item count = %d, want 6", len(deduplicated))
 	}

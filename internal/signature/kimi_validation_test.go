@@ -28,7 +28,8 @@ func kimiThinkingSignatureWithFirstCharForTest(t *testing.T, rawLen int, firstCh
 	signature := base64.RawStdEncoding.EncodeToString(decoded)
 	if len(signature) != rawLen || signature[0] != firstChar {
 		t.Fatalf(
-			"generated signature length/first char = %d/%q, want %d/%q", len(signature), signature[0], rawLen, firstChar,
+			"generated signature length/first char = %d/%q, want %d/%q", len(signature), signature[0], rawLen,
+			firstChar,
 		)
 	}
 	return signature

@@ -49,7 +49,12 @@ func TestApplyThinkingWithModelInfoAndSummaryUsesProviderVisibility(t *testing.T
 				}
 				exclude := gjson.GetBytes(out, "reasoning.exclude")
 				if exclude.Exists() != test.wantExclude {
-					t.Fatalf("reasoning.exclude exists = %v, want %v; body=%s", exclude.Exists(), test.wantExclude, out)
+					t.Fatalf(
+						"reasoning.exclude exists = %v, want %v; body=%s",
+						exclude.Exists(),
+						test.wantExclude,
+						out,
+					)
 				}
 				if test.wantExclude && exclude.Bool() {
 					t.Fatalf("OpenRouter summary visibility remained excluded: %s", out)
@@ -125,8 +130,10 @@ func TestApplyThinkingWithModelInfoAndSummaryFullyDisabledGeminiStaysDisabled(t 
 			configPath: "generationConfig.thinkingConfig",
 		},
 		{
-			name:       "Antigravity",
-			body:       `{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}}}}`,
+			name: "Antigravity",
+			body: `{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":` +
+				`"high","includeThoughts":` +
+				`true}}}}`,
 			toFormat:   "antigravity",
 			provider:   "antigravity",
 			configPath: "request.generationConfig.thinkingConfig",

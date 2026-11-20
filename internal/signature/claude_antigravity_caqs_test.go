@@ -36,28 +36,34 @@ func TestAntigravityCAQSReplayIsLimitedToAntigravity(t *testing.T) {
 		{"nested alias prefix", "anthropic#cais#", providerUnknown, false},
 		{"unknown prefix", "junk#", providerUnknown, false},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			raw := test.prefix + sig
-			if got := DetectProvider(raw); got != test.provider {
-				t.Fatalf("DetectProvider() = %q, want %q", got, test.provider)
-			}
-			if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(raw); ok != test.replay ||
-				(ok && normalized != sig) || (!ok && normalized != "") {
-				t.Fatalf("Antigravity replay = %t, want %t", ok, test.replay)
-			}
-			if decision := decideCompatibility(ProviderClaude, raw, BlockKindClaudeThinking); decision.Compatible || decision.Action != actionDropBlock || decision.NormalizedSignature != "" {
-				t.Fatal("native Claude accepted Antigravity CAQS wrapper")
-			}
-			payload := []byte(`{"messages":[{"role":"assistant","content":[` +
-				`{"type":"thinking","thinking":"work","signature":"` + raw + `"},` +
-				`{"type":"text","text":"answer"}]}]}`)
-			output, report := SanitizeClaudeMessagesForClaudeUpstream(payload, "claude-opus-5-5")
-			content := gjson.GetBytes(output, "messages.0.content").Array()
-			if len(content) != 1 || content[0].Get("type").String() != "text" ||
-				content[0].Get("text").String() != "answer" || report.DroppedBlocks != 1 || report.Preserved != 0 {
-				t.Fatalf("native Claude preserved Q thinking: report=%+v output=%s", report, output)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				raw := test.prefix + sig
+				if got := DetectProvider(raw); got != test.provider {
+					t.Fatalf("DetectProvider() = %q, want %q", got, test.provider)
+				}
+				if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(raw); ok != test.replay ||
+					(ok && normalized != sig) || (!ok && normalized != "") {
+					t.Fatalf("Antigravity replay = %t, want %t", ok, test.replay)
+				}
+				if decision := decideCompatibility(
+					ProviderClaude, raw, BlockKindClaudeThinking,
+				); decision.Compatible || decision.Action != actionDropBlock || decision.NormalizedSignature != "" {
+					t.Fatal("native Claude accepted Antigravity CAQS wrapper")
+				}
+				payload := []byte(`{"messages":[{"role":"assistant","content":[` +
+					`{"type":"thinking","thinking":"work","signature":"` + raw + `"},` +
+					`{"type":"text","text":"answer"}]}]}`)
+				output, report := SanitizeClaudeMessagesForClaudeUpstream(payload, "claude-opus-5-5")
+				content := gjson.GetBytes(output, "messages.0.content").Array()
+				if len(content) != 1 || content[0].Get("type").String() != "text" ||
+					content[0].Get("text").
+						String() !=
+						"answer" || report.DroppedBlocks != 1 || report.Preserved != 0 {
+					t.Fatalf("native Claude preserved Q thinking: report=%+v output=%s", report, output)
+				}
+			},
+		)
 	}
 	inner, err := base64.StdEncoding.DecodeString(sig)
 	if err != nil {
@@ -132,20 +138,25 @@ func TestAntigravityCAQSRejectsUnsupportedAndAmbiguousWrappers(t *testing.T) {
 		"outer newline":          sig[:8] + "\n" + sig[8:],
 		"triple wrapper":         base64.StdEncoding.EncodeToString([]byte(sig)),
 	} {
-		t.Run(name, func(t *testing.T) {
-			if isValidAntigravityClaudeCAQSSignature(value) {
-				t.Fatal("unsupported CAQS wrapper accepted")
-			}
-			if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(value); ok || normalized != "" {
-				t.Fatal("unsupported CAQS wrapper was replayable")
-			}
-			if strings.HasPrefix(value, "Q") {
-				if normalized, ok := CompatibleSignatureForProviderWithOptions(ProviderClaude, value, BlockKindClaudeThinking,
-					SignatureCompatibilityOptions{PreserveUnknownNonEmpty: true}); ok || normalized != "" {
-					t.Fatal("native Claude accepted CAQS wrapper")
+		t.Run(
+			name, func(t *testing.T) {
+				if isValidAntigravityClaudeCAQSSignature(value) {
+					t.Fatal("unsupported CAQS wrapper accepted")
 				}
-			}
-		})
+				if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(value); ok ||
+					normalized != "" {
+					t.Fatal("unsupported CAQS wrapper was replayable")
+				}
+				if strings.HasPrefix(value, "Q") {
+					if normalized, ok := CompatibleSignatureForProviderWithOptions(
+						ProviderClaude, value, BlockKindClaudeThinking,
+						SignatureCompatibilityOptions{PreserveUnknownNonEmpty: true},
+					); ok || normalized != "" {
+						t.Fatal("native Claude accepted CAQS wrapper")
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -193,8 +204,10 @@ func TestAntigravityCAQSDuplicateSubmessages(t *testing.T) {
 			t.Fatal("duplicate submessage was replayable")
 		}
 		for _, preserveUnknown := range []bool{false, true} {
-			if normalized, ok := CompatibleSignatureForProviderWithOptions(ProviderClaude, sig, BlockKindClaudeThinking,
-				SignatureCompatibilityOptions{PreserveUnknownNonEmpty: preserveUnknown}); ok || normalized != "" {
+			if normalized, ok := CompatibleSignatureForProviderWithOptions(
+				ProviderClaude, sig, BlockKindClaudeThinking,
+				SignatureCompatibilityOptions{PreserveUnknownNonEmpty: preserveUnknown},
+			); ok || normalized != "" {
 				t.Fatal("native compatibility accepted duplicate Antigravity wrapper")
 			}
 		}
@@ -210,14 +223,16 @@ func TestAntigravityCAQSDuplicateSubmessages(t *testing.T) {
 		{"valid duplicate", channel},
 	} {
 		for _, scope := range []string{"channel", "container"} {
-			t.Run(scope+"/"+test.name, func(t *testing.T) {
-				first := bytesField(1, test.channel)
-				if scope == "channel" {
-					assertRejected(t, payload(append(first, container...)))
-				} else {
-					assertRejected(t, payload(first, container))
-				}
-			})
+			t.Run(
+				scope+"/"+test.name, func(t *testing.T) {
+					first := bytesField(1, test.channel)
+					if scope == "channel" {
+						assertRejected(t, payload(append(first, container...)))
+					} else {
+						assertRejected(t, payload(first, container))
+					}
+				},
+			)
 		}
 	}
 	for _, test := range []struct {
@@ -228,9 +243,11 @@ func TestAntigravityCAQSDuplicateSubmessages(t *testing.T) {
 		{"empty container", nil},
 		{"valid container duplicate", container},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			assertRejected(t, payload(test.container, container))
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				assertRejected(t, payload(test.container, container))
+			},
+		)
 	}
 }
 
@@ -242,8 +259,15 @@ func TestAntigravityCAQSStrictEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.EnvelopeVersion != 4 || info.ChannelID != 18 || info.Infrastructure == nil || *info.Infrastructure != 2 ||
-		info.BlockKind != "thinking" || info.ModelText != "" || info.SignatureLen != 1020 || !info.SignatureInContainer {
+	if info.EnvelopeVersion != 4 || info.ChannelID != 18 || info.Infrastructure == nil ||
+		*info.Infrastructure != 2 ||
+		info.BlockKind !=
+			"thinking" ||
+		info.ModelText !=
+			"" ||
+		info.SignatureLen !=
+			1020 ||
+		!info.SignatureInContainer {
 		t.Fatalf("unexpected Antigravity envelope: %+v", info)
 	}
 	for _, target := range []Provider{ProviderClaude, ProviderGemini, ProviderGPT, providerKimi, providerGrok} {
@@ -278,8 +302,15 @@ func TestAntigravityCAQSStrictEncoding(t *testing.T) {
 	}
 	paddedInner := base64.StdEncoding.EncodeToString(padded)
 	for name, value := range map[string]string{
-		"wrapped native CAIS": base64.StdEncoding.EncodeToString([]byte(defaultClaudeCAISTestParts("claude-opus-5-5").encode())),
-		"wrapped native CAQS": base64.StdEncoding.EncodeToString([]byte(defaultClaudeCAQSTestParts("thinking").encode())),
+		"wrapped native " +
+			"CAIS": base64.StdEncoding.EncodeToString(
+			[]byte(defaultClaudeCAISTestParts(
+				"claude-opus-5-" +
+					"5",
+			).encode()),
+		),
+		"wrapped native " +
+			"CAQS": base64.StdEncoding.EncodeToString([]byte(defaultClaudeCAQSTestParts("thinking").encode())),
 		"inner padding bits":  base64.StdEncoding.EncodeToString([]byte(badPadding(paddedInner))),
 		"outer padding bits":  badPadding(base64.StdEncoding.EncodeToString([]byte(paddedInner))),
 		"inner trailing tab":  base64.StdEncoding.EncodeToString(append(append([]byte(nil), inner...), '\t')),
@@ -289,25 +320,32 @@ func TestAntigravityCAQSStrictEncoding(t *testing.T) {
 		"prefix only":         "Q0FRUw==",
 		"oversize":            "Q" + strings.Repeat("A", maxSignatureLen),
 	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := inspectAntigravityClaudeCAQSSignature(value); err == nil {
-				t.Fatal("invalid Antigravity encoding accepted")
-			}
-			if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(value); ok || normalized != "" {
-				t.Fatal("invalid Antigravity encoding was replayable")
-			}
-			if normalized, ok := CompatibleSignatureForProvider(ProviderClaude, value, BlockKindClaudeThinking); ok || normalized != "" {
-				t.Fatal("strict native compatibility accepted invalid Antigravity encoding")
-			}
-			normalized, ok := CompatibleSignatureForProviderWithOptions(ProviderClaude, value, BlockKindClaudeThinking,
-				SignatureCompatibilityOptions{PreserveUnknownNonEmpty: true})
-			if strings.HasPrefix(value, "Q") {
-				if ok || normalized != "" {
-					t.Fatal("opaque compatibility accepted an invalid Q wrapper")
+		t.Run(
+			name, func(t *testing.T) {
+				if _, err := inspectAntigravityClaudeCAQSSignature(value); err == nil {
+					t.Fatal("invalid Antigravity encoding accepted")
 				}
-			} else if !ok || normalized != value {
-				t.Fatal("explicit opaque compatibility changed an unknown non-Q value")
-			}
-		})
+				if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(value); ok ||
+					normalized != "" {
+					t.Fatal("invalid Antigravity encoding was replayable")
+				}
+				if normalized, ok := CompatibleSignatureForProvider(
+					ProviderClaude, value, BlockKindClaudeThinking,
+				); ok || normalized != "" {
+					t.Fatal("strict native compatibility accepted invalid Antigravity encoding")
+				}
+				normalized, ok := CompatibleSignatureForProviderWithOptions(
+					ProviderClaude, value, BlockKindClaudeThinking,
+					SignatureCompatibilityOptions{PreserveUnknownNonEmpty: true},
+				)
+				if strings.HasPrefix(value, "Q") {
+					if ok || normalized != "" {
+						t.Fatal("opaque compatibility accepted an invalid Q wrapper")
+					}
+				} else if !ok || normalized != value {
+					t.Fatal("explicit opaque compatibility changed an unknown non-Q value")
+				}
+			},
+		)
 	}
 }

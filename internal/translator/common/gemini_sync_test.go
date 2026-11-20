@@ -9,7 +9,11 @@ import (
 func TestSplitGeminiFunctionResponseTurnsPreservesToolAdjacency(t *testing.T) {
 	model := []byte(`{"role":"model","parts":[{"functionCall":{"name":"fetch","args":{}}}]}`)
 	reminder := []byte(`{"role":"user","parts":[{"text":"reminder"}]}`)
-	mixed := []byte(`{"role":"user","parts":[{"functionResponse":{"name":"fetch","response":{"ok":true}}},{"text":"after result"}]}`)
+	mixed := []byte(
+		(`{"role":"user","parts":[{"functionResponse":{"name":"fetch",` +
+			`"response":{"ok":true}}},{"text":"after ` +
+			`result"}]}`),
+	)
 	response := SplitGeminiFunctionResponseTurns([][]byte{model, reminder, mixed})
 	if len(response) != 4 {
 		t.Fatalf("turn count = %d, want model, result, reminder, text", len(response))

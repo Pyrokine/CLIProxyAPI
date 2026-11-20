@@ -22,9 +22,19 @@ func TestExtractReasoningEffortUsesLastValidResponsesUpdate(t *testing.T) {
 			{`{"reasoning":{"effort":"invalid"}}`, "medium"},
 			{`{"tools":[]}`, "medium"},
 		} {
-			body := []byte(`{"reasoning":{"effort":"xhigh"},"input":[{"type":"configuration_update","reasoning":{"effort":"medium"}},{"type":"configuration_update",` + tc.update[1:len(tc.update)-1] + `}]}`)
+			body := []byte((`{"reasoning":{"effort":"xhigh"},"input":[{"type":"configuration_update` +
+				`","reasoning":{"effort":"medium"}},{"type":"configuration_update",`) +
+				tc.update[1:len(tc.update)-
+					1] +
+				`}]}`)
 			if got := ExtractReasoningEffort(body, provider, "fixture-model(low)"); got != tc.want {
-				t.Fatalf("provider=%s update=%s requested effort=%q, want %q", provider, tc.update, got, tc.want)
+				t.Fatalf(
+					"provider=%s update=%s requested effort=%q, want %q",
+					provider,
+					tc.update,
+					got,
+					tc.want,
+				)
 			}
 			if got := ExtractTranslatedReasoningEffort(body, provider); got != tc.want {
 				t.Fatalf("provider=%s translated effort=%q, want %q", provider, got, tc.want)
@@ -106,7 +116,11 @@ func TestExtractTranslatedReasoningEffortSupportsKimiNativeThinking(t *testing.T
 			name: "native effort wins",
 			body: `{"thinking":{"type":"enabled","effort":"high"},"reasoning_effort":"low"}`, want: "high",
 		},
-		{name: "disabled wins", body: `{"thinking":{"type":"disabled"},"reasoning_effort":"high"}`, want: "none"},
+		{
+			name: "disabled wins",
+			body: `{"thinking":{"type":"disabled"},"reasoning_effort":"high"}`,
+			want: "none",
+		},
 		{
 			name: "enabled default stays unspecified",
 			body: `{"thinking":{"type":"enabled"},"reasoning_effort":"high"}`, want: "",

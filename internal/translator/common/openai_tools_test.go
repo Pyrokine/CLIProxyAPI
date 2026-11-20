@@ -89,19 +89,21 @@ func TestAlignOpenAIToolCallMessages(t *testing.T) {
 		},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			messages := make([][]byte, 0, len(test.messages))
-			for _, message := range test.messages {
-				messages = append(messages, []byte(message))
-			}
-			got := AlignOpenAIToolCallMessages(messages, test.ambiguous...)
-			want := make([][]byte, 0, len(test.want))
-			for _, index := range test.want {
-				want = append(want, messages[index])
-			}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("aligned messages = %s, want %s", got, want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				messages := make([][]byte, 0, len(test.messages))
+				for _, message := range test.messages {
+					messages = append(messages, []byte(message))
+				}
+				got := AlignOpenAIToolCallMessages(messages, test.ambiguous...)
+				want := make([][]byte, 0, len(test.want))
+				for _, index := range test.want {
+					want = append(want, messages[index])
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("aligned messages = %s, want %s", got, want)
+				}
+			},
+		)
 	}
 }

@@ -7,11 +7,16 @@ import (
 )
 
 func TestAttachToolMessageCacheControlFindsToolResultAndValidSource(t *testing.T) {
-	msg := []byte(`{"role":"user","content":[{"type":"text","text":"before"},{"type":"tool_result","tool_use_id":"one","content":[]},{"type":"tool_result","tool_use_id":"two","content":[]}]}`)
+	msg := []byte(`{"role":"user","content":[{"type":"text","text":"before"},{"type":"too` +
+		`l_result","tool_use_id":"one","content":[]},{"type":"tool_result","too` +
+		`l_use_id":"two","content":[]}]}`)
 	for _, source := range []string{
-		`{"content":[{"cache_control":{"type":null}},{"cache_control":{"type":"ephemeral","ttl":"1h","future":true}}],"cache_control":{"type":"ephemeral","ttl":"5m"}}`,
+		`{"content":[{"cache_control":{"type":null}},{"cache_control":{"type":"ephemeral","ttl":"1h","future"` +
+			`:true}}],"cache_control":{"type":"ephemeral","ttl":"5m"}}`,
 		`{"content":{"cache_control":{"type":"ephemeral","ttl":"1h","future":true}}}`,
-		`{"content":[{"cache_control":{"type":" ephemeral "}}],"cache_control":{"type":"ephemeral","ttl":"1h","future":true}}`,
+		`{"content":[{"cache_control":{"type":" ephemeral "}}],"cache_control":` +
+			`{"type":"ephemeral","ttl":"1h","future":` +
+			`true}}`,
 	} {
 		out := AttachToolMessageCacheControl(msg, gjson.Parse(source))
 		if gjson.GetBytes(out, "content.1.cache_control.ttl").String() != "1h" ||

@@ -199,7 +199,9 @@ func inspectClaudeCAISPayload(decoded []byte, rejectDuplicateMessages bool) (*cl
 					return errField
 				}
 				if len(value) == 0 {
-					return fmt.Errorf("invalid Claude CAIS signature: channel field 5 signature bytes must not be empty")
+					return fmt.Errorf(
+						"invalid Claude CAIS signature: channel field 5 signature bytes must not be empty",
+					)
 				}
 				info.SignatureLen = len(value)
 				haveSignatureBytes = true

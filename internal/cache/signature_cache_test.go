@@ -51,6 +51,7 @@ func TestCacheSignature_NotFound(t *testing.T) {
 	}
 
 	// Existing session but different text
+	//goland:noinspection SpellCheckingInspection
 	StoreSignature(testModelName, "text-a", "sigA12345678901234567890123456789012345678901234567890")
 	if got := GetCachedSignature(testModelName, "text-b"); got != "" {
 		t.Errorf("Expected empty string for different text, got '%s'", got)

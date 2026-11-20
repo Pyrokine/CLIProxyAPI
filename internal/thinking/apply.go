@@ -2,6 +2,7 @@
 package thinking
 
 import (
+	"slices"
 	"strings"
 	"sync"
 
@@ -144,7 +145,13 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //
 //	// Without suffix - uses body config
 //	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro", "gemini", "gemini", "gemini")
-func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, error) {
+func ApplyThinking(
+	body []byte,
+	model string,
+	fromFormat string,
+	toFormat string,
+	providerKey string,
+) ([]byte, error) {
 	summaryConfig := ExtractSummaryConfig(body, toFormat)
 	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig, false)
 }
@@ -176,7 +183,18 @@ func ApplyThinkingWithModelInfoAndSummary(
 	normalizedUpdatesChanged ...bool,
 ) ([]byte, error) {
 	updatesChanged := len(normalizedUpdatesChanged) > 0 && normalizedUpdatesChanged[0]
-	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, modelInfo, true, summaryConfig, updatesChanged)
+	return applyThinking(
+		body,
+		sourceBody,
+		model,
+		fromFormat,
+		toFormat,
+		providerKey,
+		modelInfo,
+		true,
+		summaryConfig,
+		updatesChanged,
+	)
 }
 
 func applyThinking(
@@ -225,6 +243,10 @@ func applyThinking(
 			sourceConfig = extractCodexUsageConfig(sourceRequest)
 		}
 	}
+	if !hasConfig(sourceConfig) && !updatesChanged && len(sourceBody) == 0 &&
+		fromFormat != providerFormat && !hasConfig(extractConfigForUsage(body, providerFormat)) {
+		sourceConfig = extractSourceConfig(body, fromFormat)
+	}
 	if responsesTarget && !supportsUpdates {
 		var err error
 		body, err = stripConfigurationUpdates(body)
@@ -236,14 +258,20 @@ func applyThinking(
 	// 2. Route check: Get provider applier
 	applier := getProviderApplier(providerFormat)
 	if applier == nil {
-		log.WithFields(log.Fields{"provider": providerFormat, "model": model}).Debug("thinking: unknown provider, passthrough |")
+		log.WithFields(
+			log.Fields{
+				"provider": providerFormat, "model": model,
+			},
+		).Debug("thinking: unknown provider, passthrough |")
 		return body, nil
 	}
-	if !suffixResult.HasSuffix && len(sourceBody) > 0 && responsesSource && !gjson.ValidBytes(body) && hasConfig(extractConfigurationUpdateConfig(sourceBody)) {
+	if !suffixResult.HasSuffix && len(sourceBody) > 0 && responsesSource && !gjson.ValidBytes(body) &&
+		hasConfig(extractConfigurationUpdateConfig(sourceBody)) {
 		return body, nil
 	}
 	if nativeResponses && !suffixResult.HasSuffix {
-		if log.IsLevelEnabled(log.DebugLevel) && (modelInfo.Thinking != nil || modelInfo.UserDefined) {
+		if modelInfo != nil && log.IsLevelEnabled(log.DebugLevel) &&
+			(modelInfo.Thinking != nil || modelInfo.UserDefined) {
 			if config := extractCodexUsageConfig(body); hasConfig(config) {
 				fields := log.Fields{
 					"provider": providerFormat, "model": modelInfo.ID,
@@ -267,7 +295,6 @@ func applyThinking(
 		return applyUserDefinedModel(
 			body,
 			modelInfo,
-			fromFormat,
 			providerFormat,
 			providerKey,
 			suffixResult,
@@ -318,7 +345,11 @@ func applyThinking(
 		).Debug("thinking: config from model suffix |")
 	} else {
 		config = sourceConfig
-		if !hasConfig(config) && !updatesChanged && modelInfoResolved && len(sourceBody) > 0 {
+		nativeKimiThinking := providerFormat == "kimi" && gjson.GetBytes(body, "thinking").IsObject()
+		if nativeKimiThinking {
+			config = extractKimiConfig(body)
+		}
+		if !hasConfig(config) && !nativeKimiThinking && !updatesChanged && modelInfoResolved && len(sourceBody) > 0 {
 			config = extractSourceConfig(sourceBody, fromFormat)
 		}
 		if !hasConfig(config) {
@@ -365,6 +396,11 @@ func applyThinking(
 		modelType := strings.ToLower(strings.TrimSpace(modelInfo.Type))
 		if fromFormat != providerFormat || modelType != "" && !isSameProviderFamily(providerFormat, modelType) {
 			level := Level(strings.ToLower(strings.TrimSpace(string(config.Level))))
+			if level == levelMinimal && !isLevelSupported(
+				"minimal", modelInfo.Thinking.Levels,
+			) && isLevelSupported("low", modelInfo.Thinking.Levels) {
+				config.Level = levelLow
+			}
 			if level == LevelXHigh || level == LevelMax {
 				candidates := []Level{level, LevelMax, LevelHigh}
 				if level == LevelMax {
@@ -378,6 +414,12 @@ func applyThinking(
 				}
 			}
 		}
+	}
+
+	// Preserve Interactions' explicit off value as zero on budget-only targets.
+	if fromFormat == "interactions" && !suffixResult.HasSuffix && config.Mode == ModeNone &&
+		modelInfo.Thinking.ZeroAllowed && len(modelInfo.Thinking.Levels) == 0 {
+		config.Level = LevelNone
 	}
 
 	// 5. Validate and normalize configuration
@@ -444,14 +486,15 @@ func thinkingIsFullyDisabled(config Config) bool {
 //
 // Parsing priority:
 //  1. Special values: "none" → ModeNone, "auto"/"-1" → ModeAuto
-//  2. Level names: "minimal", "low", "medium", "high", "xhigh" → ModeLevel
+//  2. Level names: "minimal", "low", "medium", "high", "xhigh", "max" → ModeLevel
 //  3. Numeric values: positive integers → ModeBudget, 0 → ModeNone
 //
 // If none of the above match, returns empty Config (treated as no config).
 func parseSuffixToConfig(rawSuffix, provider, model string) Config {
 	// 1. Try special values first (none, auto, -1)
 	if mode, ok := parseSpecialSuffix(rawSuffix); ok {
-		// noinspection GoSwitchMissingCasesForIotaConsts — parseSpecialSuffix only returns ModeNone or ModeAuto on success.
+		// parseSpecialSuffix only returns ModeNone or ModeAuto on success.
+		// noinspection GoSwitchMissingCasesForIotaConsts
 		switch mode {
 		case ModeNone:
 			return Config{Mode: ModeNone, Budget: 0}
@@ -462,7 +505,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) Config {
 		}
 	}
 
-	// 2. Try level parsing (minimal, low, medium, high, xhigh)
+	// 2. Try level parsing (minimal, low, medium, high, xhigh, max)
 	if level, ok := parseLevelSuffix(rawSuffix); ok {
 		return Config{Mode: ModeLevel, Level: level}
 	}
@@ -491,7 +534,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) Config {
 func applyUserDefinedModel(
 	body []byte,
 	modelInfo *registry.ModelInfo,
-	fromFormat, toFormat, providerKey string,
+	toFormat, providerKey string,
 	suffixResult SuffixResult,
 	sourceConfig Config,
 	nativeResponses bool,
@@ -557,7 +600,7 @@ func applyUserDefinedModel(
 		},
 	).Debug("thinking: applying config for user-defined model (skip validation)")
 
-	config = normalizeUserDefinedConfig(config, fromFormat, toFormat, suffixResult.HasSuffix)
+	config = normalizeUserDefinedConfig(config, toFormat)
 	applied, err := applier.Apply(body, config, modelInfo)
 	if err != nil {
 		return applied, err
@@ -575,11 +618,11 @@ func applyUserDefinedModel(
 	), nil
 }
 
-func normalizeUserDefinedConfig(config Config, fromFormat, toFormat string, fromSuffix bool) Config {
-	if config.Mode != ModeLevel || toFormat == "claude" && !fromSuffix {
+func normalizeUserDefinedConfig(config Config, toFormat string) Config {
+	if config.Mode != ModeLevel || toFormat == "claude" {
 		return config
 	}
-	if !isBudgetCapableProvider(toFormat) || !isLevelBasedProvider(fromFormat) {
+	if !isBudgetCapableProvider(toFormat) {
 		return config
 	}
 	budget, ok := ConvertLevelToBudget(string(config.Level))
@@ -613,6 +656,29 @@ func extractConfig(body []byte, provider string) Config {
 		return extractGeminiConfig(body, provider)
 	case "openai":
 		return extractOpenAIConfig(body)
+	case "interactions":
+		if level := gjson.GetBytes(body, "generation_config.thinking_level"); level.Type == gjson.String {
+			switch value := strings.ToLower(strings.TrimSpace(level.String())); value {
+			case "none":
+				return Config{Mode: ModeNone}
+			case "auto":
+				return Config{Mode: ModeAuto, Budget: -1}
+			case "":
+			default:
+				return Config{Mode: ModeLevel, Level: Level(value)}
+			}
+		}
+		if budget := gjson.GetBytes(body, "generation_config.thinking_budget"); budget.Type == gjson.Number {
+			switch value := int(budget.Int()); value {
+			case 0:
+				return Config{Mode: ModeNone}
+			case -1:
+				return Config{Mode: ModeAuto, Budget: -1}
+			default:
+				return Config{Mode: ModeBudget, Budget: value}
+			}
+		}
+		return extractCodexConfig(body)
 	case "codex", "xai":
 		return extractCodexConfig(body)
 	case "iflow":
@@ -621,7 +687,7 @@ func extractConfig(body []byte, provider string) Config {
 			return config
 		}
 		return extractOpenAIConfig(body)
-	case "kimi", "kimi-ai":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		return extractKimiConfig(body)
 	default:
 		return Config{}
@@ -900,11 +966,11 @@ func extractConfigurationUpdateConfig(body []byte) Config {
 		return Config{}
 	}
 	items := input.Array()
-	for i := len(items) - 1; i >= 0; i-- {
-		if items[i].Get("type").String() != "configuration_update" {
+	for _, item := range slices.Backward(items) {
+		if item.Get("type").String() != "configuration_update" {
 			continue
 		}
-		effort := items[i].Get("reasoning.effort")
+		effort := item.Get("reasoning.effort")
 		if effort.Type != gjson.String {
 			continue
 		}

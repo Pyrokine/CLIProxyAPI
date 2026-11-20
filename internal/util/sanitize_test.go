@@ -2,6 +2,7 @@ package util
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -92,7 +93,9 @@ func TestSanitizedFunctionNameMapReadsSupportedToolShapes(t *testing.T) {
 }
 
 func TestClaudeAndChatFunctionNameMaps(t *testing.T) {
-	names := []string{"tool/name", "tool:name", "tool.name", "1tool", strings.Repeat("x", 64) + "a", strings.Repeat("x", 64) + "b"}
+	names := []string{
+		"tool/name", "tool:name", "tool.name", "1tool", strings.Repeat("x", 64) + "a", strings.Repeat("x", 64) + "b",
+	}
 	forward := ChatFunctionNameMap(names)
 	names = append(names, forward["tool/name"])
 	forward = ChatFunctionNameMap(names)
@@ -107,8 +110,8 @@ func TestClaudeAndChatFunctionNameMaps(t *testing.T) {
 		t.Fatalf("lost tools or applied Gemini-only prefix rule: %v", forward)
 	}
 	var tools []string
-	for index := len(names) - 1; index >= 0; index-- {
-		encoded, err := json.Marshal(names[index])
+	for _, name := range slices.Backward(names) {
+		encoded, err := json.Marshal(name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -118,7 +121,12 @@ func TestClaudeAndChatFunctionNameMaps(t *testing.T) {
 	reverse := ReverseToolNameMap(fromRequest)
 	for original, mapped := range forward {
 		if fromRequest[original] != mapped || RestoreSanitizedToolName(reverse, mapped) != original {
-			t.Fatalf("order changed mapping or reverse lost %q: forward=%v reverse=%v", original, forward, reverse)
+			t.Fatalf(
+				"order changed mapping or reverse lost %q: forward=%v reverse=%v",
+				original,
+				forward,
+				reverse,
+			)
 		}
 	}
 }
@@ -126,7 +134,15 @@ func TestClaudeAndChatFunctionNameMaps(t *testing.T) {
 func TestChatFunctionNameMapPreservesDeclarationsWithHistory(t *testing.T) {
 	declarations := []string{"tool_x", "a.b", "a_b", strings.Repeat("x", 70)}
 	declared := ChatFunctionNameMap(declarations)
-	history := []string{"tool.x", "history.name", "history_name", declarations[1], declarations[3], "", "history.name"}
+	history := []string{
+		"tool.x",
+		"history.name",
+		"history_name",
+		declarations[1],
+		declarations[3],
+		"",
+		"history.name",
+	}
 	forward := ChatFunctionNameMap(declarations, history...)
 	for original, mapped := range declared {
 		if forward[original] != mapped {
@@ -139,7 +155,10 @@ func TestChatFunctionNameMapPreservesDeclarationsWithHistory(t *testing.T) {
 	reverse := ReverseToolNameMap(forward)
 	seen := make(map[string]bool)
 	for original, mapped := range forward {
-		if mapped == "" || len(mapped) > 64 || SanitizeClaudeFunctionName(mapped) != mapped || seen[mapped] || RestoreSanitizedToolName(reverse, mapped) != original {
+		if mapped == "" || len(mapped) > 64 || SanitizeClaudeFunctionName(mapped) != mapped || seen[mapped] ||
+			RestoreSanitizedToolName(
+				reverse, mapped,
+			) != original {
 			t.Fatalf("history mapping is invalid or irreversible: %q -> %q", original, mapped)
 		}
 		seen[mapped] = true
@@ -193,6 +212,112 @@ func TestDeduplicateFunctionDeclarations(t *testing.T) {
 	}
 	if got := RestoreSanitizedToolName(map[string]string{"other": "original"}, "other"); got != "original" {
 		t.Fatalf("restored tool name = %q, want original", got)
+	}
+}
+
+func TestIsSensitiveFieldNamePrivateKeyVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{name: "private_key", want: true},
+		{name: "private-key", want: true},
+		{name: "privateKey", want: true},
+		{name: " PRIVATE_KEY ", want: true},
+		{name: "private_key[]", want: true},
+		{name: "private_key[0]", want: true},
+		{name: "private_key_id"},
+		{name: "privateKeyId"},
+		{name: "private-key-id"},
+		{name: "public_key"},
+		{name: "client_email"},
+		{name: "max_tokens"},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				if got := IsSensitiveFieldName(tc.name); got != tc.want {
+					t.Fatalf("IsSensitiveFieldName(%q) = %t, want %t", tc.name, got, tc.want)
+				}
+			},
+		)
+	}
+}
+
+func TestMaskSensitivePayloadRedactsPrivateKeys(t *testing.T) {
+	const material = "SYNTHETIC-PRIVATE-KEY-MATERIAL-FOR-REDACTION"
+	privateKey := "-----BEGIN PRIVATE KEY-----\n" + material + "\n-----END PRIVATE KEY-----"
+	encodedKey, err := json.Marshal(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := `{"private_key":` + string(
+		encodedKey,
+	) + `,"private_key_id":"visible-key-id","public_key":"visible-public-key","client_email":"service@example.com"}`
+	nested := `{"type":"vertex","service_account":` + credential + `}`
+
+	for _, tc := range []struct {
+		name           string
+		payload        string
+		wantMask       string
+		privateKeyPath string
+		metadata       bool
+	}{
+		{
+			name: "json", payload: credential, wantMask: HideAPIKey(privateKey), privateKeyPath: "private_key",
+			metadata: true,
+		},
+		{
+			name: "nested service account", payload: nested, wantMask: HideAPIKey(privateKey),
+			privateKeyPath: "service_account.private_key", metadata: true,
+		},
+		{name: "json sequence", payload: credential + "\n" + nested, wantMask: HideAPIKey(privateKey), metadata: true},
+		{
+			name: "sse", payload: "data: " + nested + "\n\n", wantMask: HideAPIKey(HideAPIKey(privateKey)),
+			metadata: true,
+		},
+		{name: "text field", payload: "private-key: " + material, wantMask: HideAPIKey(material)},
+		{name: "embedded json", payload: "Body: " + nested, wantMask: HideAPIKey(privateKey), metadata: true},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				input := []byte(tc.payload)
+				got := MaskSensitivePayload(input)
+				if string(input) != tc.payload {
+					t.Fatal("MaskSensitivePayload changed the input bytes")
+				}
+				if strings.Contains(string(got), material) {
+					t.Fatalf("MaskSensitivePayload kept private key material: %s", got)
+				}
+				if !strings.Contains(string(got), tc.wantMask) {
+					t.Fatalf("MaskSensitivePayload omitted the masked key %q: %s", tc.wantMask, got)
+				}
+				if tc.privateKeyPath != "" {
+					if !json.Valid(got) {
+						t.Fatalf("MaskSensitivePayload returned invalid JSON: %s", got)
+					}
+					if key := gjson.GetBytes(got, tc.privateKeyPath).String(); key != tc.wantMask {
+						t.Fatalf("private key = %q, want %q", key, tc.wantMask)
+					}
+					prefix := strings.TrimSuffix(tc.privateKeyPath, "private_key")
+					for field, want := range map[string]string{
+						"private_key_id": "visible-key-id",
+						"public_key":     "visible-public-key",
+						"client_email":   "service@example.com",
+					} {
+						if value := gjson.GetBytes(got, prefix+field).String(); value != want {
+							t.Fatalf("%s = %q, want %q", field, value, want)
+						}
+					}
+				}
+				if tc.metadata {
+					for _, value := range []string{"visible-key-id", "visible-public-key", "service@example.com"} {
+						if !strings.Contains(string(got), value) {
+							t.Fatalf("MaskSensitivePayload changed non-secret metadata %q: %s", value, got)
+						}
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -251,7 +376,9 @@ func TestMaskSensitivePayloadRedactsStructuredSecretsInJSONSequences(t *testing.
 }
 
 func TestMaskSensitivePayloadRedactsStructuredSecretsInSSEFrames(t *testing.T) {
-	payload := []byte("data: {\"api_key\":{\"nested\":\"sk-structured-secret\"}}\n\ndata: {\"model\":\"gpt-5\"}\n\n")
+	payload := []byte(
+		"data: {\"api_key\":{\"nested\":\"sk-structured-secret\"}}\n\ndata: {\"model\":\"gpt-5\"}\n\n",
+	)
 
 	got := string(MaskSensitivePayload(payload))
 	if strings.Contains(got, "sk-structured-secret") || strings.Contains(got, "nested") {
@@ -294,7 +421,8 @@ func TestMaskSensitivePayloadRedactsAllSensitiveObjectSiblings(t *testing.T) {
 	payload := []byte(`{"api_key":{"token":"decoy","nested":"sk-sibling-secret"}}`)
 
 	got := string(MaskSensitivePayload(payload))
-	if strings.Contains(got, "sk-sibling-secret") || strings.Contains(got, "nested") || strings.Contains(got, "decoy") {
+	if strings.Contains(got, "sk-sibling-secret") || strings.Contains(got, "nested") ||
+		strings.Contains(got, "decoy") {
 		t.Fatalf("MaskSensitivePayload kept sensitive object sibling: %q", got)
 	}
 }
@@ -312,7 +440,9 @@ func TestMaskSensitivePayloadRedactsSensitiveFieldsInTextSSE(t *testing.T) {
 }
 
 func TestMaskSensitivePayloadRedactsJSONAfterBodyTextPrefix(t *testing.T) {
-	payload := []byte("Body:\nprefix\n{\"api_key\":{\"nested\":\"sk-prefixed-body-secret\"},\"model\":\"gpt-5\"}\n")
+	payload := []byte(
+		"Body:\nprefix\n{\"api_key\":{\"nested\":\"sk-prefixed-body-secret\"},\"model\":\"gpt-5\"}\n",
+	)
 
 	got := string(MaskSensitivePayload(payload))
 	if strings.Contains(got, "sk-prefixed-body-secret") || strings.Contains(got, "nested") {
@@ -366,14 +496,21 @@ func TestMaskSensitivePayloadFailsClosedForIncompleteJSON(t *testing.T) {
 
 func TestMaskSensitivePayloadHandlesUTF8BOM(t *testing.T) {
 	bom := []byte{0xef, 0xbb, 0xbf}
-	jsonPayload := append(append([]byte{}, bom...), []byte(`{"api_key":"sk-bom-json-secret","model":"gpt-5"}`)...)
+	jsonPayload := append(
+		append([]byte{}, bom...),
+		[]byte(`{"api_key":"sk-bom-json-secret","model":"gpt-5"}`)...,
+	)
 	maskedJSON := string(MaskSensitivePayload(jsonPayload))
 	if strings.Contains(maskedJSON, "sk-bom-json-secret") || !strings.Contains(maskedJSON, "gpt-5") {
 		t.Fatalf("MaskSensitivePayload BOM JSON mismatch: %q", maskedJSON)
 	}
 
 	ssePayload := append(
-		append([]byte{}, bom...), []byte("data: {\"api_key\":\"sk-bom-sse-secret\",\"model\":\"gpt-5\"}\n\n")...,
+		append(
+			[]byte{},
+			bom...,
+		),
+		[]byte("data: {\"api_key\":\"sk-bom-sse-secret\",\"model\":\"gpt-5\"}\n\n")...,
 	)
 	maskedSSE := string(MaskSensitivePayload(ssePayload))
 	if strings.Contains(maskedSSE, "sk-bom-sse-secret") || !strings.Contains(maskedSSE, "gpt-5") {
@@ -394,7 +531,10 @@ func TestMaskSensitivePayloadFailsClosedForTruncatedTopLevelJSONTokens(t *testin
 }
 
 func TestMaskSensitivePayloadPreservesStructuredSecretContainers(t *testing.T) {
-	payload := []byte(`{"gemini-api-key":[{"api-key":"sk-provider-secret","base-url":"https://example.com"}],"interactions-api-key":[{"api-key":"sk-interactions-secret","base-url":"https://interactions.example.com"}],"api-key-entries":[{"api-key":"sk-nested-secret","proxy-url":"http://127.0.0.1:8080"}]}`)
+	payload := []byte((`{"gemini-api-key":[{"api-key":"sk-provider-secret","base-url":"https://example.com"}],` +
+		`"interactions-api-key":[{"api-key":"sk-interactions-secret","base-url":"https://interactions.` +
+		`example.com"}],"api-key-entries":[{"api-key":"sk-nested-secret","proxy-url":"http://127.0.0.1:8080"}` +
+		`]}`))
 
 	got := string(MaskSensitivePayload(payload))
 	for _, secret := range []string{"sk-provider-secret", "sk-interactions-secret", "sk-nested-secret"} {
@@ -411,6 +551,38 @@ func TestMaskSensitivePayloadPreservesStructuredSecretContainers(t *testing.T) {
 	}
 }
 
+func TestMaskSensitivePayloadPreservesMetaKeyMetadata(t *testing.T) {
+	secret := "fixture-meta-secret-value"
+	payload := []byte(
+		`{"meta-api-key":[{"api-key":"` + secret + `","prefix":"meta-fixture","weight":0,"disabled":false}]}`,
+	)
+	masked := MaskSensitivePayload(payload)
+	if strings.Contains(string(masked), secret) {
+		t.Fatalf("Meta credential was not redacted: %s", masked)
+	}
+	var decoded struct {
+		Keys []struct {
+			APIKey   string `json:"api-key"`
+			Prefix   string `json:"prefix"`
+			Weight   *int   `json:"weight"`
+			Disabled *bool  `json:"disabled"`
+		} `json:"meta-api-key"`
+	}
+	if err := json.Unmarshal(masked, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Keys) != 1 {
+		t.Fatalf("Meta credential metadata missing: %s", masked)
+	}
+	key := decoded.Keys[0]
+	if key.APIKey != HideAPIKey(secret) || key.Prefix != "meta-fixture" || key.Weight == nil ||
+		*key.Weight != 0 ||
+		key.Disabled == nil ||
+		*key.Disabled {
+		t.Fatalf("Meta metadata or leaf redaction changed: %s", masked)
+	}
+}
+
 func TestMaskSensitivePayloadRedactsIndexedTextFields(t *testing.T) {
 	payload := []byte("api_key[]: array-secret-value\napi_key[0]: indexed-secret-value\n")
 
@@ -423,7 +595,9 @@ func TestMaskSensitivePayloadRedactsIndexedTextFields(t *testing.T) {
 }
 
 func TestMaskSensitivePayloadHandlesUTF8BOMBetweenSSEEvents(t *testing.T) {
-	payload := []byte("data: {\"model\":\"gpt-5\"}\n\n\xEF\xBB\xBFdata: {\"api_key\":{\"nested\":\"sk-segment-bom-secret\"}}\n\n")
+	payload := []byte(
+		"data: {\"model\":\"gpt-5\"}\n\n\xEF\xBB\xBFdata: {\"api_key\":{\"nested\":\"sk-segment-bom-secret\"}}\n\n",
+	)
 
 	got := string(MaskSensitivePayload(payload))
 	if strings.Contains(got, "sk-segment-bom-secret") || strings.Contains(got, "nested") {
@@ -455,7 +629,23 @@ func TestMaskSensitivePayloadAddsOrdinalsToStructuredAPIKeyCollisions(t *testing
 	if masked != HideAPIKey(rawB) {
 		t.Fatal("test API keys do not share a display mask")
 	}
-	payload := []byte(`{"gemini-api-key":[{"api-key":"` + rawA + `"},{"api-key":"` + rawB + `"}],"openai-compatibility":[{"api-key-entries":[{"api-key":"` + rawA + `"},{"api-key":"` + rawB + `"}]}]}`)
+	payload := []byte(
+		(`{"gemini-api-key":[{"api-key":` +
+			`"`) +
+			rawA +
+			(`"},{"api-key":` +
+				`"`) +
+			rawB +
+			(`"}],"openai-compatibility":` +
+				`[{"api-key-entries":` +
+				`[{"api-key":` +
+				`"`) +
+			rawA +
+			(`"},{"api-key":` +
+				`"`) +
+			rawB +
+			`"}]}]}`,
+	)
 
 	var decoded struct {
 		Gemini []struct {
@@ -509,6 +699,7 @@ func TestMaskSensitivePayloadPreservesOpaqueSensitiveMapKeyValues(t *testing.T) 
 }
 
 func TestHideAPIKeyMasksShortValues(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	cases := map[string]string{
 		"":         "***",
 		"a":        "***",
@@ -530,6 +721,7 @@ func TestHideAPIKeyMasksShortValues(t *testing.T) {
 }
 
 func TestHideAPIKeyIsRuneSafeAndNeverSelfMasks(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	for _, input := range []string{"密钥甲乙丙丁戊己庚辛壬癸", "abcd...wxyz", "***"} {
 		got := HideAPIKey(input)
 		if !utf8.ValidString(got) {
@@ -542,7 +734,9 @@ func TestHideAPIKeyIsRuneSafeAndNeverSelfMasks(t *testing.T) {
 }
 
 func TestMaskSensitivePayload(t *testing.T) {
-	jsonPayload := []byte(`{"model":"gpt-5.5","max_tokens":256,"maxTokens":128,"api_key":"sk-secret-value","apiKey":"camel-api-secret","managementKey":"management-secret","nested":{"access_token":"access-secret-value","accessToken":"camel-access-secret"}}`)
+	jsonPayload := []byte((`{"model":"gpt-5.5","max_tokens":256,"maxTokens":128,"api_key":"sk-secret-value","` +
+		`apiKey":"camel-api-secret","managementKey":"management-secret","nested":{"access_token":"access-` +
+		`secret-value","accessToken":"camel-access-secret"}}`))
 	maskedJSON := string(MaskSensitivePayload(jsonPayload))
 	for _, secret := range []string{
 		"sk-secret-value", "camel-api-secret", "management-secret", "access-secret-value", "camel-access-secret",
@@ -557,7 +751,10 @@ func TestMaskSensitivePayload(t *testing.T) {
 		t.Fatalf("MaskSensitivePayload JSON masked non-secret token limit fields: %s", maskedJSON)
 	}
 
-	textPayload := []byte("Authorization: Bearer auth-secret-value\nUpstream URL: https://example.test/v1?key=query-secret-value&model=gpt-5.5&accessToken=access-query-secret\nBody:\n{\"refreshToken\":\"refresh-secret-value\",\"maxTokens\":128}\n")
+	textPayload := []byte(("Authorization: Bearer auth-secret-value\nUpstream URL: https://example" +
+		".test/v1?key=query-secret-value&model=gpt-5.5&accessToken=access-query" +
+		"-secret\nBody:\n{\"refreshToken\":\"refresh-secret-value\",\"maxTokens" +
+		"\":128}\n"))
 	maskedText := string(MaskSensitivePayload(textPayload))
 	if strings.Contains(maskedText, "auth-secret-value") || strings.Contains(
 		maskedText, "refresh-secret-value",
@@ -572,12 +769,14 @@ func TestMaskSensitivePayload(t *testing.T) {
 }
 
 func TestMaskSensitivePayloadRedactsEscapedJSONFieldNamesInText(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	payload := []byte(`prefix {"api` + "\x5c" + `u005fkey":"sk-escaped-field-secret"} suffix`)
 
 	got := string(MaskSensitivePayload(payload))
 	if strings.Contains(got, "sk-escaped-field-secret") {
 		t.Fatalf("MaskSensitivePayload kept escaped JSON field secret: %q", got)
 	}
+	//goland:noinspection SpellCheckingInspection
 	if !strings.Contains(got, `api`+"\x5c"+`u005fkey`) {
 		t.Fatalf("MaskSensitivePayload removed escaped JSON field name: %q", got)
 	}
@@ -628,6 +827,7 @@ func TestMaskSensitivePayloadPreservesWebsocketEventsAfterBody(t *testing.T) {
 }
 
 func TestSanitizeFunctionName(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	tests := []struct {
 		name     string
 		input    string
@@ -688,7 +888,11 @@ func TestSanitizeFunctionName(t *testing.T) {
 				if len(got) > 0 {
 					first := got[0]
 					if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
-						t.Errorf("sanitizeFunctionName(%q) result starts with invalid char: %c", tt.input, first)
+						t.Errorf(
+							"sanitizeFunctionName(%q) result starts with invalid char: %c",
+							tt.input,
+							first,
+						)
 					}
 				}
 			},

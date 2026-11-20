@@ -8,13 +8,15 @@ import (
 )
 
 // Registry exposes the default registry populated with all built-in translators.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func Registry() *sdktranslator.Registry {
 	return sdktranslator.Default()
 }
 
 // Pipeline returns a pipeline that already contains the built-in translators.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func Pipeline() *sdktranslator.Pipeline {
 	return sdktranslator.NewPipeline(sdktranslator.Default())
 }

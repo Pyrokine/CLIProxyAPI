@@ -18,7 +18,7 @@ func (h labeledPluginHooks) NormalizeRequest(
 	_ bool,
 ) []byte {
 	if h.normalizeRequestCalls != nil {
-		(*h.normalizeRequestCalls)++
+		*h.normalizeRequestCalls++
 	}
 	return append(append([]byte(nil), body...), []byte("|"+h.label+"-request")...)
 }

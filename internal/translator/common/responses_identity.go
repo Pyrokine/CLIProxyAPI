@@ -11,8 +11,11 @@ import (
 
 // ResponsesToolKind identifies the Responses tool family represented by a
 // provider-neutral declaration.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ResponsesToolKind string
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const (
 	ResponsesFunctionTool ResponsesToolKind = "function"
 	ResponsesCustomTool   ResponsesToolKind = "custom"
@@ -257,9 +260,6 @@ func (identity *ResponsesToolIdentity) selectWinners() {
 func responsesDeclarationPrecedes(left, right ResponsesToolDeclaration) bool {
 	if left.SourcePriority != right.SourcePriority {
 		return left.SourcePriority < right.SourcePriority
-	}
-	if left.Direct != right.Direct {
-		return left.Direct
 	}
 	return left.Order < right.Order
 }

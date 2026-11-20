@@ -20,7 +20,12 @@ func TestExtractSummaryConfig(t *testing.T) {
 			name: "chat effort enables", format: "openai", body: `{"reasoning_effort":"high"}`,
 			wantMode: SummaryEnabled, wantDetail: "auto",
 		},
-		{name: "chat none disables", format: "openai", body: `{"reasoning_effort":"none"}`, wantMode: SummaryDisabled},
+		{
+			name:     "chat none disables",
+			format:   "openai",
+			body:     `{"reasoning_effort":"none"}`,
+			wantMode: SummaryDisabled,
+		},
 		{name: "chat missing unspecified", format: "openai", body: `{}`, wantMode: SummaryUnspecified},
 		{
 			name: "chat null effort unspecified", format: "openai", body: `{"reasoning_effort":null}`,
@@ -32,7 +37,9 @@ func TestExtractSummaryConfig(t *testing.T) {
 		},
 		{
 			name: "chat google extension false overrides effort", format: "openai",
-			body:     `{"reasoning_effort":"high","extra_body":{"google":{"thinking_config":{"include_thoughts":false}}}}`,
+			body: `{"reasoning_effort":"high","extra_body":{"google":{"thinking_config":` +
+				`{"include_thoughts":` +
+				`false}}}}`,
 			wantMode: SummaryDisabled,
 		},
 		{
@@ -117,7 +124,8 @@ func TestExtractSummaryConfig(t *testing.T) {
 		// absent budget must not be read as inactive thinking.
 		{
 			name: "claude enabled display without budget is valid", format: "claude",
-			body: `{"thinking":{"type":"enabled","display":"summarized"}}`, wantMode: SummaryEnabled, wantDetail: "auto",
+			body: `{"thinking":{"type":"enabled","display":"summarized"}}`, wantMode: SummaryEnabled,
+			wantDetail: "auto",
 		},
 		{
 			name: "claude enabled display with zero budget is invalid", format: "claude",
@@ -193,7 +201,8 @@ func TestExtractSummaryConfig(t *testing.T) {
 		},
 		{
 			name: "interactions string include alias is invalid", format: "interactions",
-			body: `{"generation_config":{"thinking_config":{"include_thoughts":"false"}}}`, wantMode: SummaryUnspecified,
+			body:     `{"generation_config":{"thinking_config":{"include_thoughts":"false"}}}`,
+			wantMode: SummaryUnspecified,
 		},
 		{
 			name: "interactions detailed is invalid", format: "interactions",
@@ -215,7 +224,10 @@ func TestExtractSummaryConfig(t *testing.T) {
 				got := ExtractSummaryConfig([]byte(test.body), test.format)
 				if got.Mode != test.wantMode || got.Detail != test.wantDetail {
 					t.Fatalf(
-						"ExtractSummaryConfig() = %+v, want mode=%v detail=%q", got, test.wantMode, test.wantDetail,
+						"ExtractSummaryConfig() = %+v, want mode=%v detail=%q",
+						got,
+						test.wantMode,
+						test.wantDetail,
 					)
 				}
 			},
@@ -312,7 +324,10 @@ func TestApplySummaryConfig(t *testing.T) {
 		},
 		{
 			name: "responses concise", format: "openai-response",
-			config: SummaryConfig{Mode: SummaryEnabled, Detail: "concise"}, path: "reasoning.summary", want: "concise",
+			config: SummaryConfig{
+				Mode:   SummaryEnabled,
+				Detail: "concise",
+			}, path: "reasoning.summary", want: "concise",
 		},
 	}
 
@@ -377,11 +392,19 @@ func TestApplySummaryConfig_OpenAIChatProviderDialects(t *testing.T) {
 				exclude := gjson.GetBytes(out, "reasoning.exclude")
 				if exclude.Exists() != test.wantExisting {
 					t.Fatalf(
-						"reasoning.exclude exists = %v, want %v; body=%s", exclude.Exists(), test.wantExisting, out,
+						"reasoning.exclude exists = %v, want %v; body=%s",
+						exclude.Exists(),
+						test.wantExisting,
+						out,
 					)
 				}
 				if test.wantExisting && exclude.String() != test.wantExclude {
-					t.Fatalf("reasoning.exclude = %q, want %q; body=%s", exclude.String(), test.wantExclude, out)
+					t.Fatalf(
+						"reasoning.exclude = %q, want %q; body=%s",
+						exclude.String(),
+						test.wantExclude,
+						out,
+					)
 				}
 				effort := gjson.GetBytes(out, "reasoning_effort")
 				if test.wantEffort == "" {
@@ -480,7 +503,8 @@ func TestApplySummaryConfigForModel_ClaudeEnabledSummaryUsesValidThinkingMode(t 
 				if got := gjson.GetBytes(out, "thinking.display").String(); got != "summarized" {
 					t.Fatalf("thinking.display = %q, want summarized; body=%s", got, out)
 				}
-				if test.wantBudget > 0 && gjson.GetBytes(out, "thinking.budget_tokens").Int() != test.wantBudget {
+				if test.wantBudget > 0 &&
+					gjson.GetBytes(out, "thinking.budget_tokens").Int() != test.wantBudget {
 					t.Fatalf(
 						"thinking.budget_tokens = %d, want %d; body=%s",
 						gjson.GetBytes(out, "thinking.budget_tokens").Int(), test.wantBudget, out,
@@ -492,7 +516,9 @@ func TestApplySummaryConfigForModel_ClaudeEnabledSummaryUsesValidThinkingMode(t 
 }
 
 func TestApplyThinkingWithModelInfoAndSummaryUsesExactClaudeCapability(t *testing.T) {
-	body := []byte(`{"model":"shared-model","max_tokens":32000,"thinking":{"type":"adaptive","display":"summarized"}}`)
+	body := []byte(
+		`{"model":"shared-model","max_tokens":32000,"thinking":{"type":"adaptive","display":"summarized"}}`,
+	)
 	sourceBody := []byte(`{"generationConfig":{"thinkingConfig":{"includeThoughts":true}}}`)
 	modelInfo := &registry.ModelInfo{
 		ID:       "shared-model",

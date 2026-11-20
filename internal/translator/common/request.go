@@ -4,7 +4,26 @@ import (
 	"strings"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+// NormalizeCodexStreamOptions keeps reasoning_summary_delivery without normalizing other request fields.
+func NormalizeCodexStreamOptions(rawJSON []byte) []byte {
+	streamOptions := gjson.GetBytes(rawJSON, "stream_options")
+	if !streamOptions.Exists() {
+		return rawJSON
+	}
+	if delivery := streamOptions.Get("reasoning_summary_delivery"); delivery.Exists() {
+		allowed, _ := sjson.SetRawBytes([]byte(`{}`), "reasoning_summary_delivery", []byte(delivery.Raw))
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "stream_options", allowed)
+		return rawJSON
+	}
+	updated, err := sjson.DeleteBytes(rawJSON, "stream_options")
+	if err == nil {
+		return updated
+	}
+	return rawJSON
+}
 
 // IsGeminiThoughtPart reports whether a Gemini request part contains hidden
 // model thought that must not be exposed as ordinary message content.
@@ -16,13 +35,15 @@ func IsGeminiThoughtPart(part gjson.Result) bool {
 // function response in either supported field spelling.
 func ContentHasGeminiFunctionResponse(content []byte) bool {
 	hasFunctionResponse := false
-	gjson.GetBytes(content, "parts").ForEach(func(_, part gjson.Result) bool {
-		if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
-			hasFunctionResponse = true
-			return false
-		}
-		return true
-	})
+	gjson.GetBytes(content, "parts").ForEach(
+		func(_, part gjson.Result) bool {
+			if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
+				hasFunctionResponse = true
+				return false
+			}
+			return true
+		},
+	)
 	return hasFunctionResponse
 }
 
@@ -69,7 +90,7 @@ func (queue *GeminiToolCallQueue) Match(name, explicitID string) string {
 		queue.remove(id)
 		return id
 	}
-	if len(queue.ids) == 0 {
+	if name != "" || len(queue.ids) == 0 {
 		return ""
 	}
 	id := queue.ids[0]
@@ -79,6 +100,8 @@ func (queue *GeminiToolCallQueue) Match(name, explicitID string) string {
 
 // PendingIDs returns the unmatched call IDs in request order. The returned
 // slice is detached so callers can preserve pairings across interrupted turns.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (queue *GeminiToolCallQueue) PendingIDs() []string {
 	return append([]string(nil), queue.ids...)
 }

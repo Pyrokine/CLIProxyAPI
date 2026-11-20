@@ -24,6 +24,18 @@ var (
 	trailingFieldIndexesPattern = regexp.MustCompile(`(\[[0-9]*])+$`)
 )
 
+// OpenAICompatibleProviderKey 返回兼容渠道的内部身份，保留原生 Provider 名称
+func OpenAICompatibleProviderKey(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "openai-compatibility"
+	}
+	if name == "openai-compatibility" || strings.HasPrefix(name, "openai-compatible-") {
+		return name
+	}
+	return "openai-compatible-" + name
+}
+
 // GetProviderName determines all AI service providers capable of serving a registered model.
 // It first queries the global model registry to retrieve the providers backing the supplied model name.
 // When the model has not been registered yet, it falls back to legacy string heuristics to infer
@@ -229,10 +241,30 @@ func IsSensitiveFieldName(key string) bool {
 	key = camelBoundaryPattern.ReplaceAllString(key, `${1}_${2}`)
 	key = strings.ToLower(key)
 	compact := strings.NewReplacer("-", "_", " ", "_").Replace(key)
-	if compact == "key" || compact == "api_key" || compact == "apikey" || compact == "password" || compact == "passwd" || compact == "authorization" || compact == "management_key" || compact == "auth_key" || compact == "access_key" ||
+	if compact ==
+		"key" ||
+		compact ==
+			"api_key" ||
+		compact ==
+			"apikey" ||
+		compact ==
+			"private_key" ||
+		compact ==
+			"password" ||
+		compact ==
+			"passwd" ||
+		compact ==
+			"authorization" ||
+		compact ==
+			"management_key" ||
+		compact ==
+			"auth_key" ||
+		compact ==
+			"access_key" ||
 		strings.HasSuffix(compact, "_management_key") || strings.HasSuffix(
 		compact, "_auth_key",
-	) || strings.HasSuffix(compact, "_access_key") {
+	) ||
+		strings.HasSuffix(compact, "_access_key") {
 		return true
 	}
 	parts := strings.FieldsFunc(compact, func(r rune) bool { return r == '_' || r == '.' || r == ':' })
@@ -624,7 +656,14 @@ func isStructuredSensitiveJSONContainer(key string) bool {
 	normalizedKey := camelBoundaryPattern.ReplaceAllString(strings.TrimSpace(key), `${1}_${2}`)
 	normalizedKey = strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(normalizedKey))
 	switch normalizedKey {
-	case "gemini_api_key", "interactions_api_key", "claude_api_key", "codex_api_key", "xai_api_key", "vertex_api_key", "api_key_entries":
+	case "gemini_api_key",
+		"interactions_api_key",
+		"claude_api_key",
+		"codex_api_key",
+		"xai_api_key",
+		"meta_api_key",
+		"vertex_api_key",
+		"api_key_entries":
 		return true
 	default:
 		return isSensitiveJSONMapKeyContainer(key)

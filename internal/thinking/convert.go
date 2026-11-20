@@ -16,7 +16,7 @@ var levelToBudgetMap = map[string]int{
 	"medium":  8192,
 	"high":    24576,
 	"xhigh":   32768,
-	"max":     32768,
+	"max":     128000,
 }
 
 // ConvertLevelToBudget converts a thinking level to a budget value.
@@ -32,6 +32,7 @@ var levelToBudgetMap = map[string]int{
 //   - medium  → 8192
 //   - high    → 24576
 //   - xhigh   → 32768
+//   - max     → 128000
 //
 // Returns:
 //   - budget: The converted budget value

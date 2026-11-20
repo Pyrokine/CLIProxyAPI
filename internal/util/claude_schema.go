@@ -235,10 +235,8 @@ func claudeSchemaMissesRequired(value any) bool {
 			}
 		}
 	case []any:
-		for _, child := range schema {
-			if claudeSchemaMissesRequired(child) {
-				return true
-			}
+		if slices.ContainsFunc(schema, claudeSchemaMissesRequired) {
+			return true
 		}
 	}
 	return false

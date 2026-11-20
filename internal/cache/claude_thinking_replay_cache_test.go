@@ -16,7 +16,9 @@ import (
 
 func claudeReplayTestContent(label string) []byte {
 	return []byte(fmt.Sprintf(
-		`[{"type":"thinking","thinking":%q,"signature":%q},{"type":"tool_use","id":%q,"name":"shell","input":{"value":%q}}]`,
+		`[{"type":"thinking","thinking":%q,"signature":%q},{"type":"tool_use",`+
+			`"id":%q,"name":"shell","input":{"value":`+
+			`%q}}]`,
 		label,
 		"sig-"+label,
 		"tool-"+label,
@@ -198,7 +200,10 @@ func TestClaudeThinkingReplayConcurrentReplaceHasOneWinner(t *testing.T) {
 func TestClaudeThinkingReplayLimitsAndPurge(t *testing.T) {
 	contents := make([][]byte, 0, claudeThinkingReplayCacheMaxTurnsPerSession+1)
 	for index := 0; index <= claudeThinkingReplayCacheMaxTurnsPerSession; index++ {
-		contents = appendClaudeThinkingReplayContent(contents, claudeReplayTestContent(fmt.Sprintf("turn-%03d", index)))
+		contents = appendClaudeThinkingReplayContent(
+			contents,
+			claudeReplayTestContent(fmt.Sprintf("turn-%03d", index)),
+		)
 	}
 	if len(contents) != claudeThinkingReplayCacheMaxTurnsPerSession {
 		t.Fatalf("turn count = %d, want %d", len(contents), claudeThinkingReplayCacheMaxTurnsPerSession)
@@ -212,8 +217,13 @@ func TestClaudeThinkingReplayLimitsAndPurge(t *testing.T) {
 	for _, label := range []string{"large-a", "large-b", "large-c"} {
 		contents = appendClaudeThinkingReplayContent(contents, claudeReplayLargeTestContent(label, 3<<20))
 	}
-	if len(contents) != 2 || claudeThinkingReplayEntryBytes(contents) > claudeThinkingReplayCacheMaxBytesPerSession {
-		t.Fatalf("byte-limited contents = %d turns, %d bytes", len(contents), claudeThinkingReplayEntryBytes(contents))
+	if len(contents) != 2 ||
+		claudeThinkingReplayEntryBytes(contents) > claudeThinkingReplayCacheMaxBytesPerSession {
+		t.Fatalf(
+			"byte-limited contents = %d turns, %d bytes",
+			len(contents),
+			claudeThinkingReplayEntryBytes(contents),
+		)
 	}
 
 	var blocks strings.Builder
@@ -426,7 +436,8 @@ func TestClearClaudeThinkingReplayDoesNotClearKimiState(t *testing.T) {
 	if errKimi != nil || !foundKimi || !bytes.Equal(gotKimi, content) {
 		t.Fatalf("Kimi replay after Claude clear = %q, found %v, error %v", gotKimi, foundKimi, errKimi)
 	}
-	if gotClaude, _, foundClaude := readClaudeReplay(t, ctx, model, session); foundClaude || len(gotClaude) != 0 {
+	if gotClaude, _, foundClaude := readClaudeReplay(t, ctx, model, session); foundClaude ||
+		len(gotClaude) != 0 {
 		t.Fatalf("Claude replay after clear = %q, found %v", gotClaude, foundClaude)
 	}
 }

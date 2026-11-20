@@ -34,10 +34,12 @@ func AttachToolMessageCacheControl(msg []byte, src gjson.Result) []byte {
 		updated := []byte(block.Raw)
 		content := src.Get("content")
 		if content.IsArray() {
-			content.ForEach(func(_, part gjson.Result) bool {
-				updated = AttachCacheControl(updated, part)
-				return !gjson.GetBytes(updated, "cache_control").Exists()
-			})
+			content.ForEach(
+				func(_, part gjson.Result) bool {
+					updated = AttachCacheControl(updated, part)
+					return !gjson.GetBytes(updated, "cache_control").Exists()
+				},
+			)
 		} else if content.IsObject() {
 			updated = AttachCacheControl(updated, content)
 		}

@@ -3,6 +3,8 @@
 // OpenAI models use the reasoning_effort format with discrete levels
 // (low/medium/high). Some models support xhigh and none levels.
 // See: _bmad-output/planning-artifacts/architecture.md#Epic-8
+//
+//goland:noinspection GrazieInspection
 package openai
 
 import (
@@ -15,7 +17,9 @@ import (
 // OpenAI-specific behavior:
 //   - Output format: reasoning_effort (string: low/medium/high/xhigh)
 //   - Level-only mode: no numeric budget support
-//   - Some models support ZeroAllowed (gpt-5.1, gpt-5.2)
+//   - Some models support ZeroAllowed (`gpt-5.1`, `gpt-5.2`)
+//
+//goland:noinspection GrazieInspection
 type applier struct{}
 
 var _ thinking.ProviderApplier = (*applier)(nil)

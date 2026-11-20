@@ -1,6 +1,7 @@
 package util
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -64,7 +65,8 @@ func TestNoInPlaceSJSONWrites(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Fatalf(
 			"in-place sjson writes would corrupt no-copy GJSON results that alias the same buffer:\n  %s\n"+
-				"Either keep the default (allocating) sjson call, or prove no no-copy result derived from that buffer is still alive and add the file to inPlaceSJSONAllowlist.",
+				"Either keep the default (allocating) sjson call, or prove no no-copy result derived from "+
+				"that buffer is still alive and add the file to inPlaceSJSONAllowlist.",
 			strings.Join(offenders, "\n  "),
 		)
 	}
@@ -72,7 +74,7 @@ func TestNoInPlaceSJSONWrites(t *testing.T) {
 
 var inPlaceByteWritePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bcopy\([a-zA-Z_][A-Za-z0-9_.]*\[`),
-	regexp.MustCompile(`^\s*[a-zA-Z_][A-Za-z0-9_.]*\[[a-zA-Z0-9_]+] = 0$`),
+	regexp.MustCompile(`^\s*[a-zA-Z_][A-Za-z0-9_.]*\[[a-zA-Z0-9_]+] = 0\r?$`),
 }
 
 type reviewedInPlaceByteWrite struct {
@@ -109,6 +111,10 @@ var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
 		1,
 		"copies a database blob into a newly built usage detail fingerprint",
 	},
+	"sdk/auth/manager.go": {
+		1,
+		"copies an independently hex-decoded digest into a fresh PersistedVersion SHA256 array",
+	},
 	"sdk/cliproxy/auth/conductor.go": {
 		1,
 		"copies a decoded persisted digest into a new version value",
@@ -117,7 +123,13 @@ var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
 }
 
 func TestInPlaceByteWritesAreReviewed(t *testing.T) {
-	root := repoRoot(t)
+	for _, issue := range inPlaceByteWriteIssues(t, repoRoot(t), reviewedInPlaceByteWrites) {
+		t.Error(issue)
+	}
+}
+
+func inPlaceByteWriteIssues(t *testing.T, root string, reviewedWrites map[string]reviewedInPlaceByteWrite) []string {
+	t.Helper()
 	found := make(map[string][]string)
 	forEachSourceFile(
 		t, root, func(rel string, data []byte) {
@@ -130,26 +142,105 @@ func TestInPlaceByteWritesAreReviewed(t *testing.T) {
 			}
 		},
 	)
+	var issues []string
 	for rel, lines := range found {
-		reviewed, ok := reviewedInPlaceByteWrites[rel]
+		reviewed, ok := reviewedWrites[rel]
 		if !ok {
-			t.Errorf(
-				"unreviewed in-place byte write in %s:\n  %s\nProve that no no-copy GJSON result derived from that buffer is still alive, then record it in reviewedInPlaceByteWrites.",
-				rel, strings.Join(lines, "\n  "),
+			issues = append(
+				issues, fmt.Sprintf(
+					"unreviewed in-place byte write in %s:\n  %s\nProve that no no-copy GJSON result derived "+
+						"from that buffer is still alive, then record it in reviewedInPlaceByteWrites.",
+					rel, strings.Join(lines, "\n  "),
+				),
 			)
 			continue
 		}
 		if len(lines) != reviewed.count {
-			t.Errorf(
-				"%s has %d in-place byte write(s), reviewed %d (%s):\n  %s",
-				rel, len(lines), reviewed.count, reviewed.reason, strings.Join(lines, "\n  "),
+			issues = append(
+				issues, fmt.Sprintf(
+					"%s has %d in-place byte write(s), reviewed %d (%s):\n  %s",
+					rel, len(lines), reviewed.count, reviewed.reason, strings.Join(lines, "\n  "),
+				),
 			)
 		}
 	}
-	for rel := range reviewedInPlaceByteWrites {
+	for rel := range reviewedWrites {
 		if _, ok := found[rel]; !ok {
-			t.Errorf("stale entry in reviewedInPlaceByteWrites: %s no longer contains an in-place byte write", rel)
+			issues = append(
+				issues, fmt.Sprintf(
+					"stale entry in reviewedInPlaceByteWrites: %s no longer contains an in-place byte write", rel,
+				),
+			)
 		}
+	}
+	return issues
+}
+
+func TestInPlaceByteWriteGuardHandlesLineEndingsAndReviewBoundaries(t *testing.T) {
+	for _, ending := range []struct {
+		name, value string
+	}{{"LF", "\n"}, {"CRLF", "\r\n"}} {
+		t.Run(
+			ending.name, func(t *testing.T) {
+				root := t.TempDir()
+				for _, file := range []string{
+					".hidden/zero.go", "plain.go", "ignored_test.go", "ignored.txt",
+					".git/ignored.go", "vendor/ignored.go", "node_modules/ignored.go", "testdata/ignored.go",
+				} {
+					path := filepath.Join(root, filepath.FromSlash(file))
+					if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					line := "buffer[index] = 0"
+					if file == "plain.go" {
+						line = "copy(destination[:], source)"
+					}
+					if err := os.WriteFile(path, []byte(line+ending.value), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, check := range []struct {
+					name   string
+					review map[string]reviewedInPlaceByteWrite
+					want   string
+				}{
+					{
+						"reviewed", map[string]reviewedInPlaceByteWrite{
+							".hidden/zero.go": {1, "fixture zero write"}, "plain.go": {1, "fixture copy"},
+						}, "",
+					},
+					{
+						"unknown", map[string]reviewedInPlaceByteWrite{
+							"plain.go": {1, "fixture copy"},
+						}, "unreviewed in-place byte write in .hidden/zero.go",
+					},
+					{
+						"stale", map[string]reviewedInPlaceByteWrite{
+							".hidden/zero.go": {1, "fixture zero write"}, "plain.go": {1, "fixture copy"},
+							"removed.go": {1, "fixture removed write"},
+						}, "stale entry in reviewedInPlaceByteWrites: removed.go",
+					},
+					{
+						"count", map[string]reviewedInPlaceByteWrite{
+							".hidden/zero.go": {2, "fixture incorrect count"}, "plain.go": {1, "fixture copy"},
+						}, ".hidden/zero.go has 1 in-place byte write(s), reviewed 2",
+					},
+				} {
+					t.Run(
+						check.name, func(t *testing.T) {
+							issues := inPlaceByteWriteIssues(t, root, check.review)
+							if check.want == "" {
+								if len(issues) != 0 {
+									t.Fatalf("reviewed fixture rejected: %v", issues)
+								}
+							} else if len(issues) != 1 || !strings.Contains(issues[0], check.want) {
+								t.Fatalf("issues = %v, want one containing %q", issues, check.want)
+							}
+						},
+					)
+				}
+			},
+		)
 	}
 }
 

@@ -47,7 +47,8 @@ func (d *ResponsesPatchInput) Push(fragment string) (string, error) {
 	start := d.input.Len()
 	for len(fragment) > 0 {
 		c := fragment[0]
-		if d.phase != patchInputKey && d.phase != patchInputString && (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+		if d.phase != patchInputKey && d.phase != patchInputString &&
+			(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
 			fragment = fragment[1:]
 			continue
 		}

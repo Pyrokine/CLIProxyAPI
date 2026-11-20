@@ -19,10 +19,12 @@ func TestJSONEqualPreservesExactNumbers(t *testing.T) {
 		{"multiple values", `{"value":1} {"value":2}`, `{"value":1}`, false},
 		{"trailing data", `{"value":1} trailing`, `{"value":1}`, false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := JSONEqual([]byte(tc.left), []byte(tc.right)); got != tc.equal {
-				t.Fatalf("JSONEqual() = %v, want %v", got, tc.equal)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				if got := JSONEqual([]byte(tc.left), []byte(tc.right)); got != tc.equal {
+					t.Fatalf("JSONEqual() = %v, want %v", got, tc.equal)
+				}
+			},
+		)
 	}
 }

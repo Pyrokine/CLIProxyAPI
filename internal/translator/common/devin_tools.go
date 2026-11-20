@@ -15,17 +15,23 @@ func IsDevinCodexAppAutomationUpdate(namespace, toolName string) bool {
 
 var (
 	devinExecCommandDescription = regexp.MustCompile(`(?i)returning output or a session ID for ongoing interaction`)
-	devinWriteStdinDescription  = regexp.MustCompile(`(?i)Writes characters to an existing unified exec session and returns recent output(\.?)`)
+	devinWriteStdinDescription  = regexp.MustCompile(
+		`(?i)Writes characters to an existing unified exec session and returns recent output(\.?)`,
+	)
 )
 
 // SanitizeDevinToolDescription adjusts the tool-specific descriptions sent to Devin.
 func SanitizeDevinToolDescription(toolName, description string) string {
 	name := strings.ToLower(strings.TrimSpace(toolName))
 	if name == "exec_command" || strings.HasSuffix(name, "__exec_command") {
-		description = devinExecCommandDescription.ReplaceAllString(description, "returning output or an session ID for ongoing interaction")
+		description = devinExecCommandDescription.ReplaceAllString(
+			description, "returning output or an session ID for ongoing interaction",
+		)
 	}
 	if name == "write_stdin" || strings.HasSuffix(name, "__write_stdin") {
-		description = devinWriteStdinDescription.ReplaceAllString(description, "Writes characters to a existing unified exec session and returns recent output$1")
+		description = devinWriteStdinDescription.ReplaceAllString(
+			description, "Writes characters to a existing unified exec session and returns recent output$1",
+		)
 	}
 	return description
 }

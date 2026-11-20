@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -175,7 +174,8 @@ func FixJSON(input string) string {
 					for k := 0; k < 4 && i+1 < len(runes); k++ {
 						peek := runes[i+1]
 						// simple hex check
-						if (peek >= '0' && peek <= '9') || (peek >= 'a' && peek <= 'f') || (peek >= 'A' && peek <= 'F') {
+						if (peek >= '0' && peek <= '9') || (peek >= 'a' && peek <= 'f') ||
+							(peek >= 'A' && peek <= 'F') {
 							out.WriteRune(peek)
 							i++
 						} else {
@@ -229,7 +229,6 @@ func FixJSON(input string) string {
 
 func canonicalToolName(name string) string {
 	canonical := strings.TrimSpace(name)
-	canonical = strings.TrimLeft(canonical, "_")
 	return strings.ToLower(canonical)
 }
 
@@ -274,7 +273,25 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 	if name == "" || toolNameMap == nil {
 		return name
 	}
-	if mapped, ok := toolNameMap[canonicalToolName(name)]; ok && mapped != "" {
+	canonical := canonicalToolName(name)
+	if mapped, ok := toolNameMap[canonical]; ok && mapped != "" {
+		return mapped
+	}
+	base := strings.TrimLeft(canonical, "_")
+	if base == "" {
+		return name
+	}
+	mapped := ""
+	for key, original := range toolNameMap {
+		if strings.TrimLeft(key, "_") != base {
+			continue
+		}
+		if mapped != "" && mapped != original {
+			return name
+		}
+		mapped = original
+	}
+	if mapped != "" {
 		return mapped
 	}
 	return name
@@ -374,48 +391,6 @@ func ReverseToolNameMap(forward map[string]string) map[string]string {
 			out[sanitized] = original
 		}
 	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// SanitizedToolNameMap builds the legacy sanitized-name → original-name map from
-// top-level Claude-style tools. Collision-aware translators should use
-// DisambiguatedToolNameMap instead.
-func SanitizedToolNameMap(rawJSON []byte) map[string]string {
-	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
-		return nil
-	}
-	tools := gjson.GetBytes(rawJSON, "tools")
-	if !tools.IsArray() {
-		return nil
-	}
-
-	out := make(map[string]string)
-	tools.ForEach(
-		func(_, tool gjson.Result) bool {
-			name := strings.TrimSpace(tool.Get("name").String())
-			if name == "" {
-				return true
-			}
-			sanitized := SanitizeFunctionName(name)
-			if sanitized == name {
-				return true
-			}
-			if existing, exists := out[sanitized]; !exists {
-				out[sanitized] = name
-			} else {
-				log.Warnf(
-					"sanitized tool name collision: %q and %q both map to %q, keeping first",
-					existing,
-					name,
-					sanitized,
-				)
-			}
-			return true
-		},
-	)
 	if len(out) == 0 {
 		return nil
 	}

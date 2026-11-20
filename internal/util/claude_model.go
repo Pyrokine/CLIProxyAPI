@@ -1,6 +1,20 @@
 package util
 
-import "strings"
+import (
+	"strings"
+
+	claudemodels "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/claude/models"
+)
+
+// ensureClaudeModelIDPrefix 保留旧版反转格式的模型 ID
+func ensureClaudeModelIDPrefix(id string) string {
+	return claudemodels.EnsureClaudeModelIDPrefix(id)
+}
+
+// resolveClaudeModelIDPrefix 还原旧版模型 ID，保留思考后缀
+func resolveClaudeModelIDPrefix(id string) string {
+	return claudemodels.ResolveClaudeModelIDPrefix(id)
+}
 
 // IsClaudeThinkingModel checks if the model is a Claude thinking model
 // that requires the interleaved-thinking beta header.

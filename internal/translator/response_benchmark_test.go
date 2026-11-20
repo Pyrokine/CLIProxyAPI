@@ -22,16 +22,24 @@ func BenchmarkResponseTranslationLargePayload(b *testing.B) {
 		rawJSON []byte
 	}{
 		{
-			name:    "gemini_to_openai",
-			from:    "gemini",
-			to:      "openai",
-			rawJSON: []byte(`{"modelVersion":"gemini-test","candidates":[{"index":0,"content":{"parts":[{"text":"` + payload + `"}]},"finishReason":"STOP"}]}`),
+			name: "gemini_to_openai",
+			from: "gemini",
+			to:   "openai",
+			rawJSON: []byte(
+				(`{"modelVersion":"gemini-test","candidates":[{"index":0,"content":` +
+					`{"parts":[{"text":` +
+					`"`) +
+					payload +
+					`"}]},"finishReason":"STOP"}]}`,
+			),
 		},
 		{
-			name:    "codex_to_openai",
-			from:    "codex",
-			to:      "openai",
-			rawJSON: []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"gpt-test","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"` + payload + `"}]}]}}`),
+			name: "codex_to_openai",
+			from: "codex",
+			to:   "openai",
+			rawJSON: []byte((`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"` +
+				`model":"gpt-test","status":"completed","output":[{"type":"message","content":[{"type":"` +
+				`output_text","text":"`) + payload + `"}]}]}}`),
 		},
 		{
 			name:    "claude_to_openai",
@@ -52,6 +60,9 @@ func BenchmarkResponseTranslationLargePayload(b *testing.B) {
 		to := sdktranslator.FromString(testCase.to)
 		b.Run(
 			testCase.name, func(b *testing.B) {
+				if !sdktranslator.HasNonStreamResponseTransformer(to, from) {
+					b.Fatalf("response translator %s -> %s is not registered", from, to)
+				}
 				ctx := context.Background()
 				output := sdktranslator.TranslateNonStream(
 					ctx,
@@ -91,8 +102,14 @@ func BenchmarkResponseTranslationLargePayload(b *testing.B) {
 }
 
 func claudeLargeTextResponse(payload string) []byte {
-	return []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\"}}\n" +
-		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n" +
-		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" + payload + "\"}}\n" +
-		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n")
+	return []byte(
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\"}}\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n" +
+			("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":" +
+				"{\"type\":\"text_delta\",\"text\":" +
+				"\"") +
+			payload +
+			"\"}}\n" +
+			"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n",
+	)
 }

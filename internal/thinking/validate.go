@@ -16,9 +16,12 @@ import (
 //   - Auto-converts between Budget and Level formats based on model capability
 //   - Validates that requested level is in the model's supported levels list
 //   - Clamps budget values to model's allowed range
-//   - When converting Budget -> Level for level-only models, clamps the derived standard level to the nearest supported level
-//     (special values none/auto are preserved)
-//   - When config comes from a model suffix, strict budget validation is disabled (we clamp instead of error)
+//
+// - When converting Budget -> Level for level-only models, clamps the derived standard level to the nearest
+// supported level
+//
+//	  (special values none/auto are preserved)
+//	- When config comes from a model suffix, strict budget validation is disabled (we clamp instead of error)
 //
 // Parameters:
 //   - config: The thinking configuration to validate
@@ -41,7 +44,11 @@ func validateConfig(
 	fromFormat, toFormat string,
 	fromSuffix bool,
 ) (*Config, error) {
-	fromFormat, toFormat = strings.ToLower(strings.TrimSpace(fromFormat)), strings.ToLower(strings.TrimSpace(toFormat))
+	fromFormat, toFormat = strings.ToLower(
+		strings.TrimSpace(fromFormat),
+	), strings.ToLower(
+		strings.TrimSpace(toFormat),
+	)
 	model := "unknown"
 	support := (*registry.ThinkingSupport)(nil)
 	if modelInfo != nil {
@@ -71,14 +78,14 @@ func validateConfig(
 			}
 		}
 	}
-	allowClampUnsupported := isBudgetCapableProvider(fromFormat) && isLevelBasedProvider(toFormat) ||
-		modelFamilyMismatch && isSameProviderFamily(fromFormat, toFormat)
+	allowClampUnsupported := !isSameProviderFamily(fromFormat, toFormat) || modelFamilyMismatch
 	strictBudget := !fromSuffix && fromFormat != "" &&
 		isSameProviderFamily(fromFormat, toFormat) && !modelFamilyMismatch
 	budgetDerivedFromLevel := false
 
 	capability := toCapability
-	// noinspection GoSwitchMissingCasesForIotaConsts — capabilityNone/capabilityUnknown are impossible here (support != nil guard above).
+	// capabilityNone/capabilityUnknown are impossible here (support != nil guard above).
+	// noinspection GoSwitchMissingCasesForIotaConsts
 	switch capability {
 	case capabilityBudgetOnly:
 		if config.Mode == ModeLevel {
@@ -99,7 +106,8 @@ func validateConfig(
 			level, ok := ConvertBudgetToLevel(config.Budget)
 			if !ok {
 				return nil, newError(
-					errUnknownLevel, fmt.Sprintf("budget %d cannot be converted to a valid level", config.Budget),
+					errUnknownLevel,
+					fmt.Sprintf("budget %d cannot be converted to a valid level", config.Budget),
 				)
 			}
 			// When converting Budget -> Level for level-only models, clamp the derived standard level
@@ -381,15 +389,6 @@ func normalizeLevels(levels []string) []string {
 func isBudgetCapableProvider(provider string) bool {
 	switch provider {
 	case "gemini", "gemini-cli", "antigravity", "claude":
-		return true
-	default:
-		return false
-	}
-}
-
-func isLevelBasedProvider(provider string) bool {
-	switch provider {
-	case "openai", "openai-response", "codex", "xai":
 		return true
 	default:
 		return false

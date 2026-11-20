@@ -53,13 +53,14 @@ func TestCleanJSONSchemaForAntigravity_TypeFlattening_Nullable(t *testing.T) {
 		"properties": {
 			"name": {
 				"type": "string",
-				"description": "(nullable)"
+				"description": "(nullable)",
+				"nullable": true
 			},
 			"other": {
 				"type": "string"
 			}
 		},
-		"required": ["other"]
+		"required": ["name", "other"]
 	}`
 
 	result := CleanJSONSchemaForAntigravity(input)
@@ -126,6 +127,7 @@ func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_SmartSelection(t *testing
 			"query": {
 				"type": "object",
 				"description": "Accepts: null | object",
+				"nullable": true,
 				"properties": {
 					"_": { "type": "boolean" },
 					"kind": { "type": "string" }
@@ -214,7 +216,7 @@ func TestCleanJSONSchemaForAntigravity_RefHandling(t *testing.T) {
 		}
 	}`
 
-	// After $ref is converted to placeholder object, empty schema placeholder is also added
+	// Local references retain the referenced properties
 	expected := `{
 		"type": "object",
 		"properties": {
@@ -222,12 +224,10 @@ func TestCleanJSONSchemaForAntigravity_RefHandling(t *testing.T) {
 				"type": "object",
 				"description": "See: User",
 				"properties": {
-					"reason": {
-						"type": "string",
-						"description": "Brief explanation of why you are calling this tool"
-					}
+					"name": {"type":"string"},
+					"_": {"type":"boolean"}
 				},
-				"required": ["reason"]
+				"required": ["_"]
 			}
 		}
 	}`
@@ -255,7 +255,7 @@ func TestCleanJSONSchemaForAntigravity_RefHandling_DescriptionEscaping(t *testin
 		}
 	}`
 
-	// After $ref is converted, empty schema placeholder is also added
+	// Local references retain sibling descriptions and referenced properties
 	expected := `{
 		"type": "object",
 		"properties": {
@@ -263,12 +263,10 @@ func TestCleanJSONSchemaForAntigravity_RefHandling_DescriptionEscaping(t *testin
 				"type": "object",
 				"description": "He said \"hi\"\\nsecond line (See: User)",
 				"properties": {
-					"reason": {
-						"type": "string",
-						"description": "Brief explanation of why you are calling this tool"
-					}
+					"name": {"type":"string"},
+					"_": {"type":"boolean"}
 				},
-				"required": ["reason"]
+				"required": ["_"]
 			}
 		}
 	}`
@@ -499,13 +497,14 @@ func TestCleanJSONSchemaForAntigravity_TypeFlattening_Nullable_DotKey(t *testing
 		"properties": {
 			"my.param": {
 				"type": "string",
-				"description": "(nullable)"
+				"description": "(nullable)",
+				"nullable": true
 			},
 			"other": {
 				"type": "string"
 			}
 		},
-		"required": ["other"]
+		"required": ["my.param", "other"]
 	}`
 
 	result := CleanJSONSchemaForAntigravity(input)
@@ -852,54 +851,30 @@ func TestCleanJSONSchemaForAntigravity_MultipleFormats(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForAntigravity_NumericEnumToString(t *testing.T) {
-	// Gemini API requires enum values to be strings, not numbers
-	input := `{
-		"type": "object",
-		"properties": {
-			"priority": {"type": "integer", "enum": [0, 1, 2]},
-			"level": {"type": "number", "enum": [1.5, 2.5, 3.5]},
-			"status": {"type": "string", "enum": ["active", "inactive"]}
+func TestCleanJSONSchemaForAntigravityPreservesNumericEnumTypes(t *testing.T) {
+	input := `{"type":"object","properties":{"priority":{"type":"integer","enum":[0,1,2]},` +
+		`"level":{"type":"number","enum":[1.5,2.5,3.5]},"status":{"type":"string","enum":["active","inactive"]}}}`
+	result := gjson.Parse(CleanJSONSchemaForAntigravity(input))
+	for _, test := range []struct {
+		name, valueType, values string
+	}{
+		{name: "priority", valueType: "integer", values: `["0","1","2"]`},
+		{name: "level", valueType: "number", values: `["1.5","2.5","3.5"]`},
+		{name: "status", valueType: "string", values: `["active","inactive"]`},
+	} {
+		field := result.Get("properties." + test.name)
+		if field.Get("type").String() != test.valueType || field.Get("enum").Raw != test.values {
+			t.Errorf("%s type or enum changed: %s", test.name, field.Raw)
 		}
-	}`
-
-	result := CleanJSONSchemaForAntigravity(input)
-
-	// Numeric enum values should be converted to strings
-	if strings.Contains(result, `"enum":[0,1,2]`) {
-		t.Errorf("Integer enum values should be converted to strings, got: %s", result)
-	}
-	if strings.Contains(result, `"enum":[1.5,2.5,3.5]`) {
-		t.Errorf("Float enum values should be converted to strings, got: %s", result)
-	}
-	// Should contain string versions
-	if !strings.Contains(result, `"0"`) || !strings.Contains(result, `"1"`) || !strings.Contains(result, `"2"`) {
-		t.Errorf("Integer enum values should be converted to string format, got: %s", result)
-	}
-	// String enum values should remain unchanged
-	if !strings.Contains(result, `"active"`) || !strings.Contains(result, `"inactive"`) {
-		t.Errorf("String enum values should remain unchanged, got: %s", result)
 	}
 }
 
-func TestCleanJSONSchemaForAntigravity_BooleanEnumToString(t *testing.T) {
-	// Boolean enum values should also be converted to strings
-	input := `{
-		"type": "object",
-		"properties": {
-			"enabled": {"type": "boolean", "enum": [true, false]}
-		}
-	}`
-
-	result := CleanJSONSchemaForAntigravity(input)
-
-	// Boolean enum values should be converted to strings
-	if strings.Contains(result, `"enum":[true,false]`) {
-		t.Errorf("Boolean enum values should be converted to strings, got: %s", result)
-	}
-	// Should contain string versions "true" and "false"
-	if !strings.Contains(result, `"true"`) || !strings.Contains(result, `"false"`) {
-		t.Errorf("Boolean enum values should be converted to string format, got: %s", result)
+func TestCleanJSONSchemaForAntigravityPreservesBooleanEnumTypes(t *testing.T) {
+	input := `{"type":"object","properties":{"enabled":{"type":"boolean","enum":[true,false]}}}`
+	result := gjson.Parse(CleanJSONSchemaForAntigravity(input))
+	field := result.Get("properties.enabled")
+	if field.Get("type").String() != "boolean" || field.Get("enum").Raw != `["true","false"]` {
+		t.Fatalf("boolean enum semantics changed: %s", field.Raw)
 	}
 }
 

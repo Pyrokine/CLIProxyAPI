@@ -25,20 +25,22 @@ func TestKimiK28ClaudeMessagesMaxPreservesMax(t *testing.T) {
 		"k2.8-code",
 	}
 	for _, model := range models {
-		t.Run(model, func(t *testing.T) {
-			body := []byte(
-				`{"model":"` + model +
-					`","messages":[{"role":"user","content":"hi"}],` +
-					`"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
-			)
-			out, err := thinking.ApplyThinking(body, model, "claude", "claude", "claude")
-			if err != nil {
-				t.Fatalf("ApplyThinking() error = %v", err)
-			}
-			if got := gjson.GetBytes(out, "output_config.effort").String(); got != "max" {
-				t.Fatalf("output_config.effort = %q, want max; body=%s", got, out)
-			}
-		})
+		t.Run(
+			model, func(t *testing.T) {
+				body := []byte(
+					`{"model":"` + model +
+						`","messages":[{"role":"user","content":"hi"}],` +
+						`"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+				)
+				out, err := thinking.ApplyThinking(body, model, "claude", "claude", "claude")
+				if err != nil {
+					t.Fatalf("ApplyThinking() error = %v", err)
+				}
+				if got := gjson.GetBytes(out, "output_config.effort").String(); got != "max" {
+					t.Fatalf("output_config.effort = %q, want max; body=%s", got, out)
+				}
+			},
+		)
 	}
 }
 

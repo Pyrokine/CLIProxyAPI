@@ -63,7 +63,9 @@ func TestApplyGeminiFormatsOnlyPreserveBooleanSummary(t *testing.T) {
 }
 
 func TestApplyGeminiLevelFormatModeNoneZeroDeletesThinkingConfig(t *testing.T) {
-	body := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true},"temperature":0.2}}`)
+	body := []byte(
+		`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true},"temperature":0.2}}`,
+	)
 	out, err := ApplyGeminiLevelFormat(body, Config{Mode: ModeNone}, GeminiDirectPrefix)
 	if err != nil {
 		t.Fatalf("ApplyGeminiLevelFormat() error = %v", err)
@@ -77,7 +79,11 @@ func TestApplyGeminiLevelFormatModeNoneZeroDeletesThinkingConfig(t *testing.T) {
 }
 
 func TestApplyGeminiBudgetFormatModeNoneZeroDeletesThinkingConfig(t *testing.T) {
-	body := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":1024,"includeThoughts":true},"temperature":0.2}}}`)
+	body := []byte(
+		(`{"request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":` +
+			`1024,"includeThoughts":true},"temperature":` +
+			`0.2}}}`),
+	)
 	out, err := ApplyGeminiBudgetFormat(body, Config{Mode: ModeNone}, 0, GeminiCLIPrefix)
 	if err != nil {
 		t.Fatalf("ApplyGeminiBudgetFormat() error = %v", err)

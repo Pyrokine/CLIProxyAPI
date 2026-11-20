@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -80,12 +81,16 @@ func (r *Registry) RegisterRequestEnvelope(from, to Format, request RequestEnvel
 
 // TranslateRequest converts a payload between schemas, returning the original payload
 // if no translator is registered.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool) []byte {
 	return r.TranslateRequestWithContext(context.Background(), from, to, model, rawJSON, stream)
 }
 
 // TranslateRequestWithContext converts a payload and applies package-level plugin hooks.
 // Call TranslateRequestChecked when a request rejection must reach the caller.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *Registry) TranslateRequestWithContext(
 	ctx context.Context,
 	from, to Format,
@@ -102,6 +107,8 @@ func (r *Registry) TranslateRequestWithContext(
 }
 
 // TranslateRequestChecked propagates unsupported-content failures to the caller.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *Registry) TranslateRequestChecked(
 	ctx context.Context,
 	from, to Format,
@@ -109,12 +116,14 @@ func (r *Registry) TranslateRequestChecked(
 	rawJSON []byte,
 	stream bool,
 ) ([]byte, error) {
-	req := r.TranslateRequestEnvelope(ctx, from, to, RequestEnvelope{
-		Format: from,
-		Model:  model,
-		Stream: stream,
-		Body:   rawJSON,
-	})
+	req := r.TranslateRequestEnvelope(
+		ctx, from, to, RequestEnvelope{
+			Format: from,
+			Model:  model,
+			Stream: stream,
+			Body:   rawJSON,
+		},
+	)
 	return req.Body, req.Err
 }
 
@@ -189,12 +198,14 @@ func configurationUpdates(body []byte) []string {
 		return nil
 	}
 	var updates []string
-	input.ForEach(func(_, item gjson.Result) bool {
-		if item.Get("type").String() == "configuration_update" {
-			updates = append(updates, item.Raw)
-		}
-		return true
-	})
+	input.ForEach(
+		func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "configuration_update" {
+				updates = append(updates, item.Raw)
+			}
+			return true
+		},
+	)
 	return updates
 }
 
@@ -212,6 +223,8 @@ func (r *Registry) HasRequestTransformer(from, to Format) bool {
 }
 
 // HasResponseTransformer indicates whether a response translator exists.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *Registry) HasResponseTransformer(from, to Format) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -225,6 +238,8 @@ func (r *Registry) HasResponseTransformer(from, to Format) bool {
 }
 
 // HasStreamResponseTransformer indicates whether a streaming response translator exists.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *Registry) HasStreamResponseTransformer(from, to Format) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -238,6 +253,8 @@ func (r *Registry) HasStreamResponseTransformer(from, to Format) bool {
 }
 
 // HasNonStreamResponseTransformer indicates whether a non-streaming response translator exists.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *Registry) HasNonStreamResponseTransformer(from, to Format) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -257,7 +274,14 @@ func (r *Registry) TranslateStream(
 	model string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) [][]byte {
+) (frames [][]byte) {
+	if to == FormatOpenAIResponse || to == FormatCodex {
+		defer func() {
+			for i, frame := range frames {
+				frames[i] = util.EnsureResponsesUsageDetails(frame)
+			}
+		}()
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -282,22 +306,21 @@ func (r *Registry) TranslateStream(
 	}
 
 	r.mu.RLock()
-	var frames [][]byte
+	fn := r.responses[to][from].Stream
+	r.mu.RUnlock()
+
 	var patch *responsesPatchTranslation
 	translated := false
-	if byTarget, ok := r.responses[to]; ok {
-		if fn, isOk := byTarget[from]; isOk && fn.Stream != nil {
-			var original []byte
-			var inner *any
-			patch, original, inner = prepareResponsesPatchResponse(from, to, originalRequestRawJSON, param)
-			patch.validateStreamEnd(from, body)
-			if patch == nil || patch.err == nil {
-				frames = fn.Stream(ctx, model, original, requestRawJSON, body, inner)
-			}
-			translated = true
+	if fn != nil {
+		var original []byte
+		var inner *any
+		patch, original, inner = prepareResponsesPatchResponse(from, to, originalRequestRawJSON, param)
+		patch.validateStreamEnd(from, body)
+		if patch == nil || patch.err == nil {
+			frames = fn(ctx, model, original, requestRawJSON, body, inner)
 		}
+		translated = true
 	}
-	r.mu.RUnlock()
 	if !translated {
 		frames = [][]byte{body}
 	}
@@ -307,7 +330,9 @@ func (r *Registry) TranslateStream(
 	}
 	if hooks != nil {
 		for i, frame := range frames {
-			frames[i] = hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, frame, true)
+			frames[i] = hooks.NormalizeResponseAfter(
+				ctx, from, to, model, originalRequestRawJSON, requestRawJSON, frame, true,
+			)
 		}
 	}
 	return frames
@@ -320,7 +345,12 @@ func (r *Registry) TranslateNonStream(
 	model string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) []byte {
+) (result []byte) {
+	if to == FormatOpenAIResponse || to == FormatCodex {
+		defer func() {
+			result = util.EnsureResponsesUsageDetails(result)
+		}()
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -343,20 +373,20 @@ func (r *Registry) TranslateNonStream(
 	}
 
 	r.mu.RLock()
+	fn := r.responses[to][from].NonStream
+	r.mu.RUnlock()
+
 	var patch *responsesPatchTranslation
 	translated := false
-	if byTarget, ok := r.responses[to]; ok {
-		if fn, isOk := byTarget[from]; isOk && fn.NonStream != nil {
-			var original []byte
-			var inner *any
-			patch, original, inner = prepareResponsesPatchResponse(from, to, originalRequestRawJSON, param)
-			if patch == nil || patch.err == nil {
-				body = fn.NonStream(ctx, model, original, requestRawJSON, body, inner)
-				translated = true
-			}
+	if fn != nil {
+		var original []byte
+		var inner *any
+		patch, original, inner = prepareResponsesPatchResponse(from, to, originalRequestRawJSON, param)
+		if patch == nil || patch.err == nil {
+			body = fn(ctx, model, original, requestRawJSON, body, inner)
+			translated = true
 		}
 	}
-	r.mu.RUnlock()
 	if translated && body == nil {
 		if patch != nil {
 			errTranslate := ResponseTranslationError(&patch.inner)
@@ -378,14 +408,15 @@ func (r *Registry) TranslateNonStream(
 }
 
 // TranslateTokenCount applies the registered token count response translator.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *Registry) TranslateTokenCount(ctx context.Context, from, to Format, count int64, rawJSON []byte) []byte {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	fn := r.responses[to][from].TokenCount
+	r.mu.RUnlock()
 
-	if byTarget, ok := r.responses[to]; ok {
-		if fn, isOk := byTarget[from]; isOk && fn.TokenCount != nil {
-			return fn.TokenCount(ctx, count)
-		}
+	if fn != nil {
+		return fn(ctx, count)
 	}
 	return rawJSON
 }

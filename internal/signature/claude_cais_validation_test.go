@@ -8,7 +8,12 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
-const observedClaudeCAISFable5Sample = "CAISqwIKiAEIEBgCKkBHRlRBsNiptQUWfPoOhuQKwi5LnncZVO9bB5jqOs76D7uBtgktML0zqJtNmLHXHHcgD6lk4MQu4QBXzFd1lbC3Mg5jbGF1ZGUtZmFibGUtNTgBQgh0aGlua2luZ1okZDk3NDM5NzUtNGJiMC00OTM2LTllMjgtZDViMGQyMWJkYzQ4EgxCGh+XVFFFeySAjtAaDL/A1LltGu6MMJ+eXSIwsN0oBpDrqLv22UBfkMnTotnIbkvkOyb9xZHgigG6OZVHaI3gThm+maLKmgO5PrFLKlDFYp+YZksy/wKwszJlnLTPzAK+NUlfzagOE1ymtZTXhAYK260XyFYmg/te/C231+Fr/hoX+EJoUBnrn0gD7hqMISOT+TaFEuOXYsN517GfaxgB"
+const observedClaudeCAISFable5Sample = "CAISqwIKiAEIEBgCKkBHRlRBsNiptQUWfPoOhuQKwi5LnncZVO9bB5jqOs76D7uBtgktML" +
+	"0zqJtNmLHXHHcgD6lk4MQu4QBXzFd1lbC3Mg5jbGF1ZGUtZmFibGUtNTgBQgh0aGlua2lu" +
+	"Z1okZDk3NDM5NzUtNGJiMC00OTM2LTllMjgtZDViMGQyMWJkYzQ4EgxCGh+XVFFFeySAjt" +
+	"AaDL/A1LltGu6MMJ+eXSIwsN0oBpDrqLv22UBfkMnTotnIbkvkOyb9xZHgigG6OZVHaI3g" +
+	"Thm+maLKmgO5PrFLKlDFYp+YZksy/wKwszJlnLTPzAK+NUlfzagOE1ymtZTXhAYK260XyF" +
+	"Ymg/te/C231+Fr/hoX+EJoUBnrn0gD7hqMISOT+TaFEuOXYsN517GfaxgB"
 
 const observedClaudeCAISContextID = "d9743975-4bb0-4936-9e28-d5b0d21bdc48"
 
@@ -184,7 +189,8 @@ func TestClaudeCAISSignatureObservedSample(t *testing.T) {
 	); decision.Compatible || decision.Action != actionDropBlock {
 		t.Fatalf("Gemini compatibility decision = %+v, want drop block", decision)
 	}
-	if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(observedClaudeCAISFable5Sample); ok || normalized != "" {
+	if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(observedClaudeCAISFable5Sample); ok ||
+		normalized != "" {
 		t.Fatalf("Antigravity compatibility = %q, %v, want empty and false", normalized, ok)
 	}
 	if isValidGrokEncryptedContent(observedClaudeCAISFable5Sample) {
@@ -259,7 +265,14 @@ func TestClaudeCAISSignatureSurvivesClaudeSanitize(t *testing.T) {
 	for _, prefix := range []string{"claude#", "cais#", "ccmax#"} {
 		t.Run(
 			prefix, func(t *testing.T) {
-				input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"keep","signature":"` + prefix + observedClaudeCAISFable5Sample + `"},{"type":"text","text":"answer"}]}]}`)
+				input := []byte(
+					`{"messages":[{"role":"assistant","content":[{"type":"thinking",` +
+						`"thinking":"keep","signature":` +
+						`"` +
+						prefix +
+						observedClaudeCAISFable5Sample +
+						`"},{"type":"text","text":"answer"}]}]}`,
+				)
 				output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-opus-5")
 				if report.Preserved != 1 || report.DroppedBlocks != 0 {
 					t.Fatalf("sanitize report = %+v, want one preserved block", report)

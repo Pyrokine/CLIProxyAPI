@@ -24,7 +24,11 @@ func TestJoinRawArray(t *testing.T) {
 	}{
 		{name: "empty", want: "[]"},
 		{name: "single", items: [][]byte{[]byte(`{"id":1}`)}, want: `[{"id":1}]`},
-		{name: "multiple", items: [][]byte{[]byte(`{"id":1}`), []byte(`{"id":2}`)}, want: `[{"id":1},{"id":2}]`},
+		{
+			name:  "multiple",
+			items: [][]byte{[]byte(`{"id":1}`), []byte(`{"id":2}`)},
+			want:  `[{"id":1},{"id":2}]`,
+		},
 	}
 
 	for _, test := range tests {
@@ -49,7 +53,9 @@ func TestSetRawArrayItems(t *testing.T) {
 		{name: "empty", data: `{"items":[]}`, path: "items", want: `{"items":[]}`},
 		{
 			name: "single nested", data: `{"before":1,"request":{"contents":[]},"after":2}`, path: "request.contents",
-			items: [][]byte{[]byte(`{"id":1}`)}, want: `{"before":1,"request":{"contents":[{"id":1}]},"after":2}`,
+			items: [][]byte{
+				[]byte(`{"id":1}`),
+			}, want: `{"before":1,"request":{"contents":[{"id":1}]},"after":2}`,
 		},
 		{
 			name: "single fallback", data: `{"items":[{"old":1},{"old":2}]}`, path: "items",
@@ -75,7 +81,9 @@ func TestSetRawArrayItems(t *testing.T) {
 
 func TestEchoRequestFieldsCopiesTypedValues(t *testing.T) {
 	request := gjson.Parse(
-		`{"instructions":"answer","max_output_tokens":42,"parallel_tool_calls":true,"temperature":0.25,"reasoning":{"effort":"high"},"metadata":{"team":"sdk"},"unknown":"ignored"}`,
+		`{"instructions":"answer","max_output_tokens":42,"parallel_tool_calls":` +
+			`true,"temperature":0.25,"reasoning":{"effort":"high"},"metadata":{"tea` +
+			`m":"sdk"},"unknown":"ignored"}`,
 	)
 	got := EchoRequestFields([]byte(`{"response":{"id":"resp_1"}}`), request, "response.")
 	for _, test := range []struct {
@@ -129,7 +137,9 @@ func TestSetStringWithoutHTMLEscape(t *testing.T) {
 		{
 			name: "command redirection", data: `{"arguments":""}`, path: "arguments",
 			value: `gh issue view 5802 --json number,title,body,url,state,labels,assignees 2>&1 | head -100`,
-			want:  `{"arguments":"gh issue view 5802 --json number,title,body,url,state,labels,assignees 2>&1 | head -100"}`,
+			want: `{"arguments":"gh issue view 5802 --json number,title,body,url,state,` +
+				`labels,assignees 2>&1 | head ` +
+				`-100"}`,
 		},
 		{
 			name: "JSON arguments", data: `{"arguments":""}`, path: "arguments",
@@ -149,32 +159,39 @@ func TestSetStringWithoutHTMLEscape(t *testing.T) {
 			name: "empty", data: `{"arguments":"old"}`, path: "arguments", value: "", want: `{"arguments":""}`,
 		},
 		{
-			name: "control characters", data: `{"arguments":""}`, path: "arguments", value: "line1\nline2\t\\path\\to\\file",
-			want: `{"arguments":"line1\nline2\t\\path\\to\\file"}`,
+			name: "control characters", data: `{"arguments":""}`, path: "arguments",
+			value: "line1\nline2\t\\path\\to\\file",
+			want:  `{"arguments":"line1\nline2\t\\path\\to\\file"}`,
 		},
 		{
 			name: "Unicode", data: `{"arguments":""}`, path: "arguments", value: "你好，世界！🚀 <&>",
 			want: `{"arguments":"你好，世界！🚀 <&>"}`,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := SetStringWithoutHTMLEscape([]byte(test.data), test.path, test.value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(got) != test.want {
-				t.Fatalf("JSON = %s, want %s", got, test.want)
-			}
-			if actual := gjson.GetBytes(got, test.path); !actual.Exists() || actual.String() != test.value {
-				t.Fatalf("decoded value = %q, want %q", actual.String(), test.value)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				got, err := SetStringWithoutHTMLEscape([]byte(test.data), test.path, test.value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != test.want {
+					t.Fatalf("JSON = %s, want %s", got, test.want)
+				}
+				if actual := gjson.GetBytes(got, test.path); !actual.Exists() || actual.String() != test.value {
+					t.Fatalf("decoded value = %q, want %q", actual.String(), test.value)
+				}
+			},
+		)
 	}
 }
 
 func TestSSEEventDataConcatenatedFrames(t *testing.T) {
-	frames := bytes.Split(append(SSEEventData("event1", []byte(`{"a":1}`)),
-		SSEEventData("event2", []byte(`{"b":2}`))...), []byte("\n\n"))
+	frames := bytes.Split(
+		append(
+			SSEEventData("event1", []byte(`{"a":1}`)),
+			SSEEventData("event2", []byte(`{"b":2}`))...,
+		), []byte("\n\n"),
+	)
 	if len(frames) != 3 || len(frames[2]) != 0 {
 		t.Fatalf("frame count = %d, want two complete frames and an empty suffix", len(frames))
 	}

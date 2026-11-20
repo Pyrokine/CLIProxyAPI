@@ -7,11 +7,13 @@ import (
 )
 
 func TestClaudeMessageSystemReminderTextPreservesTextPartOrder(t *testing.T) {
-	content := gjson.Parse(`[
+	content := gjson.Parse(
+		`[
 		{"type":"text","text":"first instruction"},
 		{"type":"image","source":{"type":"base64","data":"image"}},
 		{"type":"text","text":"second instruction"}
-	]`)
+	]`,
+	)
 
 	got, ok := ClaudeMessageSystemReminderText(content)
 	if !ok {

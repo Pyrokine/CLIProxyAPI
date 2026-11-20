@@ -129,9 +129,11 @@ func alignToolResults(content gjson.Result, toolUseIDs []string, typePath, typeN
 		return content
 	}
 
-	sort.SliceStable(matchedResults, func(left, right int) bool {
-		return matchedResults[left].order < matchedResults[right].order
-	})
+	sort.SliceStable(
+		matchedResults, func(left, right int) bool {
+			return matchedResults[left].order < matchedResults[right].order
+		},
+	)
 
 	ordered := make([][]byte, len(parts))
 	for index, part := range parts {

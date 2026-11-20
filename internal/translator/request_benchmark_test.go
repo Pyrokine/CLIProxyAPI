@@ -59,6 +59,9 @@ func benchmarkRequestTranslation(b *testing.B, turns int) {
 			to := sdktranslator.FromString(target)
 			b.Run(
 				route.source+"_to_"+target, func(b *testing.B) {
+					if !sdktranslator.HasRequestTransformer(from, to) {
+						b.Fatalf("request translator %s -> %s is not registered", from, to)
+					}
 					output := sdktranslator.TranslateRequest(from, to, "gemini-2.5-pro", request, true)
 					if !gjson.ValidBytes(output) {
 						b.Fatalf("translator generated invalid JSON: %s", output)
@@ -266,7 +269,8 @@ func benchmarkInteractionsRequest(turns int) []byte {
 	if turns > 0 {
 		input = append(
 			input, map[string]any{
-				"type": "user_input", "content": []any{map[string]any{"type": "text", "text": benchmarkHistorySentinel}},
+				"type":    "user_input",
+				"content": []any{map[string]any{"type": "text", "text": benchmarkHistorySentinel}},
 			},
 		)
 	}

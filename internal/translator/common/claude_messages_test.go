@@ -8,9 +8,17 @@ import (
 
 func TestClaudeMessageAccumulatorGroupsAndOrdersAssistantParts(t *testing.T) {
 	accumulator := NewClaudeMessageAccumulator(3)
-	accumulator.Append([]byte(`{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"first","input":{}}]}`))
-	accumulator.Append([]byte(`{"role":"assistant","content":[{"type":"thinking","thinking":"reason"},{"type":"text","text":"answer"}]}`))
-	accumulator.Append([]byte(`{"role":"assistant","content":[{"type":"tool_use","id":"call_2","name":"second","input":{}}]}`))
+	accumulator.Append(
+		[]byte(`{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"first","input":{}}]}`),
+	)
+	accumulator.Append(
+		[]byte(
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"reason"},{"type":"text","text":"answer"}]}`,
+		),
+	)
+	accumulator.Append(
+		[]byte(`{"role":"assistant","content":[{"type":"tool_use","id":"call_2","name":"second","input":{}}]}`),
+	)
 
 	messages := accumulator.Messages()
 	if len(messages) != 1 {
@@ -36,7 +44,9 @@ func TestClaudeMessageAccumulatorGroupsAndOrdersAssistantParts(t *testing.T) {
 
 func TestClaudeMessageAccumulatorPreservesUserOrderAndRoleBoundaries(t *testing.T) {
 	accumulator := NewClaudeMessageAccumulator(3)
-	accumulator.Append([]byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}`))
+	accumulator.Append(
+		[]byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}`),
+	)
 	accumulator.Append([]byte(`{"role":"user","content":[{"type":"text","text":"continue"}]}`))
 	accumulator.Append([]byte(`{"role":"assistant","content":[{"type":"text","text":"done"}]}`))
 
@@ -97,7 +107,9 @@ func TestClaudeMessageAccumulatorFlushPreservesExplicitBoundary(t *testing.T) {
 
 func TestClaudeMessageAccumulatorPreservesBlockCacheControl(t *testing.T) {
 	accumulator := NewClaudeMessageAccumulator(2)
-	accumulator.Append([]byte(`{"role":"user","content":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}`))
+	accumulator.Append(
+		[]byte(`{"role":"user","content":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}`),
+	)
 	accumulator.Append([]byte(`{"role":"user","content":[{"type":"text","text":"fresh"}]}`))
 
 	messages := accumulator.Messages()
@@ -110,13 +122,15 @@ func TestClaudeMessageAccumulatorPreservesBlockCacheControl(t *testing.T) {
 }
 
 func TestAlignClaudeToolResultsSupportsPartialNonContiguousResults(t *testing.T) {
-	content := gjson.Parse(`[
+	content := gjson.Parse(
+		`[
 		{"type":"tool_result","tool_use_id":"call-c","content":"three"},
 		{"type":"text","text":"keep text here"},
 		{"type":"tool_result","tool_use_id":"external","content":"external"},
 		{"type":"image","source":{"type":"base64","data":"image"}},
 		{"type":"tool_result","tool_use_id":"call-a","content":"one"}
-	]`)
+	]`,
+	)
 
 	aligned := AlignClaudeToolResults(content, []string{"call-a", "call-b", "call-c"})
 	parts := aligned.Array()
@@ -138,10 +152,12 @@ func TestAlignClaudeToolResultsSupportsPartialNonContiguousResults(t *testing.T)
 }
 
 func TestAlignClaudeToolResultsMatchesRawIDsExactly(t *testing.T) {
-	content := gjson.Parse(`[
+	content := gjson.Parse(
+		`[
 		{"type":"tool_result","tool_use_id":"call_a","content":"underscore"},
 		{"type":"tool_result","tool_use_id":"call.a","content":"dot"}
-	]`)
+	]`,
+	)
 
 	aligned := AlignClaudeToolResults(content, []string{"call.a", "call_a"})
 	parts := aligned.Array()
@@ -154,13 +170,15 @@ func TestAlignClaudeToolResultsMatchesRawIDsExactly(t *testing.T) {
 }
 
 func TestAlignGeminiFunctionResponsesPreservesOtherSlots(t *testing.T) {
-	parts := gjson.Parse(`[
+	parts := gjson.Parse(
+		`[
 		{"functionResponse":{"id":"call_a","name":"second","response":{"result":"underscore"}}},
 		{"text":"keep text"},
 		{"functionResponse":{"id":"external","name":"external","response":{"result":{"$ref":"#/Item"}}}},
 		{"inlineData":{"mime_type":"image/png","data":"image"}},
 		{"functionResponse":{"id":"call.a","name":"first","response":{"result":"dot"}}}
-	]`)
+	]`,
+	)
 	aligned := AlignGeminiFunctionResponses(parts, []string{"call.a", "missing", "call_a"})
 	for path, want := range map[string]string{
 		"0.functionResponse.id":                   "call.a",
@@ -188,23 +206,53 @@ func TestClaudeToolResultContent(t *testing.T) {
 		{"number", `42`, `42`, nil},
 		{"null", `null`, `null`, nil},
 		{"empty array", `[]`, `[]`, nil},
-		{"text blocks", `[{"type":"text","text":"alpha"},{"type":"text","text":"beta"}]`, `{"text":"alpha\nbeta"}`, nil},
-		{"text and images", `[{"type":"text","text":"alpha"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"one"}},{"type":"text","text":"beta"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"two"}}]`, `{"text":"alpha\nbeta"}`, []string{"one", "two"}},
-		{"image only", `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"one"}}]`, `{"text":""}`, []string{"one"}},
-		{"opaque blocks", `[{"type":"text","text":"alpha"},{"$ref":"#/Item"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"one"}}]`, `[{"type":"text","text":"alpha"},{"$ref":"#/Item"}]`, []string{"one"}},
-		{"URL image preserved as JSON", `[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}]`, `[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}]`, nil},
-		{"incomplete image preserved as JSON", `[{"type":"image","source":{"type":"base64","media_type":"image/png"}}]`, `[{"type":"image","source":{"type":"base64","media_type":"image/png"}}]`, nil},
+		{
+			"text blocks", `[{"type":"text","text":"alpha"},{"type":"text","text":"beta"}]`, `{"text":"alpha\nbeta"}`,
+			nil,
+		},
+		{
+			"text and images",
+			`[{"type":"text","text":"alpha"},{"type":"image","source":{"type":"base` +
+				`64","media_type":"image/png","data":"one"}},{"type":"text","text":"bet` +
+				`a"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg` +
+				`","data":"two"}}]`,
+			`{"text":"alpha\nbeta"}`, []string{"one", "two"},
+		},
+		{
+			"image only", `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"one"}}]`,
+			`{"text":""}`, []string{"one"},
+		},
+		{
+			"opaque blocks",
+			`[{"type":"text","text":"alpha"},{"$ref":"#/Item"},{"type":"image","sou` +
+				`rce":{"type":"base64","media_type":"image/png","data":"one"}}]`,
+			`[{"type":"text","text":"alpha"},{"$ref":"#/Item"}]`, []string{"one"},
+		},
+		{
+			"URL image preserved as JSON",
+			`[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}]`,
+			`[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}]`, nil,
+		},
+		{
+			"incomplete image preserved as JSON",
+			`[{"type":"image","source":{"type":"base64","media_type":"image/png"}}]`,
+			`[{"type":"image","source":{"type":"base64","media_type":"image/png"}}]`, nil,
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			result, images := ClaudeToolResultContent(gjson.Parse(tc.input))
-			if result.Raw != tc.want || len(images) != len(tc.images) {
-				t.Fatalf("result=%s, images=%v, want %s and %v", result.Raw, images, tc.want, tc.images)
-			}
-			for index, data := range tc.images {
-				if source := images[index]; source.Get("type").String() != "base64" || source.Get("media_type").String() == "" || source.Get("data").String() != data {
-					t.Fatalf("image[%d]=%s, want base64 data %q", index, source.Raw, data)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				result, images := ClaudeToolResultContent(gjson.Parse(tc.input))
+				if result.Raw != tc.want || len(images) != len(tc.images) {
+					t.Fatalf("result=%s, images=%v, want %s and %v", result.Raw, images, tc.want, tc.images)
 				}
-			}
-		})
+				for index, data := range tc.images {
+					if source := images[index]; source.Get("type").String() != "base64" ||
+						source.Get("media_type").String() == "" ||
+						source.Get("data").String() != data {
+						t.Fatalf("image[%d]=%s, want base64 data %q", index, source.Raw, data)
+					}
+				}
+			},
+		)
 	}
 }

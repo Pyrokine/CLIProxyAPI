@@ -16,31 +16,36 @@ func TestCleanJSONSchemaForAntigravityResponsePreservesUnions(t *testing.T) {
 				{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},
 				{"type":"null"}
 			]},
-			"label":{"oneOf":[{"type":"string"},{"type":"null"}]}
+			"label":{"oneOf":[{"type":"string"},{"type":"null"}]},
+			"untyped":{"oneOf":[{},{"type":"null"}]},
+			"overlap":{"oneOf":[{"type":"string","nullable":true},{"type":"null"}]},
+			"duplicate_null":{"oneOf":[{"type":"null"},{"type":"string"},{"type":"null"}]},
+			"mixed":{"anyOf":[{"type":"string"},{"type":"number"}]},
+			"objects":{"oneOf":[
+				{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]},
+				{"type":"object","properties":{"b":{"type":"string"}},"required":["b"]}
+			]}
 		}
 	}`
 
 	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
-	for _, testCase := range []struct {
-		path      string
-		wantTypes []string
-	}{
-		{path: "properties.action.anyOf", wantTypes: []string{"object", "null"}},
-		{path: "properties.label.oneOf", wantTypes: []string{"string", "null"}},
+	for path, wantType := range map[string]string{"properties.action": "object", "properties.label": "string"} {
+		schema := result.Get(path)
+		if schema.Get("anyOf").Exists() || schema.Get("oneOf").Exists() ||
+			schema.Get("type").String() != wantType || !schema.Get("nullable").Bool() {
+			t.Errorf("response nullable union %s = %s", path, schema.Raw)
+		}
+	}
+	if result.Get("properties.action.properties.name.type").String() != "string" ||
+		result.Get("properties.action.required.0").String() != "name" {
+		t.Errorf("nullable object lost its fields or requirements: %s", result.Raw)
+	}
+	for _, path := range []string{
+		"properties.mixed.anyOf", "properties.objects.oneOf", "properties.untyped.oneOf", "properties.overlap.oneOf",
+		"properties.duplicate_null.oneOf",
 	} {
-		union := result.Get(testCase.path)
-		if !union.IsArray() {
-			t.Errorf("response union %s was flattened: %s", testCase.path, result.Raw)
-			continue
-		}
-		gotTypes := make([]string, 0, len(union.Array()))
-		for _, branch := range union.Array() {
-			gotTypes = append(gotTypes, branch.Get("type").String())
-		}
-		if !reflect.DeepEqual(gotTypes, testCase.wantTypes) {
-			t.Errorf(
-				"response union %s types = %v, want %v: %s", testCase.path, gotTypes, testCase.wantTypes, result.Raw,
-			)
+		if !reflect.DeepEqual(result.Get(path).Value(), gjson.Get(input, path).Value()) {
+			t.Errorf("response alternatives changed at %s: %s", path, result.Raw)
 		}
 	}
 }
@@ -75,7 +80,13 @@ func TestCleanJSONSchemaForAntigravityResponsePreservesEnumType(t *testing.T) {
 			gotValues = append(gotValues, enumValue.String())
 		}
 		if !reflect.DeepEqual(gotValues, testCase.wantValues) {
-			t.Errorf("%s enum values = %v, want %v: %s", testCase.path, gotValues, testCase.wantValues, result.Raw)
+			t.Errorf(
+				"%s enum values = %v, want %v: %s",
+				testCase.path,
+				gotValues,
+				testCase.wantValues,
+				result.Raw,
+			)
 		}
 	}
 }
@@ -93,13 +104,18 @@ func TestJSONSchemaCleanOptionsKeepToolRewritesScoped(t *testing.T) {
 	if toolSchema.Get("properties.choice.anyOf").Exists() {
 		t.Errorf("tool union was not flattened: %s", toolSchema.Raw)
 	}
-	if gotType := toolSchema.Get("properties.level.type").String(); gotType != "string" {
-		t.Errorf("tool enum type = %q, want string: %s", gotType, toolSchema.Raw)
+	if gotType := toolSchema.Get("properties.level.type").String(); gotType != "number" {
+		t.Errorf("tool enum type = %q, want number: %s", gotType, toolSchema.Raw)
 	}
 
+	if toolSchema.Get("properties.level.enum").Raw != `["1","2"]` {
+		t.Errorf("tool numeric enum was changed: %s", toolSchema.Raw)
+	}
 	responseSchema := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
-	if !responseSchema.Get("properties.choice.anyOf").IsArray() {
-		t.Errorf("response union was flattened: %s", responseSchema.Raw)
+	if responseSchema.Get("properties.choice.anyOf").Exists() ||
+		responseSchema.Get("properties.choice.type").String() != "string" ||
+		!responseSchema.Get("properties.choice.nullable").Bool() {
+		t.Errorf("response nullable union was changed: %s", responseSchema.Raw)
 	}
 	if gotType := responseSchema.Get("properties.level.type").String(); gotType != "number" {
 		t.Errorf("response enum type = %q, want number: %s", gotType, responseSchema.Raw)
@@ -129,11 +145,13 @@ func TestCleanJSONSchemaForAntigravityResponsePreservesAdditionalPropertiesFalse
 		t.Fatalf("response schema gained tool-only hint: %s", result.Raw)
 	}
 
-	nonFalse := CleanJSONSchemaForAntigravityResponse(`{
+	nonFalse := CleanJSONSchemaForAntigravityResponse(
+		`{
 		"type":"object",
 		"properties":{"map":{"type":"object","additionalProperties":{"type":"string"}}},
 		"additionalProperties":true
-	}`)
+	}`,
+	)
 	if strings.Contains(nonFalse, `"additionalProperties"`) {
 		t.Fatalf("non-false additionalProperties survived: %s", nonFalse)
 	}
@@ -166,7 +184,8 @@ func TestCleanJSONSchemaMergesConditionalPropertiesWithoutPromotingRequired(t *t
 						t.Errorf("conditional property %s was lost: %s", path, result.Raw)
 					}
 				}
-				if required := result.Get("required").Array(); len(required) != 1 || required[0].String() != "kind" {
+				if required := result.Get("required").Array(); len(required) != 1 ||
+					required[0].String() != "kind" {
 					t.Errorf("required = %v, want only kind; schema=%s", required, result.Raw)
 				}
 			},
@@ -293,7 +312,9 @@ func TestCleanJSONSchemaRepairsMalformedAndStringifiedSchemas(t *testing.T) {
 }
 
 func TestCleanJSONSchemaAddsArrayItemsOnlyForTools(t *testing.T) {
-	input := `{"type":"object","properties":{"values":{"type":"array"},"existing":{"type":"array","items":{"type":"number"}}}}`
+	input := `{"type":"object","properties":{"values":{"type":"array"},"existing":` +
+		`{"type":"array","items":{"type":` +
+		`"number"}}}}`
 	for name, clean := range map[string]func(string) string{
 		"antigravity": CleanJSONSchemaForAntigravity,
 		"gemini":      CleanJSONSchemaForGemini,

@@ -15,6 +15,7 @@ const (
 	minGrokEncryptedContentEntropyRatio = 0.85
 )
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type GrokEncryptedContentInfo struct {
 	RawLen     int
 	DecodedLen int
