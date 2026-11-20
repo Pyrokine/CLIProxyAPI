@@ -125,11 +125,15 @@ func TestEnsureTokenBreakdownForProviderUsesKnownSemantics(t *testing.T) {
 		t.Run(
 			tt.name, func(t *testing.T) {
 				detail := EnsureTokenBreakdownForProvider(tt.detail, tt.provider, tt.executorType)
-				if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != TokenAccountingQualityComplete {
+				if !detail.TokenBreakdown.Valid() ||
+					detail.TokenBreakdown.Quality != TokenAccountingQualityComplete {
 					t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 				}
 				if detail.TotalTokens != tt.wantTotal || detail.TokenBreakdown.TotalTokens != tt.wantTotal ||
-					detail.TokenBreakdown.Input.TotalTokens != tt.wantInput || detail.TokenBreakdown.Output.TotalTokens != tt.wantOutput {
+					detail.TokenBreakdown.Input.TotalTokens !=
+						tt.wantInput ||
+					detail.TokenBreakdown.Output.TotalTokens !=
+						tt.wantOutput {
 					t.Fatalf(
 						"detail = %+v, want total=%d input=%d output=%d", detail, tt.wantTotal, tt.wantInput,
 						tt.wantOutput,
@@ -144,14 +148,20 @@ func TestEnsureTokenBreakdownForUnknownProviderDoesNotGuessReasoning(t *testing.
 	detail := EnsureTokenBreakdownForProvider(
 		Detail{InputTokens: 100, OutputTokens: 30, ReasoningTokens: 12}, "plugin-provider", "",
 	)
-	if detail.TotalTokens != 130 || detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified || detail.TokenBreakdown.UnclassifiedTokens != 130 {
+	if detail.TotalTokens != 130 || detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified ||
+		detail.TokenBreakdown.UnclassifiedTokens != 130 {
 		t.Fatalf("detail = %+v", detail)
 	}
 }
 
 func TestEnsureTokenBreakdownForUnknownProviderPreservesAuxiliaryOnlyUsage(t *testing.T) {
-	detail := EnsureTokenBreakdownForProvider(Detail{ReasoningTokens: 12, CacheReadTokens: 7}, "plugin-provider", "")
-	if detail.TotalTokens != 19 || detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified || detail.TokenBreakdown.UnclassifiedTokens != 19 {
+	detail := EnsureTokenBreakdownForProvider(
+		Detail{ReasoningTokens: 12, CacheReadTokens: 7},
+		"plugin-provider",
+		"",
+	)
+	if detail.TotalTokens != 19 || detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified ||
+		detail.TokenBreakdown.UnclassifiedTokens != 19 {
 		t.Fatalf("detail = %+v", detail)
 	}
 }
@@ -166,7 +176,8 @@ func TestEnsureTokenBreakdownForGeminiClassifiesReasoningOnlyUsage(t *testing.T)
 
 func TestEnsureTokenBreakdownPreservesLegacyCachedOnlyUsage(t *testing.T) {
 	detail := EnsureTokenBreakdownForProvider(Detail{CachedTokens: 13}, "openai", "")
-	if detail.TotalTokens != 13 || detail.CacheReadTokens != 13 || detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified ||
+	if detail.TotalTokens != 13 || detail.CacheReadTokens != 13 ||
+		detail.TokenBreakdown.Quality != TokenAccountingQualityUnclassified ||
 		detail.TokenBreakdown.UnclassifiedTokens != 13 {
 		t.Fatalf("detail = %+v", detail)
 	}
@@ -211,20 +222,28 @@ func TestTokenBreakdownValidRejectsOverflowingSums(t *testing.T) {
 		{
 			name: "top-level buckets wrap back to zero",
 			breakdown: TokenBreakdown{
-				SchemaVersion:      TokenAccountingSchemaVersion,
-				Quality:            TokenAccountingQualityInconsistent,
-				Input:              TokenInputBreakdown{TotalTokens: math.MaxInt64, UncachedTokens: math.MaxInt64},
-				Output:             TokenOutputBreakdown{TotalTokens: math.MaxInt64, NonReasoningTokens: math.MaxInt64},
+				SchemaVersion: TokenAccountingSchemaVersion,
+				Quality:       TokenAccountingQualityInconsistent,
+				Input: TokenInputBreakdown{
+					TotalTokens:    math.MaxInt64,
+					UncachedTokens: math.MaxInt64,
+				},
+				Output: TokenOutputBreakdown{
+					TotalTokens:        math.MaxInt64,
+					NonReasoningTokens: math.MaxInt64,
+				},
 				UnclassifiedTokens: 2,
 			},
 		},
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if test.breakdown.Valid() {
-				t.Fatalf("overflowing breakdown reported valid: %+v", test.breakdown)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				if test.breakdown.Valid() {
+					t.Fatalf("overflowing breakdown reported valid: %+v", test.breakdown)
+				}
+			},
+		)
 	}
 }

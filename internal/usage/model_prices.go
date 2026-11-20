@@ -20,21 +20,34 @@ type PriceProvider interface {
 }
 
 type detailedPrice struct {
-	CanonicalModel string
-	Currency       string
-	Source         string
-	EffectiveFrom  string
-	EffectiveUntil string
-	Prompt         float64
-	Completion     float64
-	CacheRead      *float64
-	CacheWrite     *float64
-	CacheWrite5m   *float64
-	CacheWrite1h   *float64
-	Status         CostStatus
-	Automatic      bool
-	Effective      bool
-	Reason         string
+	CanonicalModel     string
+	Currency           string
+	Source             string
+	EffectiveFrom      string
+	EffectiveUntil     string
+	Prompt             float64
+	Completion         float64
+	PromptKnown        *bool
+	CompletionKnown    *bool
+	CacheRead          *float64
+	CacheWrite         *float64
+	CacheWrite5m       *float64
+	CacheWrite1h       *float64
+	CacheWrite30m      *float64
+	CacheWrite12h      *float64
+	SpeedRates         []modelcatalog.SpeedRate
+	ConditionalRates   []modelcatalog.ConditionalRate
+	ModalityRates      []modelcatalog.ModalityRate
+	ChargeRates        []modelcatalog.ChargeRate
+	CoverageGaps       []modelcatalog.CoverageGap
+	RequestScoped      bool
+	Region             string
+	HasBaseRates       bool
+	CalendarRateActive bool
+	Status             CostStatus
+	Automatic          bool
+	Effective          bool
+	Reason             string
 }
 
 type detailedPriceFunc func(model string, at time.Time) (detailedPrice, bool)
@@ -161,10 +174,13 @@ func priceFuncFromCatalog(catalog modelcatalog.File) PriceFunc {
 		price := entry.price.RatesAt(now)
 		currency := strings.ToUpper(strings.TrimSpace(price.Currency))
 		if (currency != "" && currency != "USD") ||
-			!price.EffectiveAt(now) || !price.HasReferenceTokenRates() {
+			!price.EffectiveAt(now) || !price.HasBaseTokenRates() {
 			return 0, 0, 0, false
 		}
-		cacheRead, _ := price.CacheReadRate()
+		cacheRead, known := price.CacheReadRate()
+		if !known || !price.PromptRateKnown() || !price.CompletionRateKnown() {
+			return 0, 0, 0, false
+		}
 		return price.Prompt, price.Completion, cacheRead, true
 	}
 }
@@ -179,8 +195,8 @@ func detailedPriceFuncFromCatalog(catalog modelcatalog.File) detailedPriceFunc {
 		if !ok {
 			return detailedPrice{}, false
 		}
-		price := entry.price.RatesAt(at)
-		hasReferenceRates := price.HasReferenceTokenRates()
+		price := entry.price.Clone().RatesAt(at)
+		hasReferenceRates := price.HasBaseTokenRates()
 		cacheRead, hasCacheRead := price.CacheReadRate()
 		cacheWrite, hasCacheWrite := price.CacheWriteRate()
 		cacheWrite5m, hasCacheWrite5m := price.CacheWrite5mRate()
@@ -193,18 +209,32 @@ func detailedPriceFuncFromCatalog(catalog modelcatalog.File) detailedPriceFunc {
 		if source == "" {
 			source = "model-catalog"
 		}
+		promptKnown, completionKnown := price.PromptRateKnown(), price.CompletionRateKnown()
 		result := detailedPrice{
-			CanonicalModel: entry.canonicalModel,
-			Currency:       currency,
-			Source:         source,
-			EffectiveFrom:  strings.TrimSpace(price.EffectiveFrom),
-			EffectiveUntil: strings.TrimSpace(price.EffectiveUntil),
-			Prompt:         price.Prompt,
-			Completion:     price.Completion,
-			Status:         CostStatus(price.EffectiveStatus()),
-			Automatic:      price.Automatic(),
-			Effective:      price.EffectiveAt(at),
-			Reason:         strings.Join(price.Limitations, "; "),
+			PromptKnown:        &promptKnown,
+			CompletionKnown:    &completionKnown,
+			CanonicalModel:     entry.canonicalModel,
+			Currency:           currency,
+			Source:             source,
+			EffectiveFrom:      strings.TrimSpace(price.EffectiveFrom),
+			EffectiveUntil:     strings.TrimSpace(price.EffectiveUntil),
+			Prompt:             price.Prompt,
+			Completion:         price.Completion,
+			SpeedRates:         price.SpeedRates,
+			ConditionalRates:   price.ConditionalRates,
+			ModalityRates:      price.ModalityRates,
+			ChargeRates:        price.ChargeRates,
+			CoverageGaps:       price.CoverageGaps,
+			RequestScoped:      price.RequestScoped,
+			Region:             strings.TrimSpace(price.Region),
+			HasBaseRates:       hasReferenceRates,
+			CalendarRateActive: (price.Prompt != entry.price.Prompt || price.Completion != entry.price.Completion) && !price.CalendarKnownAt(at),
+			CacheWrite30m:      price.CacheWrite30m,
+			CacheWrite12h:      price.CacheWrite12h,
+			Status:             CostStatus(price.EffectiveStatus()),
+			Automatic:          price.Automatic(),
+			Effective:          price.EffectiveAt(at),
+			Reason:             strings.Join(price.Limitations, "; "),
 		}
 		if hasReferenceRates && hasCacheRead {
 			result.CacheRead = &cacheRead
@@ -271,7 +301,7 @@ func indexModelPrices(prices map[string]modelcatalog.Price) map[string]indexedCa
 		if key := modelPriceKey(name); key != "" {
 			indexed[key] = indexedCatalogPrice{
 				canonicalModel: strings.TrimSpace(name),
-				price:          price,
+				price:          price.Clone(),
 			}
 		}
 	}

@@ -4,12 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	_ "modernc.org/sqlite"
 )
+
+const requestLogIDSQLExpression = "CASE WHEN json_valid(events.metadata) THEN " +
+	"json_extract(events.metadata, '$.request_id') END"
 
 func TestPersistRequestLogArtifactRejectsOlderRevision(t *testing.T) {
 	store := openTestStore(t)
@@ -290,5 +294,109 @@ func TestMigrateV4ToV5CreatesRequestLogArtifactSchema(t *testing.T) {
 	}
 	if _, found, err := migrated.queryRequestLogArtifact(context.Background(), detail.RequestID); err != nil || found {
 		t.Fatalf("legacy artifact lookup = found %t, error %v; want no lifecycle row", found, err)
+	}
+}
+
+func TestHasEventRequestIDPreservesTypesTrimAndUpgradeState(t *testing.T) {
+	cases := []struct {
+		name, metadata, request string
+		want                    bool
+	}{
+		{"string", `{"request_id":"known-id"}`, "known-id", true},
+		{"trim input", `{"request_id":"known-id"}`, "\u2000 \tknown-id\n\u00a0", true},
+		{"stored whitespace", `{"request_id":" known-id "}`, " known-id ", false},
+		{"case sensitive", `{"request_id":"Known-ID"}`, "known-id", false},
+		{"numeric", `{"request_id":123}`, "123", false},
+		{"numeric string", `{"request_id":"123"}`, "123", true},
+		{"real", `{"request_id":1.0}`, "1.0", false},
+		{"boolean", `{"request_id":true}`, "1", false},
+		{"boolean string", `{"request_id":"true"}`, "true", true},
+		{"null", `{"request_id":null}`, "null", false},
+		{"object", `{"request_id":{"value":1}}`, `{"value":1}`, true},
+		{"array", `{"request_id":["x",1]}`, `["x",1]`, true},
+		{"unicode", `{"request_id":"雪-ID"}`, "雪-ID", true},
+		{"embedded zero", `{"request_id":"a\u0000b"}`, "a\x00b", true},
+		{"empty input", `{"request_id":""}`, " \t\n", false},
+		{"missing", `{}`, "unknown-id", false},
+		{"malformed", `{broken`, "unknown-id", false},
+	}
+	for _, test := range cases {
+		t.Run(
+			test.name, func(t *testing.T) {
+				store := openTestStore(t)
+				if _, err := store.db.Exec(
+					`INSERT INTO dim_model(name) VALUES('request-id');
+INSERT INTO events(fingerprint,ts_ns,model_id,failed,metadata) VALUES(CAST(printf('%020d',1) AS BLOB),1,1,0,?)`,
+					test.metadata,
+				); err != nil {
+					t.Fatal(err)
+				}
+				for _, pending := range []bool{false, true} {
+					if pending {
+						if _, err := store.db.Exec(
+							"DELETE FROM event_fields; UPDATE meta SET value='' WHERE key=?", eventFieldsCursorKey,
+						); err != nil {
+							t.Fatal(err)
+						}
+					}
+					var legacy int
+					if query := strings.TrimSpace(test.request); query != "" {
+						if err := store.db.QueryRow(
+							"SELECT EXISTS(SELECT 1 FROM events WHERE "+requestLogIDSQLExpression+" = ? LIMIT 1)", query,
+						).Scan(&legacy); err != nil {
+							t.Fatal(err)
+						}
+					}
+					got, err := store.hasEventRequestID(t.Context(), test.request)
+					if err != nil || got != test.want || got != (legacy != 0) {
+						t.Fatalf(
+							"pending=%t exists=%t error=%v legacy=%d want=%t", pending, got, err, legacy, test.want,
+						)
+					}
+				}
+			},
+		)
+	}
+}
+
+func TestHasEventRequestIDUsesLayoutRequestIDIndexes(t *testing.T) {
+	store := openTestStore(t)
+	for _, pending := range []bool{false, true} {
+		want := "idx_event_fields_request_id"
+		if pending {
+			want = "idx_events_request_id"
+			if _, err := store.db.Exec("UPDATE meta SET value='' WHERE key=?", eventFieldsCursorKey); err != nil {
+				t.Fatal(err)
+			}
+		}
+		source, err := eventFieldsSource(t.Context(), store.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		query := "SELECT EXISTS(SELECT 1 FROM " + source + " AS events WHERE events.request_id = ? LIMIT 1)"
+		rows, err := store.db.Query("EXPLAIN QUERY PLAN "+query, "unknown-id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan.WriteString(detail + "\n")
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		_ = rows.Close()
+		if !strings.Contains(plan.String(), "COVERING INDEX "+want) || strings.Contains(plan.String(), "SCAN events") {
+			t.Fatalf("pending=%t expected request ID index %s:\n%s", pending, want, plan.String())
+		}
+		if exists, err := store.hasEventRequestID(t.Context(), "unknown-id"); err != nil || exists {
+			t.Fatalf("pending=%t unknown request ID exists=%t error=%v", pending, exists, err)
+		}
+		t.Logf("pending=%t %s", pending, strings.TrimSpace(plan.String()))
 	}
 }

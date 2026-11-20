@@ -126,7 +126,8 @@ func TestUsageExportImportEncryptedRoundTrip(t *testing.T) {
 		`"executor_type":"openai-response",` +
 		`"thinking":{"intensity":"high","mode":"enabled","level":"deep","budget":4096},` +
 		`"response_headers":{"Content-Type":["application/json"],"X-Upstream-Token":["secret-header"]},` +
-		`"tokens":{"input_tokens":101,"output_tokens":202,"reasoning_tokens":33,"cached_tokens":44,"total_tokens":380},` +
+		(`"tokens":{"input_tokens":101,"output_tokens":202,"reasoning_tokens":` +
+			`33,"cached_tokens":44,"total_tokens":380},`) +
 		`"failed":false` +
 		`}]`
 	if _, err := source.ImportContext(ctx, []byte(legacy)); err != nil {
@@ -190,7 +191,10 @@ func TestUsageExportImportEncryptedRoundTrip(t *testing.T) {
 	}
 	if importResponse.Added != 1 || importResponse.Skipped != 0 ||
 		importResponse.TotalRequests != 1 || importResponse.FailedRequests != 0 || importResponse.Warning != "" {
-		t.Fatalf("ImportUsageStatistics response = %+v, want added/total 1 and no failures/warning", importResponse)
+		t.Fatalf(
+			"ImportUsageStatistics response = %+v, want added/total 1 and no failures/warning",
+			importResponse,
+		)
 	}
 
 	sourceEvents, err := source.QueryBackupEventsContext(ctx, time.Time{}, time.Time{}, usage.EventFilters{})

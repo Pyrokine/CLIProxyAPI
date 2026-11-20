@@ -120,52 +120,75 @@ func TestUsageManagerSharesExecutionIDAcrossPlugins(t *testing.T) {
 	}{
 		{name: "generated", nilContext: true},
 		{name: "http-context", httpID: "inbound-http-id", wantHTTP: "inbound-http-id"},
-		{name: "whitespace", recordID: " \t", recordHTTP: " \t", httpID: "inbound-http-id", wantHTTP: "inbound-http-id"},
-		{name: "context", contextID: " context-execution ", httpID: "inbound-http-id", wantID: "context-execution", wantHTTP: "inbound-http-id"},
-		{name: "record", contextID: "context-execution", recordID: " record-execution ", httpID: "inbound-http-id", recordHTTP: " stored-http-id ", wantID: "record-execution", wantHTTP: "stored-http-id"},
+		{
+			name: "whitespace", recordID: " \t", recordHTTP: " \t", httpID: "inbound-http-id",
+			wantHTTP: "inbound-http-id",
+		},
+		{
+			name: "context", contextID: " context-execution ", httpID: "inbound-http-id", wantID: "context-execution",
+			wantHTTP: "inbound-http-id",
+		},
+		{
+			name: "record", contextID: "context-execution", recordID: " record-execution ", httpID: "inbound-http-id",
+			recordHTTP: " stored-http-id ", wantID: "record-execution", wantHTTP: "stored-http-id",
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manager := NewManager(2)
-			defer manager.Stop()
-			first := make(chan capturedUsageRecord, 2)
-			second := make(chan capturedUsageRecord, 2)
-			manager.Register(&deferredCapturePlugin{records: first})
-			manager.RegisterNamed("second", &deferredCapturePlugin{records: second})
-			var ctx context.Context
-			if !tc.nilContext {
-				ctx = internallogging.WithRequestID(context.Background(), tc.httpID)
-				ctx = WithExecutionID(ctx, tc.contextID)
-			}
-			record := Record{Model: tc.name, ExecutionID: tc.recordID, RequestID: tc.recordHTTP}
-			previous := ""
-			for range 2 {
-				if err := manager.Publish(ctx, record); err != nil {
-					t.Fatal(err)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				manager := NewManager(2)
+				defer manager.Stop()
+				first := make(chan capturedUsageRecord, 2)
+				second := make(chan capturedUsageRecord, 2)
+				manager.Register(&deferredCapturePlugin{records: first})
+				manager.RegisterNamed("second", &deferredCapturePlugin{records: second})
+				var ctx context.Context
+				if !tc.nilContext {
+					ctx = internallogging.WithRequestID(context.Background(), tc.httpID)
+					ctx = WithExecutionID(ctx, tc.contextID)
 				}
-				left := waitForDeferredRecord(t, first, tc.name).record
-				right := waitForDeferredRecord(t, second, tc.name).record
-				if left.ExecutionID == "" || left.ExecutionID != right.ExecutionID {
-					t.Fatalf("plugins received different or empty execution IDs: %q, %q", left.ExecutionID, right.ExecutionID)
-				}
-				if left.RequestID != tc.wantHTTP || right.RequestID != tc.wantHTTP {
-					t.Fatalf("HTTP IDs = %q, %q; want %q", left.RequestID, right.RequestID, tc.wantHTTP)
-				}
-				if tc.wantID != "" {
-					if left.ExecutionID != tc.wantID {
-						t.Fatalf("execution ID = %q, want %q", left.ExecutionID, tc.wantID)
+				record := Record{Model: tc.name, ExecutionID: tc.recordID, RequestID: tc.recordHTTP}
+				previous := ""
+				for range 2 {
+					if err := manager.Publish(ctx, record); err != nil {
+						t.Fatal(err)
 					}
-				} else {
-					id, err := uuid.Parse(left.ExecutionID)
-					if err != nil || id.Version() != 4 || id.String() != left.ExecutionID || left.ExecutionID == previous {
-						t.Fatalf("generated execution ID is not an independent canonical UUID v4: %q", left.ExecutionID)
+					left := waitForDeferredRecord(t, first, tc.name).record
+					right := waitForDeferredRecord(t, second, tc.name).record
+					if left.ExecutionID == "" || left.ExecutionID != right.ExecutionID {
+						t.Fatalf(
+							"plugins received different or empty execution IDs: %q, %q", left.ExecutionID,
+							right.ExecutionID,
+						)
 					}
+					if left.RequestID != tc.wantHTTP || right.RequestID != tc.wantHTTP {
+						t.Fatalf("HTTP IDs = %q, %q; want %q", left.RequestID, right.RequestID, tc.wantHTTP)
+					}
+					if tc.wantID != "" {
+						if left.ExecutionID != tc.wantID {
+							t.Fatalf("execution ID = %q, want %q", left.ExecutionID, tc.wantID)
+						}
+					} else {
+						id, err := uuid.Parse(left.ExecutionID)
+						if err !=
+							nil ||
+							id.Version() !=
+								4 ||
+							id.String() !=
+								left.ExecutionID ||
+							left.ExecutionID ==
+								previous {
+							t.Fatalf(
+								"generated execution ID is not an independent canonical UUID v4: %q", left.ExecutionID,
+							)
+						}
+					}
+					previous = left.ExecutionID
 				}
-				previous = left.ExecutionID
-			}
-			if record.ExecutionID != tc.recordID || record.RequestID != tc.recordHTTP {
-				t.Fatal("publication changed the caller record")
-			}
-		})
+				if record.ExecutionID != tc.recordID || record.RequestID != tc.recordHTTP {
+					t.Fatal("publication changed the caller record")
+				}
+			},
+		)
 	}
 }
 
@@ -178,9 +201,11 @@ func TestDeferredRecordPreservesContextAfterCancellation(t *testing.T) {
 	deferred := NewDeferredRecord()
 	ctx := WithDeferredRecord(baseCtx, deferred)
 	headers := http.Header{"X-Upstream-Request-Id": {"deferred-1"}}
-	if !DeferRecord(ctx, Record{
-		Model: "deferred-context-model", Completed: true, ResponseHeaders: headers,
-	}) {
+	if !DeferRecord(
+		ctx, Record{
+			Model: "deferred-context-model", Completed: true, ResponseHeaders: headers,
+		},
+	) {
 		t.Fatal("DeferRecord rejected the first record")
 	}
 	headers.Set("X-Upstream-Request-Id", "mutated")
@@ -330,15 +355,19 @@ func TestManagerDeliverySnapshotsRecordAndDetachesRequestCancellation(t *testing
 	}
 	defer releaseBlockedDelivery()
 	captured := make(chan capturedUsageRecord, 1)
-	manager.Register(usagePluginFunc(func(ctx context.Context, record Record) {
-		switch record.Model {
-		case "block":
-			close(blockEntered)
-			<-releaseBlock
-		case "target":
-			captured <- capturedUsageRecord{ctx: ctx, record: record}
-		}
-	}))
+	manager.Register(
+		usagePluginFunc(
+			func(ctx context.Context, record Record) {
+				switch record.Model {
+				case "block":
+					close(blockEntered)
+					<-releaseBlock
+				case "target":
+					captured <- capturedUsageRecord{ctx: ctx, record: record}
+				}
+			},
+		),
+	)
 	if errPublish := manager.Publish(context.Background(), Record{Model: "block"}); errPublish != nil {
 		t.Fatalf("Publish(block) error = %v", errPublish)
 	}
@@ -352,10 +381,12 @@ func TestManagerDeliverySnapshotsRecordAndDetachesRequestCancellation(t *testing
 	requestCtx, cancelRequest := context.WithCancel(
 		context.WithValue(context.Background(), contextKey{}, "preserved"),
 	)
-	requestCtx = internallogging.WithClientRequestMetadata(requestCtx, internallogging.ClientRequestMetadata{
-		SessionID:       "slot:child",
-		ParentSessionID: "slot:parent",
-	})
+	requestCtx = internallogging.WithClientRequestMetadata(
+		requestCtx, internallogging.ClientRequestMetadata{
+			SessionID:       "slot:child",
+			ParentSessionID: "slot:parent",
+		},
+	)
 	requestCtx = WithStream(requestCtx, true)
 	generate := false
 	budget := 7
@@ -402,10 +433,12 @@ func TestManagerDeliverySnapshotsRecordAndDetachesRequestCancellation(t *testing
 }
 
 func TestPrepareRecordForDeliverySessionFallbackIsSameOrigin(t *testing.T) {
-	ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
-		SessionID:       "session:current",
-		ParentSessionID: "session:parent",
-	})
+	ctx := internallogging.WithClientRequestMetadata(
+		context.Background(), internallogging.ClientRequestMetadata{
+			SessionID:       "session:current",
+			ParentSessionID: "session:parent",
+		},
+	)
 	tests := []struct {
 		name        string
 		record      Record
@@ -436,13 +469,15 @@ func TestPrepareRecordForDeliverySessionFallbackIsSameOrigin(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got := prepareRecordForDelivery(ctx, test.record)
-			if got.SessionID != coresession.NormalizeToCanonicalUUID(test.wantSession) ||
-				got.ParentSessionID != coresession.NormalizeToCanonicalUUID(test.wantParent) {
-				t.Fatalf("session hierarchy = (%q, %q)", got.SessionID, got.ParentSessionID)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				got := prepareRecordForDelivery(ctx, test.record)
+				if got.SessionID != coresession.NormalizeToCanonicalUUID(test.wantSession) ||
+					got.ParentSessionID != coresession.NormalizeToCanonicalUUID(test.wantParent) {
+					t.Fatalf("session hierarchy = (%q, %q)", got.SessionID, got.ParentSessionID)
+				}
+			},
+		)
 	}
 }
 
@@ -451,16 +486,26 @@ func TestManagerIsolatesMutableHeadersBetweenPlugins(t *testing.T) {
 	defer manager.Stop()
 
 	captured := make(chan http.Header, 1)
-	manager.Register(usagePluginFunc(func(_ context.Context, record Record) {
-		record.ResponseHeaders.Set("X-Plugin", "mutated")
-	}))
-	manager.Register(usagePluginFunc(func(_ context.Context, record Record) {
-		captured <- record.ResponseHeaders
-	}))
-	if errPublish := manager.Publish(context.Background(), Record{
-		Model:           "isolated",
-		ResponseHeaders: http.Header{"X-Plugin": {"original"}},
-	}); errPublish != nil {
+	manager.Register(
+		usagePluginFunc(
+			func(_ context.Context, record Record) {
+				record.ResponseHeaders.Set("X-Plugin", "mutated")
+			},
+		),
+	)
+	manager.Register(
+		usagePluginFunc(
+			func(_ context.Context, record Record) {
+				captured <- record.ResponseHeaders
+			},
+		),
+	)
+	if errPublish := manager.Publish(
+		context.Background(), Record{
+			Model:           "isolated",
+			ResponseHeaders: http.Header{"X-Plugin": {"original"}},
+		},
+	); errPublish != nil {
 		t.Fatalf("Publish(isolated) error = %v", errPublish)
 	}
 

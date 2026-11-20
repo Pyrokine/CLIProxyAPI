@@ -75,7 +75,8 @@ func TestEventMetadataRoundTripPreservesUsageV2Fields(t *testing.T) {
 	if decoded.Generate || !decoded.generateRecorded {
 		t.Fatalf("Generate = %t recorded=%t, want false/true", decoded.Generate, decoded.generateRecorded)
 	}
-	if decoded.ClientIP != detail.ClientIP || decoded.XForwardedFor != detail.XForwardedFor || decoded.UserAgent != detail.UserAgent {
+	if decoded.ClientIP != detail.ClientIP || decoded.XForwardedFor != detail.XForwardedFor ||
+		decoded.UserAgent != detail.UserAgent {
 		t.Fatalf("client metadata changed: %+v", decoded)
 	}
 	if decoded.AccountingVersion != coreusage.TokenAccountingSchemaVersion || decoded.TokenBreakdown != breakdown {

@@ -18,9 +18,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// openTestStore opens a Store rooted at t.TempDir() so each test gets a clean
+// openTestStore opens a sqliteStore rooted at t.TempDir() so each test gets a clean
 // SQLite database and the WAL files clean up automatically.
-func openTestStore(t *testing.T) *Store {
+func openTestStore(t *testing.T) *sqliteStore {
 	t.Helper()
 	store, err := openStore(filepath.Join(t.TempDir(), "events.db"))
 	if err != nil {
@@ -445,7 +445,11 @@ func TestComputeCostMicroRejectsInvalidAndOutOfRangeValues(t *testing.T) {
 		{name: "cache negative infinity", cache: math.Inf(-1)},
 		{name: "negative price", prompt: -1},
 		{name: "exactly 2^63", tokens: tokenStats{InputTokens: 1}, prompt: math.Exp2(63)},
-		{name: "multiplication overflow", tokens: tokenStats{InputTokens: math.MaxInt64}, prompt: math.MaxFloat64},
+		{
+			name:   "multiplication overflow",
+			tokens: tokenStats{InputTokens: math.MaxInt64},
+			prompt: math.MaxFloat64,
+		},
 	}
 	for _, test := range tests {
 		t.Run(
@@ -546,7 +550,11 @@ func TestWriterFlushIsolatesBadRecord(t *testing.T) {
 	base := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
 	batch := []FlatDetail{
 		{Timestamp: base, Model: "good-model-1", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
-		{Timestamp: base.Add(time.Minute), Model: "bad-model", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
+		{
+			Timestamp: base.Add(time.Minute),
+			Model:     "bad-model",
+			Tokens:    tokenStats{InputTokens: 1, TotalTokens: 1},
+		},
 		{
 			Timestamp: base.Add(2 * time.Minute), Model: "good-model-2",
 			Tokens: tokenStats{InputTokens: 1, TotalTokens: 1},
@@ -564,7 +572,8 @@ func TestWriterFlushIsolatesBadRecord(t *testing.T) {
 	if err := store.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&eventCount); err != nil {
 		t.Fatalf("count events: %v", err)
 	}
-	if err := store.db.QueryRow("SELECT COALESCE(SUM(requests), 0) FROM hour_bucket").Scan(&bucketRequests); err != nil {
+	if err := store.db.QueryRow("SELECT COALESCE(SUM(requests), 0) FROM hour_bucket").Scan(&bucketRequests); err !=
+		nil {
 		t.Fatalf("sum bucket requests: %v", err)
 	}
 	if eventCount != 2 || bucketRequests != 2 {
@@ -578,6 +587,75 @@ func TestWriterFlushIsolatesBadRecord(t *testing.T) {
 	}
 	if badDimensions != 0 {
 		t.Fatalf("bad model dimensions=%d, want 0", badDimensions)
+	}
+}
+
+func TestWriterBatchDeadlineRecoversRecordsIndividually(t *testing.T) {
+	store := openTestStore(t)
+	calls := 0
+	timeout := time.Second
+	provider := &scriptedPriceProvider{
+		snapshots: []PriceFunc{
+			func(string) (float64, float64, float64, bool) {
+				calls++
+				if calls == 1 {
+					time.Sleep(2 * timeout)
+				}
+				return 1, 0, 0, true
+			},
+		},
+	}
+	writer := newWriterWithPriceProviderAndGate(store, provider, nil, nil)
+	base := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
+	batch := []FlatDetail{
+		{Timestamp: base, Model: "deadline-model", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
+		{
+			Timestamp: base.Add(time.Second),
+			Model:     "deadline-model",
+			Tokens:    tokenStats{InputTokens: 1, TotalTokens: 1},
+		},
+		{
+			Timestamp: base.Add(2 * time.Second), Model: "deadline-model",
+			Tokens: tokenStats{InputTokens: 1, TotalTokens: 1},
+		},
+	}
+	snapshot := writer.acquirePriceSnapshot()
+	defer snapshot.close()
+	result := writer.flushEventBatchWithPricing(batch, timeout, snapshot.pricing)
+	if result.err != nil || result.committed != len(batch) || result.rejected != 0 || len(result.retry) != 0 {
+		t.Fatalf(
+			"deadline recovery: committed=%d rejected=%d retry=%d error=%v", result.committed, result.rejected,
+			len(result.retry), result.err,
+		)
+	}
+	if provider.CallCount() != 1 {
+		t.Fatalf("pricing snapshot count=%d, want 1", provider.CallCount())
+	}
+	var events, requests int64
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow("SELECT COALESCE(SUM(requests), 0) FROM hour_bucket").Scan(&requests); err != nil {
+		t.Fatal(err)
+	}
+	if events != int64(len(batch)) || requests != int64(len(batch)) {
+		t.Fatalf("deadline recovery lost records: events=%d requests=%d", events, requests)
+	}
+	calls = 0
+	single := []FlatDetail{
+		{
+			Timestamp: base.Add(time.Minute), Model: "deadline-model",
+			Tokens: tokenStats{InputTokens: 1, TotalTokens: 1},
+		},
+	}
+	result = writer.flushEventBatchWithPricing(single, timeout, snapshot.pricing)
+	if result.committed != 0 || result.rejected != 0 || len(result.retry) != 1 || !errors.Is(
+		result.err, errWriterFlushTransient,
+	) {
+		t.Fatalf(
+			"single-record deadline must remain retryable: committed=%d rejected=%d retry=%d error=%v",
+			result.committed, result.rejected, len(result.retry), result.err,
+		)
 	}
 }
 
@@ -600,7 +678,10 @@ func TestWriterRetriesBatchAfterTransientFlushFailure(t *testing.T) {
 	}
 	defer func() { _ = writerDB.Close() }()
 	writerDB.SetMaxOpenConns(1)
-	store := &Store{db: writerDB}
+	store := &sqliteStore{db: writerDB}
+	if err := store.prepareEventStatements(t.Context()); err != nil {
+		t.Fatalf("prepare event statements: %v", err)
+	}
 
 	lockerDB, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(20)")
 	if err != nil {
@@ -720,7 +801,14 @@ func TestQueryLatencyStatsFromBuckets(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	qr, err := store.querySummary(ctx, base.Add(-time.Hour), base.Add(time.Hour), EventFilters{}, "hourly", true)
+	qr, err := store.querySummary(
+		ctx,
+		base.Add(-time.Hour),
+		base.Add(time.Hour),
+		EventFilters{},
+		"hourly",
+		true,
+	)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -883,7 +971,14 @@ func TestPersistEvent_ResponseHeadersRoundTrip(t *testing.T) {
 	}
 
 	events, total, err := store.queryEventDetails(
-		ctx, d.Timestamp.Add(-time.Minute), d.Timestamp.Add(time.Minute), EventFilters{}, 1, 10, "timestamp", false,
+		ctx,
+		d.Timestamp.Add(-time.Minute),
+		d.Timestamp.Add(time.Minute),
+		EventFilters{},
+		1,
+		10,
+		"timestamp",
+		false,
 	)
 	if err != nil {
 		t.Fatalf("QueryEvents: %v", err)
@@ -1042,7 +1137,8 @@ func TestWriterSubmitRejectsAfterStop(t *testing.T) {
 	if writer.submit(FlatDetail{Timestamp: time.Now(), Model: "rejected"}) {
 		t.Fatal("Submit accepted a record after Stop")
 	}
-	if stats := writer.stats(); stats.EventAccepted != 0 || stats.EventCommitted != 0 || stats.EventRejected != 0 {
+	if stats := writer.stats(); stats.EventAccepted != 0 || stats.EventCommitted != 0 ||
+		stats.EventRejected != 0 {
 		t.Fatalf("writer stats after rejected submit = %#v, want zero", stats)
 	}
 }
@@ -1093,9 +1189,11 @@ func TestWriterSubmitDuringStopDoesNotPanic(t *testing.T) {
 	writer.start(context.Background())
 	var wg sync.WaitGroup
 	for range 32 {
-		wg.Go(func() {
-			writer.submit(FlatDetail{Timestamp: time.Now(), Model: "model"})
-		})
+		wg.Go(
+			func() {
+				writer.submit(FlatDetail{Timestamp: time.Now(), Model: "model"})
+			},
+		)
 	}
 	writer.Stop()
 	wg.Wait()
@@ -1120,7 +1218,10 @@ func TestWriterShutdownWaitsForTransientSQLiteLock(t *testing.T) {
 	}
 	defer func() { _ = writerDB.Close() }()
 	writerDB.SetMaxOpenConns(1)
-	store := &Store{db: writerDB}
+	store := &sqliteStore{db: writerDB}
+	if err := store.prepareEventStatements(t.Context()); err != nil {
+		t.Fatalf("prepare event statements: %v", err)
+	}
 
 	lockerDB, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(20)")
 	if err != nil {
@@ -1572,7 +1673,11 @@ func TestMigrateV3ToV4RewritesFingerprintsBeforeReimport(t *testing.T) {
 		t.Fatalf("events after reimport = %d, want 1", events)
 	}
 	var requests int64
-	if errQuery := migrated.db.QueryRow("SELECT COALESCE(SUM(requests), 0) FROM hour_bucket").Scan(&requests); errQuery != nil {
+	if errQuery := migrated.db.QueryRow(
+		"SELECT COALESCE(SUM(requests), 0) FROM " +
+			"hour_bucket",
+	).Scan(&requests); errQuery !=
+		nil {
 		t.Fatal(errQuery)
 	}
 	if requests != 1 {
@@ -1658,7 +1763,13 @@ func TestMigrateV7ToV8HashesAPIKeyIdentitiesAndRecomputesFingerprints(t *testing
 	}
 	wantIdentity := coreusage.HashAPIKeyIdentity(rawAPIKey)
 	if version != CurrentSchemaVersion || identity != wantIdentity {
-		t.Fatalf("migrated version/identity = %q/%q, want %q/%q", version, identity, CurrentSchemaVersion, wantIdentity)
+		t.Fatalf(
+			"migrated version/identity = %q/%q, want %q/%q",
+			version,
+			identity,
+			CurrentSchemaVersion,
+			wantIdentity,
+		)
 	}
 	migratedDetail := detail
 	migratedDetail.APIKey = wantIdentity
@@ -1979,6 +2090,8 @@ func TestMigrateV5ToV6BackfillsCanonicalTokenBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open current database for downgrade: %v", err)
 	}
+	dropSummaryGrainsForLegacyFixture(t, rawDB)
+	removeEventFields(t, rawDB)
 	for _, table := range []string{"events", "hour_bucket", "day_bucket"} {
 		for _, operation := range []string{"insert", "update"} {
 			if _, err = rawDB.Exec("DROP TRIGGER IF EXISTS usage_" + table + "_integer_" + operation); err != nil {
@@ -2329,6 +2442,7 @@ func prepareV3TestDB(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("open current database for downgrade: %v", err)
 	}
+	dropSummaryGrainsForLegacyFixture(t, rawDB)
 	for _, table := range []string{"events", "hour_bucket", "day_bucket"} {
 		for _, operation := range []string{"insert", "update"} {
 			name := fmt.Sprintf("usage_%s_integer_%s", table, operation)
@@ -2386,4 +2500,34 @@ func columnPresent(t *testing.T, db *sql.DB, table, column string) bool {
 		}
 	}
 	return false
+}
+
+func dropSummaryGrainsForLegacyFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, event := range []string{"insert", "delete", "update"} {
+		if _, err := db.Exec("DROP TRIGGER IF EXISTS summary_bucket_event_" + event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, table := range []string{"hour_bucket", "day_bucket"} {
+		for _, event := range []string{"insert", "delete", "update"} {
+			if _, err := db.Exec("DROP TRIGGER IF EXISTS summary_projection_" + table + "_" + event); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := db.Exec(
+		"DROP TABLE IF EXISTS summary_projection; DELETE FROM meta WHERE " +
+			"key='summary_projection_v1'",
+	); err !=
+		nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		"DROP TABLE IF EXISTS summary_bucket; DELETE FROM meta WHERE " +
+			"key='summary_grains_v1'",
+	); err !=
+		nil {
+		t.Fatal(err)
+	}
 }

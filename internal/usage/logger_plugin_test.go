@@ -204,6 +204,7 @@ func TestLegacyAggregateBackendsUseUTC(t *testing.T) {
 }
 
 func TestLoggerPluginRedactsAPIKeySourceForLegacyStatistics(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	raw := "abcd...wxyz"
 	stats := newRequestStatistics()
 	plugin := &loggerPlugin{stats: stats, enabled: func() bool { return true }}
@@ -218,7 +219,8 @@ func TestLoggerPluginRedactsAPIKeySourceForLegacyStatistics(t *testing.T) {
 
 	detail := stats.snapshot().APIs[coreusage.HashAPIKeyIdentity("client-key")].Models["model"].Details[0]
 	display, kind, tagged := DecodeCredentialSource(detail.Source)
-	if got, want := display, util.HideAPIKey(raw); got != want || kind != coreusage.CredentialSourceKindAPIKey || !tagged {
+	if got, want := display, util.HideAPIKey(raw); got != want || kind != coreusage.CredentialSourceKindAPIKey ||
+		!tagged {
 		t.Fatalf("legacy source = %q/%v/%v, want %q/true/true", got, kind, tagged, want)
 	}
 }
@@ -302,7 +304,9 @@ func TestLoggerPluginRedactsAPIKeySourceForSQLite(t *testing.T) {
 		}
 		if len(events) == 1 {
 			display, kind, tagged := DecodeCredentialSource(events[0].Source)
-			if got, want := display, util.HideAPIKey(raw); got != want || kind != coreusage.CredentialSourceKindAPIKey || !tagged {
+			if got, want := display, util.HideAPIKey(raw); got != want ||
+				kind != coreusage.CredentialSourceKindAPIKey ||
+				!tagged {
 				t.Fatalf("SQLite source = %q/%v/%v, want %q/true/true", got, kind, tagged, want)
 			}
 			break

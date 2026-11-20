@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -48,6 +50,8 @@ const (
 )
 
 // PriceFunc returns the pricing for a model: prices are in USD per 1M tokens.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PriceFunc func(model string) (prompt, completion, cache float64, found bool)
 
 var (
@@ -60,7 +64,7 @@ var (
 var ErrLegacySnapshotTooLarge = errors.New("usage: legacy snapshot exceeds size limit")
 
 // Persister is the SQLite-backed coordinator for usage data. It owns the
-// Store + Writer + rollup goroutine, exposes a stable surface to the rest of
+// sqliteStore + sqliteWriter + rollup goroutine, exposes a stable surface to the rest of
 // the codebase, and hides the schema / WAL / dim_table details.
 type Persister struct {
 	mu           sync.RWMutex
@@ -68,14 +72,16 @@ type Persister struct {
 	pricingMu    sync.RWMutex
 	costRecalcMu sync.RWMutex
 
-	store           *Store
-	writer          *Writer
-	stopOnce        sync.Once
-	stopFn          func()
-	stopDone        chan struct{}
-	lifecycleCtx    context.Context
-	lifecycleCancel context.CancelFunc
-	maintenance     chan struct{}
+	store             *sqliteStore
+	writer            *sqliteWriter
+	stopOnce          sync.Once
+	stopFn            func()
+	stopDone          chan struct{}
+	lifecycleCtx      context.Context
+	lifecycleCancel   context.CancelFunc
+	maintenanceCtx    context.Context
+	maintenanceCancel context.CancelFunc
+	maintenance       chan struct{}
 
 	pricesFn      PriceFunc
 	priceProvider PriceProvider
@@ -150,6 +156,8 @@ func (p *Persister) HasPricing() bool {
 	if p == nil {
 		return false
 	}
+	p.pricingMu.RLock()
+	defer p.pricingMu.RUnlock()
 	pricing := p.currentPricingSnapshot()
 	return pricing.priceFn != nil || pricing.detailedPriceFn != nil
 }
@@ -167,7 +175,7 @@ func (p *Persister) IsReady() bool {
 	return p.store != nil && p.writer != nil
 }
 
-func (p *Persister) apiKeyReservationStore() *Store {
+func (p *Persister) apiKeyReservationStore() *sqliteStore {
 	if p == nil || p.stopRequested.Load() {
 		return nil
 	}
@@ -211,33 +219,49 @@ func (p *Persister) CommitAPIKeyReservation(ctx context.Context, reservationID, 
 	return store.CommitAPIKeyReservation(ctx, reservationID, reason)
 }
 
-// DBSize returns the on-disk size of events.db plus its WAL/SHM sidecars.
-// Returns 0 when the store is not yet open or the file does not exist.
+// DBSize returns the database and sidecar size, or -1 with an error log when stat fails.
+// New callers should use DBSizeWithError to handle an unavailable size directly.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (p *Persister) DBSize() int64 {
+	size, err := p.DBSizeWithError()
+	if err != nil {
+		log.Errorf("usage: read database size: %v", err)
+	}
+	return size
+}
+
+// DBSizeWithError sums events.db and its optional WAL/SHM sidecars.
+func (p *Persister) DBSizeWithError() (int64, error) {
 	if p == nil || p.baseDir == "" {
-		return 0
+		return 0, nil
 	}
 	var total int64
 	for _, name := range []string{dbFileName, dbFileName + "-wal", dbFileName + "-shm"} {
 		info, err := statUsageFile(filepath.Join(p.baseDir, name))
-		if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			continue
+		}
+		if err != nil {
+			return -1, fmt.Errorf("stat usage %s: %w", name, err)
 		}
 		total += info.Size()
 	}
-	return total
+	return total, nil
 }
 
 func (p *Persister) dbSizeStatus() (
-	sizeBytes int64,
-	maxBytes int64,
+	sizeBytes, maxBytes int64,
 	warningThresholdPct int,
-	warning bool,
-	capped bool,
+	warning, capped bool,
+	err error,
 ) {
-	sizeBytes = p.DBSize()
+	sizeBytes, err = p.DBSizeWithError()
+	if err != nil {
+		return sizeBytes, 0, 0, false, false, err
+	}
 	if p == nil {
-		return sizeBytes, 0, 0, false, false
+		return sizeBytes, 0, 0, false, false, nil
 	}
 	p.mu.RLock()
 	warningThresholdPct = p.retention.WarningThresholdPct
@@ -247,21 +271,27 @@ func (p *Persister) dbSizeStatus() (
 		warningThresholdPct = 80
 	}
 	if maxDBSizeMB <= 0 {
-		return sizeBytes, 0, warningThresholdPct, false, false
+		return sizeBytes, 0, warningThresholdPct, false, false, nil
 	}
-	maxBytes = int64(maxDBSizeMB) << 20
+	maxBytes = usageDBSizeLimitBytes(maxDBSizeMB)
 	capped = sizeBytes >= maxBytes
-	warning = sizeBytes*100 >= maxBytes*int64(warningThresholdPct)
-	return sizeBytes, maxBytes, warningThresholdPct, warning, capped
+	warning = usageDBSizeWarning(sizeBytes, maxBytes, warningThresholdPct)
+	return sizeBytes, maxBytes, warningThresholdPct, warning, capped, nil
 }
 
-func (p *Persister) DBSizeStatus() (
-	sizeBytes int64,
-	maxBytes int64,
-	warningThresholdPct int,
-	warning bool,
-	capped bool,
-) {
+// DBSizeStatus preserves the published SDK entry point and logs unavailable sizes.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (p *Persister) DBSizeStatus() (int64, int64, int, bool, bool) {
+	size, maximum, threshold, warning, capped, err := p.dbSizeStatus()
+	if err != nil {
+		log.Errorf("usage: read database size status: %v", err)
+	}
+	return size, maximum, threshold, warning, capped
+}
+
+// DBSizeStatusWithError reports file status failures without returning partial sizes.
+func (p *Persister) DBSizeStatusWithError() (int64, int64, int, bool, bool, error) {
 	return p.dbSizeStatus()
 }
 
@@ -275,7 +305,32 @@ func (p *Persister) dbSizeCapLimit() int64 {
 	if maxDBSizeMB <= 0 {
 		return 0
 	}
-	return int64(maxDBSizeMB) << 20
+	return usageDBSizeLimitBytes(maxDBSizeMB)
+}
+
+func usageDBSizeLimitBytes(sizeMB int) int64 {
+	if sizeMB <= 0 {
+		return 0
+	}
+	if sizeMB > config.MaxStorageSizeMB {
+		log.WithField(
+			"max_db_size_mb", sizeMB,
+		).Warn("usage: database size limit exceeds the supported range; using the maximum supported limit")
+		sizeMB = config.MaxStorageSizeMB
+	}
+	return int64(sizeMB) << 20
+}
+
+func usageDBSizeWarning(sizeBytes, maxBytes int64, pct int) bool {
+	if pct <= 0 {
+		return true
+	}
+	if sizeBytes < 0 {
+		return false
+	}
+	sizeHigh, sizeLow := bits.Mul64(uint64(sizeBytes), 100)
+	limitHigh, limitLow := bits.Mul64(uint64(maxBytes), uint64(pct))
+	return sizeHigh > limitHigh || sizeHigh == limitHigh && sizeLow >= limitLow
 }
 
 func (p *Persister) refreshDBSizeCap() bool {
@@ -284,7 +339,12 @@ func (p *Persister) refreshDBSizeCap() bool {
 		p.dbSizeCapped.Store(false)
 		return false
 	}
-	capped := p.DBSize() >= maxBytes
+	size, err := p.DBSizeWithError()
+	if err != nil {
+		log.Errorf("usage: refresh database size cap failed; retaining last measured cap state: %v", err)
+		return p.dbSizeCapped.Load()
+	}
+	capped := size >= maxBytes
 	p.dbSizeCapped.Store(capped)
 	return capped
 }
@@ -350,7 +410,9 @@ func (p *Persister) Start(ctx context.Context) {
 
 	if err := os.MkdirAll(p.baseDir, 0o700); err != nil {
 		log.Errorf(
-			"usage: failed to create data directory %s: %v — falling back to in-memory request statistics; no usage data will be persisted across restarts",
+			"usage: failed to create data directory %s: %v — falling back to in-mem"+
+				"ory request statistics; no usage data will be persisted across restart"+
+				"s",
 			p.baseDir, err,
 		)
 		return
@@ -360,7 +422,9 @@ func (p *Persister) Start(ctx context.Context) {
 	store, err := openStore(dbPath)
 	if err != nil {
 		log.Errorf(
-			"usage: failed to open SQLite store %s: %v — falling back to in-memory request statistics; no usage data will be persisted across restarts; legacy summary.json / detail/* JSON files are NOT touched, so manual migration is still possible after the underlying issue is fixed",
+			"usage: failed to open SQLite store %s: %v — falling back to in-memory request statistics; no "+
+				"usage data will be persisted across restarts; legacy summary.json / detail/* JSON files are "+
+				"NOT touched, so manual migration is still possible after the underlying issue is fixed",
 			dbPath, err,
 		)
 		return
@@ -376,11 +440,8 @@ func (p *Persister) Start(ctx context.Context) {
 
 	p.pricingMu.RLock()
 	priceProvider, configuredPriceFn := p.priceSource()
-	priceFn := configuredPriceFn
-	if priceProvider != nil {
-		priceFn = priceProvider.Snapshot()
-	}
-	if err := migrateLegacyToSQLite(ctx, store, priceFn, p.baseDir); err != nil {
+	pricing := p.currentPricingSnapshot()
+	if err := migrateLegacyToSQLite(ctx, store, pricing, p.baseDir); err != nil {
 		log.Errorf("usage: legacy migration failed: %v", err)
 		// Migration failure is recoverable — the user can fix the file and
 		// restart. Continue serving with whatever we already have on disk.
@@ -395,20 +456,25 @@ func (p *Persister) Start(ctx context.Context) {
 	writer.setCapacityCheck(p.refreshDBSizeCap)
 	p.refreshDBSizeCap()
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	maintenanceCtx, maintenanceCancel := context.WithCancel(lifecycleCtx)
 	writer.start(lifecycleCtx)
 
-	rollupStop := store.startRollup(lifecycleCtx)
+	rollupStop := store.startRollup(maintenanceCtx)
+	store.eventFieldsCapacityCheck = p.checkEventFieldsUpgradeCapacity
+	eventFieldsStop := store.startEventFieldsUpgrade(maintenanceCtx)
 
 	p.mu.Lock()
 	p.store = store
 	p.writer = writer
 	p.lifecycleCtx = lifecycleCtx
 	p.lifecycleCancel = lifecycleCancel
+	p.maintenanceCtx = maintenanceCtx
+	p.maintenanceCancel = maintenanceCancel
 	p.mu.Unlock()
 	p.pricingMu.RUnlock()
 
 	p.restoreCostRecalculation(lifecycleCtx)
-	trimStop := p.startRetentionTrim(lifecycleCtx)
+	trimStop := p.startRetentionTrim(maintenanceCtx)
 
 	p.mu.Lock()
 	p.stopFn = func() {
@@ -416,6 +482,7 @@ func (p *Persister) Start(ctx context.Context) {
 		writer.Stop()
 		trimStop()
 		rollupStop()
+		eventFieldsStop()
 		_ = store.Close()
 		p.mu.Lock()
 		p.store = nil
@@ -432,7 +499,7 @@ func (p *Persister) startRetentionTrim(ctx context.Context) func() {
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
-		p.Trim()
+		_ = p.Trim()
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
@@ -442,13 +509,26 @@ func (p *Persister) startRetentionTrim(ctx context.Context) func() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				p.Trim()
+				_ = p.Trim()
 			}
 		}
 	}()
 	return func() {
 		close(stopCh)
 		<-doneCh
+	}
+}
+
+// StopMaintenance cancels background database work while the dispatcher drains into the live writer.
+func (p *Persister) StopMaintenance() {
+	if p == nil {
+		return
+	}
+	p.mu.RLock()
+	cancel := p.maintenanceCancel
+	p.mu.RUnlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -508,14 +588,17 @@ func (p *Persister) maintenanceContext(parent context.Context, timeout time.Dura
 		ctx, cancel = context.WithCancel(parent)
 	}
 	p.mu.RLock()
-	lifecycleCtx := p.lifecycleCtx
+	maintenanceCtx := p.maintenanceCtx
+	if maintenanceCtx == nil {
+		maintenanceCtx = p.lifecycleCtx
+	}
 	p.mu.RUnlock()
-	if lifecycleCtx == nil {
+	if maintenanceCtx == nil {
 		return ctx, cancel
 	}
-	stopLifecycleWatch := context.AfterFunc(lifecycleCtx, cancel)
+	stopMaintenanceWatch := context.AfterFunc(maintenanceCtx, cancel)
 	return ctx, func() {
-		stopLifecycleWatch()
+		stopMaintenanceWatch()
 		cancel()
 	}
 }
@@ -810,36 +893,62 @@ func (p *Persister) checkpointContext(parent context.Context, mode string) error
 
 // Trim deletes exact events older than retention and rebuilds every aggregate
 // in the same transaction so partial-hour cutoffs remain consistent.
-func (p *Persister) Trim() {
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (p *Persister) Trim() error {
+	_, err := p.TrimWithCount()
+	return err
+}
+
+// TrimWithCount returns the number of expired events removed by a committed transaction.
+func (p *Persister) TrimWithCount() (int64, error) {
 	if p == nil {
-		return
+		return 0, errors.New("usage: nil persister")
 	}
 	p.mu.RLock()
 	retention := p.retention
 	p.mu.RUnlock()
 	if retention.Days <= 0 {
-		return
+		return 0, nil
 	}
-	cutoff := time.Now().Add(-time.Duration(retention.Days) * 24 * time.Hour).UTC()
-	if err := p.trimBefore(cutoff); err != nil {
+	cutoff := retentionCutoff(time.Now(), retention.Days)
+	deleted, err := p.trimBeforeCount(cutoff)
+	if err != nil {
 		log.Warnf("usage: trim: %v", err)
+		return 0, err
 	}
+	return deleted, nil
+}
+
+func retentionCutoff(now time.Time, days int) time.Time {
+	const dayNs = uint64(24 * time.Hour)
+	// Unsigned arithmetic spans the entire SQLite nanosecond range.
+	distance := uint64(now.UnixNano()) + uint64(1)<<63
+	if uint64(days) > distance/dayNs {
+		return time.Unix(0, -1<<63).UTC()
+	}
+	return time.Unix(0, int64(uint64(now.UnixNano())-uint64(days)*dayNs)).UTC()
 }
 
 func (p *Persister) trimBefore(cutoff time.Time) error {
+	_, err := p.trimBeforeCount(cutoff)
+	return err
+}
+
+func (p *Persister) trimBeforeCount(cutoff time.Time) (int64, error) {
 	if p == nil {
-		return errors.New("usage: nil persister")
+		return 0, errors.New("usage: nil persister")
 	}
 	cutoffNs, err := unixNanoUTC(cutoff)
 	if err != nil {
-		return fmt.Errorf("invalid trim cutoff: %w", err)
+		return 0, fmt.Errorf("invalid trim cutoff: %w", err)
 	}
 
 	ctx, cancel := p.maintenanceContext(context.Background(), 60*time.Second)
 	defer cancel()
 	unlockMaintenance, errLock := p.acquireMaintenance(ctx)
 	if errLock != nil {
-		return fmt.Errorf("wait for usage maintenance: %w", errLock)
+		return 0, fmt.Errorf("wait for usage maintenance: %w", errLock)
 	}
 	defer unlockMaintenance()
 
@@ -850,12 +959,12 @@ func (p *Persister) trimBefore(cutoff time.Time) error {
 	s := p.store
 	p.mu.RUnlock()
 	if s == nil || s.db == nil {
-		return errors.New("usage: store not initialized")
+		return 0, errors.New("usage: store not initialized")
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin trim tx: %w", err)
+		return 0, fmt.Errorf("begin trim tx: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -866,31 +975,33 @@ func (p *Persister) trimBefore(cutoff time.Time) error {
 
 	deleteResult, err := tx.ExecContext(ctx, "DELETE FROM events WHERE ts_ns < ?", cutoffNs)
 	if err != nil {
-		return fmt.Errorf("delete expired events: %w", err)
+		return 0, fmt.Errorf("delete expired events: %w", err)
 	}
 	deleted, err := deleteResult.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("count expired events: %w", err)
+		return 0, fmt.Errorf("count expired events: %w", err)
 	}
 	if deleted == 0 {
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit empty trim tx: %w", err)
+			return 0, fmt.Errorf("commit empty trim tx: %w", err)
 		}
 		committed = true
-		return nil
+		return 0, nil
 	}
 	if err := rebuildUsageBucketsTx(ctx, tx); err != nil {
-		return err
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit trim tx: %w", err)
+		return 0, fmt.Errorf("commit trim tx: %w", err)
 	}
 	committed = true
-	return nil
+	return deleted, nil
 }
 
 // TrimPreviewResult mirrors the JSON-era preview shape so /usage/trim/preview
 // continues to work without UI changes.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type TrimPreviewResult struct {
 	FilesCount     int                `json:"files_count"`
 	TotalSizeBytes int64              `json:"total_size_bytes"`
@@ -923,7 +1034,7 @@ func (p *Persister) TrimPreview() TrimPreviewResult {
 	if s == nil || s.db == nil || retention.Days <= 0 {
 		return TrimPreviewResult{}
 	}
-	cutoff := time.Now().Add(-time.Duration(retention.Days) * 24 * time.Hour).UTC().UnixNano()
+	cutoff := retentionCutoff(time.Now(), retention.Days).UnixNano()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1225,14 +1336,16 @@ func (p *Persister) querySnapshotFilteredContext(
 
 	// Resolve every active dim filter once. If any active filter has zero
 	// matches, the result is empty (don't fall back to full data).
-	modelF, err := resolveNamesToIDs(ctx, tx, "dim_model", filters.Model)
+	modelF, err := resolveNamesToIDs(ctx, tx, "dim_model", filters.Model, false)
 	if err != nil {
 		return StatisticsSnapshot{}, fmt.Errorf("resolve snapshot model filter: %w", err)
 	}
 	if modelF.active && !modelF.matchedAny {
 		return snap, nil
 	}
-	apiKeyF, err := resolveFilterNamesToIDs(ctx, tx, "dim_api_key", filters.APIKey, filters.APIKeys)
+	apiKeyF, err := resolveFilterNamesToIDs(
+		ctx, tx, "dim_api_key", filters.APIKey, filters.APIKeys, filters.CanonicalAPIKeys,
+	)
 	if err != nil {
 		return StatisticsSnapshot{}, fmt.Errorf("resolve snapshot API key filter: %w", err)
 	}
@@ -1376,6 +1489,7 @@ func (p *Persister) querySnapshotFilteredContext(
 			return StatisticsSnapshot{}, fmt.Errorf("decode snapshot event metadata at ts_ns=%d: %w", tsNs, err)
 		}
 		detail.LatencyMs = flat.LatencyMs
+		detail.latencyRecorded = flat.latencyRecorded
 		detail.RequestID = flat.RequestID
 		detail.TimeToFirstByteMs = flat.TimeToFirstByteMs
 		detail.TotalDurationMs = flat.TotalDurationMs
@@ -1390,6 +1504,21 @@ func (p *Persister) querySnapshotFilteredContext(
 		detail.ServiceTier = flat.ServiceTier
 		detail.RequestServiceTier = flat.RequestServiceTier
 		detail.ResponseServiceTier = flat.ResponseServiceTier
+		detail.ClientModel = flat.ClientModel
+		detail.UpstreamURL = flat.UpstreamURL
+		detail.ResponseURL = flat.ResponseURL
+		detail.ResponseURLSource = flat.ResponseURLSource
+		detail.ResponseURLStatus = flat.ResponseURLStatus
+		detail.UpstreamNextHopStatus = flat.UpstreamNextHopStatus
+		detail.UpstreamModel = flat.UpstreamModel
+		detail.ResponseModel = flat.ResponseModel
+		detail.ResponseProvider = flat.ResponseProvider
+		detail.ResponseProviderSource = flat.ResponseProviderSource
+		detail.RequestSpeed = flat.RequestSpeed
+		detail.ResponseSpeed = flat.ResponseSpeed
+		detail.CacheReadReported = flat.CacheReadReported
+		detail.CacheWriteReported = coreusage.NormalizeCacheWriteReported(flat.CacheWriteReported, t.CacheWriteTokens)
+		detail.BillingMetadata = coreusage.CloneBillingMetadata(flat.BillingMetadata)
 		detail.ExecutorType = flat.ExecutorType
 		detail.Thinking = cloneThinking(flat.Thinking)
 		detail.ResponseHeaders = flat.ResponseHeaders
@@ -1489,6 +1618,8 @@ func (p *Persister) querySnapshotFilteredContext(
 }
 
 // RecalculateCostsResult holds the outcome of a cost recalculation.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type RecalculateCostsResult struct {
 	TaskID           string  `json:"task_id,omitempty"`
 	RecalculatedDays int     `json:"recalculated_days"`
@@ -1515,6 +1646,7 @@ type CostRecalculationStatus struct {
 	Error              string  `json:"error,omitempty"`
 	StartedAt          string  `json:"started_at,omitempty"`
 	UpdatedAt          string  `json:"updated_at,omitempty"`
+	CompletedAt        string  `json:"completed_at,omitempty"`
 	Resumable          bool    `json:"resumable,omitempty"`
 	Resumed            bool    `json:"resumed,omitempty"`
 	RestartReason      string  `json:"restart_reason,omitempty"`
@@ -1761,6 +1893,7 @@ const repriceEventPageSize = 512
 
 type repriceEvent struct {
 	id             int64
+	provider       string
 	tsNs           int64
 	tokens         tokenStats
 	metadata       sql.NullString
@@ -1791,13 +1924,16 @@ func repriceModelEvents(
 	for {
 		rows, errQuery := tx.QueryContext(
 			ctx,
-			`SELECT id, ts_ns,
-			        input_tokens, output_tokens, reasoning_tokens, cached_tokens,
-			        cache_read_tokens, cache_write_tokens, total_tokens,
-			        metadata, pricing_receipt, cost_micro, cost_status, cost_reason
-			   FROM events
-			  WHERE model_id = ? AND id > ?
-			  ORDER BY id
+			`SELECT e.id, e.ts_ns, COALESCE(p.name, ''),
+			        e.input_tokens, e.output_tokens, e.reasoning_tokens, e.cached_tokens,
+			        e.cache_read_tokens, e.cache_write_tokens, e.total_tokens,
+			        `+eventPricingMetadataReadSQL("e.", "fields.")+`,
+			        e.pricing_receipt, e.cost_micro, e.cost_status, e.cost_reason
+			   FROM events e
+			   LEFT JOIN event_fields fields ON fields.id = e.id
+			   LEFT JOIN dim_provider p ON p.id = e.provider_id
+			  WHERE e.model_id = ? AND e.id > ?
+			  ORDER BY e.id
 			  LIMIT ?`,
 			model.id,
 			afterID,
@@ -1814,6 +1950,7 @@ func repriceModelEvents(
 			if errScan := rows.Scan(
 				&event.id,
 				&event.tsNs,
+				&event.provider,
 				&event.tokens.InputTokens,
 				&event.tokens.OutputTokens,
 				&event.tokens.ReasoningTokens,
@@ -1835,32 +1972,15 @@ func repriceModelEvents(
 				_ = rows.Close()
 				return fmt.Errorf("validate tokens for %s event %d: %w", model.name, event.id, err)
 			}
-			event.pricingReceipt, err = decodePricingReceipt(pricingReceipt)
+			event.pricingReceipt, err = decodePricingReceipt(pricingReceipt, event.metadata)
 			if err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("decode pricing receipt for %s event %d: %w", model.name, event.id, err)
 			}
 			eventTime := time.Unix(0, event.tsNs).UTC()
-			if event.pricingReceipt != nil {
-				event.updated, err = computeCurrentCatalogCostFromPricingReceipt(
-					event.tokens,
-					event.pricingReceipt,
-					pricing,
-					eventTime,
-				)
-			} else {
-				var breakdown *coreusage.TokenBreakdown
-				breakdown, err = decodeEventTokenBreakdown(event.metadata)
-				if err == nil {
-					event.updated, err = computeCost(
-						event.tokens,
-						breakdown,
-						pricing,
-						model.name,
-						eventTime,
-					)
-				}
-			}
+			event.updated, err = computeCurrentCatalogEventCost(
+				event.tokens, event.pricingReceipt, pricing, model.name, event.provider, eventTime, event.metadata,
+			)
 			if err != nil {
 				_ = rows.Close()
 				return err
@@ -1924,8 +2044,14 @@ func (p *Persister) ImportContextWithSecret(
 	if p == nil {
 		return ImportResult{}, errors.New("usage: nil persister")
 	}
-	if p.overDBSizeCap() {
-		return ImportResult{}, errors.New("usage: SQLite DB size cap reached, import refused")
+	if maximum := p.dbSizeCapLimit(); maximum > 0 {
+		size, err := p.DBSizeWithError()
+		if err != nil {
+			return ImportResult{}, fmt.Errorf("check usage import capacity: %w", err)
+		}
+		if size >= maximum {
+			return ImportResult{}, errors.New("usage: SQLite DB size cap reached, import refused")
+		}
 	}
 	if parent == nil {
 		parent = context.Background()
@@ -1945,11 +2071,11 @@ func (p *Persister) ImportContextWithSecret(
 	p.mu.RLock()
 	s := p.store
 	p.mu.RUnlock()
-	priceFn := p.priceFn()
+	pricing := p.currentPricingSnapshot()
 	if s == nil {
 		return ImportResult{}, errors.New("usage: store not initialized")
 	}
-	result, err := importBytesWithSecret(ctx, s, priceFn, data, secret)
+	result, err := importBytesWithSecret(ctx, s, pricing, data, secret)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -1989,25 +2115,20 @@ func handlePostImportMaintenanceError(
 	return nil
 }
 
+// currentPricingSnapshot requires the caller to hold pricingMu.
 func (p *Persister) currentPricingSnapshot() pricingSnapshot {
-	p.pricingMu.RLock()
-	defer p.pricingMu.RUnlock()
 	provider, fn := p.priceSource()
 	if provider == nil {
 		return pricingSnapshot{priceFn: fn}
+	}
+	if revisionProvider, ok := provider.(detailedPriceRevisionProvider); ok {
+		detailed, revision := revisionProvider.DetailedSnapshotWithRevision()
+		return pricingSnapshot{detailedPriceFn: detailed, revision: revision}
 	}
 	if detailedProvider, ok := provider.(detailedPriceProvider); ok {
 		return pricingSnapshot{detailedPriceFn: detailedProvider.DetailedSnapshot()}
 	}
 	return pricingSnapshot{priceFn: provider.Snapshot()}
-}
-
-func (p *Persister) priceFn() PriceFunc {
-	provider, fn := p.priceSource()
-	if provider != nil {
-		return provider.Snapshot()
-	}
-	return fn
 }
 
 func (p *Persister) priceSource() (PriceProvider, PriceFunc) {
@@ -2067,18 +2188,47 @@ func atomicWrite(path string, data []byte) error {
 // layout changed between restarts. Cross-filesystem moves fall back to copy +
 // remove. Skips when paths match or when the new location already has
 // summary.json / events.db.
-func MigrateDataDirIfNeeded(configFilePath, newBaseDir string) error {
+func MigrateDataDirIfNeeded(configFilePath, newBaseDir string, previousBaseDirs ...string) error {
 	if newBaseDir == "" {
 		return nil
 	}
 	for _, marker := range []string{"events.db", "summary.json"} {
 		if _, err := os.Stat(filepath.Join(newBaseDir, marker)); err == nil {
-			_ = os.Remove(filepath.Join(newBaseDir, migrationReadyMarkerFile))
+			for _, previous := range previousBaseDirs {
+				if strings.TrimSpace(previous) == "" || filepath.Clean(previous) == filepath.Clean(newBaseDir) {
+					continue
+				}
+				oldInfo, oldErr := os.Stat(previous)
+				newInfo, newErr := os.Stat(newBaseDir)
+				if oldErr == nil && newErr == nil && os.SameFile(oldInfo, newInfo) {
+					continue
+				}
+				for _, oldMarker := range []string{"events.db", "summary.json"} {
+					if _, err := os.Stat(filepath.Join(previous, oldMarker)); err == nil {
+						return fmt.Errorf(
+							"usage data migration destination %s already contains data while "+
+								"source %s still contains "+
+								"data",
+							newBaseDir,
+							previous,
+						)
+					} else if !errors.Is(err, os.ErrNotExist) {
+						return fmt.Errorf("inspect usage migration source: %w", err)
+					}
+				}
+			}
+			if err := os.Remove(filepath.Join(newBaseDir, migrationReadyMarkerFile)); err != nil && !errors.Is(
+				err, os.ErrNotExist,
+			) {
+				return fmt.Errorf("remove completed usage migration marker: %w", err)
+			}
 			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect usage migration destination: %w", err)
 		}
 	}
 
-	candidates := make([]string, 0, 2)
+	candidates := append(make([]string, 0, len(previousBaseDirs)+2), previousBaseDirs...)
 	if configFilePath != "" {
 		candidates = append(candidates, filepath.Join(filepath.Dir(configFilePath), dataDirName))
 	}
@@ -2087,12 +2237,21 @@ func MigrateDataDirIfNeeded(configFilePath, newBaseDir string) error {
 	}
 
 	for _, oldBaseDir := range candidates {
+		if strings.TrimSpace(oldBaseDir) == "" {
+			continue
+		}
 		if filepath.Clean(oldBaseDir) == filepath.Clean(newBaseDir) {
 			continue
 		}
 		oldInfo, err := os.Stat(oldBaseDir)
-		if err != nil || !oldInfo.IsDir() {
+		if errors.Is(err, os.ErrNotExist) {
 			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect previous usage directory %s: %w", oldBaseDir, err)
+		}
+		if !oldInfo.IsDir() {
+			return fmt.Errorf("previous usage path %s is not a directory", oldBaseDir)
 		}
 		if err := os.MkdirAll(filepath.Dir(newBaseDir), 0o700); err != nil {
 			return fmt.Errorf("create parent dir for %s: %w", newBaseDir, err)

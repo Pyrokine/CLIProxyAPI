@@ -3,6 +3,7 @@ package usage
 import (
 	"bytes"
 	"context"
+	"crypto/cipher"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -108,7 +111,7 @@ type csvParser struct{}
 // csvRequiredHeaders is the minimum header set the parser needs to recover a
 // FlatDetail. raw_api_key + auth_index are optional (legacy CSVs lack them).
 var csvRequiredHeaders = []string{
-	"timestamp", "model", "source", "api_key", "result",
+	"timestamp", "model", "result",
 	"input_tokens", "output_tokens", "total_tokens",
 }
 
@@ -200,6 +203,10 @@ func (csvParser) Parse(data []byte) ([]FlatDetail, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse csv line %d: %w", lineNo, err)
 		}
+		if sealed := get(row, "import_data"); sealed != "" {
+			details = append(details, FlatDetail{ImportData: sealed})
+			continue
+		}
 		ts, err := time.Parse(time.RFC3339, get(row, "timestamp"))
 		if err != nil {
 			// Frontend writes ISO-8601 with offset; tolerate the date-only and
@@ -240,6 +247,23 @@ func (csvParser) Parse(data []byte) ([]FlatDetail, error) {
 		if err != nil {
 			return nil, err
 		}
+		cacheReadTokens, err := parseInt(lineNo, row, "cache_read_tokens", false)
+		if err != nil {
+			return nil, err
+		}
+		cacheWriteTokens, err := parseInt(lineNo, row, "cache_write_tokens", false)
+		if err != nil {
+			return nil, err
+		}
+		var cacheWriteReported *bool
+		if raw := get(row, "cache_write_reported"); raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				return nil, fmt.Errorf("parse csv line %d cache_write_reported: %w", lineNo, err)
+			}
+			cacheWriteReported = &value
+		}
+		cacheWriteReported = coreusage.NormalizeCacheWriteReported(cacheWriteReported, cacheWriteTokens)
 		totalTokens, err := parseInt(lineNo, row, "total_tokens", true)
 		if err != nil {
 			return nil, err
@@ -248,32 +272,64 @@ func (csvParser) Parse(data []byte) ([]FlatDetail, error) {
 		if err != nil {
 			return nil, err
 		}
+		source := get(row, "source")
+		if source == "" {
+			source = get(row, "credential")
+		}
+		if source == "" {
+			source = get(row, "auth_id")
+		}
+		var billingMetadata *coreusage.BillingMetadata
+		if raw := get(row, "billing_metadata"); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &billingMetadata); err != nil || !billingMetadata.Valid() {
+				return nil, fmt.Errorf("invalid billing metadata in CSV row %d", lineNo)
+			}
+		}
 		requestServiceTier := get(row, "request_service_tier")
 		if requestServiceTier == "" {
 			requestServiceTier = get(row, "service_tier")
 		}
 		details = append(
 			details, FlatDetail{
-				Timestamp:           ts,
-				Model:               get(row, "model"),
-				Source:              get(row, "source"),
-				AuthIndex:           get(row, "auth_index"),
-				Provider:            get(row, "provider"),
-				APIKey:              apiKey,
-				LatencyMs:           latencyMs,
-				ReasoningEffort:     get(row, "reasoning_effort"),
-				ServiceTier:         requestServiceTier,
-				RequestServiceTier:  requestServiceTier,
-				ResponseServiceTier: get(row, "response_service_tier"),
-				ExecutorType:        get(row, "executor_type"),
-				Thinking:            thinking,
-				Failed:              result == "failed",
+				Timestamp:              ts,
+				Model:                  get(row, "model"),
+				Source:                 source,
+				AuthIndex:              get(row, "auth_index"),
+				Provider:               get(row, "provider"),
+				APIKey:                 apiKey,
+				RequestID:              get(row, "request_id"),
+				LatencyMs:              latencyMs,
+				latencyRecorded:        get(row, "latency_ms") != "",
+				ReasoningEffort:        get(row, "reasoning_effort"),
+				ServiceTier:            requestServiceTier,
+				RequestServiceTier:     requestServiceTier,
+				ResponseServiceTier:    get(row, "response_service_tier"),
+				ClientModel:            get(row, "client_model"),
+				UpstreamURL:            get(row, "upstream_url"),
+				ResponseURL:            get(row, "response_url"),
+				ResponseURLSource:      get(row, "response_url_source"),
+				ResponseURLStatus:      get(row, "response_url_status"),
+				UpstreamNextHopStatus:  get(row, "upstream_next_hop_status"),
+				UpstreamModel:          get(row, "upstream_model"),
+				ResponseModel:          get(row, "response_model"),
+				ResponseProvider:       get(row, "response_provider"),
+				ResponseProviderSource: get(row, "response_provider_source"),
+				RequestSpeed:           get(row, "request_speed"),
+				ResponseSpeed:          get(row, "response_speed"),
+				CacheReadReported:      strings.EqualFold(get(row, "cache_read_reported"), "true"),
+				CacheWriteReported:     cacheWriteReported,
+				BillingMetadata:        billingMetadata,
+				ExecutorType:           get(row, "executor_type"),
+				Thinking:               thinking,
+				Failed:                 result == "failed",
 				Tokens: tokenStats{
-					InputTokens:     inputTokens,
-					OutputTokens:    outputTokens,
-					ReasoningTokens: reasoningTokens,
-					CachedTokens:    cachedTokens,
-					TotalTokens:     totalTokens,
+					InputTokens:      inputTokens,
+					OutputTokens:     outputTokens,
+					ReasoningTokens:  reasoningTokens,
+					CachedTokens:     cachedTokens,
+					CacheReadTokens:  cacheReadTokens,
+					CacheWriteTokens: cacheWriteTokens,
+					TotalTokens:      totalTokens,
 				},
 			},
 		)
@@ -354,7 +410,15 @@ func parseAnyWithSecret(data []byte, secret string) ([]FlatDetail, string, error
 			if err != nil {
 				return nil, fmt.Sprintf("%T", p), err
 			}
+			keys := make(map[string]cipher.AEAD)
 			for index := range details {
+				if details[index].ImportData != "" {
+					restored, restoreErr := parseUsageEventExport(details[index].ImportData, secret, keys)
+					if restoreErr != nil {
+						return nil, fmt.Sprintf("%T", p), fmt.Errorf("event[%d]: %w", index, restoreErr)
+					}
+					details[index] = restored
+				}
 				normalizeFlatDetailServiceTiers(&details[index])
 			}
 			return details, fmt.Sprintf("%T", p), nil
@@ -383,32 +447,51 @@ func flattenSnapshot(snap StatisticsSnapshot) []FlatDetail {
 				}
 				out = append(
 					out, FlatDetail{
-						Timestamp:           d.Timestamp,
-						Model:               cleanModel,
-						Source:              normaliseDimName(d.Source, ""),
-						AuthIndex:           normaliseDimName(d.AuthIndex, ""),
-						APIKey:              cleanAPI,
-						LatencyMs:           d.LatencyMs,
-						RequestID:           strings.TrimSpace(d.RequestID),
-						TimeToFirstByteMs:   d.TimeToFirstByteMs,
-						TotalDurationMs:     d.TotalDurationMs,
-						Completed:           d.Completed,
-						Generate:            d.Generate,
-						ClientIP:            strings.TrimSpace(d.ClientIP),
-						XForwardedFor:       strings.TrimSpace(d.XForwardedFor),
-						UserAgent:           strings.TrimSpace(d.UserAgent),
-						AccountingVersion:   d.AccountingVersion,
-						TokenBreakdown:      d.TokenBreakdown,
-						ReasoningEffort:     strings.TrimSpace(d.ReasoningEffort),
-						ServiceTier:         requestServiceTier,
-						RequestServiceTier:  requestServiceTier,
-						ResponseServiceTier: strings.TrimSpace(d.ResponseServiceTier),
-						ExecutorType:        strings.TrimSpace(d.ExecutorType),
-						Thinking:            cloneThinking(d.Thinking),
-						ResponseHeaders:     cloneHTTPHeader(d.ResponseHeaders),
-						Tokens:              d.Tokens,
-						Failed:              d.Failed,
-						generateRecorded:    true,
+						Timestamp:              d.Timestamp,
+						Model:                  cleanModel,
+						Source:                 normaliseDimName(d.Source, ""),
+						Provider:               normaliseDimName(d.Provider, ""),
+						AuthIndex:              normaliseDimName(d.AuthIndex, ""),
+						APIKey:                 cleanAPI,
+						LatencyMs:              d.LatencyMs,
+						latencyRecorded:        d.latencyRecorded,
+						RequestID:              strings.TrimSpace(d.RequestID),
+						TimeToFirstByteMs:      d.TimeToFirstByteMs,
+						TotalDurationMs:        d.TotalDurationMs,
+						Completed:              d.Completed,
+						Generate:               d.Generate,
+						ClientIP:               strings.TrimSpace(d.ClientIP),
+						XForwardedFor:          strings.TrimSpace(d.XForwardedFor),
+						UserAgent:              strings.TrimSpace(d.UserAgent),
+						AccountingVersion:      d.AccountingVersion,
+						TokenBreakdown:         d.TokenBreakdown,
+						ReasoningEffort:        strings.TrimSpace(d.ReasoningEffort),
+						ServiceTier:            requestServiceTier,
+						RequestServiceTier:     requestServiceTier,
+						ResponseServiceTier:    strings.TrimSpace(d.ResponseServiceTier),
+						ClientModel:            d.ClientModel,
+						UpstreamURL:            util.SanitizeUpstreamURL(d.UpstreamURL),
+						ResponseURL:            util.SanitizeUpstreamURL(d.ResponseURL),
+						ResponseURLSource:      d.ResponseURLSource,
+						ResponseURLStatus:      d.ResponseURLStatus,
+						UpstreamNextHopStatus:  d.UpstreamNextHopStatus,
+						UpstreamModel:          d.UpstreamModel,
+						ResponseModel:          d.ResponseModel,
+						ResponseProvider:       d.ResponseProvider,
+						ResponseProviderSource: d.ResponseProviderSource,
+						RequestSpeed:           d.RequestSpeed,
+						ResponseSpeed:          d.ResponseSpeed,
+						CacheReadReported:      d.CacheReadReported,
+						CacheWriteReported: coreusage.NormalizeCacheWriteReported(
+							d.CacheWriteReported, d.Tokens.CacheWriteTokens,
+						),
+						BillingMetadata:  coreusage.CloneBillingMetadata(d.BillingMetadata),
+						ExecutorType:     strings.TrimSpace(d.ExecutorType),
+						Thinking:         cloneThinking(d.Thinking),
+						ResponseHeaders:  cloneHTTPHeader(d.ResponseHeaders),
+						Tokens:           d.Tokens,
+						Failed:           d.Failed,
+						generateRecorded: true,
 					},
 				)
 			}
@@ -479,16 +562,16 @@ func importDayRange(details []FlatDetail) (int64, int64, bool, error) {
 }
 
 // importBytes is the synchronous entry point for legacy, non-encrypted input.
-func importBytes(ctx context.Context, store *Store, priceFn PriceFunc, data []byte) (ImportResult, error) {
-	return importBytesWithSecret(ctx, store, priceFn, data, "")
+func importBytes(ctx context.Context, store *sqliteStore, priceFn PriceFunc, data []byte) (ImportResult, error) {
+	return importBytesWithSecret(ctx, store, pricingSnapshot{priceFn: priceFn}, data, "")
 }
 
 // importBytesWithSecret parses encrypted backups and every legacy format, then
 // imports all details in one transaction so the caller sees consistent counts.
 func importBytesWithSecret(
 	ctx context.Context,
-	store *Store,
-	priceFn PriceFunc,
+	store *sqliteStore,
+	pricing pricingSnapshot,
 	data []byte,
 	secret string,
 ) (ImportResult, error) {
@@ -501,13 +584,19 @@ func importBytesWithSecret(
 	}
 	preserveEncryptedBackup := format == "usageBackupV3" || format == "usageBackupV4"
 	for i := range details {
-		details[i].Source = normalizeImportedCredentialSource(details[i].Source, preserveEncryptedBackup)
+		details[i].Model = normaliseDimName(details[i].Model, "unknown")
+		details[i].Provider = normaliseDimName(details[i].Provider, "")
+		details[i].AuthIndex = normaliseDimName(details[i].AuthIndex, "")
+		details[i].APIKey = normaliseDimName(details[i].APIKey, "")
+		details[i].Source = normalizeImportedCredentialSource(
+			details[i].Source, preserveEncryptedBackup || details[i].fingerprintTrusted,
+		)
 	}
 	earliestDayNs, latestDayNs, hasDayRange, err := importDayRange(details)
 	if err != nil {
 		return ImportResult{Format: format}, fmt.Errorf("%w: %v", ErrInvalidImport, err)
 	}
-	added, skipped, err := importDetails(ctx, store, priceFn, details)
+	added, skipped, err := importDetails(ctx, store, pricing, details)
 	if err != nil {
 		return ImportResult{Format: format}, err
 	}
@@ -523,7 +612,7 @@ func importBytesWithSecret(
 
 // importFile reads, parses and imports a single file. Used by migrate_legacy
 // and could be exposed via a future CLI subcommand.
-func importFile(ctx context.Context, store *Store, priceFn PriceFunc, path string) (ImportResult, error) {
+func importFile(ctx context.Context, store *sqliteStore, pricing pricingSnapshot, path string) (ImportResult, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("stat %s: %w", path, err)
@@ -537,13 +626,13 @@ func importFile(ctx context.Context, store *Store, priceFn PriceFunc, path strin
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("read %s: %w", path, err)
 	}
-	return importBytes(ctx, store, priceFn, data)
+	return importBytesWithSecret(ctx, store, pricing, data, "")
 }
 
 // importDetails persists the entire payload in one transaction. Imports are
 // management operations, and atomicity is more important than allowing live
 // writers to interleave with a partially visible import.
-func importDetails(ctx context.Context, store *Store, priceFn PriceFunc, details []FlatDetail) (
+func importDetails(ctx context.Context, store *sqliteStore, pricing pricingSnapshot, details []FlatDetail) (
 	added, skipped int,
 	err error,
 ) {
@@ -562,7 +651,7 @@ func importDetails(ctx context.Context, store *Store, priceFn PriceFunc, details
 	}()
 	dirtyDays := make(map[int64]struct{})
 	for i := range details {
-		ok, err := persistEvent(ctx, tx, store, &details[i], priceFn)
+		ok, err := persistEventWithPricing(ctx, tx, store, &details[i], pricing)
 		if err != nil {
 			return 0, 0, fmt.Errorf("import event[%d]: %w", i, err)
 		}

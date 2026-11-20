@@ -29,11 +29,11 @@ var (
 	errWriterStorageCap     = errors.New("usage: SQLite DB size cap reached")
 )
 
-// Writer ingests FlatDetail records and persists them in batched transactions
-// against a Store. A single goroutine owns all SQL writes so we never collide
+// sqliteWriter ingests FlatDetail records and persists them in batched transactions
+// against a sqliteStore. A single goroutine owns all SQL writes so we never collide
 // with SQLite's "one writer at a time" rule.
-type Writer struct {
-	store         *Store
+type sqliteWriter struct {
+	store         *sqliteStore
 	priceFn       PriceFunc
 	priceProvider PriceProvider
 	pricingMu     *sync.RWMutex
@@ -99,21 +99,21 @@ func (s *writerPriceSnapshot) close() {
 
 // newWriter wires a writer to a store. priceFn may be nil — events still land
 // on disk, just with cost_micro = 0 until pricing is configured.
-func newWriter(store *Store, priceFn PriceFunc) *Writer {
+func newWriter(store *sqliteStore, priceFn PriceFunc) *sqliteWriter {
 	return newWriterWithPricingGate(store, priceFn, nil)
 }
 
-func newWriterWithPricingGate(store *Store, priceFn PriceFunc, pricingMu *sync.RWMutex) *Writer {
+func newWriterWithPricingGate(store *sqliteStore, priceFn PriceFunc, pricingMu *sync.RWMutex) *sqliteWriter {
 	return newWriterWithPriceProviderAndGate(store, nil, priceFn, pricingMu)
 }
 
 func newWriterWithPriceProviderAndGate(
-	store *Store,
+	store *sqliteStore,
 	provider PriceProvider,
 	priceFn PriceFunc,
 	pricingMu *sync.RWMutex,
-) *Writer {
-	return &Writer{
+) *sqliteWriter {
+	return &sqliteWriter{
 		store:         store,
 		priceFn:       priceFn,
 		priceProvider: provider,
@@ -125,7 +125,7 @@ func newWriterWithPriceProviderAndGate(
 	}
 }
 
-func (w *Writer) acquirePriceSnapshot() *writerPriceSnapshot {
+func (w *sqliteWriter) acquirePriceSnapshot() *writerPriceSnapshot {
 	if w.pricingMu != nil {
 		w.pricingMu.RLock()
 	}
@@ -154,7 +154,7 @@ func (w *Writer) acquirePriceSnapshot() *writerPriceSnapshot {
 
 // start launches the writer goroutine. Calling start more than once is a no-op
 // so callers don't need their own guard.
-func (w *Writer) start(ctx context.Context) {
+func (w *sqliteWriter) start(ctx context.Context) {
 	if w == nil || !w.started.CompareAndSwap(false, true) {
 		return
 	}
@@ -163,7 +163,7 @@ func (w *Writer) start(ctx context.Context) {
 
 // Stop closes the input channel, lets the loop drain anything in-flight, then
 // waits for shutdown. Idempotent.
-func (w *Writer) Stop() {
+func (w *sqliteWriter) Stop() {
 	if w == nil {
 		return
 	}
@@ -173,7 +173,7 @@ func (w *Writer) Stop() {
 	}
 }
 
-func (w *Writer) requestStop() {
+func (w *sqliteWriter) requestStop() {
 	w.stopOnce.Do(
 		func() {
 			w.stopped.Store(true)
@@ -188,7 +188,7 @@ func (w *Writer) requestStop() {
 
 // setPriceFunc lets callers swap pricing at runtime (e.g. after a model
 // catalog refresh) without restarting the writer.
-func (w *Writer) setPriceFunc(fn PriceFunc) {
+func (w *sqliteWriter) setPriceFunc(fn PriceFunc) {
 	if w == nil {
 		return
 	}
@@ -198,7 +198,7 @@ func (w *Writer) setPriceFunc(fn PriceFunc) {
 	w.priceMu.Unlock()
 }
 
-func (w *Writer) setCapacityCheck(capacityFull func() bool) {
+func (w *sqliteWriter) setCapacityCheck(capacityFull func() bool) {
 	if w == nil {
 		return
 	}
@@ -207,7 +207,7 @@ func (w *Writer) setCapacityCheck(capacityFull func() bool) {
 	w.capacityMu.Unlock()
 }
 
-func (w *Writer) storageCapacityReached() bool {
+func (w *sqliteWriter) storageCapacityReached() bool {
 	if w == nil {
 		return false
 	}
@@ -217,7 +217,7 @@ func (w *Writer) storageCapacityReached() bool {
 	return capacityFull != nil && capacityFull()
 }
 
-func (w *Writer) setPriceProvider(provider PriceProvider) {
+func (w *sqliteWriter) setPriceProvider(provider PriceProvider) {
 	if w == nil {
 		return
 	}
@@ -228,7 +228,7 @@ func (w *Writer) setPriceProvider(provider PriceProvider) {
 }
 
 // submit applies backpressure until the record is accepted or the writer stops.
-func (w *Writer) submit(detail FlatDetail) bool {
+func (w *sqliteWriter) submit(detail FlatDetail) bool {
 	if w == nil {
 		return false
 	}
@@ -241,6 +241,12 @@ func (w *Writer) submit(detail FlatDetail) bool {
 	detail.APIKey = normaliseDimName(detail.APIKey, "")
 	detail.AuthIndex = normaliseDimName(detail.AuthIndex, "")
 	detail.Provider = normaliseDimName(detail.Provider, "")
+	writeTokens := detail.Tokens.CacheWriteTokens
+	if detail.TokenBreakdown.Valid() {
+		writeTokens = detail.TokenBreakdown.Input.CacheWriteTokens
+	}
+	detail.CacheWriteReported = coreusage.NormalizeCacheWriteReported(detail.CacheWriteReported, writeTokens)
+	detail.BillingMetadata = coreusage.CloneBillingMetadata(detail.BillingMetadata)
 
 	priceSnapshot := w.acquirePriceSnapshot()
 	cost, receipt, err := buildPricingReceipt(&detail, priceSnapshot.pricing, time.Now().UTC())
@@ -274,7 +280,7 @@ func (w *Writer) submit(detail FlatDetail) bool {
 
 // SubmitRequestLogArtifact applies backpressure until the lifecycle update is
 // accepted by the same writer goroutine that owns event writes.
-func (w *Writer) SubmitRequestLogArtifact(artifact logging.RequestLogArtifact) bool {
+func (w *sqliteWriter) SubmitRequestLogArtifact(artifact logging.RequestLogArtifact) bool {
 	if w == nil {
 		return false
 	}
@@ -301,7 +307,7 @@ func (w *Writer) SubmitRequestLogArtifact(artifact logging.RequestLogArtifact) b
 }
 
 // stats returns accepted, committed, and permanently rejected writer counts.
-func (w *Writer) stats() writerStats {
+func (w *sqliteWriter) stats() writerStats {
 	if w == nil {
 		return writerStats{}
 	}
@@ -315,7 +321,7 @@ func (w *Writer) stats() writerStats {
 	}
 }
 
-func (w *Writer) loop(ctx context.Context) {
+func (w *sqliteWriter) loop(ctx context.Context) {
 	defer close(w.done)
 
 	eventCh := w.ch
@@ -483,6 +489,8 @@ func (w *Writer) loop(ctx context.Context) {
 }
 
 const (
+	markDirtyDaySQL = "INSERT OR IGNORE INTO dirty_day(day_ts_ns) VALUES (?)"
+
 	insertEventSQL = `
 INSERT OR IGNORE INTO events (
     fingerprint, ts_ns, model_id, api_key_id, source_id, auth_index_id, credential_id, provider_id,
@@ -548,11 +556,11 @@ WHERE hour_bucket.requests         <= 9223372036854775807 - excluded.requests
 `
 )
 
-func (w *Writer) flush(batch []FlatDetail) error {
+func (w *sqliteWriter) flush(batch []FlatDetail) error {
 	return w.flushWithTimeout(batch, writerFlushTimeout)
 }
 
-func (w *Writer) flushWithTimeout(batch []FlatDetail, timeout time.Duration) error {
+func (w *sqliteWriter) flushWithTimeout(batch []FlatDetail, timeout time.Duration) error {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -564,11 +572,11 @@ func (w *Writer) flushWithTimeout(batch []FlatDetail, timeout time.Duration) err
 	return w.flushWithPricing(batch, timeout, priceSnapshot.pricing)
 }
 
-func (w *Writer) flushWithPricing(batch []FlatDetail, timeout time.Duration, pricing pricingSnapshot) error {
+func (w *sqliteWriter) flushWithPricing(batch []FlatDetail, timeout time.Duration, pricing pricingSnapshot) error {
 	return w.flushEventBatchWithPricing(batch, timeout, pricing).err
 }
 
-func (w *Writer) flushEventBatchWithPricing(
+func (w *sqliteWriter) flushEventBatchWithPricing(
 	batch []FlatDetail,
 	timeout time.Duration,
 	pricing pricingSnapshot,
@@ -605,7 +613,7 @@ func (w *Writer) flushEventBatchWithPricing(
 		warmCaches(batch)
 		return eventFlushResult{committed: len(batch)}
 	}
-	if isTransientWriterError(batchErr) {
+	if isTransientWriterError(batchErr) && (len(batch) == 1 || !errors.Is(batchErr, context.DeadlineExceeded)) {
 		return eventFlushResult{
 			retry: batch,
 			err:   fmt.Errorf("%w: %v", errWriterFlushTransient, batchErr),
@@ -681,7 +689,7 @@ func isTransientWriterError(err error) bool {
 		strings.Contains(message, "sqlite_locked")
 }
 
-func (w *Writer) flushRequestLogArtifacts(
+func (w *sqliteWriter) flushRequestLogArtifacts(
 	batch []logging.RequestLogArtifact,
 	timeout time.Duration,
 ) error {
@@ -715,7 +723,7 @@ func (w *Writer) flushRequestLogArtifacts(
 	return nil
 }
 
-func (w *Writer) flushTransactionWithPricing(
+func (w *sqliteWriter) flushTransactionWithPricing(
 	ctx context.Context,
 	batch []FlatDetail,
 	pricing pricingSnapshot,
@@ -743,20 +751,20 @@ func (w *Writer) flushTransactionWithPricing(
 	return nil
 }
 
-// persistEvent is the shared write path used by both the live Writer and the
+// persistEvent is the shared write path used by both the live sqliteWriter and the
 // synchronous Import path. It returns added=true when INSERT OR IGNORE
 // actually inserted a new row, false when the fingerprint was already known.
 //
 // hour_bucket is only touched when added=true so re-importing the same file
 // can never double-count.
-func persistEvent(ctx context.Context, tx *sql.Tx, store *Store, d *FlatDetail, priceFn PriceFunc) (bool, error) {
+func persistEvent(ctx context.Context, tx *sql.Tx, store *sqliteStore, d *FlatDetail, priceFn PriceFunc) (bool, error) {
 	return persistEventWithPricing(ctx, tx, store, d, pricingSnapshot{priceFn: priceFn})
 }
 
 func persistEventWithPricing(
 	ctx context.Context,
 	tx *sql.Tx,
-	store *Store,
+	store *sqliteStore,
 	d *FlatDetail,
 	pricing pricingSnapshot,
 ) (bool, error) {
@@ -815,7 +823,7 @@ func persistEventWithPricing(
 		}
 		cost = normalizeTrustedCost(cost)
 	} else {
-		cost, err = computeCost(tokens, tokenBreakdown, pricing, d.Model, d.Timestamp)
+		cost, err = computeCost(tokens, tokenBreakdown, pricing, d.Model, d.Timestamp, d)
 		if err != nil {
 			return false, err
 		}
@@ -823,23 +831,23 @@ func persistEventWithPricing(
 	d.Cost = float64(cost.Micro) / costMicroPerUSD
 	d.CostStatus = cost.Status
 	d.CostReason = cost.Reason
-	pricingReceipt, err := encodePricingReceipt(d.PricingReceipt)
-	if err != nil {
-		return false, err
-	}
 	metadata, err := encodeEventMetadata(d)
 	if err != nil {
 		return false, err
 	}
+	pricingReceipt, metadata, err := encodeStoredPricingReceipt(d.PricingReceipt, metadata)
+	if err != nil {
+		return false, err
+	}
 	coverage := coverageBucketValues(cost.Status, tokens.TotalTokens)
-	latencyMs, latencySamples := latencyBucketValues(d.LatencyMs)
+	latencyMs, latencySamples := latencyBucketValues(d.LatencyMs, d.latencyRecorded)
 
 	fp := computeFingerprint(*d)
 	if d.fingerprintTrusted {
 		fp = d.fingerprint
 	}
-	res, err := tx.ExecContext(
-		ctx, insertEventSQL,
+	res, err := execEventStatement(
+		ctx, tx, store.insertEventStmt, insertEventSQL,
 		fp[:],
 		tsNs,
 		modelID,
@@ -878,8 +886,8 @@ func persistEventWithPricing(
 		return false, nil
 	}
 
-	bucketResult, err := tx.ExecContext(
-		ctx, upsertHourBucketSQL,
+	bucketResult, err := execEventStatement(
+		ctx, tx, store.upsertHourBucketStmt, upsertHourBucketSQL,
 		hourNs,
 		modelID,
 		nullableID(credID),
@@ -904,10 +912,8 @@ func persistEventWithPricing(
 		return true, errors.New("upsert hour_bucket rejected integer overflow")
 	}
 
-	if _, err := tx.ExecContext(
-		ctx,
-		"INSERT OR IGNORE INTO dirty_day(day_ts_ns) VALUES (?)",
-		dayNs,
+	if _, err := execEventStatement(
+		ctx, tx, store.markDirtyDayStmt, markDirtyDaySQL, dayNs,
 	); err != nil {
 		return true, fmt.Errorf("mark dirty day: %w", err)
 	}
@@ -925,6 +931,16 @@ func persistEventWithPricing(
 	return true, nil
 }
 
+func execEventStatement(
+	ctx context.Context, tx *sql.Tx, stmt *sql.Stmt, query string, args ...any,
+) (sql.Result, error) {
+	// Stores constructed around an existing DB can use the same transactional write path.
+	if stmt == nil {
+		return tx.ExecContext(ctx, query, args...)
+	}
+	return tx.StmtContext(ctx, stmt).ExecContext(ctx, args...)
+}
+
 // nullableID returns nil when the wrapper is invalid so database/sql writes
 // SQL NULL rather than the zero int64.
 func nullableID(n sql.NullInt64) any {
@@ -934,8 +950,8 @@ func nullableID(n sql.NullInt64) any {
 	return n.Int64
 }
 
-func latencyBucketValues(latencyMs int64) (int64, int64) {
-	if latencyMs <= 0 {
+func latencyBucketValues(latencyMs int64, recorded bool) (int64, int64) {
+	if latencyMs < 0 || latencyMs == 0 && !recorded {
 		return 0, 0
 	}
 	return latencyMs, 1
@@ -969,7 +985,7 @@ type costResult struct {
 
 // computeCostMicro keeps the legacy PriceFunc contract for imports and tests.
 func computeCostMicro(tokens tokenStats, priceFn PriceFunc, model string) (int64, error) {
-	result, err := computeCost(tokens, nil, pricingSnapshot{priceFn: priceFn}, model, time.Time{})
+	result, err := computeCost(tokens, nil, pricingSnapshot{priceFn: priceFn}, model, time.Time{}, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -985,6 +1001,7 @@ func computeCost(
 	pricing pricingSnapshot,
 	model string,
 	at time.Time,
+	observed *FlatDetail,
 ) (costResult, error) {
 	if breakdown != nil {
 		if !breakdown.Valid() {
@@ -1004,6 +1021,18 @@ func computeCost(
 	if !price.Effective {
 		return costResult{Status: CostStatusUnpriced, Reason: "price is not effective at the event timestamp"}, nil
 	}
+	if price.RequestScoped || len(price.ConditionalRates) > 0 || len(price.ModalityRates) > 0 || len(price.ChargeRates) > 0 || price.CacheWrite30m != nil || price.CacheWrite12h != nil {
+		detail := FlatDetail{Timestamp: at, Model: model, Tokens: tokens}
+		if observed != nil {
+			detail = *observed
+			detail.Timestamp, detail.Model, detail.Tokens = at, model, tokens
+		}
+		if breakdown != nil {
+			detail.AccountingVersion, detail.TokenBreakdown = coreusage.TokenAccountingSchemaVersion, *breakdown
+		}
+		result, _, err := buildPricingReceipt(&detail, pricing, time.Now().UTC())
+		return result, err
+	}
 	switch price.Status {
 	case costStatusComplete, costStatusPartial, CostStatusUnpriced:
 	default:
@@ -1017,26 +1046,20 @@ func computeCost(
 		return costResult{Status: CostStatusUnpriced, Reason: reason}, nil
 	}
 
-	for _, item := range []struct {
-		name  string
-		price float64
-	}{
-		{name: "prompt", price: price.Prompt},
-		{name: "completion", price: price.Completion},
-	} {
-		if err := validateCostRate(item.name, item.price, model); err != nil {
-			return costResult{}, err
-		}
+	if err := validateReceiptPriceRates(price, model); err != nil {
+		return costResult{}, err
 	}
-	if price.CacheRead != nil {
-		if err := validateCostRate("cache_read", *price.CacheRead, model); err != nil {
-			return costResult{}, err
-		}
+	speed, _ := ObservedRequestSpeed(observed)
+	provider := ""
+	if observed != nil {
+		provider = strings.TrimSpace(observed.Provider)
 	}
-	if price.CacheWrite != nil {
-		if err := validateCostRate("cache_write", *price.CacheWrite, model); err != nil {
-			return costResult{}, err
+	speedRule, hasSpeedRule, speedReason := selectSpeedPrice(price, speed, provider, at)
+	effectiveRate := func(base float64, category pricingLineItemCategory) float64 {
+		if hasSpeedRule {
+			return base * pricingSpeedMultiplier(speedRule, category)
 		}
+		return base
 	}
 
 	uncachedInput := tokens.InputTokens
@@ -1072,7 +1095,12 @@ func computeCost(
 			}
 		}
 	}
-	raw := float64(uncachedInput)*price.Prompt + float64(completionTokens)*price.Completion
+	if speedReason != "" {
+		status = mostConservativeCostStatus(status, costStatusPartial)
+		reasons = append(reasons, speedReason)
+	}
+	raw := float64(uncachedInput)*effectiveRate(price.Prompt, pricingLineItemUncachedInput) +
+		float64(completionTokens)*effectiveRate(price.Completion, pricingLineItemOutput)
 	if price.Reason != "" {
 		reasons = append(reasons, price.Reason)
 	}
@@ -1083,7 +1111,7 @@ func computeCost(
 		} else {
 			reasons = append(reasons, "cache-read reference price uses prompt rate")
 		}
-		raw += float64(cacheReadTokens) * cacheReadRate
+		raw += float64(cacheReadTokens) * effectiveRate(cacheReadRate, pricingLineItemCacheRead)
 	}
 	if cacheWriteTokens > 0 {
 		cacheWriteRate := price.Prompt
@@ -1092,7 +1120,31 @@ func computeCost(
 		} else {
 			reasons = append(reasons, "cache-write reference price uses prompt rate")
 		}
-		raw += float64(cacheWriteTokens) * cacheWriteRate
+		if !hasSpeedRule {
+			raw += float64(cacheWriteTokens) * cacheWriteRate
+		} else {
+			var fiveMinute, oneHour int64
+			if observed != nil {
+				fiveMinute, oneHour = observed.cacheWrite5mTokens, observed.cacheWrite1hTokens
+			}
+			known, ok := addPricingReceiptValues(fiveMinute, oneHour)
+			if !ok || known > cacheWriteTokens {
+				return costResult{}, errors.New("usage: cache-write TTL detail exceeds aggregate cache-write tokens")
+			}
+			for _, bucket := range []struct {
+				category pricingLineItemCategory
+				tokens   int64
+			}{
+				{pricingLineItemCacheWrite5m, fiveMinute},
+				{pricingLineItemCacheWrite1h, oneHour},
+				{pricingLineItemCacheWriteUnknown, cacheWriteTokens - known},
+			} {
+				if bucket.tokens == 0 {
+					continue
+				}
+				raw += float64(bucket.tokens) * effectiveRate(cacheWriteRate, bucket.category)
+			}
+		}
 	}
 	if math.IsNaN(raw) || math.IsInf(raw, 0) || raw < 0 || raw >= math.Exp2(63) {
 		return costResult{}, fmt.Errorf("usage: cost_micro out of int64 range for model %q", model)
@@ -1111,9 +1163,11 @@ func mostConservativeCostStatus(left, right CostStatus) CostStatus {
 }
 
 func hasReferenceTokenRates(price detailedPrice) bool {
-	return price.Prompt != 0 || price.Completion != 0 ||
+	return price.HasBaseRates || price.PromptKnown != nil && *price.PromptKnown || price.CompletionKnown != nil && *price.CompletionKnown ||
+		price.Prompt != 0 || price.Completion != 0 ||
 		price.CacheRead != nil || price.CacheWrite != nil ||
-		price.CacheWrite5m != nil || price.CacheWrite1h != nil
+		price.CacheWrite5m != nil || price.CacheWrite1h != nil || price.CacheWrite30m != nil || price.CacheWrite12h != nil ||
+		len(price.ConditionalRates) > 0 || len(price.ModalityRates) > 0
 }
 
 func lookupDetailedPrice(pricing pricingSnapshot, model string, at time.Time) (detailedPrice, bool) {

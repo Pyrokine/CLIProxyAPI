@@ -20,13 +20,15 @@ const migrateMetaKey = "migrated_from_json"
 
 // MigrationStatus reports the persisted migration marker. From=="" means no
 // migration has been recorded yet.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type MigrationStatus struct {
 	From string
 	At   time.Time
 }
 
 // checkMigrationStatus reads the meta row that flags a completed JSON import.
-func checkMigrationStatus(ctx context.Context, store *Store) (MigrationStatus, error) {
+func checkMigrationStatus(ctx context.Context, store *sqliteStore) (MigrationStatus, error) {
 	var status MigrationStatus
 	if store == nil || store.db == nil {
 		return status, errors.New("usage: nil store")
@@ -60,7 +62,7 @@ func checkMigrationStatus(ctx context.Context, store *Store) (MigrationStatus, e
 // On parse failure the migration aborts with the failing file's path attached,
 // the meta row is NOT written, and the caller can decide whether to retry or
 // surface the failure.
-func migrateLegacyToSQLite(ctx context.Context, store *Store, priceFn PriceFunc, baseDir string) error {
+func migrateLegacyToSQLite(ctx context.Context, store *sqliteStore, pricing pricingSnapshot, baseDir string) error {
 	if store == nil || store.db == nil {
 		return errors.New("usage: nil store")
 	}
@@ -92,7 +94,7 @@ func migrateLegacyToSQLite(ctx context.Context, store *Store, priceFn PriceFunc,
 
 	var totalAdded, totalSkipped int64
 	for _, p := range paths {
-		result, err := importFile(ctx, store, priceFn, p)
+		result, err := importFile(ctx, store, pricing, p)
 		if err != nil {
 			return fmt.Errorf("import %s: %w", p, err)
 		}
@@ -173,8 +175,7 @@ func collectLegacyPaths(baseDir string) ([]string, error) {
 		monthDir := filepath.Join(baseDir, entry.Name())
 		dayEntries, err := os.ReadDir(monthDir)
 		if err != nil {
-			log.Warnf("usage: read %s: %v", monthDir, err)
-			continue
+			return nil, fmt.Errorf("read month dir %s: %w", monthDir, err)
 		}
 		for _, dayEntry := range dayEntries {
 			if dayEntry.IsDir() {

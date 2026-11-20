@@ -31,6 +31,8 @@ func (h *Handler) RecalculateCosts(c *gin.Context) {
 		return
 	}
 
+	RecordMutationEffect(c.Request.Context(), "task.queued", "task")
+	CompleteMutation(c.Request.Context())
 	c.JSON(
 		http.StatusAccepted, gin.H{
 			"status":          "started",
@@ -49,4 +51,18 @@ func (h *Handler) GetRecalculateCostsStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, h.usagePersister.RecalculateCostsStatus())
+}
+
+// GetUsageStorageUpgrade reports the durable structured storage upgrade state.
+func (h *Handler) GetUsageStorageUpgrade(c *gin.Context) {
+	if h == nil || h.usagePersister == nil {
+		c.JSON(http.StatusOK, gin.H{"status": "idle", "running": false})
+		return
+	}
+	status, err := h.usagePersister.StorageUpgradeStatusContext(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "running": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, status)
 }

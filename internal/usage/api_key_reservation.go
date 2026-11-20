@@ -41,7 +41,7 @@ type reservationSQLExecutor interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func (s *Store) ReserveAPIKey(
+func (s *sqliteStore) ReserveAPIKey(
 	ctx context.Context,
 	request coreusage.APIKeyReservationRequest,
 ) (coreusage.APIKeyReservation, error) {
@@ -415,19 +415,19 @@ func expireAPIKeyReservations(ctx context.Context, exec reservationSQLExecutor, 
 	return nil
 }
 
-func (s *Store) ReleaseAPIKeyReservation(ctx context.Context, reservationID, reason string) error {
+func (s *sqliteStore) ReleaseAPIKeyReservation(ctx context.Context, reservationID, reason string) error {
 	return s.transitionAPIKeyReservation(ctx, reservationID, reason, "released", false)
 }
 
-func (s *Store) MarkAPIKeyReservationUnknown(ctx context.Context, reservationID, reason string) error {
+func (s *sqliteStore) MarkAPIKeyReservationUnknown(ctx context.Context, reservationID, reason string) error {
 	return s.transitionAPIKeyReservation(ctx, reservationID, reason, "unknown", false)
 }
 
-func (s *Store) CommitAPIKeyReservation(ctx context.Context, reservationID, reason string) error {
+func (s *sqliteStore) CommitAPIKeyReservation(ctx context.Context, reservationID, reason string) error {
 	return s.transitionAPIKeyReservation(ctx, reservationID, reason, "committed", true)
 }
 
-func (s *Store) transitionAPIKeyReservation(
+func (s *sqliteStore) transitionAPIKeyReservation(
 	ctx context.Context,
 	reservationID,
 	reason,
@@ -658,7 +658,7 @@ func settleAPIKeyReservationEvent(
 	return nil
 }
 
-func (s *Store) withImmediateReservationTransaction(
+func (s *sqliteStore) withImmediateReservationTransaction(
 	ctx context.Context,
 	fn func(reservationSQLExecutor) error,
 ) error {

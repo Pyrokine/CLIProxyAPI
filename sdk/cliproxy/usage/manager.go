@@ -27,29 +27,43 @@ const (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider            string
-	BaseURL             string
-	ExecutorType        string
-	Model               string
-	Stream              bool
-	Alias               string
-	APIKey              string
-	SessionID           string
-	ParentSessionID     string
-	ReservationID       string
-	AuthID              string
-	AuthIndex           string
-	AccessTokenSHA256   string
-	AuthType            string
-	Source              string
-	SourceKind          CredentialSourceKind
-	SourceRedacted      bool
-	ReasoningEffort     string
-	ServiceTier         string
-	RequestServiceTier  string
-	ResponseServiceTier string
-	// ResponseModel is the model reported by the provider, if present.
-	ResponseModel string
+	Provider              string
+	BaseURL               string
+	ExecutorType          string
+	Model                 string
+	Stream                bool
+	Alias                 string
+	APIKey                string
+	SessionID             string
+	ParentSessionID       string
+	ReservationID         string
+	AuthID                string
+	AuthIndex             string
+	AccessTokenSHA256     string
+	AuthType              string
+	Source                string
+	SourceKind            CredentialSourceKind
+	SourceRedacted        bool
+	ReasoningEffort       string
+	ServiceTier           string
+	RequestServiceTier    string
+	ResponseServiceTier   string
+	RequestSpeed          string
+	ResponseSpeed         string
+	CacheReadReported     bool
+	CacheWriteReported    *bool
+	BillingMetadata       *BillingMetadata
+	ClientModel           string
+	UpstreamURL           string
+	ResponseURL           string
+	ResponseURLSource     string
+	ResponseURLStatus     string
+	UpstreamNextHopStatus string
+	UpstreamModel         string
+	// ResponseModel and ResponseProvider are upstream self-reports.
+	ResponseModel          string
+	ResponseProvider       string
+	ResponseProviderSource string
 	// Generate reports whether the client requested actual generation.
 	// nil or true means generation is enabled; only an explicit false disables generation.
 	Generate    *bool
@@ -378,6 +392,30 @@ func deferredRecordWithOutcome(record Record, err error) Record {
 
 func prepareRecordForDelivery(ctx context.Context, record Record) Record {
 	record = cloneRecord(record)
+	record.CacheReadReported = record.CacheReadReported || record.Detail.CacheReadReported
+	if record.Detail.CacheWriteReported == nil {
+		record.Detail.CacheWriteReported = record.CacheWriteReported
+	}
+	writeTokens := record.Detail.CacheCreationTokens
+	if record.Detail.TokenBreakdown.Valid() {
+		writeTokens = max(writeTokens, record.Detail.TokenBreakdown.Input.CacheWriteTokens)
+	}
+	record.Detail.CacheWriteReported = NormalizeCacheWriteReported(record.Detail.CacheWriteReported, writeTokens)
+	record.CacheWriteReported = NormalizeCacheWriteReported(record.Detail.CacheWriteReported, writeTokens)
+	if record.BillingMetadata == nil {
+		record.BillingMetadata = CloneBillingMetadata(record.Detail.BillingMetadata)
+	}
+	if record.Detail.BillingMetadata == nil {
+		record.Detail.BillingMetadata = CloneBillingMetadata(record.BillingMetadata)
+	}
+	if record.Failed {
+		if record.BillingMetadata != nil {
+			record.BillingMetadata.ChargesReported = false
+		}
+		if record.Detail.BillingMetadata != nil {
+			record.Detail.BillingMetadata.ChargesReported = false
+		}
+	}
 	if record.ExecutionID = strings.TrimSpace(record.ExecutionID); record.ExecutionID == "" {
 		record.ExecutionID = ExecutionIDFromContext(ctx)
 	}
@@ -412,6 +450,10 @@ func prepareRecordForDelivery(ctx context.Context, record Record) Record {
 }
 
 func cloneRecord(record Record) Record {
+	record.CacheWriteReported = NormalizeCacheWriteReported(record.CacheWriteReported, 0)
+	record.Detail.CacheWriteReported = NormalizeCacheWriteReported(record.Detail.CacheWriteReported, 0)
+	record.BillingMetadata = CloneBillingMetadata(record.BillingMetadata)
+	record.Detail.BillingMetadata = CloneBillingMetadata(record.Detail.BillingMetadata)
 	record.ResponseHeaders = record.ResponseHeaders.Clone()
 	if record.Generate != nil {
 		generate := *record.Generate
@@ -448,17 +490,93 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens                int64
-	OutputTokens               int64
-	ReasoningTokens            int64
-	CachedTokens               int64
-	CacheReadTokens            int64
-	CacheCreationTokens        int64
-	CacheCreation5mInputTokens int64
-	CacheCreation1hInputTokens int64
-	TotalTokens                int64
-	TokenBreakdown             TokenBreakdown
-	ResponseServiceTier        string
+	InputTokens                 int64
+	OutputTokens                int64
+	ReasoningTokens             int64
+	CachedTokens                int64
+	CacheReadTokens             int64
+	CacheReadReported           bool
+	CacheWriteReported          *bool
+	CacheCreationTokens         int64
+	CacheCreation5mInputTokens  int64
+	CacheCreation1hInputTokens  int64
+	CacheCreation30mInputTokens int64
+	CacheCreation12hInputTokens int64
+	TotalTokens                 int64
+	TokenBreakdown              TokenBreakdown
+	BillingMetadata             *BillingMetadata
+	ResponseServiceTier         string
+}
+
+// NormalizeCacheWriteReported keeps explicit unknown values and recognizes legacy positive write totals.
+func NormalizeCacheWriteReported(reported *bool, tokens int64) *bool {
+	if reported != nil {
+		return new(*reported)
+	}
+	if tokens > 0 {
+		return new(true)
+	}
+	return nil
+}
+
+// BillingMetadata preserves reported quantities needed to select conditional prices.
+type BillingMetadata struct {
+	SchemaVersion      int                  `json:"schema_version"`
+	ContextInputTokens *int64               `json:"context_input_tokens,omitempty"`
+	Region             string               `json:"region,omitempty"`
+	RegionSource       string               `json:"region_source,omitempty"`
+	Modalities         []ModalityTokenUsage `json:"modalities,omitempty"`
+	Charges            []BillingQuantity    `json:"charges,omitempty"`
+	ChargesReported    bool                 `json:"charges_reported"`
+}
+
+type ModalityTokenUsage struct {
+	Category string `json:"category"`
+	Modality string `json:"modality"`
+	Tokens   int64  `json:"tokens"`
+}
+
+type BillingQuantity struct {
+	Kind       string  `json:"kind"`
+	Unit       string  `json:"unit"`
+	Quantity   float64 `json:"quantity"`
+	Resolution string  `json:"resolution,omitempty"`
+}
+
+func (metadata *BillingMetadata) Valid() bool {
+	if metadata == nil {
+		return true
+	}
+	if metadata.SchemaVersion != 1 || (metadata.ContextInputTokens != nil && *metadata.ContextInputTokens < 0) {
+		return false
+	}
+	for _, value := range metadata.Modalities {
+		if value.Category == "" || value.Modality == "" || value.Tokens < 0 {
+			return false
+		}
+	}
+	for _, value := range metadata.Charges {
+		if value.Kind == "" || value.Unit == "" || value.Quantity < 0 || math.IsNaN(value.Quantity) || math.IsInf(
+			value.Quantity, 0,
+		) {
+			return false
+		}
+	}
+	return true
+}
+
+func CloneBillingMetadata(metadata *BillingMetadata) *BillingMetadata {
+	if metadata == nil {
+		return nil
+	}
+	cloned := *metadata
+	if metadata.ContextInputTokens != nil {
+		value := *metadata.ContextInputTokens
+		cloned.ContextInputTokens = &value
+	}
+	cloned.Modalities = append([]ModalityTokenUsage(nil), metadata.Modalities...)
+	cloned.Charges = append([]BillingQuantity(nil), metadata.Charges...)
+	return &cloned
 }
 
 // Thinking describes the requested thinking intensity for a usage record.
@@ -877,7 +995,8 @@ func RegisterNamedPlugin(name string, plugin Plugin) {
 
 // RegisterNamedPluginWithRetirement registers or replaces a named plugin and
 // returns the retirement for the replaced generation.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func RegisterNamedPluginWithRetirement(name string, plugin Plugin) *Retirement {
 	return DefaultManager().RegisterNamedWithRetirement(name, plugin)
 }
@@ -925,9 +1044,11 @@ func PublishRecord(ctx context.Context, record Record) error {
 func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func StopDefault() { DefaultManager().Stop() }
 
 // StopDefaultContext stops the default manager and waits up to ctx.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func StopDefaultContext(ctx context.Context) error { return DefaultManager().StopContext(ctx) }

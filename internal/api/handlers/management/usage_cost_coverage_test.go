@@ -57,11 +57,12 @@ func TestGetUsageSummaryReturnsCostCoverage(t *testing.T) {
 	}
 	for index, event := range events {
 		detail := usage.FlatDetail{
-			Timestamp:         from.Add(time.Duration(index+1) * time.Minute),
-			RequestID:         fmt.Sprintf("coverage-%d", index),
-			Model:             event.model,
-			Completed:         true,
-			AccountingVersion: coreusage.TokenAccountingSchemaVersion,
+			Timestamp:           from.Add(time.Duration(index+1) * time.Minute),
+			RequestID:           fmt.Sprintf("coverage-%d", index),
+			Model:               event.model,
+			ResponseServiceTier: "default",
+			Completed:           true,
+			AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
 			TokenBreakdown: coreusage.NewSubsetTokenBreakdown(
 				event.tokens,
 				0,

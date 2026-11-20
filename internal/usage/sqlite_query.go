@@ -34,12 +34,12 @@ const (
 	// costMicroPerUSD converts cost_micro back to USD for response payloads.
 	costMicroPerUSD = 1_000_000.0
 
-	maxSummarySeriesCount  = 500
-	maxSummaryTotalPoints  = 100_000
-	maxSummaryInputRows    = 100_000
-	MaxEventsPageSize      = 500
-	maxEventsOffset        = 100_000
-	maxEventsMetadataBytes = 8 << 20
+	maxSummarySeriesCount    = 500
+	maxSummaryDimensionCount = 10_000
+	maxSummaryTotalPoints    = 100_000
+	MaxEventsPageSize        = 500
+	maxEventsOffset          = 100_000
+	maxEventsMetadataBytes   = 8 << 20
 )
 
 var (
@@ -79,20 +79,30 @@ const summaryBucketValueColumns = "model_id, credential_id, api_key_id, provider
 	"complete_requests, partial_requests, unpriced_requests, " +
 	"complete_tokens, partial_tokens, unpriced_tokens, latency_ms_total, latency_samples"
 
-func daySummaryBucketSource() string {
+func daySummaryBucketSource(tables ...string) string {
+	dayTable, hourTable := "day_bucket", "hour_bucket"
+	if len(tables) == 2 {
+		dayTable, hourTable = tables[0], tables[1]
+	}
 	dayForHour := sqliteFloorBucketExpr("h.bucket_ts_ns", nsPerDay)
-	return "(SELECT d.bucket_ts_ns, " + summaryBucketValueColumns + " FROM day_bucket d " +
+	return "(SELECT d.bucket_ts_ns, " + summaryBucketValueColumns + " FROM " + dayTable + " d " +
 		"WHERE NOT EXISTS (SELECT 1 FROM dirty_day dirty WHERE dirty.day_ts_ns = d.bucket_ts_ns) " +
-		"UNION ALL SELECT " + dayForHour + " AS bucket_ts_ns, " + summaryBucketValueColumns + " FROM hour_bucket h " +
+		"UNION ALL SELECT " +
+		dayForHour +
+		" AS bucket_ts_ns, " +
+		summaryBucketValueColumns +
+		" FROM " +
+		hourTable +
+		" h " +
 		"WHERE EXISTS (SELECT 1 FROM dirty_day dirty WHERE dirty.day_ts_ns = " + dayForHour + "))"
 }
 
 // resolvedCredentialFilter is the credential-dimension counterpart that also
-// carries the provider scope. v2 filter strings can be either bare "source"
-// (matches the source under any provider — used by legacy frontends and by
-// rows where provider is NULL) or "provider:source" (matches the source only
-// under that provider — used by the v2 FilterBar dropdown to disambiguate
-// the same OAuth email across claude/codex/gemini).
+// carries the provider scope. v2 filter strings accept two forms.
+// A bare "source" matches under any provider. Legacy frontends and rows with a
+// NULL provider use this form. A "provider:source" filter matches only under that
+// provider. The v2 FilterBar dropdown uses it to distinguish the same OAuth email
+// across Claude, Codex, and Gemini.
 type resolvedCredentialFilter struct {
 	active     bool
 	matchedAny bool
@@ -113,10 +123,16 @@ type credentialPair struct {
 // it resolves to "this dimension is NULL" without touching the dim table,
 // so by_api_key's (none) bucket can be selected/excluded as a real filter
 // value.
-func resolveNamesToIDs(ctx context.Context, db dbQueryer, table, raw string) (resolvedFilter, error) {
+func resolveNamesToIDs(ctx context.Context, db dbQueryer, table, raw string, canonicalAPIKeys bool) (
+	resolvedFilter,
+	error,
+) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return resolvedFilter{}, nil
+	}
+	if canonicalAPIKeys && raw == noneSentinel {
+		return resolvedFilter{active: true, includesNone: true, matchedAny: true}, nil
 	}
 	rf := resolvedFilter{active: true}
 	seenNames := make(map[string]struct{})
@@ -134,6 +150,9 @@ func resolveNamesToIDs(ctx context.Context, db dbQueryer, table, raw string) (re
 		if name == noneSentinel {
 			rf.includesNone = true
 			rf.matchedAny = true
+			if canonicalAPIKeys {
+				return nil
+			}
 		}
 		if !resolved {
 			var err error
@@ -178,6 +197,7 @@ func resolveFilterNamesToIDs(
 	table string,
 	raw string,
 	values []string,
+	canonicalAPIKeys bool,
 ) (resolvedFilter, error) {
 	names := make([]string, 0, len(values))
 	for _, value := range values {
@@ -186,13 +206,13 @@ func resolveFilterNamesToIDs(
 		}
 	}
 	if len(names) == 0 {
-		return resolveNamesToIDs(ctx, db, table, raw)
+		return resolveNamesToIDs(ctx, db, table, raw, canonicalAPIKeys)
 	}
 	if len(names) == 1 {
 		if strings.TrimSpace(raw) == "" {
 			raw = names[0]
 		}
-		return resolveNamesToIDs(ctx, db, table, raw)
+		return resolveNamesToIDs(ctx, db, table, raw, canonicalAPIKeys)
 	}
 
 	rf := resolvedFilter{active: true}
@@ -207,6 +227,9 @@ func resolveFilterNamesToIDs(
 		if name == noneSentinel {
 			rf.includesNone = true
 			rf.matchedAny = true
+			if canonicalAPIKeys {
+				continue
+			}
 		}
 		ids, err := resolveDimensionNameIDs(ctx, db, table, name)
 		if err != nil {
@@ -252,7 +275,8 @@ func resolveDimensionNameIDs(ctx context.Context, db dbQueryer, table, name stri
 			return nil, fmt.Errorf("resolve api key scan: %w", err)
 		}
 		trimmedCandidate := strings.TrimSpace(candidateName)
-		if trimmedCandidate == name || trimmedCandidate == identity || util.HideAPIKey(trimmedCandidate) == name {
+		if trimmedCandidate == name || trimmedCandidate == identity ||
+			util.HideAPIKey(trimmedCandidate) == name {
 			ids = append(ids, candidateID)
 		}
 	}
@@ -386,10 +410,11 @@ func resolveCredentialNameIDs(ctx context.Context, db dbQueryer, name string) ([
 // filter token. The first colon is the separator; emails (the typical source
 // value) never contain a colon, so a bare-source token like "user@host.com"
 // stays in the credName branch. The provider half must be a known short name
-// (claude, codex, gemini, ...) whose presence triggers the disambiguation,
-// and we keep the test cheap by lower-bounding the remaining "source" half
-// at one character so accidental "::source" or "provider:" inputs degrade
-// gracefully to "match nothing".
+// (`claude`, `codex`, `gemini`, ...) to trigger disambiguation. Requiring at least one
+// character in the remaining "source" half keeps the check cheap.
+// Accidental "::source" or "provider:" inputs therefore match nothing.
+//
+//goland:noinspection GrazieInspection
 func splitCredentialToken(token string) (provider, credential string) {
 	if strings.HasPrefix(token, credentialFilterPrefix) {
 		return "", token
@@ -561,7 +586,7 @@ func buildFilterClause(
 // querySummary implements /usage/summary against the bucket tables. It switches from
 // hour_bucket to day_bucket before the hourly grid reaches its resource limit.
 // granularity controls time-series granularity but never scans events.
-func (s *Store) querySummary(
+func (s *sqliteStore) querySummary(
 	ctx context.Context,
 	from, to time.Time,
 	filters EventFilters,
@@ -571,7 +596,7 @@ func (s *Store) querySummary(
 	return s.query(ctx, from, to, filters, granularity, includeGroups, false, "")
 }
 
-func (s *Store) queryWithAuthIndex(
+func (s *sqliteStore) queryWithAuthIndex(
 	ctx context.Context,
 	from, to time.Time,
 	filters EventFilters,
@@ -581,7 +606,7 @@ func (s *Store) queryWithAuthIndex(
 	return s.queryWithAuthIndexGranularity(ctx, from, to, filters, granularity, "", includeGroups)
 }
 
-func (s *Store) queryWithAuthIndexGranularity(
+func (s *sqliteStore) queryWithAuthIndexGranularity(
 	ctx context.Context,
 	from, to time.Time,
 	filters EventFilters,
@@ -592,7 +617,7 @@ func (s *Store) queryWithAuthIndexGranularity(
 	return s.query(ctx, from, to, filters, granularity, includeGroups, true, authIndexGranularity)
 }
 
-func (s *Store) query(
+func (s *sqliteStore) query(
 	ctx context.Context,
 	from, to time.Time,
 	filters EventFilters,
@@ -617,11 +642,8 @@ func (s *Store) query(
 		return QueryResult{}, fmt.Errorf("usage: invalid query end: %w", err)
 	}
 
-	useDayBucket := to.Sub(from) > dayBucketThreshold
-	table := "hour_bucket"
-	if useDayBucket {
-		table = daySummaryBucketSource()
-	}
+	useDayBucket := to.Sub(from) > dayBucketThreshold || granularity == "daily"
+	var table string
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -634,7 +656,7 @@ func (s *Store) query(
 		}
 	}()
 
-	modelF, err := resolveNamesToIDs(ctx, tx, "dim_model", filters.Model)
+	modelF, err := resolveNamesToIDs(ctx, tx, "dim_model", filters.Model, false)
 	if err != nil {
 		return QueryResult{}, err
 	}
@@ -642,7 +664,9 @@ func (s *Store) query(
 	if err != nil {
 		return QueryResult{}, err
 	}
-	apiKeyF, err := resolveFilterNamesToIDs(ctx, tx, "dim_api_key", filters.APIKey, filters.APIKeys)
+	apiKeyF, err := resolveFilterNamesToIDs(
+		ctx, tx, "dim_api_key", filters.APIKey, filters.APIKeys, filters.CanonicalAPIKeys,
+	)
 	if err != nil {
 		return QueryResult{}, err
 	}
@@ -655,13 +679,7 @@ func (s *Store) query(
 		return emptyQueryResult(), nil
 	}
 
-	// Bucket rows are keyed by their start instant (hour/day boundary). A
-	// non-aligned from like 10:15 would otherwise exclude the 10:00 bucket
-	// entirely, dropping 10:15-10:59 events that actually live in it. Floor
-	// both ends to the bucket grain so any bucket overlapping [from, to] is
-	// included. The trade-off (a sliver of out-of-window events at the edges)
-	// is inherent to bucket aggregation and far less surprising than silent
-	// undercounting.
+	// Padding uses the display grain; aggregate inputs retain exact inclusive boundaries.
 	grainNs := nsPerHour
 	if useDayBucket {
 		grainNs = nsPerDay
@@ -676,11 +694,11 @@ func (s *Store) query(
 	}
 
 	timeExpr := "bucket_ts_ns"
-	if useDayBucket || granularity == "daily" {
+	if useDayBucket {
 		timeExpr = sqliteFloorBucketExpr("bucket_ts_ns", nsPerDay)
 	}
 	stepNs := nsPerHour
-	if useDayBucket || granularity == "daily" {
+	if useDayBucket {
 		stepNs = nsPerDay
 	}
 	seriesLimit, err := summarySeriesLimit(fromNs, toNs, stepNs)
@@ -720,54 +738,93 @@ func (s *Store) query(
 			return QueryResult{}, err
 		}
 	}
-	if err = ensureSummaryInputBudget(
-		ctx,
-		tx,
-		table,
-		fromNs,
-		toNs,
-		modelF,
-		credF,
-		apiKeyF,
+	if err := ensureBoundarySummaryPrecision(
+		ctx, tx, fromRawNs, toRawNs, modelF, credF, apiKeyF, useDayBucket,
 	); err != nil {
 		return QueryResult{}, err
 	}
+	table, err = summaryRangeSource(grainNs, grainNs, fromRawNs, toRawNs, false)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	sources := make(map[string]string, len(summaryProjectionScopes))
+	for _, scope := range summaryProjectionScopes {
+		sources[scope] = table
+	}
+	timeTable := table
+	if !includeGroups && !includeAuthIndex && !modelF.active && !credF.active && !apiKeyF.active {
+		useProjection, err := canUseSummaryProjections(ctx, tx, fromRawNs, toRawNs)
+		if err != nil {
+			return QueryResult{}, err
+		}
+		if useProjection {
+			windows, err := summaryProjectionDirtyWindows(ctx, tx, fromRawNs, toRawNs)
+			if err != nil {
+				return QueryResult{}, err
+			}
+			for _, scope := range summaryProjectionScopes {
+				sources[scope], err = summaryRangeSource(
+					nsPerSummaryWindow, grainNs, fromRawNs, toRawNs, false,
+					summaryProjectionRange{dimension: scope, dirtyWindows: windows},
+				)
+				if err != nil {
+					return QueryResult{}, err
+				}
+			}
+			timeTable, err = summaryRangeSource(
+				grainNs, grainNs, fromRawNs, toRawNs, false,
+				summaryProjectionRange{dimension: "all", dirtyWindows: windows},
+			)
+			if err != nil {
+				return QueryResult{}, err
+			}
+		}
+	}
+	var authTable string
 	if includeAuthIndex {
-		if err = ensureAuthIndexInputBudget(
-			ctx,
-			tx,
-			fromRawNs,
-			toRawNs,
-			modelF,
-			credF,
-			apiKeyF,
-		); err != nil {
+		authTable, err = summaryRangeSource(authIndexStepNs, authIndexStepNs, fromRawNs, toRawNs, true)
+		if err != nil {
 			return QueryResult{}, err
 		}
 	}
 
 	result := emptyQueryResult()
-	if err := s.queryTotals(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
+	if err := s.queryTotals(ctx, tx, sources["all"], fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
 		return QueryResult{}, err
 	}
-	if err := s.queryByModel(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
+	if err := s.queryByModel(ctx, tx, sources["model"], fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
 		return QueryResult{}, err
 	}
-	if err := s.queryByCredential(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
+	if err := s.queryByCredential(
+		ctx, tx, sources["credential"], fromNs, toNs, modelF, credF, apiKeyF, &result,
+	); err != nil {
 		return QueryResult{}, err
 	}
-	if err := s.queryByAPIKey(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
+	if err := s.queryByAPIKey(ctx, tx, sources["api_key"], fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
 		return QueryResult{}, err
 	}
 	if includeAuthIndex {
-		if err := s.queryByAuthIndex(ctx, tx, fromRawNs, toRawNs, modelF, credF, apiKeyF, &result); err != nil {
+		authCoverage := emptyQueryResult()
+		if err := s.queryTotals(
+			ctx, tx, authTable, authIndexFromNs, authIndexToNs, modelF, credF, apiKeyF, &authCoverage,
+		); err != nil {
+			return QueryResult{}, err
+		}
+		if authCoverage.Totals.Requests != result.Totals.Requests {
+			return QueryResult{}, ErrSummaryPrecisionUnavailable
+		}
+		if err := s.queryByAuthIndex(
+			ctx, tx, authTable, authIndexFromNs, authIndexToNs, modelF, credF, apiKeyF, &result,
+		); err != nil {
 			return QueryResult{}, err
 		}
 	}
-	if summaryDimensionCount(&result) > maxSummarySeriesCount {
+	if summaryDimensionCount(&result) > maxSummaryDimensionCount {
 		return QueryResult{}, ErrSummaryQueryTooLarge
 	}
-	if err := s.queryTimeSeries(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result); err != nil {
+	if err := s.queryTimeSeries(
+		ctx, tx, timeTable, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result,
+	); err != nil {
 		return QueryResult{}, err
 	}
 	if includeGroups {
@@ -791,8 +848,9 @@ func (s *Store) query(
 		if err := s.queryTimeSeriesByAuthIndex(
 			ctx,
 			tx,
-			fromRawNs,
-			toRawNs,
+			authTable,
+			authIndexFromNs,
+			authIndexToNs,
 			modelF,
 			credF,
 			apiKeyF,
@@ -843,55 +901,6 @@ func (s *Store) query(
 	}
 	committed = true
 	return result, nil
-}
-
-func ensureSummaryInputBudget(
-	ctx context.Context,
-	queryer dbQueryer,
-	table string,
-	fromNs, toNs int64,
-	modelF resolvedFilter,
-	credF resolvedCredentialFilter,
-	apiKeyF resolvedFilter,
-) error {
-	filterSQL, filterArgs := composeFilterSQL(modelF, credF, apiKeyF, "b.")
-	query := "SELECT COUNT(*) FROM (SELECT 1 FROM " + table +
-		" b WHERE b.bucket_ts_ns >= ? AND b.bucket_ts_ns <= ?" + filterSQL +
-		" LIMIT ?)"
-	args := append([]any{fromNs, toNs}, filterArgs...)
-	args = append(args, maxSummaryInputRows+1)
-	var rows int
-	if err := queryer.QueryRowContext(ctx, query, args...).Scan(&rows); err != nil {
-		return fmt.Errorf("usage: count summary input rows: %w", err)
-	}
-	if rows > maxSummaryInputRows {
-		return ErrSummaryQueryTooLarge
-	}
-	return nil
-}
-
-func ensureAuthIndexInputBudget(
-	ctx context.Context,
-	queryer dbQueryer,
-	fromNs, toNs int64,
-	modelF resolvedFilter,
-	credF resolvedCredentialFilter,
-	apiKeyF resolvedFilter,
-) error {
-	filterSQL, filterArgs := composeFilterSQL(modelF, credF, apiKeyF, "e.")
-	query := "SELECT COUNT(*) FROM (SELECT 1 FROM events e " +
-		"WHERE e.ts_ns >= ? AND e.ts_ns <= ? AND e.auth_index_id IS NOT NULL" + filterSQL +
-		" LIMIT ?)"
-	args := append([]any{fromNs, toNs}, filterArgs...)
-	args = append(args, maxSummaryInputRows+1)
-	var rows int
-	if err := queryer.QueryRowContext(ctx, query, args...).Scan(&rows); err != nil {
-		return fmt.Errorf("usage: count auth-index summary input rows: %w", err)
-	}
-	if rows > maxSummaryInputRows {
-		return ErrSummaryQueryTooLarge
-	}
-	return nil
 }
 
 func summarySeriesLimit(fromNs, toNs, stepNs int64) (int, error) {
@@ -1130,7 +1139,7 @@ func composeFilterSQL(
 	return sb.String(), args
 }
 
-func (s *Store) queryTotals(
+func (s *sqliteStore) queryTotals(
 	ctx context.Context,
 	queryer dbQueryer,
 	table string,
@@ -1177,7 +1186,7 @@ func (s *Store) queryTotals(
 	return nil
 }
 
-func (s *Store) queryByModel(
+func (s *sqliteStore) queryByModel(
 	ctx context.Context,
 	queryer dbQueryer,
 	table string,
@@ -1219,7 +1228,8 @@ func (s *Store) queryByModel(
 			return fmt.Errorf("queryByModel scan: %w", err)
 		}
 		ms.Cost = float64(costMicro) / costMicroPerUSD
-		if _, exists := result.ByModel[name]; !exists && summaryDimensionCount(result) >= maxSummarySeriesCount {
+		if _, exists := result.ByModel[name]; !exists &&
+			summaryDimensionCount(result) >= maxSummaryDimensionCount {
 			return ErrSummaryQueryTooLarge
 		}
 		result.ByModel[name] = &ms
@@ -1227,7 +1237,7 @@ func (s *Store) queryByModel(
 	return rows.Err()
 }
 
-func (s *Store) queryByCredential(
+func (s *sqliteStore) queryByCredential(
 	ctx context.Context,
 	queryer dbQueryer,
 	table string,
@@ -1264,7 +1274,8 @@ func (s *Store) queryByCredential(
 		cs.Source = credName
 		cs.Provider = providerName
 		key := credentialMapKey(providerName, credName)
-		if _, exists := result.ByCredential[key]; !exists && summaryDimensionCount(result) >= maxSummarySeriesCount {
+		if _, exists := result.ByCredential[key]; !exists &&
+			summaryDimensionCount(result) >= maxSummaryDimensionCount {
 			return ErrSummaryQueryTooLarge
 		}
 		result.ByCredential[key] = &cs
@@ -1285,7 +1296,7 @@ func credentialMapKey(provider, source string) string {
 	return provider + ":" + source
 }
 
-func (s *Store) queryByAPIKey(
+func (s *sqliteStore) queryByAPIKey(
 	ctx context.Context,
 	queryer dbQueryer,
 	table string,
@@ -1332,7 +1343,8 @@ func (s *Store) queryByAPIKey(
 			return fmt.Errorf("queryByAPIKey scan: %w", err)
 		}
 		aks.Cost = float64(costMicro) / costMicroPerUSD
-		if _, exists := result.ByAPIKey[name]; !exists && summaryDimensionCount(result) >= maxSummarySeriesCount {
+		if _, exists := result.ByAPIKey[name]; !exists &&
+			summaryDimensionCount(result) >= maxSummaryDimensionCount {
 			return ErrSummaryQueryTooLarge
 		}
 		result.ByAPIKey[name] = &aks
@@ -1340,20 +1352,21 @@ func (s *Store) queryByAPIKey(
 	return rows.Err()
 }
 
-func (s *Store) queryByAuthIndex(
+func (s *sqliteStore) queryByAuthIndex(
 	ctx context.Context,
 	queryer dbQueryer,
+	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
 	result *QueryResult,
 ) error {
 	filterSQL, filterArgs := composeFilterSQL(modelF, credF, apiKeyF, "e.")
-	q := "SELECT a.name, COUNT(*), " +
-		"SUM(CASE WHEN e.failed = 0 THEN 1 ELSE 0 END), SUM(e.failed), " +
+	q := "SELECT a.name, SUM(e.requests), " +
+		"SUM(e.success), SUM(e.failure), " +
 		"SUM(e.input_tokens), SUM(e.output_tokens), SUM(e.reasoning_tokens), SUM(e.cached_tokens), " +
 		"SUM(e.cache_read_tokens), SUM(e.cache_write_tokens), SUM(e.total_tokens), SUM(e.cost_micro) " +
-		"FROM events e JOIN dim_auth_index a ON a.id = e.auth_index_id " +
-		"WHERE e.ts_ns >= ? AND e.ts_ns <= ?" + filterSQL +
+		"FROM " + table + " e JOIN dim_auth_index a ON a.id = e.auth_index_id " +
+		"WHERE e.bucket_ts_ns >= ? AND e.bucket_ts_ns <= ?" + filterSQL +
 		" GROUP BY a.id, a.name"
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
@@ -1377,7 +1390,8 @@ func (s *Store) queryByAuthIndex(
 			return fmt.Errorf("queryByAuthIndex scan: %w", err)
 		}
 		stats.Cost = float64(costMicro) / costMicroPerUSD
-		if _, exists := result.ByAuthIndex[name]; !exists && summaryDimensionCount(result) >= maxSummarySeriesCount {
+		if _, exists := result.ByAuthIndex[name]; !exists &&
+			summaryDimensionCount(result) >= maxSummaryDimensionCount {
 			return ErrSummaryQueryTooLarge
 		}
 		result.ByAuthIndex[name] = &stats
@@ -1392,7 +1406,7 @@ func (s *Store) queryByAuthIndex(
 // (Reserved name to keep the diff against v1 readable; remove in a follow-up
 // once code-search confirms zero remaining call sites.)
 
-func (s *Store) queryTimeSeries(
+func (s *sqliteStore) queryTimeSeries(
 	ctx context.Context,
 	queryer dbQueryer,
 	table string,
@@ -1439,7 +1453,7 @@ func (s *Store) queryTimeSeries(
 	return rows.Err()
 }
 
-func (s *Store) queryTimeSeriesByModel(
+func (s *sqliteStore) queryTimeSeriesByModel(
 	ctx context.Context,
 	queryer dbQueryer,
 	table string,
@@ -1485,7 +1499,8 @@ func (s *Store) queryTimeSeriesByModel(
 		}
 		tp.Time = time.Unix(0, ts).UTC().Format(time.RFC3339)
 		tp.Cost = float64(costMicro) / costMicroPerUSD
-		if _, exists := result.TimeSeriesByModel[name]; !exists && summaryTimeSeriesCount(result) >= seriesLimit {
+		if _, exists := result.TimeSeriesByModel[name]; !exists &&
+			summaryTimeSeriesCount(result) >= seriesLimit {
 			return ErrSummaryQueryTooLarge
 		}
 		result.TimeSeriesByModel[name] = append(result.TimeSeriesByModel[name], tp)
@@ -1493,7 +1508,7 @@ func (s *Store) queryTimeSeriesByModel(
 	return rows.Err()
 }
 
-func (s *Store) queryTimeSeriesByCredential(
+func (s *sqliteStore) queryTimeSeriesByCredential(
 	ctx context.Context,
 	queryer dbQueryer,
 	table string,
@@ -1548,7 +1563,8 @@ func (s *Store) queryTimeSeriesByCredential(
 		tp.Time = time.Unix(0, ts).UTC().Format(time.RFC3339)
 		tp.Cost = float64(costMicro) / costMicroPerUSD
 		key := credentialMapKey(providerName, credName)
-		if _, exists := result.TimeSeriesByCredential[key]; !exists && summaryTimeSeriesCount(result) >= seriesLimit {
+		if _, exists := result.TimeSeriesByCredential[key]; !exists &&
+			summaryTimeSeriesCount(result) >= seriesLimit {
 			return ErrSummaryQueryTooLarge
 		}
 		result.TimeSeriesByCredential[key] = append(result.TimeSeriesByCredential[key], tp)
@@ -1556,7 +1572,7 @@ func (s *Store) queryTimeSeriesByCredential(
 	return rows.Err()
 }
 
-func (s *Store) queryTimeSeriesByAPIKey(
+func (s *sqliteStore) queryTimeSeriesByAPIKey(
 	ctx context.Context,
 	queryer dbQueryer,
 	table string,
@@ -1604,7 +1620,8 @@ func (s *Store) queryTimeSeriesByAPIKey(
 		}
 		tp.Time = time.Unix(0, ts).UTC().Format(time.RFC3339)
 		tp.Cost = float64(costMicro) / costMicroPerUSD
-		if _, exists := result.TimeSeriesByAPIKey[name]; !exists && summaryTimeSeriesCount(result) >= seriesLimit {
+		if _, exists := result.TimeSeriesByAPIKey[name]; !exists &&
+			summaryTimeSeriesCount(result) >= seriesLimit {
 			return ErrSummaryQueryTooLarge
 		}
 		result.TimeSeriesByAPIKey[name] = append(result.TimeSeriesByAPIKey[name], tp)
@@ -1612,9 +1629,10 @@ func (s *Store) queryTimeSeriesByAPIKey(
 	return rows.Err()
 }
 
-func (s *Store) queryTimeSeriesByAuthIndex(
+func (s *sqliteStore) queryTimeSeriesByAuthIndex(
 	ctx context.Context,
 	queryer dbQueryer,
+	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
 	stepNs int64,
@@ -1622,13 +1640,13 @@ func (s *Store) queryTimeSeriesByAuthIndex(
 	result *QueryResult,
 ) error {
 	filterSQL, filterArgs := composeFilterSQL(modelF, credF, apiKeyF, "e.")
-	tsExpr := sqliteFloorBucketExpr("e.ts_ns", stepNs)
-	q := "SELECT a.name, " + tsExpr + " AS ts, COUNT(*), " +
-		"SUM(CASE WHEN e.failed = 0 THEN 1 ELSE 0 END), SUM(e.failed), " +
+	tsExpr := sqliteFloorBucketExpr("e.bucket_ts_ns", stepNs)
+	q := "SELECT a.name, " + tsExpr + " AS ts, SUM(e.requests), " +
+		"SUM(e.success), SUM(e.failure), " +
 		"SUM(e.input_tokens), SUM(e.output_tokens), SUM(e.reasoning_tokens), SUM(e.cached_tokens), " +
 		"SUM(e.cache_read_tokens), SUM(e.cache_write_tokens), SUM(e.total_tokens), SUM(e.cost_micro) " +
-		"FROM events e JOIN dim_auth_index a ON a.id = e.auth_index_id " +
-		"WHERE e.ts_ns >= ? AND e.ts_ns <= ?" + filterSQL +
+		"FROM " + table + " e JOIN dim_auth_index a ON a.id = e.auth_index_id " +
+		"WHERE e.bucket_ts_ns >= ? AND e.bucket_ts_ns <= ?" + filterSQL +
 		" GROUP BY a.id, a.name, ts ORDER BY a.name, ts"
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
@@ -1654,7 +1672,8 @@ func (s *Store) queryTimeSeriesByAuthIndex(
 		}
 		point.Time = time.Unix(0, ts).UTC().Format(time.RFC3339)
 		point.Cost = float64(costMicro) / costMicroPerUSD
-		if _, exists := result.TimeSeriesByAuthIndex[name]; !exists && summaryTimeSeriesCount(result) >= seriesLimit {
+		if _, exists := result.TimeSeriesByAuthIndex[name]; !exists &&
+			summaryTimeSeriesCount(result) >= seriesLimit {
 			return ErrSummaryQueryTooLarge
 		}
 		result.TimeSeriesByAuthIndex[name] = append(result.TimeSeriesByAuthIndex[name], point)
@@ -1666,7 +1685,7 @@ func (s *Store) queryTimeSeriesByAuthIndex(
 // large windows don't pull every row into memory the way DetailStore.QueryRange
 // did — that "read everything then slice" pattern was the OOM accomplice in
 // the JSON era and explicitly cannot be reintroduced.
-func (s *Store) queryEventDetails(
+func (s *sqliteStore) queryEventDetails(
 	ctx context.Context,
 	from, to time.Time,
 	filters EventFilters,
@@ -1678,7 +1697,7 @@ func (s *Store) queryEventDetails(
 }
 
 // queryCompactEventDetails 只读取请求列表需要的字段，默认 queryEventDetails 响应继续供导出和旧客户端使用
-func (s *Store) queryCompactEventDetails(
+func (s *sqliteStore) queryCompactEventDetails(
 	ctx context.Context,
 	from, to time.Time,
 	filters EventFilters,
@@ -1689,7 +1708,7 @@ func (s *Store) queryCompactEventDetails(
 	return s.queryEventsPage(ctx, from, to, filters, page, pageSize, sortField, desc, true)
 }
 
-func (s *Store) queryEventsPage(
+func (s *sqliteStore) queryEventsPage(
 	ctx context.Context,
 	from, to time.Time,
 	filters EventFilters,
@@ -1764,6 +1783,7 @@ func (s *Store) queryEventsPage(
 }
 
 type eventsPageQuery struct {
+	fromSQL   string
 	whereSQL  string
 	whereArgs []any
 	orderCol  string
@@ -1779,7 +1799,11 @@ func prepareEventsPageQuery(
 	sortField string,
 	desc bool,
 ) (eventsPageQuery, error) {
-	modelF, err := resolveNamesToIDs(ctx, queryer, "dim_model", filters.Model)
+	speedFilter, err := ParseRequestSpeedFilter(filters.Speed)
+	if err != nil {
+		return eventsPageQuery{}, err
+	}
+	modelF, err := resolveNamesToIDs(ctx, queryer, "dim_model", filters.Model, false)
 	if err != nil {
 		return eventsPageQuery{}, err
 	}
@@ -1787,7 +1811,9 @@ func prepareEventsPageQuery(
 	if err != nil {
 		return eventsPageQuery{}, err
 	}
-	apiKeyF, err := resolveFilterNamesToIDs(ctx, queryer, "dim_api_key", filters.APIKey, filters.APIKeys)
+	apiKeyF, err := resolveFilterNamesToIDs(
+		ctx, queryer, "dim_api_key", filters.APIKey, filters.APIKeys, filters.CanonicalAPIKeys,
+	)
 	if err != nil {
 		return eventsPageQuery{}, err
 	}
@@ -1797,6 +1823,10 @@ func prepareEventsPageQuery(
 		return eventsPageQuery{}, nil
 	}
 
+	source, err := eventFieldsSource(ctx, queryer)
+	if err != nil {
+		return eventsPageQuery{}, err
+	}
 	filterSQL, filterArgs := composeFilterSQL(modelF, credF, apiKeyF, "")
 	switch filters.Status {
 	case "success":
@@ -1805,21 +1835,54 @@ func prepareEventsPageQuery(
 		filterSQL += " AND failed = 1"
 	}
 
+	if speedFilter != "" {
+		filterSQL += " AND events.observed_speed = ?"
+		filterArgs = append(filterArgs, speedFilter)
+	}
+
 	searchSQL := ""
 	var searchArgs []any
 	if query := strings.TrimSpace(filters.Search); query != "" {
 		searchSQL = " AND (" +
-			"EXISTS (SELECT 1 FROM dim_model m WHERE m.id = events.model_id AND m.name LIKE ?) " +
-			"OR EXISTS (SELECT 1 FROM dim_credential c WHERE c.id = events.credential_id AND c.name LIKE ?) " +
-			"OR EXISTS (SELECT 1 FROM dim_source s WHERE s.id = events.source_id AND s.name LIKE ?) " +
-			"OR EXISTS (SELECT 1 FROM dim_auth_index a WHERE a.id = events.auth_index_id AND a.name LIKE ?) " +
-			"OR EXISTS (SELECT 1 FROM dim_api_key k WHERE k.id = events.api_key_id AND k.name LIKE ?)" +
-			")"
+			"events.model_id IN (SELECT id FROM dim_model WHERE name LIKE ?) " +
+			"OR events.credential_id IN (SELECT id FROM dim_credential WHERE name LIKE ?) " +
+			"OR events.source_id IN (SELECT id FROM dim_source WHERE name LIKE ?) " +
+			"OR events.auth_index_id IN (SELECT id FROM dim_auth_index WHERE name LIKE ?) " +
+			"OR events.api_key_id IN (SELECT id FROM dim_api_key WHERE name LIKE ?)"
 		pattern := "%" + query + "%"
 		searchArgs = []any{pattern, pattern, pattern, pattern, pattern}
+		if source == "event_fields" {
+			for _, field := range []string{
+				"service_tier", "request_service_tier", "response_service_tier", "request_speed", "response_speed",
+			} {
+				searchSQL += " OR events." + field + " LIKE ?"
+				searchArgs = append(searchArgs, pattern)
+			}
+		} else {
+			searchSQL += " OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(events.metadata) THEN " +
+				"json_extract(events.metadata, '$.service_tier', '$.request_service_tier', " +
+				"'$.response_service_tier', '$.request_speed', '$.response_speed') END) WHERE value LIKE ?)"
+			searchArgs = append(searchArgs, pattern)
+		}
+		// Use SQLite LIKE for the same wildcard and case rules as the stored values.
+		var searchSpeed bool
+		if err := queryer.QueryRowContext(
+			ctx,
+			"SELECT 'standard' LIKE ? OR 'fast' LIKE ? OR 'ultrafast' LIKE ? OR "+
+				"'flex' LIKE ? OR 'batch' LIKE ? OR 'unknown' LIKE ?",
+			pattern, pattern, pattern, pattern, pattern, pattern,
+		).Scan(&searchSpeed); err != nil {
+			return eventsPageQuery{}, fmt.Errorf("resolve search speed: %w", err)
+		}
+		if searchSpeed {
+			searchSQL += " OR events.observed_speed LIKE ?"
+			searchArgs = append(searchArgs, pattern)
+		}
+		searchSQL += ")"
 	}
 
 	result := eventsPageQuery{
+		fromSQL:   source + " AS events",
 		whereSQL:  "WHERE events.ts_ns >= ? AND events.ts_ns <= ?" + filterSQL + searchSQL,
 		whereArgs: append(append([]any{fromNs, toNs}, filterArgs...), searchArgs...),
 		orderCol:  "events.ts_ns",
@@ -1838,7 +1901,7 @@ func prepareEventsPageQuery(
 	startedAt := time.Now()
 	if err = queryer.QueryRowContext(
 		ctx,
-		"SELECT COUNT(*) FROM events "+result.whereSQL,
+		"SELECT COUNT(*) FROM "+result.fromSQL+" "+result.whereSQL,
 		result.whereArgs...,
 	).Scan(&result.total); err != nil {
 		return eventsPageQuery{}, fmt.Errorf("count events: %w", err)
@@ -1847,7 +1910,13 @@ func prepareEventsPageQuery(
 	return result, nil
 }
 
-func (s *Store) queryCompactEvents(
+func (query eventsPageQuery) pageSQL() string {
+	return "WITH event_page AS MATERIALIZED (SELECT events." + strings.Join(eventFieldsColumns(), ",events.") +
+		" FROM " + query.fromSQL + " " + query.whereSQL +
+		" ORDER BY " + query.orderCol + " " + query.orderDir + " LIMIT ? OFFSET ?) "
+}
+
+func (s *sqliteStore) queryCompactEvents(
 	ctx context.Context,
 	queryer dbQueryer,
 	fromNs, toNs int64,
@@ -1868,16 +1937,15 @@ func (s *Store) queryCompactEvents(
 	if err != nil {
 		return nil, 0, err
 	}
-	if pageQuery.total == 0 {
+	if pageQuery.whereSQL == "" {
 		return nil, 0, nil
 	}
 
 	metadataValue := func(path string) string {
-		return "CASE WHEN json_valid(events.metadata) THEN json_extract(events.metadata, '" + path + "') END"
+		return "event_fields." + strings.TrimPrefix(path, "$.")
 	}
-	metadataState := "CASE WHEN events.metadata IS NULL OR events.metadata = '' THEN 0 " +
-		"WHEN json_valid(events.metadata) THEN 1 ELSE -1 END"
-	dataQ := "SELECT events.ts_ns, " +
+	metadataState := "event_fields.metadata_state"
+	dataQ := pageQuery.pageSQL() + "SELECT events.ts_ns, " +
 		"(SELECT name FROM dim_model      WHERE id = events.model_id), " +
 		"(SELECT name FROM dim_source     WHERE id = events.source_id), " +
 		"(SELECT name FROM dim_auth_index WHERE id = events.auth_index_id), " +
@@ -1892,11 +1960,31 @@ func (s *Store) queryCompactEvents(
 		metadataValue("$.time_to_first_byte_ms") + ", " +
 		metadataValue("$.total_duration_ms") + ", " +
 		metadataValue("$.completed") + ", " +
+		metadataValue("$.reasoning_effort") + ", " +
 		metadataValue("$.thinking") + ", " +
+		metadataValue("$.service_tier") + ", " +
+		metadataValue("$.request_service_tier") + ", " +
+		metadataValue("$.response_service_tier") + ", " +
+		metadataValue("$.client_model") + ", " +
+		metadataValue("$.upstream_url") + ", " +
+		"CAST(" + eventMetadataValueSQL("events.", "response_url") + " AS TEXT), " +
+		"CAST(" + eventMetadataValueSQL("events.", "response_url_source") + " AS TEXT), " +
+		"CAST(" + eventMetadataValueSQL("events.", "response_url_status") + " AS TEXT), " +
+		"CAST(" + eventMetadataValueSQL("events.", "upstream_next_hop_status") + " AS TEXT), " +
+		metadataValue("$.upstream_model") + ", " +
+		metadataValue("$.response_model") + ", " +
+		metadataValue("$.response_provider") + ", " +
+		metadataValue("$.response_provider_source") + ", " +
+		metadataValue("$.request_speed") + ", " +
+		metadataValue("$.response_speed") + ", " +
+		eventMetadataValueSQL("events.", "cache_read_reported") + ", " +
+		eventMetadataValueSQL("events.", "cache_write_reported") + ", " +
+		eventMetadataValueSQL("events.", "billing_metadata") + ", " +
+		eventMetadataValueSQL("events.", "pricing_receipt_v2") + ", " +
+		metadataValue("$.executor_type") + ", " +
 		"request_log.state, request_log.home_ip " +
-		"FROM events" + requestLogArtifactJoinSQL + " " + pageQuery.whereSQL +
-		" ORDER BY " + pageQuery.orderCol + " " + pageQuery.orderDir +
-		" LIMIT ? OFFSET ?"
+		"FROM event_page AS event_fields JOIN events ON events.id=event_fields.id" + requestLogArtifactJoinSQL +
+		" ORDER BY " + pageQuery.orderCol + " " + pageQuery.orderDir
 	dataArgs := append([]any{}, pageQuery.whereArgs...)
 	dataArgs = append(dataArgs, pageSize, offset)
 
@@ -1915,7 +2003,17 @@ func (s *Store) queryCompactEvents(
 		var modelName, sourceName, authIndexName, apiKeyName, providerName sql.NullString
 		var metadataState int64
 		var latencyMs, timeToFirstByteMs, totalDurationMs, completed sql.NullInt64
-		var requestID, thinking, pricingReceipt, artifactState, artifactHomeIP sql.NullString
+		var requestID, reasoningEffort, thinking sql.NullString
+		var pricingReceipt, artifactState, artifactHomeIP sql.NullString
+		var serviceTier, requestServiceTier, responseServiceTier sql.NullString
+		var clientModel, upstreamURL, upstreamModel, responseModel sql.NullString
+		var responseURL, responseURLSource, responseURLStatus, upstreamNextHopStatus sql.NullString
+		var responseProvider, responseProviderSource, requestSpeed, responseSpeed sql.NullString
+		var executorType sql.NullString
+		var cacheReadReported sql.NullBool
+		var cacheWriteReported sql.NullBool
+		var billingMetadata sql.NullString
+		var pricingReceiptV2 sql.NullString
 		var failed int64
 		if err = rows.Scan(
 			&tsNs,
@@ -1942,7 +2040,28 @@ func (s *Store) queryCompactEvents(
 			&timeToFirstByteMs,
 			&totalDurationMs,
 			&completed,
+			&reasoningEffort,
 			&thinking,
+			&serviceTier,
+			&requestServiceTier,
+			&responseServiceTier,
+			&clientModel,
+			&upstreamURL,
+			&responseURL,
+			&responseURLSource,
+			&responseURLStatus,
+			&upstreamNextHopStatus,
+			&upstreamModel,
+			&responseModel,
+			&responseProvider,
+			&responseProviderSource,
+			&requestSpeed,
+			&responseSpeed,
+			&cacheReadReported,
+			&cacheWriteReported,
+			&billingMetadata,
+			&pricingReceiptV2,
+			&executorType,
 			&artifactState,
 			&artifactHomeIP,
 		); err != nil {
@@ -1960,7 +2079,13 @@ func (s *Store) queryCompactEvents(
 		detail.AuthIndex = authIndexName.String
 		detail.APIKey = apiKeyName.String
 		detail.Provider = providerName.String
-		detail.PricingReceipt, err = decodePricingReceipt(pricingReceipt)
+		receiptMetadata := sql.NullString{}
+		if pricingReceiptV2.Valid {
+			receiptMetadata = sql.NullString{
+				Valid: true, String: `{"pricing_receipt_v2":` + pricingReceiptV2.String + `}`,
+			}
+		}
+		detail.PricingReceipt, err = decodePricingReceipt(pricingReceipt, receiptMetadata)
 		if err != nil {
 			_ = rows.Close()
 			return nil, 0, fmt.Errorf("decode compact event pricing receipt at ts_ns=%d: %w", tsNs, err)
@@ -1971,8 +2096,42 @@ func (s *Store) queryCompactEvents(
 		detail.MetadataRecorded = metadataState == 1
 		if latencyMs.Valid {
 			detail.LatencyMs = latencyMs.Int64
+			detail.latencyRecorded = true
 		}
 		detail.RequestID = strings.TrimSpace(requestID.String)
+		detail.ReasoningEffort = strings.TrimSpace(reasoningEffort.String)
+		detail.ServiceTier = strings.TrimSpace(serviceTier.String)
+		detail.RequestServiceTier = strings.TrimSpace(requestServiceTier.String)
+		detail.ResponseServiceTier = strings.TrimSpace(responseServiceTier.String)
+		detail.ClientModel = strings.TrimSpace(clientModel.String)
+		detail.UpstreamURL = strings.TrimSpace(upstreamURL.String)
+		detail.ResponseURL = strings.TrimSpace(responseURL.String)
+		detail.ResponseURLSource = strings.TrimSpace(responseURLSource.String)
+		detail.ResponseURLStatus = strings.TrimSpace(responseURLStatus.String)
+		detail.UpstreamNextHopStatus = strings.TrimSpace(upstreamNextHopStatus.String)
+		detail.UpstreamModel = strings.TrimSpace(upstreamModel.String)
+		detail.ResponseModel = strings.TrimSpace(responseModel.String)
+		detail.ResponseProvider = strings.TrimSpace(responseProvider.String)
+		detail.ResponseProviderSource = strings.TrimSpace(responseProviderSource.String)
+		detail.RequestSpeed = strings.TrimSpace(requestSpeed.String)
+		detail.ResponseSpeed = strings.TrimSpace(responseSpeed.String)
+		detail.CacheReadReported = cacheReadReported.Valid && cacheReadReported.Bool
+		if cacheWriteReported.Valid {
+			detail.CacheWriteReported = new(cacheWriteReported.Bool)
+		}
+		detail.CacheWriteReported = coreusage.NormalizeCacheWriteReported(
+			detail.CacheWriteReported, detail.Tokens.CacheWriteTokens,
+		)
+		if billingMetadata.Valid && billingMetadata.String != "" {
+			if err := json.Unmarshal(
+				[]byte(billingMetadata.String), &detail.BillingMetadata,
+			); err != nil || !detail.BillingMetadata.Valid() {
+				_ = rows.Close()
+				return nil, 0, fmt.Errorf("invalid compact billing metadata at ts_ns=%d", tsNs)
+			}
+		}
+		detail.ExecutorType = executorType.String
+		normalizeFlatDetailServiceTiers(&detail)
 		if timeToFirstByteMs.Valid {
 			detail.TimeToFirstByteMs = timeToFirstByteMs.Int64
 		}
@@ -2004,10 +2163,13 @@ func (s *Store) queryCompactEvents(
 		return nil, 0, fmt.Errorf("close compact event rows: %w", err)
 	}
 	log.Debugf("usage: compact events metadata projection scan took %v", time.Since(startedAt))
+	if pageQuery.total == 0 {
+		return nil, 0, nil
+	}
 	return out, pageQuery.total, nil
 }
 
-func (s *Store) queryEvents(
+func (s *sqliteStore) queryEvents(
 	ctx context.Context,
 	queryer dbQueryer,
 	fromNs, toNs int64,
@@ -2028,10 +2190,10 @@ func (s *Store) queryEvents(
 	if err != nil {
 		return nil, 0, err
 	}
-	if pageQuery.total == 0 {
+	if pageQuery.whereSQL == "" {
 		return nil, 0, nil
 	}
-	dataQ := "SELECT events.ts_ns, " +
+	dataQ := pageQuery.pageSQL() + "SELECT events.ts_ns, " +
 		"(SELECT name FROM dim_model      WHERE id = events.model_id), " +
 		"(SELECT name FROM dim_source     WHERE id = events.source_id), " +
 		"(SELECT name FROM dim_auth_index WHERE id = events.auth_index_id), " +
@@ -2039,10 +2201,12 @@ func (s *Store) queryEvents(
 		"(SELECT name FROM dim_provider   WHERE id = events.provider_id), " +
 		"events.input_tokens, events.output_tokens, events.reasoning_tokens, events.cached_tokens, " +
 		"events.cache_read_tokens, events.cache_write_tokens, events.total_tokens, " +
-		"events.cost_micro, events.cost_status, events.cost_reason, events.pricing_receipt, events.failed, events.metadata" + requestLogArtifactColumns +
-		"FROM events" + requestLogArtifactJoinSQL + " " + pageQuery.whereSQL +
-		" ORDER BY " + pageQuery.orderCol + " " + pageQuery.orderDir +
-		" LIMIT ? OFFSET ?"
+		("events.cost_micro, events.cost_status, events.cost_reason, " +
+			"events.pricing_receipt, events.failed, " +
+			"events.metadata") +
+		requestLogArtifactColumns +
+		"FROM event_page AS event_fields JOIN events ON events.id=event_fields.id" + requestLogArtifactJoinSQL +
+		" ORDER BY " + pageQuery.orderCol + " " + pageQuery.orderDir
 
 	dataArgs := append([]any{}, pageQuery.whereArgs...)
 	dataArgs = append(dataArgs, pageSize, offset)
@@ -2089,7 +2253,7 @@ func (s *Store) queryEvents(
 		d.AuthIndex = authIdxName.String
 		d.APIKey = apiKeyName.String
 		d.Provider = providerName.String
-		d.PricingReceipt, err = decodePricingReceipt(pricingReceipt)
+		d.PricingReceipt, err = decodePricingReceipt(pricingReceipt, metadata)
 		if err != nil {
 			_ = rows.Close()
 			return nil, 0, fmt.Errorf("decode event pricing receipt at ts_ns=%d: %w", tsNs, err)
@@ -2134,12 +2298,15 @@ func (s *Store) queryEvents(
 	if err := rows.Close(); err != nil {
 		return nil, 0, fmt.Errorf("close event rows: %w", err)
 	}
+	if pageQuery.total == 0 {
+		return nil, 0, nil
+	}
 	return out, pageQuery.total, nil
 }
 
 // queryBackupEventSet returns one transactionally consistent, unpaginated event
 // set for an encrypted backup. Zero from/to values leave that bound open.
-func (s *Store) queryBackupEventSet(
+func (s *sqliteStore) queryBackupEventSet(
 	ctx context.Context,
 	from, to time.Time,
 	filters EventFilters,
@@ -2147,7 +2314,7 @@ func (s *Store) queryBackupEventSet(
 	return s.queryBackupEvents(ctx, from, to, filters, maxPortableBackupPlaintextBytes)
 }
 
-func (s *Store) queryBackupEvents(
+func (s *sqliteStore) queryBackupEvents(
 	ctx context.Context,
 	from, to time.Time,
 	filters EventFilters,
@@ -2155,6 +2322,10 @@ func (s *Store) queryBackupEvents(
 ) ([]FlatDetail, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("usage: query backup events on nil store")
+	}
+	speedFilter, err := ParseRequestSpeedFilter(filters.Speed)
+	if err != nil {
+		return nil, err
 	}
 	if maxPlaintextBytes <= 0 || maxPlaintextBytes > maxPortableBackupPlaintextBytes {
 		maxPlaintextBytes = maxPortableBackupPlaintextBytes
@@ -2181,7 +2352,7 @@ func (s *Store) queryBackupEvents(
 		}
 	}()
 
-	modelF, err := resolveNamesToIDs(ctx, tx, "dim_model", filters.Model)
+	modelF, err := resolveNamesToIDs(ctx, tx, "dim_model", filters.Model, false)
 	if err != nil {
 		return nil, fmt.Errorf("usage: resolve backup model filter: %w", err)
 	}
@@ -2189,7 +2360,9 @@ func (s *Store) queryBackupEvents(
 	if err != nil {
 		return nil, fmt.Errorf("usage: resolve backup credential filter: %w", err)
 	}
-	apiKeyF, err := resolveFilterNamesToIDs(ctx, tx, "dim_api_key", filters.APIKey, filters.APIKeys)
+	apiKeyF, err := resolveFilterNamesToIDs(
+		ctx, tx, "dim_api_key", filters.APIKey, filters.APIKeys, filters.CanonicalAPIKeys,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("usage: resolve backup API key filter: %w", err)
 	}
@@ -2204,7 +2377,19 @@ func (s *Store) queryBackupEvents(
 	}
 
 	whereSQL, args := buildFilterClause(from, to, "ts_ns", "", modelF, apiKeyF, credF)
-	query := "SELECT events.fingerprint, events.ts_ns, " +
+	if speedFilter != "" {
+		if whereSQL == "" {
+			whereSQL = " WHERE 1=1"
+		}
+		whereSQL += " AND events.observed_speed = ?"
+		args = append(args, speedFilter)
+	}
+	source, err := eventFieldsSource(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	query := "WITH event_export AS (SELECT events.id,events.request_id FROM " + source + " AS events" + whereSQL + ") " +
+		"SELECT events.fingerprint, events.ts_ns, " +
 		"(SELECT name FROM dim_model      WHERE id = events.model_id), " +
 		"(SELECT name FROM dim_source     WHERE id = events.source_id), " +
 		"(SELECT name FROM dim_auth_index WHERE id = events.auth_index_id), " +
@@ -2212,8 +2397,12 @@ func (s *Store) queryBackupEvents(
 		"(SELECT name FROM dim_provider   WHERE id = events.provider_id), " +
 		"events.input_tokens, events.output_tokens, events.reasoning_tokens, events.cached_tokens, " +
 		"events.cache_read_tokens, events.cache_write_tokens, events.total_tokens, " +
-		"events.cost_micro, events.cost_status, events.cost_reason, events.pricing_receipt, events.failed, events.metadata" + requestLogArtifactColumns +
-		"FROM events" + requestLogArtifactJoinSQL + whereSQL + " ORDER BY events.ts_ns, events.id"
+		("events.cost_micro, events.cost_status, events.cost_reason, " +
+			"events.pricing_receipt, events.failed, " +
+			"events.metadata") +
+		requestLogArtifactColumns +
+		"FROM event_export AS event_fields JOIN events ON events.id=event_fields.id" + requestLogArtifactJoinSQL +
+		" ORDER BY events.ts_ns, events.id"
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("usage: query backup events: %w", err)
@@ -2276,7 +2465,7 @@ func (s *Store) queryBackupEvents(
 		detail.AuthIndex = authIndexName.String
 		detail.APIKey = apiKeyName.String
 		detail.Provider = providerName.String
-		detail.PricingReceipt, err = decodePricingReceipt(pricingReceipt)
+		detail.PricingReceipt, err = decodePricingReceipt(pricingReceipt, metadata)
 		if err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("usage: decode backup event pricing receipt at ts_ns=%d: %w", tsNs, err)
@@ -2339,7 +2528,7 @@ func (s *Store) queryBackupEvents(
 // instead of re-scanning every historical day on every startup. The hourly
 // ticker keeps re-rolling yesterday/today in the background and advances the
 // watermark as new closed days appear.
-func (s *Store) startRollup(ctx context.Context) func() {
+func (s *sqliteStore) startRollup(ctx context.Context) func() {
 	// Initial pass must complete before we accept queries — otherwise a
 	// startup-time day-bucket query reads an empty day_bucket and the user sees a
 	// blank summary until the goroutine catches up.
@@ -2386,7 +2575,7 @@ func (s *Store) startRollup(ctx context.Context) func() {
 	}
 }
 
-func (s *Store) rollupRecentDays(ctx context.Context) error {
+func (s *sqliteStore) rollupRecentDays(ctx context.Context) error {
 	yesterday := time.Now().UTC().Add(-2 * time.Hour).Truncate(24 * time.Hour)
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	for d := yesterday; !d.After(today); d = d.Add(24 * time.Hour) {
@@ -2397,7 +2586,7 @@ func (s *Store) rollupRecentDays(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) rollupDirtyDays(ctx context.Context) error {
+func (s *sqliteStore) rollupDirtyDays(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT day_ts_ns FROM dirty_day ORDER BY day_ts_ns")
 	if err != nil {
 		return fmt.Errorf("query dirty days: %w", err)
@@ -2428,7 +2617,7 @@ func (s *Store) rollupDirtyDays(ctx context.Context) error {
 
 // rollupPendingDays catches day_bucket up to the newest hour_bucket day using a
 // persisted watermark in meta, so restarts only process unseen closed days.
-func (s *Store) rollupPendingDays(ctx context.Context) error {
+func (s *sqliteStore) rollupPendingDays(ctx context.Context) error {
 	newestDayNs, hasData, err := s.latestHourBucketDay(ctx)
 	if err != nil {
 		return err
@@ -2457,14 +2646,14 @@ func (s *Store) rollupPendingDays(ctx context.Context) error {
 	return s.setDayRollupWatermark(ctx, newestDayNs)
 }
 
-func (s *Store) rollupImportedDays(ctx context.Context, earliestDayNs, latestDayNs int64) error {
+func (s *sqliteStore) rollupImportedDays(ctx context.Context, earliestDayNs, latestDayNs int64) error {
 	if earliestDayNs > latestDayNs {
 		return nil
 	}
 	return s.rollupDayRange(ctx, earliestDayNs, latestDayNs)
 }
 
-func (s *Store) nextPendingRollupDay(
+func (s *sqliteStore) nextPendingRollupDay(
 	ctx context.Context,
 	watermarkNs int64,
 	hasWatermark bool,
@@ -2482,7 +2671,7 @@ func (s *Store) nextPendingRollupDay(
 	return watermarkNs + nsPerDay, true, nil
 }
 
-func (s *Store) rollupDayRange(ctx context.Context, startDayNs, endDayNs int64) error {
+func (s *sqliteStore) rollupDayRange(ctx context.Context, startDayNs, endDayNs int64) error {
 	if startDayNs > endDayNs {
 		return nil
 	}
@@ -2500,7 +2689,7 @@ func (s *Store) rollupDayRange(ctx context.Context, startDayNs, endDayNs int64) 
 	}
 }
 
-func (s *Store) earliestHourBucketDay(ctx context.Context) (int64, bool, error) {
+func (s *sqliteStore) earliestHourBucketDay(ctx context.Context) (int64, bool, error) {
 	var dayNs sql.NullInt64
 	query := "SELECT MIN(" + sqliteFloorBucketExpr("bucket_ts_ns", nsPerDay) + ") FROM hour_bucket"
 	if err := s.db.QueryRowContext(ctx, query).Scan(&dayNs); err != nil {
@@ -2512,7 +2701,7 @@ func (s *Store) earliestHourBucketDay(ctx context.Context) (int64, bool, error) 
 	return dayNs.Int64, true, nil
 }
 
-func (s *Store) latestHourBucketDay(ctx context.Context) (int64, bool, error) {
+func (s *sqliteStore) latestHourBucketDay(ctx context.Context) (int64, bool, error) {
 	var dayNs sql.NullInt64
 	query := "SELECT MAX(" + sqliteFloorBucketExpr("bucket_ts_ns", nsPerDay) + ") FROM hour_bucket"
 	if err := s.db.QueryRowContext(ctx, query).Scan(&dayNs); err != nil {
@@ -2524,7 +2713,7 @@ func (s *Store) latestHourBucketDay(ctx context.Context) (int64, bool, error) {
 	return dayNs.Int64, true, nil
 }
 
-func (s *Store) getDayRollupWatermark(ctx context.Context) (int64, bool, error) {
+func (s *sqliteStore) getDayRollupWatermark(ctx context.Context) (int64, bool, error) {
 	var raw string
 	err := s.db.QueryRowContext(
 		ctx,
@@ -2553,7 +2742,7 @@ func (s *Store) getDayRollupWatermark(ctx context.Context) (int64, bool, error) 
 	return watermarkNs, true, nil
 }
 
-func (s *Store) setDayRollupWatermark(ctx context.Context, dayNs int64) error {
+func (s *sqliteStore) setDayRollupWatermark(ctx context.Context, dayNs int64) error {
 	if _, err := s.db.ExecContext(
 		ctx,
 		"INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2572,7 +2761,7 @@ func (s *Store) setDayRollupWatermark(ctx context.Context, dayNs int64) error {
 // The UPSERT uses "SET col = excluded.col" rather than "+= excluded.col"
 // because excluded already holds the recomputed total — adding would double
 // count on the second pass.
-func (s *Store) rollupDay(ctx context.Context, dayStartNs int64) error {
+func (s *sqliteStore) rollupDay(ctx context.Context, dayStartNs int64) error {
 	if s == nil || s.db == nil {
 		return errors.New("usage: rollupDay on nil store")
 	}
@@ -2596,7 +2785,7 @@ func (s *Store) rollupDay(ctx context.Context, dayStartNs int64) error {
 	return nil
 }
 
-func (s *Store) rollupDayTx(ctx context.Context, tx *sql.Tx, dayStartNs int64) error {
+func (s *sqliteStore) rollupDayTx(ctx context.Context, tx *sql.Tx, dayStartNs int64) error {
 	if s == nil || tx == nil {
 		return errors.New("usage: rollupDayTx on nil store or transaction")
 	}

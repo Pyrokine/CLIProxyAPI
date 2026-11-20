@@ -22,6 +22,9 @@ const (
 	queueEnabled  uint32 = 1
 	queueClosed   uint32 = 2
 
+	usageOutputChannel = "usage"
+	errorOutputChannel = "errors"
+
 	usageSupportRefreshPayload = `{"support_refresh":true}`
 	usageRefreshPayload        = `{"refresh":true}`
 )
@@ -31,7 +34,7 @@ type queueItem struct {
 	payload    []byte
 }
 
-// Queue owns one service's usage output buffer, subscribers and runtime flags.
+// Queue 维护单个服务的用量缓存、事件订阅和运行状态
 type Queue struct {
 	state                  atomic.Uint32
 	usageStatisticsEnabled atomic.Bool
@@ -43,7 +46,7 @@ type Queue struct {
 	pruneTimer             *time.Timer
 	pruneGeneration        uint64
 	dropped                atomic.Uint64
-	subscribers            map[uint64]chan []byte
+	subscribers            map[string]map[uint64]chan []byte
 	nextSubscriberID       uint64
 }
 
@@ -131,10 +134,21 @@ func (q *Queue) Enqueue(payload []byte) {
 		q.dropped.Add(1)
 		return
 	}
-	if q.publishToSubscribers(payload) {
+	if q.publishToSubscribers(usageOutputChannel, payload) {
 		return
 	}
 	q.enqueue(payload)
+}
+
+func (q *Queue) EnqueueError(payload []byte) {
+	if q == nil || !q.Enabled() || len(payload) == 0 {
+		return
+	}
+	if len(payload) > maxQueueItemBytes {
+		q.dropped.Add(1)
+		return
+	}
+	q.publishToSubscribers(errorOutputChannel, payload)
 }
 
 func (q *Queue) PopOldest(count int) [][]byte {
@@ -165,14 +179,28 @@ func (q *Queue) TrySubscribeUsage() (<-chan []byte, func(), bool) {
 		close(closed)
 		return closed, func() {}, false
 	}
-	return q.subscribeUsage([]byte(usageSupportRefreshPayload))
+	return q.subscribe(usageOutputChannel, []byte(usageSupportRefreshPayload))
+}
+
+func (q *Queue) SubscribeErrors() (<-chan []byte, func()) {
+	subscriber, unsubscribe, _ := q.TrySubscribeErrors()
+	return subscriber, unsubscribe
+}
+
+func (q *Queue) TrySubscribeErrors() (<-chan []byte, func(), bool) {
+	if q == nil {
+		closed := make(chan []byte)
+		close(closed)
+		return closed, func() {}, false
+	}
+	return q.subscribe(errorOutputChannel, nil)
 }
 
 func (q *Queue) NotifyUsageRefresh() {
 	if q == nil {
 		return
 	}
-	q.publishToSubscribers([]byte(usageRefreshPayload))
+	q.publishToSubscribers(usageOutputChannel, []byte(usageRefreshPayload))
 }
 
 func SetEnabled(value bool) { defaultQueue.SetEnabled(value) }
@@ -183,18 +211,24 @@ func SetRetentionSeconds(value int) { defaultQueue.SetRetentionSeconds(value) }
 
 func Enqueue(payload []byte) { defaultQueue.Enqueue(payload) }
 
+func enqueueError(payload []byte) { defaultQueue.EnqueueError(payload) }
+
 func PopOldest(count int) [][]byte { return defaultQueue.PopOldest(count) }
 
 func subscribeUsage() (<-chan []byte, func()) { return defaultQueue.SubscribeUsage() }
+
+func subscribeErrors() (<-chan []byte, func()) { return defaultQueue.SubscribeErrors() }
 
 func NotifyUsageRefresh() { defaultQueue.NotifyUsageRefresh() }
 
 func (q *Queue) clear() {
 	q.mu.Lock()
 
-	subscribers := make([]chan []byte, 0, len(q.subscribers))
-	for _, subscriber := range q.subscribers {
-		subscribers = append(subscribers, subscriber)
+	var subscribers []chan []byte
+	for _, topicSubscribers := range q.subscribers {
+		for _, subscriber := range topicSubscribers {
+			subscribers = append(subscribers, subscriber)
+		}
 	}
 	q.items = nil
 	q.head = 0
@@ -236,26 +270,27 @@ func (q *Queue) enqueue(payload []byte) {
 	q.schedulePruneLocked(now)
 }
 
-func (q *Queue) publishToSubscribers(payload []byte) bool {
+func (q *Queue) publishToSubscribers(topic string, payload []byte) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.state.Load() != queueEnabled {
 		return true
 	}
 
-	if len(q.subscribers) == 0 {
+	subscribers := q.subscribers[topic]
+	if len(subscribers) == 0 {
 		return false
 	}
 
 	delivered := false
 	var dropped uint64
-	for id, subscriber := range q.subscribers {
+	for id, subscriber := range subscribers {
 		cloned := append([]byte(nil), payload...)
 		select {
 		case subscriber <- cloned:
 			delivered = true
 		default:
-			delete(q.subscribers, id)
+			delete(subscribers, id)
 			close(subscriber)
 			dropped++
 		}
@@ -266,21 +301,26 @@ func (q *Queue) publishToSubscribers(payload []byte) bool {
 	return delivered
 }
 
-func (q *Queue) subscribeUsage(initialPayload []byte) (<-chan []byte, func(), bool) {
+func (q *Queue) subscribe(topic string, initialPayload []byte) (<-chan []byte, func(), bool) {
 	subscriber := make(chan []byte, usageSubscriberBuffer)
 
 	q.mu.Lock()
-	if q.state.Load() != queueEnabled || len(q.subscribers) >= maxUsageSubscribers {
+	subscribers := q.subscribers[topic]
+	if q.state.Load() != queueEnabled || len(subscribers) >= maxUsageSubscribers {
 		q.mu.Unlock()
 		close(subscriber)
 		return subscriber, func() {}, false
 	}
 	if q.subscribers == nil {
-		q.subscribers = make(map[uint64]chan []byte)
+		q.subscribers = make(map[string]map[uint64]chan []byte)
+	}
+	if subscribers == nil {
+		subscribers = make(map[uint64]chan []byte)
+		q.subscribers[topic] = subscribers
 	}
 	q.nextSubscriberID++
 	id := q.nextSubscriberID
-	q.subscribers[id] = subscriber
+	subscribers[id] = subscriber
 	if len(initialPayload) > 0 {
 		subscriber <- append([]byte(nil), initialPayload...)
 	}
@@ -290,18 +330,19 @@ func (q *Queue) subscribeUsage(initialPayload []byte) (<-chan []byte, func(), bo
 	unsubscribe := func() {
 		once.Do(
 			func() {
-				q.unsubscribeUsage(id)
+				q.unsubscribe(topic, id)
 			},
 		)
 	}
 	return subscriber, unsubscribe, true
 }
 
-func (q *Queue) unsubscribeUsage(id uint64) {
+func (q *Queue) unsubscribe(topic string, id uint64) {
 	q.mu.Lock()
-	subscriber, ok := q.subscribers[id]
+	subscribers := q.subscribers[topic]
+	subscriber, ok := subscribers[id]
 	if ok {
-		delete(q.subscribers, id)
+		delete(subscribers, id)
 	}
 	q.mu.Unlock()
 

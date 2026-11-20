@@ -158,6 +158,18 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persister unavailable"})
 		return
 	}
+	apiKeyIdentity := strings.TrimSpace(c.Query("api_key_identity"))
+	if apiKeyIdentity != "" && apiKeyIdentity != "canonical" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid api_key_identity parameter"})
+		return
+	}
+	canonicalAPIKeys := apiKeyIdentity == "canonical"
+
+	speed, errSpeed := usage.ParseRequestSpeedFilter(c.Query("speed"))
+	if errSpeed != nil || len(c.QueryArray("speed")) > 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid speed parameter"})
+		return
+	}
 	from, errFrom := parseTimeParam(c.Query("from"), time.Time{})
 	to, errTo := parseTimeParam(c.Query("to"), time.Time{})
 	if errFrom != nil || errTo != nil {
@@ -170,12 +182,15 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	apiKeyFilter, apiKeyFilters := newUsageAPIKeyPresenter(h.configSnapshot()).expandFilters(
 		c.Query("api_key"),
 		c.QueryArray("api_key"),
+		canonicalAPIKeys,
 	)
 	filters := usage.EventFilters{
-		Model:   c.Query("model"),
-		APIKey:  apiKeyFilter,
-		APIKeys: apiKeyFilters,
-		Source:  c.Query("credential"),
+		Model:            c.Query("model"),
+		APIKey:           apiKeyFilter,
+		APIKeys:          apiKeyFilters,
+		CanonicalAPIKeys: canonicalAPIKeys,
+		Source:           c.Query("credential"),
+		Speed:            speed,
 	}
 	events, err := h.usagePersister.QueryBackupEventsContext(c.Request.Context(), from, to, filters)
 	if err != nil {
@@ -201,6 +216,16 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt usage export"})
 		return
 	}
+	if speed != "" {
+		filter, err := json.Marshal(gin.H{"speed_filter": speed})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode usage export"})
+			return
+		}
+		// The backup is a JSON object; append the response marker without decoding its ciphertext.
+		payload = append(payload[:len(payload)-1], ',')
+		payload = append(payload, filter[1:]...)
+	}
 	if int64(len(payload)) > usage.MaxPortableBackupBytes {
 		writeUsageBackupTooLarge(c)
 		return
@@ -212,7 +237,10 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 func writeUsageBackupTooLarge(c *gin.Context) {
 	c.JSON(
 		http.StatusRequestEntityTooLarge,
-		gin.H{"error": "usage backup exceeds the 100 MiB portable limit; narrow the export with from, to, model, api_key, or credential filters"},
+		gin.H{
+			"error": "usage backup exceeds the 100 MiB portable limit; narrow the export wit" +
+				"h from, to, model, api_key, or credential filters",
+		},
 	)
 }
 
@@ -264,9 +292,8 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	secret := ""
+	secret := usageBackupSecret(c)
 	if usage.IsUsageBackup(data) {
-		secret = usageBackupSecret(c)
 		if secret == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "usage backup decryption key unavailable"})
 			return
@@ -279,12 +306,21 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		}
 		status := http.StatusInternalServerError
 		if errors.Is(err, usage.ErrInvalidImport) {
+			rejectMutation(ctx)
 			status = http.StatusBadRequest
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 
+	if result.Added > 0 {
+		RecordMutationEffect(ctx, "usage.persisted", "usage")
+	}
+	if result.Warning != "" {
+		failMutation(ctx)
+	} else {
+		CompleteMutation(ctx)
+	}
 	totalRequests, failureCount, err := h.usagePersister.QueryRequestCountsContext(ctx)
 	if ctx.Err() != nil {
 		return
@@ -356,7 +392,11 @@ func (h *Handler) GetUsageDBSize(c *gin.Context) {
 		)
 		return
 	}
-	sizeBytes, maxBytes, warningThresholdPct, warning, capped := h.usagePersister.DBSizeStatus()
+	sizeBytes, maxBytes, warningThresholdPct, warning, capped, err := h.usagePersister.DBSizeStatusWithError()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read usage database size"})
+		return
+	}
 	c.JSON(
 		http.StatusOK, gin.H{
 			"size_bytes":            sizeBytes,
@@ -399,6 +439,10 @@ func (h *Handler) PutUsageRetention(c *gin.Context) {
 		)
 		return
 	}
+	if body.MaxDBSizeMB != nil && *body.MaxDBSizeMB > config.MaxStorageSizeMB {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_db_size_mb exceeds the supported range"})
+		return
+	}
 	if body.MaxDBSizeMB != nil && *body.MaxDBSizeMB < 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "max_db_size_mb must be 0 (disable) or a positive integer"})
 		return
@@ -436,6 +480,8 @@ func (h *Handler) PutUsageRetention(c *gin.Context) {
 	}
 	retention := committed.UsageRetention
 	h.usagePersister.SetRetention(retention)
+	RecordMutationEffect(c.Request.Context(), "usage.runtime_applied", "usage")
+	CompleteMutation(c.Request.Context())
 
 	warningThreshold := retention.WarningThresholdPct
 	if warningThreshold == 0 {
@@ -457,7 +503,15 @@ func (h *Handler) TrimUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persister unavailable"})
 		return
 	}
-	h.usagePersister.Trim()
+	deleted, err := h.usagePersister.TrimWithCount()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if deleted > 0 {
+		RecordMutationEffect(c.Request.Context(), "usage.deleted", "usage")
+	}
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 

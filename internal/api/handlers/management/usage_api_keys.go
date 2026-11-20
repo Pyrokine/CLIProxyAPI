@@ -21,6 +21,19 @@ type usageAPIKeyPresenter struct {
 	rawKeys            []string
 }
 
+func maskUsageAPIKey(value string) string {
+	runes := []rune(value)
+	if len(runes) <= 4 {
+		return util.HideAPIKey(value)
+	}
+	prefix, suffix := string(runes[:2]), string(runes[len(runes)-2:])
+	masked := prefix + "..." + suffix
+	if masked == value {
+		return prefix + "...." + suffix
+	}
+	return masked
+}
+
 func newUsageAPIKeyPresenter(cfg *config.Config) usageAPIKeyPresenter {
 	if cfg == nil {
 		return usageAPIKeyPresenter{}
@@ -55,7 +68,7 @@ func newUsageAPIKeyPresenter(cfg *config.Config) usageAPIKeyPresenter {
 		identity := coreusage.HashAPIKeyIdentity(raw)
 		identities = append(identities, identity)
 		byIdentity[identity] = usageAPIKeyPresentation{
-			display: util.HideAPIKey(raw),
+			display: maskUsageAPIKey(raw),
 			alias:   cfg.APIKeyAliases[raw],
 		}
 	}
@@ -103,17 +116,27 @@ func (p usageAPIKeyPresenter) present(value string) usageAPIKeyPresentation {
 	if presentation, ok := p.byIdentity[coreusage.EnsureAPIKeyIdentity(trimmed)]; ok {
 		return presentation
 	}
-	return usageAPIKeyPresentation{display: util.HideAPIKey(trimmed)}
+	return usageAPIKeyPresentation{display: maskUsageAPIKey(trimmed)}
 }
 
 func (p usageAPIKeyPresenter) presentRedacted(value string) usageAPIKeyPresentation {
 	if presentation, ok := p.byRedactedIdentity[strings.TrimSpace(value)]; ok {
 		return presentation
 	}
+	base, ordinal, hasOrdinal := splitMaskedAPIKeyOrdinal(value)
+	prefix, suffix, masked := strings.Cut(base, "...")
+	left, right := []rune(prefix), []rune(suffix)
+	if masked && len(left) >= 2 && len(right) >= 2 {
+		display := string(left[:2]) + "..." + string(right[len(right)-2:])
+		if hasOrdinal {
+			display += "#" + strconv.Itoa(ordinal)
+		}
+		return usageAPIKeyPresentation{display: display}
+	}
 	return usageAPIKeyPresentation{display: value}
 }
 
-func (p usageAPIKeyPresenter) expandFilters(raw string, repeated []string) (string, []string) {
+func (p usageAPIKeyPresenter) expandFilters(raw string, repeated []string, canonicalAPIKeys bool) (string, []string) {
 	inputs := make([]string, 0, len(repeated)+1)
 	for _, value := range repeated {
 		if value = strings.TrimSpace(value); value != "" {
@@ -147,6 +170,9 @@ func (p usageAPIKeyPresenter) expandFilters(raw string, repeated []string) (stri
 		if input == "(none)" {
 			add(input)
 			matched = true
+			if canonicalAPIKeys {
+				continue
+			}
 		}
 		for _, candidate := range p.rawKeys {
 			if candidate == input {
@@ -155,7 +181,12 @@ func (p usageAPIKeyPresenter) expandFilters(raw string, repeated []string) (stri
 			}
 		}
 		masked, ordinal, hasOrdinal := splitMaskedAPIKeyOrdinal(input)
-		matches := matchingMaskedAPIKeyCandidates(masked, p.rawKeys)
+		matches := make([]string, 0, len(p.rawKeys))
+		for _, candidate := range p.rawKeys {
+			if util.HideAPIKey(candidate) == masked || maskUsageAPIKey(candidate) == masked {
+				matches = append(matches, candidate)
+			}
+		}
 		if hasOrdinal {
 			if ordinal <= len(matches) {
 				add(coreusage.HashAPIKeyIdentity(matches[ordinal-1]))

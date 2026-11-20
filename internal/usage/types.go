@@ -42,69 +42,124 @@ type costCoverage struct {
 // as identical to the historical NULL so legacy rows imported from the JSON
 // era keep their original deduplication identity.
 type FlatDetail struct {
-	Timestamp           time.Time                  `json:"timestamp"`
-	Model               string                     `json:"model"`
-	Source              string                     `json:"source"`     // credential file name
-	AuthIndex           string                     `json:"auth_index"` // alternate credential identifier
-	APIKey              string                     `json:"api_key"`    // stable irreversible client key identity
-	ReservationID       string                     `json:"-"`
-	Provider            string                     `json:"provider"` // upstream vendor (claude/codex/gemini/...)
-	LatencyMs           int64                      `json:"latency_ms,omitempty"`
-	RequestID           string                     `json:"request_id,omitempty"`
-	RequestLogState     logging.RequestLogState    `json:"request_log_state,omitempty"`
-	RequestLogLocation  logging.RequestLogLocation `json:"request_log_location,omitempty"`
-	RequestLogFileName  string                     `json:"request_log_file_name,omitempty"`
-	RequestLogHomeIP    string                     `json:"request_log_home_ip,omitempty"`
-	RequestLogReason    string                     `json:"request_log_reason,omitempty"`
-	RequestLogRevision  int64                      `json:"request_log_revision,omitempty"`
-	RequestLogUpdatedAt time.Time                  `json:"request_log_updated_at,omitzero"`
-	TimeToFirstByteMs   int64                      `json:"time_to_first_byte_ms,omitempty"`
-	TotalDurationMs     int64                      `json:"total_duration_ms,omitempty"`
-	Completed           bool                       `json:"completed"`
-	Generate            bool                       `json:"generate"`
-	ClientIP            string                     `json:"client_ip,omitempty"`
-	XForwardedFor       string                     `json:"x_forwarded_for,omitempty"`
-	UserAgent           string                     `json:"user_agent,omitempty"`
-	MetadataRecorded    bool                       `json:"metadata_recorded,omitempty"`
-	MetadataTruncated   bool                       `json:"metadata_truncated,omitempty"`
-	ReasoningEffort     string                     `json:"reasoning_effort,omitempty"`
-	ServiceTier         string                     `json:"service_tier,omitempty"`
-	RequestServiceTier  string                     `json:"request_service_tier,omitempty"`
-	ResponseServiceTier string                     `json:"response_service_tier,omitempty"`
-	ExecutorType        string                     `json:"executor_type,omitempty"`
-	Thinking            *Thinking                  `json:"thinking,omitempty"`
-	ResponseHeaders     http.Header                `json:"response_headers,omitempty"`
-	AccountingVersion   int                        `json:"accounting_version,omitempty"`
-	TokenBreakdown      coreusage.TokenBreakdown   `json:"token_breakdown,omitempty"`
-	Tokens              tokenStats                 `json:"tokens"`
-	PricingReceipt      *PricingReceipt            `json:"pricing_receipt,omitempty"`
-	Cost                float64                    `json:"cost"`
-	CostStatus          CostStatus                 `json:"cost_status"`
-	CostReason          string                     `json:"cost_reason,omitempty"`
-	Failed              bool                       `json:"failed"`
-	cacheWrite5mTokens  int64
-	cacheWrite1hTokens  int64
-	generateRecorded    bool
-	metadataTrusted     bool
-	fingerprint         [eventFingerprintBytes]byte
-	fingerprintTrusted  bool
-	costMicro           int64
-	costTrusted         bool
+	ImportData             string                     `json:"import_data,omitempty"`
+	Timestamp              time.Time                  `json:"timestamp"`
+	Model                  string                     `json:"model"`
+	Source                 string                     `json:"source"`     // credential file name
+	AuthIndex              string                     `json:"auth_index"` // alternate credential identifier
+	APIKey                 string                     `json:"api_key"`    // stable irreversible client key identity
+	ReservationID          string                     `json:"-"`
+	Provider               string                     `json:"provider"` // upstream vendor (claude/codex/gemini/...)
+	LatencyMs              int64                      `json:"latency_ms,omitempty"`
+	RequestID              string                     `json:"request_id,omitempty"`
+	RequestLogState        logging.RequestLogState    `json:"request_log_state,omitempty"`
+	RequestLogLocation     logging.RequestLogLocation `json:"request_log_location,omitempty"`
+	RequestLogFileName     string                     `json:"request_log_file_name,omitempty"`
+	RequestLogHomeIP       string                     `json:"request_log_home_ip,omitempty"`
+	RequestLogReason       string                     `json:"request_log_reason,omitempty"`
+	RequestLogRevision     int64                      `json:"request_log_revision,omitempty"`
+	RequestLogUpdatedAt    time.Time                  `json:"request_log_updated_at,omitzero"`
+	TimeToFirstByteMs      int64                      `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs        int64                      `json:"total_duration_ms,omitempty"`
+	Completed              bool                       `json:"completed"`
+	Generate               bool                       `json:"generate"`
+	ClientIP               string                     `json:"client_ip,omitempty"`
+	XForwardedFor          string                     `json:"x_forwarded_for,omitempty"`
+	UserAgent              string                     `json:"user_agent,omitempty"`
+	MetadataRecorded       bool                       `json:"metadata_recorded,omitempty"`
+	MetadataTruncated      bool                       `json:"metadata_truncated,omitempty"`
+	ReasoningEffort        string                     `json:"reasoning_effort,omitempty"`
+	ServiceTier            string                     `json:"service_tier,omitempty"`
+	RequestServiceTier     string                     `json:"request_service_tier,omitempty"`
+	ResponseServiceTier    string                     `json:"response_service_tier,omitempty"`
+	RequestSpeed           string                     `json:"request_speed,omitempty"`
+	ResponseSpeed          string                     `json:"response_speed,omitempty"`
+	CacheReadReported      bool                       `json:"cache_read_reported,omitempty"`
+	CacheWriteReported     *bool                      `json:"cache_write_reported,omitempty"`
+	BillingMetadata        *coreusage.BillingMetadata `json:"billing_metadata,omitempty"`
+	ClientModel            string                     `json:"client_model,omitempty"`
+	UpstreamURL            string                     `json:"upstream_url,omitempty"`
+	ResponseURL            string                     `json:"response_url,omitempty"`
+	ResponseURLSource      string                     `json:"response_url_source,omitempty"`
+	ResponseURLStatus      string                     `json:"response_url_status,omitempty"`
+	UpstreamNextHopStatus  string                     `json:"upstream_next_hop_status,omitempty"`
+	UpstreamModel          string                     `json:"upstream_model,omitempty"`
+	ResponseModel          string                     `json:"response_model,omitempty"`
+	ResponseProvider       string                     `json:"response_provider,omitempty"`
+	ResponseProviderSource string                     `json:"response_provider_source,omitempty"`
+	ExecutorType           string                     `json:"executor_type,omitempty"`
+	Thinking               *Thinking                  `json:"thinking,omitempty"`
+	ResponseHeaders        http.Header                `json:"response_headers,omitempty"`
+	AccountingVersion      int                        `json:"accounting_version,omitempty"`
+	TokenBreakdown         coreusage.TokenBreakdown   `json:"token_breakdown"`
+	Tokens                 tokenStats                 `json:"tokens"`
+	PricingReceipt         *PricingReceipt            `json:"pricing_receipt,omitempty"`
+	Cost                   float64                    `json:"cost"`
+	CostStatus             CostStatus                 `json:"cost_status"`
+	CostReason             string                     `json:"cost_reason,omitempty"`
+	Failed                 bool                       `json:"failed"`
+	cacheWrite5mTokens     int64
+	cacheWrite1hTokens     int64
+	cacheWrite30mTokens    int64
+	cacheWrite12hTokens    int64
+	latencyRecorded        bool
+	generateRecorded       bool
+	metadataTrusted        bool
+	fingerprint            [eventFingerprintBytes]byte
+	fingerprintTrusted     bool
+	costMicro              int64
+	costTrusted            bool
+}
+
+// MarshalJSON derives speed and keeps measured zero latency distinct from an unknown latency.
+// noinspection GoMixedReceiverTypes
+func (d FlatDetail) MarshalJSON() ([]byte, error) {
+	type detailAlias FlatDetail
+	speed, _ := ObservedRequestSpeed(&d)
+	return json.Marshal(
+		struct {
+			*detailAlias
+			LatencyMs *int64 `json:"latency_ms,omitempty"`
+			Speed     string `json:"speed"`
+		}{
+			detailAlias: (*detailAlias)(&d),
+			LatencyMs:   recordedLatencyValue(d.LatencyMs, d.latencyRecorded),
+			Speed:       speed,
+		},
+	)
 }
 
 // UnmarshalJSON preserves generation for legacy events that predate the field.
+// noinspection GoMixedReceiverTypes
 func (d *FlatDetail) UnmarshalJSON(data []byte) error {
+	var envelope struct {
+		ImportData string `json:"import_data"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+	// Display numbers can be rounded by JavaScript; authenticate canonical data before parsing them.
+	if envelope.ImportData != "" {
+		*d = FlatDetail{ImportData: envelope.ImportData}
+		return nil
+	}
 	type flatDetailAlias FlatDetail
 	*d = FlatDetail{}
 	decoded := struct {
-		Generate *bool `json:"generate"`
+		Generate  *bool  `json:"generate"`
+		LatencyMs *int64 `json:"latency_ms"`
 		*flatDetailAlias
 	}{flatDetailAlias: (*flatDetailAlias)(d)}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
+	d.CacheWriteReported = coreusage.NormalizeCacheWriteReported(d.CacheWriteReported, d.Tokens.CacheWriteTokens)
 	d.Generate = decoded.Generate == nil || *decoded.Generate
 	d.generateRecorded = decoded.Generate != nil
+	d.latencyRecorded = decoded.LatencyMs != nil
+	if decoded.LatencyMs != nil {
+		d.LatencyMs = *decoded.LatencyMs
+	}
 	return nil
 }
 
@@ -121,12 +176,14 @@ type Thinking struct {
 // APIKeys carries repeated api_key query parameters so values containing commas
 // remain unambiguous; APIKey retains compatibility with older callers.
 type EventFilters struct {
-	Model   string
-	Source  string
-	APIKey  string
-	APIKeys []string
-	Status  string // "success", "failure", or "" (all)
-	Search  string
+	Model            string
+	Source           string
+	APIKey           string
+	APIKeys          []string
+	Status           string // "success", "failure", or "" (all)
+	Speed            string // actual upstream speed, or "" (all)
+	Search           string
+	CanonicalAPIKeys bool // (none) selects only requests without an API key
 }
 
 // QueryResult is the read-side payload Query produces and the management
@@ -182,11 +239,11 @@ type summaryModelStats struct {
 }
 
 // summaryCredentialStats keeps only success/failure: credentials are scoped
-// for the health view, not for billing. Provider and Source are surfaced so
-// the frontend can render "[Claude] alias" tags without parsing the map
-// key — the v2 by_credential map keys are "provider:source" tuples, so the
-// frontend needs the components separately to look up alias dictionaries
-// (which are still keyed by raw source).
+// for the health view, not for billing. Provider and Source let the frontend
+// render "[Claude] alias" tags without parsing the map key.
+// The v2 by_credential map keys are "provider:source" tuples. The frontend needs
+// the components separately to look up alias dictionaries, whose keys remain
+// raw source values.
 type summaryCredentialStats struct {
 	Success  int64  `json:"success"`
 	Failure  int64  `json:"failure"`
@@ -202,4 +259,11 @@ type summaryAPIKeyStats struct {
 	Tokens   tokenStats   `json:"tokens"`
 	Cost     float64      `json:"cost"`
 	Latency  latencyStats `json:"latency"`
+}
+
+func recordedLatencyValue(latencyMs int64, recorded bool) *int64 {
+	if latencyMs == 0 && !recorded {
+		return nil
+	}
+	return &latencyMs
 }

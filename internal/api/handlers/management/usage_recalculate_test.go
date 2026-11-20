@@ -131,12 +131,90 @@ func TestRecalculateCostsStartsOnceAndPublishesStatus(t *testing.T) {
 			if status.Status != "ok" || status.Error != "" {
 				t.Fatalf("completed status = %+v", status)
 			}
+			startedAt, errStart := time.Parse(time.RFC3339Nano, status.StartedAt)
+			completedAt, errEnd := time.Parse(time.RFC3339Nano, status.CompletedAt)
+			if errStart != nil || errEnd != nil || completedAt.Before(startedAt) || status.UpdatedAt != status.CompletedAt {
+				t.Fatalf("completed times = %+v, parse errors=%v/%v", status, errStart, errEnd)
+			}
+			persister.Stop()
+			reopened := usage.NewPersister(baseDir, config.UsageRetention{})
+			reopened.Start(context.Background())
+			defer reopened.Stop()
+			restored := getRecalculateCostsStatus(t, &Handler{usagePersister: reopened})
+			if restored.StartedAt != status.StartedAt || restored.CompletedAt != status.CompletedAt || restored.UpdatedAt != status.UpdatedAt {
+				t.Fatalf("reopen changed recorded times: %+v -> %+v", status, restored)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("recalculation did not finish: %+v", status)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestUsageStorageUpgradeHTTPStatusIsReadOnlyAndReportsErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name       string
+		h          *Handler
+		wantCode   int
+		wantStatus string
+	}{
+		{name: "unconfigured", h: &Handler{}, wantCode: http.StatusOK, wantStatus: "idle"},
+		{
+			name:     "uninitialized",
+			h:        &Handler{usagePersister: usage.NewPersister(t.TempDir(), config.UsageRetention{})},
+			wantCode: http.StatusInternalServerError, wantStatus: "error",
+		},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				response := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(response)
+				ctx.Request = httptest.NewRequest(http.MethodGet, "/usage/storage-upgrade", nil)
+				test.h.GetUsageStorageUpgrade(ctx)
+				if response.Code != test.wantCode {
+					t.Fatalf("HTTP=%d want=%d body=%s", response.Code, test.wantCode, response.Body.String())
+				}
+				var status usage.StorageUpgradeStatus
+				if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+					t.Fatal(err)
+				}
+				if status.Status != test.wantStatus || status.Running || test.wantStatus == "error" && status.Error == "" {
+					t.Fatalf("status=%+v", status)
+				}
+			},
+		)
+	}
+	p := usage.NewPersister(t.TempDir(), config.UsageRetention{})
+	p.Start(t.Context())
+	defer p.Stop()
+	h := &Handler{usagePersister: p}
+	for _, canceled := range []bool{false, true} {
+		response := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(response)
+		requestCtx, cancel := context.WithCancel(t.Context())
+		if canceled {
+			cancel()
+		}
+		ctx.Request = httptest.NewRequestWithContext(requestCtx, http.MethodGet, "/usage/storage-upgrade", nil)
+		h.GetUsageStorageUpgrade(ctx)
+		cancel()
+		var status usage.StorageUpgradeStatus
+		if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		if canceled {
+			if response.Code != http.StatusInternalServerError || status.Status != "error" || status.Running || status.Error == "" {
+				t.Fatalf("canceled status HTTP=%d %+v", response.Code, status)
+			}
+		} else if response.Code != http.StatusOK || status.Status != "complete" || status.Running || status.ProcessedEvents == nil || *status.ProcessedEvents != 0 || status.TotalEvents == nil || *status.TotalEvents != 0 || status.Percent == nil || *status.Percent != 100 || status.StartedAt != "" || status.CompletedAt != "" {
+			t.Fatalf("complete empty status HTTP=%d %+v", response.Code, status)
+		}
+		if costs := p.RecalculateCostsStatus(); costs.Status != "idle" || costs.Running {
+			t.Fatalf("GET started cost recalculation: %+v", costs)
+		}
 	}
 }
 

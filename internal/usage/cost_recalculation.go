@@ -9,7 +9,6 @@ import (
 	"slices"
 	"time"
 
-	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -50,9 +49,13 @@ type costTaskQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func readCostRecalculationTask(ctx context.Context, queryer costTaskQueryer) (costRecalculationTask, bool, error) {
+func readCostRecalculationTask(
+	ctx context.Context,
+	queryer costTaskQueryer,
+) (costRecalculationTask, bool, error) {
 	var raw string
-	err := queryer.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", costRecalculationTaskMetaKey).Scan(&raw)
+	err := queryer.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", costRecalculationTaskMetaKey).
+		Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return costRecalculationTask{}, false, nil
 	}
@@ -89,23 +92,12 @@ func costTaskNow() string {
 func (p *Persister) pricingSnapshotForRecalculation() pricingSnapshot {
 	p.pricingMu.RLock()
 	defer p.pricingMu.RUnlock()
-	provider, fn := p.priceSource()
-	if provider == nil {
-		return pricingSnapshot{priceFn: fn}
-	}
-	if revisionProvider, ok := provider.(detailedPriceRevisionProvider); ok {
-		detailed, revision := revisionProvider.DetailedSnapshotWithRevision()
-		return pricingSnapshot{detailedPriceFn: detailed, revision: revision}
-	}
-	if detailedProvider, ok := provider.(detailedPriceProvider); ok {
-		return pricingSnapshot{detailedPriceFn: detailedProvider.DetailedSnapshot()}
-	}
-	return pricingSnapshot{priceFn: provider.Snapshot()}
+	return p.currentPricingSnapshot()
 }
 
 func (p *Persister) prepareCostRecalculationTask(
 	ctx context.Context,
-	s *Store,
+	s *sqliteStore,
 	pricing pricingSnapshot,
 ) (costRecalculationTask, error) {
 	if pricing.priceFn == nil && pricing.detailedPriceFn == nil {
@@ -183,7 +175,7 @@ func (p *Persister) prepareCostRecalculationTask(
 	return task, nil
 }
 
-func ensureCostRecalculationBuckets(ctx context.Context, s *Store) error {
+func ensureCostRecalculationBuckets(ctx context.Context, s *sqliteStore) error {
 	var events, bucketRequests int64
 	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&events); err != nil {
 		return fmt.Errorf("count events before cost recalculation: %w", err)
@@ -227,7 +219,7 @@ func appendCostRollupDay(days []int64, day int64) []int64 {
 	return append(days, day)
 }
 
-func appendDirtyCostRollupDays(ctx context.Context, s *Store, task *costRecalculationTask) error {
+func appendDirtyCostRollupDays(ctx context.Context, s *sqliteStore, task *costRecalculationTask) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT day_ts_ns FROM dirty_day ORDER BY day_ts_ns")
 	if err != nil {
 		return fmt.Errorf("read dirty days for cost recalculation: %w", err)
@@ -264,6 +256,7 @@ func costRecalculationStatusFromTask(task costRecalculationTask) CostRecalculati
 		Error:              task.LastError,
 		StartedAt:          task.StartedAt,
 		UpdatedAt:          task.UpdatedAt,
+		CompletedAt:        task.CompletedAt,
 		Resumable:          task.Status == "interrupted" || task.Status == "error",
 		Resumed:            task.Resumed,
 		RestartReason:      task.RestartReason,
@@ -312,7 +305,7 @@ type costRepriceEvent struct {
 	tsNs                               int64
 	modelID                            int64
 	credentialID, apiKeyID, providerID sql.NullInt64
-	model                              string
+	model, provider                    string
 	tokens                             tokenStats
 	metadata                           sql.NullString
 	pricingReceipt                     *PricingReceipt
@@ -398,7 +391,14 @@ func applyCostBucketDelta(ctx context.Context, tx *sql.Tx, key costBucketKey, de
 		return err
 	}
 	if current.costMicro < 0 || current.completeRequests < 0 || current.partialRequests < 0 ||
-		current.unpricedRequests < 0 || current.completeTokens < 0 || current.partialTokens < 0 || current.unpricedTokens < 0 {
+		current.unpricedRequests <
+			0 ||
+		current.completeTokens <
+			0 ||
+		current.partialTokens <
+			0 ||
+		current.unpricedTokens <
+			0 {
 		return errors.New("usage: cost recalculation would make hour bucket negative")
 	}
 	updateArgs := []any{
@@ -432,7 +432,7 @@ func applyCostBucketDelta(ctx context.Context, tx *sql.Tx, key costBucketKey, de
 
 func (p *Persister) repriceCostRecalculationPage(
 	ctx context.Context,
-	s *Store,
+	s *sqliteStore,
 	pricing pricingSnapshot,
 	task *costRecalculationTask,
 ) (bool, error) {
@@ -451,13 +451,15 @@ func (p *Persister) repriceCostRecalculationPage(
 
 	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT e.id, e.ts_ns, e.model_id, e.credential_id, e.api_key_id, e.provider_id, m.name,
+		`SELECT e.id, e.ts_ns, e.model_id, e.credential_id, e.api_key_id, e.provider_id, m.name, COALESCE(p.name, ''),
 		        e.input_tokens, e.output_tokens, e.reasoning_tokens, e.cached_tokens,
 		        e.cache_read_tokens, e.cache_write_tokens, e.total_tokens,
-		        e.metadata, e.pricing_receipt,
+		        `+eventPricingMetadataReadSQL("e.", "fields.")+`, e.pricing_receipt,
 		        e.cost_micro, e.cost_status, e.cost_reason
 		   FROM events e
+		   LEFT JOIN event_fields fields ON fields.id = e.id
 		   JOIN dim_model m ON m.id = e.model_id
+		   LEFT JOIN dim_provider p ON p.id = e.provider_id
 		  WHERE e.id > ? AND e.id <= ?
 		  ORDER BY e.id
 		  LIMIT ?`,
@@ -474,7 +476,7 @@ func (p *Persister) repriceCostRecalculationPage(
 		var pricingReceipt sql.NullString
 		if err := rows.Scan(
 			&event.id, &event.tsNs, &event.modelID, &event.credentialID, &event.apiKeyID, &event.providerID,
-			&event.model,
+			&event.model, &event.provider,
 			&event.tokens.InputTokens, &event.tokens.OutputTokens, &event.tokens.ReasoningTokens,
 			&event.tokens.CachedTokens,
 			&event.tokens.CacheReadTokens, &event.tokens.CacheWriteTokens, &event.tokens.TotalTokens,
@@ -489,26 +491,15 @@ func (p *Persister) repriceCostRecalculationPage(
 			_ = rows.Close()
 			return false, fmt.Errorf("validate cost recalculation event %d: %w", event.id, err)
 		}
-		event.pricingReceipt, err = decodePricingReceipt(pricingReceipt)
+		event.pricingReceipt, err = decodePricingReceipt(pricingReceipt, event.metadata)
 		if err != nil {
 			_ = rows.Close()
 			return false, fmt.Errorf("decode pricing receipt for event %d: %w", event.id, err)
 		}
 		eventTime := time.Unix(0, event.tsNs).UTC()
-		if event.pricingReceipt != nil {
-			event.updated, err = computeCurrentCatalogCostFromPricingReceipt(
-				event.tokens,
-				event.pricingReceipt,
-				pricing,
-				eventTime,
-			)
-		} else {
-			var breakdown *coreusage.TokenBreakdown
-			breakdown, err = decodeEventTokenBreakdown(event.metadata)
-			if err == nil {
-				event.updated, err = computeCost(event.tokens, breakdown, pricing, event.model, eventTime)
-			}
-		}
+		event.updated, err = computeCurrentCatalogEventCost(
+			event.tokens, event.pricingReceipt, pricing, event.model, event.provider, eventTime, event.metadata,
+		)
 		if err != nil {
 			_ = rows.Close()
 			return false, fmt.Errorf("recalculate event %d: %w", event.id, err)
@@ -642,7 +633,7 @@ func retryCostRecalculationOperation(ctx context.Context, operation string, run 
 
 func (p *Persister) repriceCostRecalculationPageWithRetry(
 	ctx context.Context,
-	s *Store,
+	s *sqliteStore,
 	pricing pricingSnapshot,
 	task *costRecalculationTask,
 ) (bool, error) {

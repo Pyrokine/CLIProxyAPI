@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	requestLogIDSQLExpression = "CASE WHEN json_valid(events.metadata) THEN json_extract(events.metadata, '$.request_id') END"
-	requestLogArtifactJoinSQL = " LEFT JOIN request_log_artifact AS request_log ON request_log.request_id = " + requestLogIDSQLExpression
-	requestLogArtifactColumns = ", request_log.state, request_log.location, request_log.file_name, request_log.home_ip, request_log.reason, request_log.revision, request_log.updated_at_ns "
+	requestLogArtifactJoinSQL = " LEFT JOIN request_log_artifact AS request_log ON " +
+		"request_log.request_id = event_fields.request_id"
+	requestLogArtifactColumns = ", request_log.state, request_log.location, request_log.file_name, " +
+		"request_log.home_ip, request_log.reason, request_log.revision, request_log.updated_at_ns "
 
 	upsertRequestLogArtifactSQL = `
 INSERT INTO request_log_artifact (
@@ -45,29 +46,21 @@ func migrateV4ToV5(ctx context.Context, db *sql.DB) error {
 	}()
 
 	if _, err = tx.ExecContext(
-		ctx, `
-CREATE TABLE IF NOT EXISTS request_log_artifact (
-    request_id TEXT PRIMARY KEY
-        CHECK (request_id = trim(request_id))
-        CHECK (length(request_id) > 0 AND length(request_id) <= 512),
-    state TEXT NOT NULL
-        CHECK (state IN ('pending', 'available', 'disabled', 'not_captured', 'publish_failed', 'expired', 'legacy_unknown')),
-    location TEXT NOT NULL DEFAULT '' CHECK (location IN ('', 'local', 'home')),
-    file_name TEXT NOT NULL DEFAULT '' CHECK (file_name = trim(file_name)),
-    home_ip TEXT NOT NULL DEFAULT '' CHECK (home_ip = trim(home_ip)),
-    reason TEXT NOT NULL DEFAULT '' CHECK (reason = trim(reason)),
-    revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision > 0),
-    updated_at_ns INTEGER NOT NULL CHECK (typeof(updated_at_ns) = 'integer'),
-    CHECK (state <> 'available' OR location <> ''),
-    CHECK (state <> 'available' OR location <> 'local' OR length(file_name) > 0)
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS idx_request_log_artifact_state_updated
-    ON request_log_artifact(state, updated_at_ns);
-CREATE INDEX IF NOT EXISTS idx_request_log_artifact_updated
-    ON request_log_artifact(updated_at_ns);
-CREATE INDEX IF NOT EXISTS idx_events_request_id ON events(
-    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.request_id') END
-);`,
+		ctx, "\nCREATE TABLE IF NOT EXISTS request_log_artifact (\n    request_id TEXT PRIMARY KEY\n        "+
+			"CHECK (request_id = trim(request_id))\n        CHECK (length(request_id) > 0 AND length("+
+			"request_id) <= 512),\n    state TEXT NOT NULL\n        CHECK (state IN ('pending', 'available', "+
+			"'disabled', 'not_captured', 'publish_failed', 'expired', 'legacy_unknown')),\n    location TEXT "+
+			"NOT NULL DEFAULT '' CHECK (location IN ('', 'local', 'home')),\n    file_name TEXT NOT NULL "+
+			"DEFAULT '' CHECK (file_name = trim(file_name)),\n    home_ip TEXT NOT NULL DEFAULT '' CHECK ("+
+			"home_ip = trim(home_ip)),\n    reason TEXT NOT NULL DEFAULT '' CHECK (reason = trim(reason)),\n "+
+			"   revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision > 0),\n    "+
+			"updated_at_ns INTEGER NOT NULL CHECK (typeof(updated_at_ns) = 'integer'),\n    CHECK (state <> '"+
+			"available' OR location <> ''),\n    CHECK (state <> 'available' OR location <> 'local' OR "+
+			"length(file_name) > 0)\n) WITHOUT ROWID;\nCREATE INDEX IF NOT EXISTS "+
+			"idx_request_log_artifact_state_updated\n    ON request_log_artifact(state, updated_at_ns);\n"+
+			"CREATE INDEX IF NOT EXISTS idx_request_log_artifact_updated\n    ON request_log_artifact("+
+			"updated_at_ns);\nCREATE INDEX IF NOT EXISTS idx_events_request_id ON events(\n    CASE WHEN "+
+			"json_valid(metadata) THEN json_extract(metadata, '$.request_id') END\n);",
 	); err != nil {
 		return fmt.Errorf("create request log artifact schema: %w", err)
 	}
@@ -178,16 +171,20 @@ func applyRequestLogArtifactToDetail(detail *FlatDetail, artifact logging.Reques
 	detail.RequestLogUpdatedAt = artifact.UpdatedAt
 }
 
-func (s *Store) queryRequestLogArtifact(
+func (s *sqliteStore) queryRequestLogArtifact(
 	ctx context.Context,
 	requestID string,
 ) (logging.RequestLogArtifact, bool, error) {
 	if s == nil || s.db == nil {
-		return logging.RequestLogArtifact{}, false, errors.New("usage: request log artifact store is unavailable")
+		return logging.RequestLogArtifact{}, false, errors.New(
+			"usage: request log artifact store is unavailable",
+		)
 	}
 	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
-		return logging.RequestLogArtifact{}, false, errors.New("usage: request log artifact request ID is required")
+		return logging.RequestLogArtifact{}, false, errors.New(
+			"usage: request log artifact request ID is required",
+		)
 	}
 	var (
 		state       string
@@ -222,12 +219,15 @@ WHERE request_id = ?`,
 		UpdatedAt: time.Unix(0, updatedAtNs).UTC(),
 	}
 	if err = logging.ValidateRequestLogArtifact(artifact); err != nil {
-		return logging.RequestLogArtifact{}, false, fmt.Errorf("usage: stored request log artifact is invalid: %w", err)
+		return logging.RequestLogArtifact{}, false, fmt.Errorf(
+			"usage: stored request log artifact is invalid: %w",
+			err,
+		)
 	}
 	return artifact, true, nil
 }
 
-func (s *Store) hasEventRequestID(ctx context.Context, requestID string) (bool, error) {
+func (s *sqliteStore) hasEventRequestID(ctx context.Context, requestID string) (bool, error) {
 	if s == nil || s.db == nil {
 		return false, errors.New("usage: request log artifact store is unavailable")
 	}
@@ -235,8 +235,12 @@ func (s *Store) hasEventRequestID(ctx context.Context, requestID string) (bool, 
 	if requestID == "" {
 		return false, nil
 	}
+	source, err := eventFieldsSource(ctx, s.db)
+	if err != nil {
+		return false, err
+	}
 	var exists int
-	query := "SELECT EXISTS(SELECT 1 FROM events WHERE " + requestLogIDSQLExpression + " = ? LIMIT 1)"
+	query := "SELECT EXISTS(SELECT 1 FROM " + source + " AS events WHERE events.request_id = ? LIMIT 1)"
 	if err := s.db.QueryRowContext(ctx, query, requestID).Scan(&exists); err != nil {
 		return false, fmt.Errorf("usage: query request ID existence: %w", err)
 	}

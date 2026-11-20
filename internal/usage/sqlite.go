@@ -113,7 +113,7 @@ func isSupportedSchemaVersion(version string) bool {
 	}
 }
 
-// Store owns the *sql.DB plus dimension-name → id caches.
+// sqliteStore owns the *sql.DB plus dimension-name → id caches.
 //
 // Cache strategy: every dim is INSERT-OR-IGNORE on first write and SELECT-d
 // back to learn the assigned id, so id stability is guaranteed even when two
@@ -121,9 +121,15 @@ func isSupportedSchemaVersion(version string) bool {
 // in the local sync.Map so steady-state writes only need a single SQL roundtrip
 // (the events INSERT). The cache never invalidates because dim ids never change
 // — rows are never deleted (FK ON DELETE RESTRICT) and ROWIDs are stable.
-type Store struct {
-	db           *sql.DB
-	maxPageCount atomic.Int64
+type sqliteStore struct {
+	db                       *sql.DB
+	insertEventStmt          *sql.Stmt
+	upsertHourBucketStmt     *sql.Stmt
+	markDirtyDayStmt         *sql.Stmt
+	maxPageCount             atomic.Int64
+	eventFieldsFailure       atomic.Pointer[StorageUpgradeStatus]
+	eventFieldsRunning       atomic.Bool
+	eventFieldsCapacityCheck func() error
 
 	modelCache      sync.Map // string → int64
 	apiKeyCache     sync.Map
@@ -139,7 +145,7 @@ type Store struct {
 // Connection limits: SQLite serializes writes regardless of pool size, so a
 // large pool just inflates context overhead. Eight connections gives readers
 // breathing room without wasting memory.
-func openStore(dbPath string) (*Store, error) {
+func openStore(dbPath string) (*sqliteStore, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("usage: empty SQLite db path")
 	}
@@ -167,7 +173,7 @@ func openStore(dbPath string) (*Store, error) {
 		"&_pragma=cache_size(-64000)" +
 		"&_pragma=temp_store(FILE)"
 
-	store := &Store{}
+	store := &sqliteStore{}
 	store.maxPageCount.Store(maxSQLitePageCount)
 	sqliteDriver := &sqlite.Driver{}
 	sqliteDriver.RegisterConnectionHook(
@@ -306,6 +312,14 @@ func openStore(dbPath string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("usage: unexpected schema_version=%s (want %s)", version, CurrentSchemaVersion)
 	}
+	if err := ensureSummaryGrains(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("usage: initialize exact summary aggregates: %w", err)
+	}
+	if err := ensureSummaryProjections(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("usage: initialize summary dimension projections: %w", err)
+	}
 	if err := ensurePricingReceiptImmutabilityTrigger(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("usage: enforce immutable pricing receipts: %w", err)
@@ -313,6 +327,10 @@ func openStore(dbPath string) (*Store, error) {
 	if err := ensureIntegerStorageTriggers(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("usage: enforce integer storage: %w", err)
+	}
+	if err := ensureEventFields(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("usage: initialize structured event fields: %w", err)
 	}
 	var maxRequestLogRevision sql.NullInt64
 	if err := db.QueryRowContext(ctx, "SELECT MAX(revision) FROM request_log_artifact").Scan(
@@ -323,6 +341,10 @@ func openStore(dbPath string) (*Store, error) {
 	}
 	if maxRequestLogRevision.Valid {
 		internallogging.AdvanceRequestLogArtifactRevision(maxRequestLogRevision.Int64)
+	}
+	if err := store.prepareEventStatements(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 
 	return store, nil
@@ -424,7 +446,9 @@ func migrateV1ToV2(ctx context.Context, db *sql.DB) error {
 		}
 		return nil
 	}
-	const bucketKeyBody = "bucket_ts_ns, model_id, ifnull(credential_id, 0), ifnull(api_key_id, 0), ifnull(provider_id, 0)"
+	const bucketKeyBody = "bucket_ts_ns, model_id, ifnull(credential_id, 0), ifnull(api_key_id, " +
+		"0), ifnull(provider_id, " +
+		"0)"
 	if err := rebuildIndex("hour_bucket", "uq_hour_bucket_key", bucketKeyBody); err != nil {
 		return err
 	}
@@ -585,7 +609,7 @@ func backfillLatencyBucket(
 		      FROM event_latency
 		     WHERE latency_type = 'integer'
 		       AND typeof(latency_ms) = 'integer'
-		       AND latency_ms > 0
+		       AND latency_ms >= 0
 		     GROUP BY %s, model_id, credential_id, api_key_id, provider_id
 		)
 		UPDATE %s AS bucket
@@ -623,7 +647,10 @@ func migrateV5ToV6(ctx context.Context, db *sql.DB) error {
 	}{
 		"events": {
 			{name: "cache_read_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0)"},
-			{name: "cache_write_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)"},
+			{
+				name:       "cache_write_tokens",
+				definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)",
+			},
 			{
 				name:       "cost_status",
 				definition: "TEXT NOT NULL DEFAULT 'unpriced' CHECK(cost_status IN ('complete','partial','unpriced'))",
@@ -632,11 +659,17 @@ func migrateV5ToV6(ctx context.Context, db *sql.DB) error {
 		},
 		"hour_bucket": {
 			{name: "cache_read_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0)"},
-			{name: "cache_write_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)"},
+			{
+				name:       "cache_write_tokens",
+				definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)",
+			},
 		},
 		"day_bucket": {
 			{name: "cache_read_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0)"},
-			{name: "cache_write_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)"},
+			{
+				name:       "cache_write_tokens",
+				definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)",
+			},
 		},
 	}
 	for table, definitions := range columns {
@@ -976,8 +1009,22 @@ func ensurePricingReceiptImmutabilityTrigger(ctx context.Context, exec dbExec) e
 	return nil
 }
 
-// Close releases the underlying database. Safe to call on nil.
-func (s *Store) Close() error {
+func (s *sqliteStore) prepareEventStatements(ctx context.Context) error {
+	var err error
+	if s.insertEventStmt, err = s.db.PrepareContext(ctx, insertEventSQL); err != nil {
+		return fmt.Errorf("usage: prepare insert event: %w", err)
+	}
+	if s.upsertHourBucketStmt, err = s.db.PrepareContext(ctx, upsertHourBucketSQL); err != nil {
+		return fmt.Errorf("usage: prepare upsert hour_bucket: %w", err)
+	}
+	if s.markDirtyDayStmt, err = s.db.PrepareContext(ctx, markDirtyDaySQL); err != nil {
+		return fmt.Errorf("usage: prepare mark dirty day: %w", err)
+	}
+	return nil
+}
+
+// Close releases the underlying database and its prepared statements. Safe to call on nil.
+func (s *sqliteStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -985,14 +1032,14 @@ func (s *Store) Close() error {
 }
 
 // database exposes the underlying *sql.DB for writer / query / import packages.
-func (s *Store) database() *sql.DB {
+func (s *sqliteStore) database() *sql.DB {
 	if s == nil {
 		return nil
 	}
 	return s.db
 }
 
-func (s *Store) setMaxSizeBytes(ctx context.Context, maxBytes int64) error {
+func (s *sqliteStore) setMaxSizeBytes(ctx context.Context, maxBytes int64) error {
 	if s == nil || s.db == nil {
 		return errors.New("usage: set max size on nil store")
 	}
@@ -1025,7 +1072,7 @@ func (s *Store) setMaxSizeBytes(ctx context.Context, maxBytes int64) error {
 	return nil
 }
 
-func (s *Store) applyMaxPageCountToConnections(ctx context.Context, maxPages int64) (int64, error) {
+func (s *sqliteStore) applyMaxPageCountToConnections(ctx context.Context, maxPages int64) (int64, error) {
 	connections := make([]*sql.Conn, 0, storeMaxOpenConnections)
 	defer func() {
 		for _, conn := range connections {
@@ -1062,7 +1109,7 @@ type dbExec interface {
 // resolveDimID is the shared get-or-create path for every dim_* table.
 // An empty (or whitespace-only) name returns ok=false without touching the database
 // so the caller can map it to NULL in the events row.
-func (s *Store) resolveDimID(
+func (s *sqliteStore) resolveDimID(
 	ctx context.Context,
 	exec dbExec,
 	cache *sync.Map,
@@ -1093,7 +1140,7 @@ func (s *Store) resolveDimID(
 // ResolveModelID returns the dim_model id, falling back to "unknown" when the
 // caller passes an empty model name. Model is the only dim that is NOT NULL on
 // the events table, so we never return NullInt64 here.
-func (s *Store) warmDimensionCaches(ctx context.Context, details []FlatDetail) error {
+func (s *sqliteStore) warmDimensionCaches(ctx context.Context, details []FlatDetail) error {
 	if s == nil || s.db == nil || len(details) == 0 {
 		return nil
 	}
@@ -1114,7 +1161,11 @@ func (s *Store) warmDimensionCaches(ctx context.Context, details []FlatDetail) e
 			{cache: &s.apiKeyCache, table: "dim_api_key", name: strings.TrimSpace(detail.APIKey)},
 			{cache: &s.sourceCache, table: "dim_source", name: strings.TrimSpace(detail.Source)},
 			{cache: &s.authIndexCache, table: "dim_auth_index", name: strings.TrimSpace(detail.AuthIndex)},
-			{cache: &s.credentialCache, table: "dim_credential", name: credentialName(detail.Source, detail.AuthIndex)},
+			{
+				cache: &s.credentialCache,
+				table: "dim_credential",
+				name:  credentialName(detail.Source, detail.AuthIndex),
+			},
 			{cache: &s.providerCache, table: "dim_provider", name: strings.TrimSpace(detail.Provider)},
 		}
 		for _, item := range candidates {
@@ -1143,7 +1194,7 @@ func (s *Store) warmDimensionCaches(ctx context.Context, details []FlatDetail) e
 	return nil
 }
 
-func (s *Store) resolveModelID(ctx context.Context, exec dbExec, name string) (int64, error) {
+func (s *sqliteStore) resolveModelID(ctx context.Context, exec dbExec, name string) (int64, error) {
 	if strings.TrimSpace(name) == "" {
 		name = "unknown"
 	}
@@ -1158,35 +1209,45 @@ func (s *Store) resolveModelID(ctx context.Context, exec dbExec, name string) (i
 }
 
 // resolveAPIKeyID returns the dim_api_key id, or a NULL when name is blank.
-func (s *Store) resolveAPIKeyID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
+func (s *sqliteStore) resolveAPIKeyID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
 	return s.resolveNullableDim(ctx, exec, &s.apiKeyCache, "dim_api_key", name)
 }
 
 // resolveSourceID returns the dim_source id, or a NULL when name is blank.
-func (s *Store) resolveSourceID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
+func (s *sqliteStore) resolveSourceID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
 	return s.resolveNullableDim(ctx, exec, &s.sourceCache, "dim_source", name)
 }
 
 // resolveAuthIndexID returns the dim_auth_index id, or a NULL when name is blank.
-func (s *Store) resolveAuthIndexID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
+func (s *sqliteStore) resolveAuthIndexID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
 	return s.resolveNullableDim(ctx, exec, &s.authIndexCache, "dim_auth_index", name)
 }
 
 // resolveCredentialID returns the dim_credential id for COALESCE(source, auth_index).
 // Both inputs blank → NULL credential, matching summary.go::credKey semantics.
-func (s *Store) resolveCredentialID(ctx context.Context, exec dbExec, source, authIndex string) (sql.NullInt64, error) {
-	return s.resolveNullableDim(ctx, exec, &s.credentialCache, "dim_credential", credentialName(source, authIndex))
+func (s *sqliteStore) resolveCredentialID(
+	ctx context.Context,
+	exec dbExec,
+	source, authIndex string,
+) (sql.NullInt64, error) {
+	return s.resolveNullableDim(
+		ctx,
+		exec,
+		&s.credentialCache,
+		"dim_credential",
+		credentialName(source, authIndex),
+	)
 }
 
 // resolveProviderID returns the dim_provider id, or a NULL when name is blank.
 // Old v1/v2 JSON imports never carried provider, so a blank string is the
 // expected steady-state for backfilled rows — the NULL surfaces in /usage
 // queries as the "(unknown)" bucket so the dimension chart doesn't drop them.
-func (s *Store) resolveProviderID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
+func (s *sqliteStore) resolveProviderID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
 	return s.resolveNullableDim(ctx, exec, &s.providerCache, "dim_provider", name)
 }
 
-func (s *Store) resolveNullableDim(
+func (s *sqliteStore) resolveNullableDim(
 	ctx context.Context,
 	exec dbExec,
 	cache *sync.Map,

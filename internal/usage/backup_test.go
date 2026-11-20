@@ -100,7 +100,9 @@ func TestUsageBackupRoundTripPreservesCanonicalEvents(t *testing.T) {
 	details[0].CostStatus = requestCost.Status
 	details[0].CostReason = requestCost.Reason
 	details[0].costTrusted = true
-	if added, skipped, errImport := importDetails(ctx, source, sourcePrice, details); errImport != nil {
+	if added, skipped, errImport := importDetails(
+		ctx, source, pricingSnapshot{priceFn: sourcePrice}, details,
+	); errImport != nil {
 		t.Fatalf("importDetails(source): %v", errImport)
 	} else if added != len(details) || skipped != 0 {
 		t.Fatalf("importDetails(source) = added %d skipped %d, want %d/0", added, skipped, len(details))
@@ -229,7 +231,7 @@ func TestUsageBackupRoundTripPreservesCanonicalEvents(t *testing.T) {
 	targetPrice := func(string) (float64, float64, float64, bool) {
 		return 100, 200, 50, true
 	}
-	result, err := importBytesWithSecret(ctx, target, targetPrice, payload, backupKey)
+	result, err := importBytesWithSecret(ctx, target, pricingSnapshot{priceFn: targetPrice}, payload, backupKey)
 	if err != nil {
 		t.Fatalf("ImportBytesWithSecret(target): %v", err)
 	}
@@ -244,7 +246,7 @@ func TestUsageBackupRoundTripPreservesCanonicalEvents(t *testing.T) {
 		t.Fatalf("backup round trip changed events\nsource=%#v\ntarget=%#v", sourceEvents, targetEvents)
 	}
 
-	repeated, err := importBytesWithSecret(ctx, target, targetPrice, payload, backupKey)
+	repeated, err := importBytesWithSecret(ctx, target, pricingSnapshot{priceFn: targetPrice}, payload, backupKey)
 	if err != nil {
 		t.Fatalf("ImportBytesWithSecret(repeated): %v", err)
 	}
@@ -349,7 +351,7 @@ func TestUsageBackupPreservesDistinctStoredFingerprintsAfterMetadataTruncation(t
 		{Timestamp: timestamp, Model: "model", RequestID: requestIDPrefix + "a", Tokens: tokenStats{TotalTokens: 1}},
 		{Timestamp: timestamp, Model: "model", RequestID: requestIDPrefix + "b", Tokens: tokenStats{TotalTokens: 1}},
 	}
-	if added, skipped, errImport := importDetails(ctx, source, nil, details); errImport != nil {
+	if added, skipped, errImport := importDetails(ctx, source, pricingSnapshot{}, details); errImport != nil {
 		t.Fatalf("importDetails(source): %v", errImport)
 	} else if added != len(details) || skipped != 0 {
 		t.Fatalf("importDetails(source) = added %d skipped %d, want %d/0", added, skipped, len(details))
@@ -377,7 +379,7 @@ func TestUsageBackupPreservesDistinctStoredFingerprintsAfterMetadataTruncation(t
 	}
 	defer func() { _ = target.Close() }()
 
-	result, err := importBytesWithSecret(ctx, target, nil, payload, backupKey)
+	result, err := importBytesWithSecret(ctx, target, pricingSnapshot{}, payload, backupKey)
 	if err != nil {
 		t.Fatalf("ImportBytesWithSecret(target): %v", err)
 	}

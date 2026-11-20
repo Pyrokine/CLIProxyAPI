@@ -467,7 +467,8 @@ func TestPricingReceiptEncodingCloningAndValidation(t *testing.T) {
 		CostReason:     strings.Repeat("E", maxPricingReceiptReasonBytes),
 		LineItems:      []pricingLineItem{},
 	}
-	if _, err = encodePricingReceipt(large); err == nil || !strings.Contains(err.Error(), "exceeds size limit") {
+	if _, err = encodePricingReceipt(large); err == nil ||
+		!strings.Contains(err.Error(), "exceeds size limit") {
 		t.Fatalf("encode oversized receipt error = %v", err)
 	}
 }
@@ -720,7 +721,8 @@ func TestOpenStoreMigratesV8PricingReceiptSchemaIdempotently(t *testing.T) {
 		}
 		var triggerCount int
 		if errQuery = migrated.db.QueryRow(
-			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'usage_events_pricing_receipt_immutable'",
+			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = " +
+				"'usage_events_pricing_receipt_immutable'",
 		).Scan(&triggerCount); errQuery != nil {
 			_ = migrated.Close()
 			t.Fatalf("query pricing receipt trigger: %v", errQuery)

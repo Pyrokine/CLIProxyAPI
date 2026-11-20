@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"golang.org/x/crypto/scrypt"
 )
@@ -56,46 +57,61 @@ type usageBackupKeyDerivation struct {
 }
 
 type usageBackupEvent struct {
-	Fingerprint         string                     `json:"fingerprint,omitempty"`
-	Timestamp           time.Time                  `json:"timestamp"`
-	Model               string                     `json:"model"`
-	Source              string                     `json:"source"`
-	AuthIndex           string                     `json:"auth_index"`
-	APIKeyIdentity      string                     `json:"api_key_identity,omitempty"`
-	Provider            string                     `json:"provider"`
-	LatencyMs           int64                      `json:"latency_ms,omitempty"`
-	RequestID           string                     `json:"request_id,omitempty"`
-	RequestLogState     logging.RequestLogState    `json:"request_log_state,omitempty"`
-	RequestLogLocation  logging.RequestLogLocation `json:"request_log_location,omitempty"`
-	RequestLogFileName  string                     `json:"request_log_file_name,omitempty"`
-	RequestLogHomeIP    string                     `json:"request_log_home_ip,omitempty"`
-	RequestLogReason    string                     `json:"request_log_reason,omitempty"`
-	RequestLogRevision  int64                      `json:"request_log_revision,omitempty"`
-	RequestLogUpdatedAt time.Time                  `json:"request_log_updated_at,omitzero"`
-	TimeToFirstByteMs   int64                      `json:"time_to_first_byte_ms,omitempty"`
-	TotalDurationMs     int64                      `json:"total_duration_ms,omitempty"`
-	Completed           bool                       `json:"completed"`
-	Generate            *bool                      `json:"generate,omitempty"`
-	ClientIP            string                     `json:"client_ip,omitempty"`
-	XForwardedFor       string                     `json:"x_forwarded_for,omitempty"`
-	UserAgent           string                     `json:"user_agent,omitempty"`
-	AccountingVersion   int                        `json:"accounting_version,omitempty"`
-	TokenBreakdown      *coreusage.TokenBreakdown  `json:"token_breakdown,omitempty"`
-	MetadataRecorded    bool                       `json:"metadata_recorded,omitempty"`
-	MetadataTruncated   bool                       `json:"metadata_truncated,omitempty"`
-	ReasoningEffort     string                     `json:"reasoning_effort,omitempty"`
-	ServiceTier         string                     `json:"service_tier,omitempty"`
-	RequestServiceTier  string                     `json:"request_service_tier,omitempty"`
-	ResponseServiceTier string                     `json:"response_service_tier,omitempty"`
-	ExecutorType        string                     `json:"executor_type,omitempty"`
-	Thinking            *Thinking                  `json:"thinking,omitempty"`
-	ResponseHeaders     http.Header                `json:"response_headers,omitempty"`
-	Tokens              tokenStats                 `json:"tokens"`
-	CostMicro           int64                      `json:"cost_micro"`
-	CostStatus          CostStatus                 `json:"cost_status,omitempty"`
-	CostReason          string                     `json:"cost_reason,omitempty"`
-	PricingReceipt      *PricingReceipt            `json:"pricing_receipt,omitempty"`
-	Failed              bool                       `json:"failed"`
+	Fingerprint            string                     `json:"fingerprint,omitempty"`
+	Timestamp              time.Time                  `json:"timestamp"`
+	Model                  string                     `json:"model"`
+	Source                 string                     `json:"source"`
+	AuthIndex              string                     `json:"auth_index"`
+	APIKeyIdentity         string                     `json:"api_key_identity,omitempty"`
+	Provider               string                     `json:"provider"`
+	LatencyMs              *int64                     `json:"latency_ms,omitempty"`
+	RequestID              string                     `json:"request_id,omitempty"`
+	RequestLogState        logging.RequestLogState    `json:"request_log_state,omitempty"`
+	RequestLogLocation     logging.RequestLogLocation `json:"request_log_location,omitempty"`
+	RequestLogFileName     string                     `json:"request_log_file_name,omitempty"`
+	RequestLogHomeIP       string                     `json:"request_log_home_ip,omitempty"`
+	RequestLogReason       string                     `json:"request_log_reason,omitempty"`
+	RequestLogRevision     int64                      `json:"request_log_revision,omitempty"`
+	RequestLogUpdatedAt    time.Time                  `json:"request_log_updated_at,omitzero"`
+	TimeToFirstByteMs      int64                      `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs        int64                      `json:"total_duration_ms,omitempty"`
+	Completed              bool                       `json:"completed"`
+	Generate               *bool                      `json:"generate,omitempty"`
+	ClientIP               string                     `json:"client_ip,omitempty"`
+	XForwardedFor          string                     `json:"x_forwarded_for,omitempty"`
+	UserAgent              string                     `json:"user_agent,omitempty"`
+	AccountingVersion      int                        `json:"accounting_version,omitempty"`
+	TokenBreakdown         *coreusage.TokenBreakdown  `json:"token_breakdown,omitempty"`
+	MetadataRecorded       bool                       `json:"metadata_recorded,omitempty"`
+	MetadataTruncated      bool                       `json:"metadata_truncated,omitempty"`
+	ReasoningEffort        string                     `json:"reasoning_effort,omitempty"`
+	ServiceTier            string                     `json:"service_tier,omitempty"`
+	RequestServiceTier     string                     `json:"request_service_tier,omitempty"`
+	ResponseServiceTier    string                     `json:"response_service_tier,omitempty"`
+	RequestSpeed           string                     `json:"request_speed,omitempty"`
+	ResponseSpeed          string                     `json:"response_speed,omitempty"`
+	CacheReadReported      bool                       `json:"cache_read_reported,omitempty"`
+	CacheWriteReported     *bool                      `json:"cache_write_reported,omitempty"`
+	BillingMetadata        *coreusage.BillingMetadata `json:"billing_metadata,omitempty"`
+	ClientModel            string                     `json:"client_model,omitempty"`
+	UpstreamURL            string                     `json:"upstream_url,omitempty"`
+	ResponseURL            string                     `json:"response_url,omitempty"`
+	ResponseURLSource      string                     `json:"response_url_source,omitempty"`
+	ResponseURLStatus      string                     `json:"response_url_status,omitempty"`
+	UpstreamNextHopStatus  string                     `json:"upstream_next_hop_status,omitempty"`
+	UpstreamModel          string                     `json:"upstream_model,omitempty"`
+	ResponseModel          string                     `json:"response_model,omitempty"`
+	ResponseProvider       string                     `json:"response_provider,omitempty"`
+	ResponseProviderSource string                     `json:"response_provider_source,omitempty"`
+	ExecutorType           string                     `json:"executor_type,omitempty"`
+	Thinking               *Thinking                  `json:"thinking,omitempty"`
+	ResponseHeaders        http.Header                `json:"response_headers,omitempty"`
+	Tokens                 tokenStats                 `json:"tokens"`
+	CostMicro              int64                      `json:"cost_micro"`
+	CostStatus             CostStatus                 `json:"cost_status,omitempty"`
+	CostReason             string                     `json:"cost_reason,omitempty"`
+	PricingReceipt         *PricingReceipt            `json:"pricing_receipt,omitempty"`
+	Failed                 bool                       `json:"failed"`
 }
 
 type usageBackupContent struct {
@@ -426,50 +442,70 @@ func usageBackupEventFromFlatDetail(detail FlatDetail, identity string) usageBac
 		accountingVersion = coreusage.TokenAccountingSchemaVersion
 	}
 	return usageBackupEvent{
-		Fingerprint:         hex.EncodeToString(fingerprint[:]),
-		Timestamp:           detail.Timestamp,
-		Model:               detail.Model,
-		Source:              detail.Source,
-		AuthIndex:           detail.AuthIndex,
-		APIKeyIdentity:      identity,
-		Provider:            detail.Provider,
-		LatencyMs:           detail.LatencyMs,
-		RequestID:           detail.RequestID,
-		RequestLogState:     detail.RequestLogState,
-		RequestLogLocation:  detail.RequestLogLocation,
-		RequestLogFileName:  detail.RequestLogFileName,
-		RequestLogHomeIP:    detail.RequestLogHomeIP,
-		RequestLogReason:    detail.RequestLogReason,
-		RequestLogRevision:  detail.RequestLogRevision,
-		RequestLogUpdatedAt: detail.RequestLogUpdatedAt,
-		TimeToFirstByteMs:   detail.TimeToFirstByteMs,
-		TotalDurationMs:     detail.TotalDurationMs,
-		Completed:           detail.Completed,
-		Generate:            &generate,
-		ClientIP:            detail.ClientIP,
-		XForwardedFor:       detail.XForwardedFor,
-		UserAgent:           detail.UserAgent,
-		AccountingVersion:   accountingVersion,
-		TokenBreakdown:      tokenBreakdown,
-		MetadataRecorded:    detail.MetadataRecorded,
-		MetadataTruncated:   detail.MetadataTruncated,
-		ReasoningEffort:     detail.ReasoningEffort,
-		ServiceTier:         detail.ServiceTier,
-		RequestServiceTier:  detail.RequestServiceTier,
-		ResponseServiceTier: detail.ResponseServiceTier,
-		ExecutorType:        detail.ExecutorType,
-		Thinking:            cloneThinking(detail.Thinking),
-		ResponseHeaders:     cloneHTTPHeader(detail.ResponseHeaders),
-		Tokens:              detail.Tokens,
-		CostMicro:           detail.costMicro,
-		CostStatus:          detail.CostStatus,
-		CostReason:          detail.CostReason,
-		PricingReceipt:      clonePricingReceipt(detail.PricingReceipt),
-		Failed:              detail.Failed,
+		Fingerprint:            hex.EncodeToString(fingerprint[:]),
+		Timestamp:              detail.Timestamp,
+		Model:                  detail.Model,
+		Source:                 detail.Source,
+		AuthIndex:              detail.AuthIndex,
+		APIKeyIdentity:         identity,
+		Provider:               detail.Provider,
+		LatencyMs:              recordedLatencyValue(detail.LatencyMs, detail.latencyRecorded),
+		RequestID:              detail.RequestID,
+		RequestLogState:        detail.RequestLogState,
+		RequestLogLocation:     detail.RequestLogLocation,
+		RequestLogFileName:     detail.RequestLogFileName,
+		RequestLogHomeIP:       detail.RequestLogHomeIP,
+		RequestLogReason:       detail.RequestLogReason,
+		RequestLogRevision:     detail.RequestLogRevision,
+		RequestLogUpdatedAt:    detail.RequestLogUpdatedAt,
+		TimeToFirstByteMs:      detail.TimeToFirstByteMs,
+		TotalDurationMs:        detail.TotalDurationMs,
+		Completed:              detail.Completed,
+		Generate:               &generate,
+		ClientIP:               detail.ClientIP,
+		XForwardedFor:          detail.XForwardedFor,
+		UserAgent:              detail.UserAgent,
+		AccountingVersion:      accountingVersion,
+		TokenBreakdown:         tokenBreakdown,
+		MetadataRecorded:       detail.MetadataRecorded,
+		MetadataTruncated:      detail.MetadataTruncated,
+		ReasoningEffort:        detail.ReasoningEffort,
+		ServiceTier:            detail.ServiceTier,
+		RequestServiceTier:     detail.RequestServiceTier,
+		ResponseServiceTier:    detail.ResponseServiceTier,
+		ClientModel:            detail.ClientModel,
+		UpstreamURL:            util.SanitizeUpstreamURL(detail.UpstreamURL),
+		ResponseURL:            util.SanitizeUpstreamURL(detail.ResponseURL),
+		ResponseURLSource:      detail.ResponseURLSource,
+		ResponseURLStatus:      detail.ResponseURLStatus,
+		UpstreamNextHopStatus:  detail.UpstreamNextHopStatus,
+		UpstreamModel:          detail.UpstreamModel,
+		ResponseModel:          detail.ResponseModel,
+		ResponseProvider:       detail.ResponseProvider,
+		ResponseProviderSource: detail.ResponseProviderSource,
+		RequestSpeed:           detail.RequestSpeed,
+		ResponseSpeed:          detail.ResponseSpeed,
+		CacheReadReported:      detail.CacheReadReported,
+		CacheWriteReported: coreusage.NormalizeCacheWriteReported(
+			detail.CacheWriteReported, detail.Tokens.CacheWriteTokens,
+		),
+		BillingMetadata: coreusage.CloneBillingMetadata(detail.BillingMetadata),
+		ExecutorType:    detail.ExecutorType,
+		Thinking:        cloneThinking(detail.Thinking),
+		ResponseHeaders: cloneHTTPHeader(detail.ResponseHeaders),
+		Tokens:          detail.Tokens,
+		CostMicro:       detail.costMicro,
+		CostStatus:      detail.CostStatus,
+		CostReason:      detail.CostReason,
+		PricingReceipt:  clonePricingReceipt(detail.PricingReceipt),
+		Failed:          detail.Failed,
 	}
 }
 
 func (event usageBackupEvent) flatDetail(rawAPIKey string) (FlatDetail, error) {
+	if !event.BillingMetadata.Valid() {
+		return FlatDetail{}, errors.New("invalid billing metadata")
+	}
 	if event.TokenBreakdown != nil {
 		if event.AccountingVersion != coreusage.TokenAccountingSchemaVersion || !event.TokenBreakdown.Valid() {
 			return FlatDetail{}, errors.New("invalid token breakdown")
@@ -491,51 +527,162 @@ func (event usageBackupEvent) flatDetail(rawAPIKey string) (FlatDetail, error) {
 	if event.TokenBreakdown != nil {
 		tokenBreakdown = *event.TokenBreakdown
 	}
+	latencyMs := int64(0)
+	if event.LatencyMs != nil {
+		latencyMs = *event.LatencyMs
+	}
 	return FlatDetail{
-		Timestamp:           event.Timestamp,
-		Model:               event.Model,
-		Source:              event.Source,
-		AuthIndex:           event.AuthIndex,
-		APIKey:              rawAPIKey,
-		Provider:            event.Provider,
-		LatencyMs:           event.LatencyMs,
-		RequestID:           event.RequestID,
-		RequestLogState:     event.RequestLogState,
-		RequestLogLocation:  event.RequestLogLocation,
-		RequestLogFileName:  event.RequestLogFileName,
-		RequestLogHomeIP:    event.RequestLogHomeIP,
-		RequestLogReason:    event.RequestLogReason,
-		RequestLogRevision:  event.RequestLogRevision,
-		RequestLogUpdatedAt: event.RequestLogUpdatedAt,
-		TimeToFirstByteMs:   event.TimeToFirstByteMs,
-		TotalDurationMs:     event.TotalDurationMs,
-		Completed:           event.Completed,
-		Generate:            generate,
-		ClientIP:            event.ClientIP,
-		XForwardedFor:       event.XForwardedFor,
-		UserAgent:           event.UserAgent,
-		AccountingVersion:   event.AccountingVersion,
-		TokenBreakdown:      tokenBreakdown,
-		MetadataRecorded:    event.MetadataRecorded,
-		MetadataTruncated:   event.MetadataTruncated,
-		ReasoningEffort:     event.ReasoningEffort,
-		ServiceTier:         event.ServiceTier,
-		RequestServiceTier:  event.RequestServiceTier,
-		ResponseServiceTier: event.ResponseServiceTier,
-		ExecutorType:        event.ExecutorType,
-		Thinking:            cloneThinking(event.Thinking),
-		ResponseHeaders:     cloneHTTPHeader(event.ResponseHeaders),
-		Tokens:              event.Tokens,
-		PricingReceipt:      clonePricingReceipt(event.PricingReceipt),
-		CostStatus:          event.CostStatus,
-		CostReason:          event.CostReason,
-		Failed:              event.Failed,
-		generateRecorded:    event.Generate != nil,
-		metadataTrusted:     true,
-		fingerprint:         fingerprint,
-		fingerprintTrusted:  fingerprintTrusted,
-		Cost:                float64(event.CostMicro) / costMicroPerUSD,
-		costMicro:           event.CostMicro,
-		costTrusted:         true,
+		Timestamp:              event.Timestamp,
+		Model:                  event.Model,
+		Source:                 event.Source,
+		AuthIndex:              event.AuthIndex,
+		APIKey:                 rawAPIKey,
+		Provider:               event.Provider,
+		LatencyMs:              latencyMs,
+		latencyRecorded:        event.LatencyMs != nil,
+		RequestID:              event.RequestID,
+		RequestLogState:        event.RequestLogState,
+		RequestLogLocation:     event.RequestLogLocation,
+		RequestLogFileName:     event.RequestLogFileName,
+		RequestLogHomeIP:       event.RequestLogHomeIP,
+		RequestLogReason:       event.RequestLogReason,
+		RequestLogRevision:     event.RequestLogRevision,
+		RequestLogUpdatedAt:    event.RequestLogUpdatedAt,
+		TimeToFirstByteMs:      event.TimeToFirstByteMs,
+		TotalDurationMs:        event.TotalDurationMs,
+		Completed:              event.Completed,
+		Generate:               generate,
+		ClientIP:               event.ClientIP,
+		XForwardedFor:          event.XForwardedFor,
+		UserAgent:              event.UserAgent,
+		AccountingVersion:      event.AccountingVersion,
+		TokenBreakdown:         tokenBreakdown,
+		MetadataRecorded:       event.MetadataRecorded,
+		MetadataTruncated:      event.MetadataTruncated,
+		ReasoningEffort:        event.ReasoningEffort,
+		ServiceTier:            event.ServiceTier,
+		RequestServiceTier:     event.RequestServiceTier,
+		ResponseServiceTier:    event.ResponseServiceTier,
+		ClientModel:            event.ClientModel,
+		UpstreamURL:            util.SanitizeUpstreamURL(event.UpstreamURL),
+		ResponseURL:            util.SanitizeUpstreamURL(event.ResponseURL),
+		ResponseURLSource:      event.ResponseURLSource,
+		ResponseURLStatus:      event.ResponseURLStatus,
+		UpstreamNextHopStatus:  event.UpstreamNextHopStatus,
+		UpstreamModel:          event.UpstreamModel,
+		ResponseModel:          event.ResponseModel,
+		ResponseProvider:       event.ResponseProvider,
+		ResponseProviderSource: event.ResponseProviderSource,
+		RequestSpeed:           event.RequestSpeed,
+		ResponseSpeed:          event.ResponseSpeed,
+		CacheReadReported:      event.CacheReadReported,
+		CacheWriteReported: coreusage.NormalizeCacheWriteReported(
+			event.CacheWriteReported, event.Tokens.CacheWriteTokens,
+		),
+		BillingMetadata:    coreusage.CloneBillingMetadata(event.BillingMetadata),
+		ExecutorType:       event.ExecutorType,
+		Thinking:           cloneThinking(event.Thinking),
+		ResponseHeaders:    cloneHTTPHeader(event.ResponseHeaders),
+		Tokens:             event.Tokens,
+		PricingReceipt:     clonePricingReceipt(event.PricingReceipt),
+		CostStatus:         event.CostStatus,
+		CostReason:         event.CostReason,
+		Failed:             event.Failed,
+		generateRecorded:   event.Generate != nil,
+		metadataTrusted:    true,
+		fingerprint:        fingerprint,
+		fingerprintTrusted: fingerprintTrusted,
+		Cost:               float64(event.CostMicro) / costMicroPerUSD,
+		costMicro:          event.CostMicro,
+		costTrusted:        true,
 	}, nil
+}
+
+// PrepareUsageEventExport seals canonical events before their display fields are masked.
+// The authenticated management or explicit backup key is required to import them.
+func PrepareUsageEventExport(details []FlatDetail, secret string) error {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return errors.New("usage: event export key unavailable")
+	}
+	salt := make([]byte, usageBackupSaltBytes)
+	if _, err := rand.Read(salt); err != nil {
+		return fmt.Errorf("usage: event export salt: %w", err)
+	}
+	key, _, err := deriveUsageBackupKeys(secret, salt)
+	if err != nil {
+		return err
+	}
+	gcm, err := newUsageBackupAEAD(key)
+	if err != nil {
+		return err
+	}
+	for i := range details {
+		event := usageBackupEventFromFlatDetail(details[i], details[i].APIKey)
+		plaintext, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("usage: encode event export: %w", err)
+		}
+		nonce := make([]byte, gcm.NonceSize())
+		if _, err = rand.Read(nonce); err != nil {
+			return fmt.Errorf("usage: event export nonce: %w", err)
+		}
+		sealed := gcm.Seal(nonce, nonce, plaintext, []byte("cliproxy-usage-event-v1"))
+		details[i].ImportData = "usage-event-v1:" + base64.RawURLEncoding.EncodeToString(
+			salt,
+		) + ":" + base64.RawURLEncoding.EncodeToString(
+			sealed,
+		)
+	}
+	return nil
+}
+
+func parseUsageEventExport(value, secret string, keys map[string]cipher.AEAD) (FlatDetail, error) {
+	if strings.TrimSpace(secret) == "" {
+		return FlatDetail{}, errors.New("usage: event import key unavailable; use the key that created the export")
+	}
+	encoded, ok := strings.CutPrefix(value, "usage-event-v1:")
+	if !ok {
+		return FlatDetail{}, errors.New("usage: unsupported event export format")
+	}
+	saltText, encoded, ok := strings.Cut(encoded, ":")
+	if !ok {
+		return FlatDetail{}, errors.New("usage: invalid event export salt")
+	}
+	salt, err := base64.RawURLEncoding.DecodeString(saltText)
+	if err != nil || len(salt) != usageBackupSaltBytes {
+		return FlatDetail{}, errors.New("usage: invalid event export salt")
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return FlatDetail{}, errors.New("usage: invalid event export encoding")
+	}
+	gcm := keys[saltText]
+	if gcm == nil {
+		key, _, err := deriveUsageBackupKeys(strings.TrimSpace(secret), salt)
+		if err != nil {
+			return FlatDetail{}, err
+		}
+		gcm, err = newUsageBackupAEAD(key)
+		if err != nil {
+			return FlatDetail{}, err
+		}
+		keys[saltText] = gcm
+	}
+	if len(sealed) < gcm.NonceSize() {
+		return FlatDetail{}, errors.New("usage: invalid event export nonce")
+	}
+	plaintext, err := gcm.Open(
+		nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], []byte("cliproxy-usage-event-v1"),
+	)
+	if err != nil {
+		return FlatDetail{}, errors.New(
+			"usage: event export authentication failed; use the key that created the export",
+		)
+	}
+	var event usageBackupEvent
+	if err = decodeSingleJSONValue(plaintext, &event); err != nil {
+		return FlatDetail{}, fmt.Errorf("usage: decode event export: %w", err)
+	}
+	return event.flatDetail(event.APIKeyIdentity)
 }

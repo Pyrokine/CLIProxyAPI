@@ -93,7 +93,9 @@ func validTokenAccountingQuality(quality TokenAccountingQuality) bool {
 
 // NewSubsetTokenBreakdown normalizes protocols where cache tokens are included
 // in input totals and reasoning tokens are included in output totals.
-func NewSubsetTokenBreakdown(inputTotal, cacheRead, cacheWrite, outputTotal, reasoning, total int64) TokenBreakdown {
+func NewSubsetTokenBreakdown(
+	inputTotal, cacheRead, cacheWrite, outputTotal, reasoning, total int64,
+) TokenBreakdown {
 	expectedTotal, okExpected := AddNonNegativeInt64(inputTotal, outputTotal)
 	cacheTotal, okCache := AddNonNegativeInt64(cacheRead, cacheWrite)
 	if !okExpected || !okCache || reasoning < 0 || cacheTotal > inputTotal || reasoning > outputTotal {
@@ -123,7 +125,9 @@ func NewSubsetTokenBreakdown(inputTotal, cacheRead, cacheWrite, outputTotal, rea
 
 // NewPartialSubsetTokenBreakdown preserves known subset buckets while assigning
 // an authoritative remainder to the unclassified bucket.
-func NewPartialSubsetTokenBreakdown(inputTotal, cacheRead, cacheWrite, outputTotal, reasoning, total int64) TokenBreakdown {
+func NewPartialSubsetTokenBreakdown(
+	inputTotal, cacheRead, cacheWrite, outputTotal, reasoning, total int64,
+) TokenBreakdown {
 	cacheTotal, okCache := AddNonNegativeInt64(cacheRead, cacheWrite)
 	expectedTotal, okExpected := AddNonNegativeInt64(inputTotal, outputTotal)
 	if !okCache || !okExpected || inputTotal < 0 || outputTotal < 0 || reasoning < 0 ||
@@ -163,7 +167,9 @@ func NewPartialSubsetTokenBreakdown(inputTotal, cacheRead, cacheWrite, outputTot
 
 // NewIndependentTokenBreakdown normalizes protocols where uncached input,
 // cache reads, cache writes, non-reasoning output, and reasoning are separate.
-func NewIndependentTokenBreakdown(uncachedInput, cacheRead, cacheWrite, nonReasoningOutput, reasoning, total int64) TokenBreakdown {
+func NewIndependentTokenBreakdown(
+	uncachedInput, cacheRead, cacheWrite, nonReasoningOutput, reasoning, total int64,
+) TokenBreakdown {
 	inputTotal, okInput := AddNonNegativeInt64(uncachedInput, cacheRead, cacheWrite)
 	outputTotal, okOutput := AddNonNegativeInt64(nonReasoningOutput, reasoning)
 	expectedTotal, okExpected := AddNonNegativeInt64(inputTotal, outputTotal)
@@ -194,7 +200,11 @@ func NewIndependentTokenBreakdown(uncachedInput, cacheRead, cacheWrite, nonReaso
 
 // NewSeparateReasoningTokenBreakdown normalizes protocols where cache tokens
 // are included in input totals while reasoning is separate from ordinary output.
-func NewSeparateReasoningTokenBreakdown(inputTotal, cacheRead, cacheWrite, nonReasoningOutput, reasoning, total int64) TokenBreakdown {
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func NewSeparateReasoningTokenBreakdown(
+	inputTotal, cacheRead, cacheWrite, nonReasoningOutput, reasoning, total int64,
+) TokenBreakdown {
 	cacheTotal, okCache := AddNonNegativeInt64(cacheRead, cacheWrite)
 	if !okCache || inputTotal < 0 || cacheTotal > inputTotal {
 		return inconsistentTokenBreakdown(total, 0)
@@ -246,7 +256,8 @@ func NewUnclassifiedTokenBreakdown(total int64) TokenBreakdown {
 
 // EnsureTokenBreakdown attaches a valid v2 breakdown to legacy or direct SDK
 // usage details without guessing whether reasoning is already inside output.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func EnsureTokenBreakdown(detail Detail) Detail {
 	return EnsureTokenBreakdownForProvider(detail, "", "")
 }
@@ -258,7 +269,14 @@ func EnsureTokenBreakdownForProvider(detail Detail, provider, executorType strin
 	if !detail.TokenBreakdown.Valid() {
 		semantics := tokenAccountingSemanticsFor(provider, executorType)
 		if detail.CacheReadTokens == 0 && detail.CachedTokens > 0 && detail.InputTokens == 0 &&
-			detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CacheCreationTokens == 0 && detail.TotalTokens == 0 &&
+			detail.OutputTokens ==
+				0 &&
+			detail.ReasoningTokens ==
+				0 &&
+			detail.CacheCreationTokens ==
+				0 &&
+			detail.TotalTokens ==
+				0 &&
 			(semantics == tokenAccountingSemanticsSubset || semantics == tokenAccountingSemanticsSeparateReasoning) {
 			detail.CacheReadTokens = detail.CachedTokens
 		}
@@ -267,6 +285,11 @@ func EnsureTokenBreakdownForProvider(detail Detail, provider, executorType strin
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.TokenBreakdown.TotalTokens
 	}
+	writeTokens := detail.CacheCreationTokens
+	if detail.TokenBreakdown.Valid() {
+		writeTokens = max(writeTokens, detail.TokenBreakdown.Input.CacheWriteTokens)
+	}
+	detail.CacheWriteReported = NormalizeCacheWriteReported(detail.CacheWriteReported, writeTokens)
 	return detail
 }
 
@@ -324,7 +347,8 @@ func tokenBreakdownForSemantics(detail Detail, semantics tokenAccountingSemantic
 
 func unclassifiedTokenLowerBound(detail Detail) (int64, bool) {
 	cacheTokens, okCache := AddNonNegativeInt64(detail.CacheReadTokens, detail.CacheCreationTokens)
-	if !okCache || detail.InputTokens < 0 || detail.OutputTokens < 0 || detail.ReasoningTokens < 0 || detail.CachedTokens < 0 {
+	if !okCache || detail.InputTokens < 0 || detail.OutputTokens < 0 || detail.ReasoningTokens < 0 ||
+		detail.CachedTokens < 0 {
 		return 0, false
 	}
 	inputTotal := max(detail.CachedTokens, max(cacheTokens, detail.InputTokens))
@@ -339,9 +363,10 @@ func tokenAccountingSemanticsFor(provider, executorType string) tokenAccountingS
 	if value == "" || value == "unknown" || value == "unknown unknown" {
 		return tokenAccountingSemanticsUnknown
 	}
-	if normalizedExecutor == "openaicompatexecutor" || normalizedProvider == "openai-compatibility" || strings.HasPrefix(
-		normalizedProvider, "openai-compatible-",
-	) {
+	if normalizedExecutor == "openaicompatexecutor" || normalizedProvider == "openai-compatibility" ||
+		strings.HasPrefix(
+			normalizedProvider, "openai-compatible-",
+		) {
 		return tokenAccountingSemanticsSubset
 	}
 	if strings.Contains(value, "claude") || strings.Contains(value, "anthropic") {

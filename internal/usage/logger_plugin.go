@@ -104,7 +104,13 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if timestamp.IsZero() {
 		timestamp = time.Now()
 	}
+	if record.Detail.CacheWriteReported == nil {
+		record.Detail.CacheWriteReported = record.CacheWriteReported
+	}
 	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
+	if usageDetail.BillingMetadata == nil {
+		usageDetail.BillingMetadata = coreusage.CloneBillingMetadata(record.BillingMetadata)
+	}
 	tokens := normaliseDetail(usageDetail)
 	modelName := record.Model
 	if modelName == "" {
@@ -152,36 +158,56 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	persister := p.persister
 	if persister != nil {
 		detail := FlatDetail{
-			Timestamp:           timestamp,
-			Model:               modelName,
-			Source:              source,
-			AuthIndex:           authIndex,
-			APIKey:              record.APIKey,
-			ReservationID:       record.ReservationID,
-			Provider:            record.Provider,
-			LatencyMs:           latencyMilliseconds(record.Latency),
-			RequestID:           strings.TrimSpace(record.RequestID),
-			TimeToFirstByteMs:   record.TimeToFirstByteMs,
-			TotalDurationMs:     record.TotalDurationMs,
-			Completed:           record.Completed,
-			Generate:            coreusage.GenerateEnabled(record.Generate),
-			ClientIP:            strings.TrimSpace(record.ClientIP),
-			XForwardedFor:       strings.TrimSpace(record.XForwardedFor),
-			UserAgent:           strings.TrimSpace(record.UserAgent),
-			AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
-			TokenBreakdown:      usageDetail.TokenBreakdown,
-			cacheWrite5mTokens:  usageDetail.CacheCreation5mInputTokens,
-			cacheWrite1hTokens:  usageDetail.CacheCreation1hInputTokens,
-			ReasoningEffort:     reasoningEffort,
-			ServiceTier:         requestServiceTier,
-			RequestServiceTier:  requestServiceTier,
-			ResponseServiceTier: responseServiceTier,
-			ExecutorType:        executorType,
-			Thinking:            thinkingFromCore(record.Thinking),
-			ResponseHeaders:     sanitizeResponseHeaders(record.ResponseHeaders),
-			Tokens:              tokens,
-			Failed:              failed,
-			generateRecorded:    true,
+			Timestamp:              timestamp,
+			Model:                  modelName,
+			Source:                 source,
+			AuthIndex:              authIndex,
+			APIKey:                 record.APIKey,
+			ReservationID:          record.ReservationID,
+			Provider:               record.Provider,
+			LatencyMs:              latencyMilliseconds(record.Latency),
+			latencyRecorded:        record.Latency > 0,
+			RequestID:              strings.TrimSpace(record.RequestID),
+			TimeToFirstByteMs:      record.TimeToFirstByteMs,
+			TotalDurationMs:        record.TotalDurationMs,
+			Completed:              record.Completed,
+			Generate:               coreusage.GenerateEnabled(record.Generate),
+			ClientIP:               strings.TrimSpace(record.ClientIP),
+			XForwardedFor:          strings.TrimSpace(record.XForwardedFor),
+			UserAgent:              strings.TrimSpace(record.UserAgent),
+			AccountingVersion:      coreusage.TokenAccountingSchemaVersion,
+			TokenBreakdown:         usageDetail.TokenBreakdown,
+			cacheWrite5mTokens:     usageDetail.CacheCreation5mInputTokens,
+			cacheWrite1hTokens:     usageDetail.CacheCreation1hInputTokens,
+			cacheWrite30mTokens:    usageDetail.CacheCreation30mInputTokens,
+			cacheWrite12hTokens:    usageDetail.CacheCreation12hInputTokens,
+			ReasoningEffort:        reasoningEffort,
+			ServiceTier:            requestServiceTier,
+			RequestServiceTier:     requestServiceTier,
+			ResponseServiceTier:    responseServiceTier,
+			ClientModel:            record.ClientModel,
+			UpstreamURL:            util.SanitizeUpstreamURL(record.UpstreamURL),
+			ResponseURL:            util.SanitizeUpstreamURL(record.ResponseURL),
+			ResponseURLSource:      record.ResponseURLSource,
+			ResponseURLStatus:      record.ResponseURLStatus,
+			UpstreamNextHopStatus:  record.UpstreamNextHopStatus,
+			UpstreamModel:          record.UpstreamModel,
+			ResponseModel:          record.ResponseModel,
+			ResponseProvider:       record.ResponseProvider,
+			ResponseProviderSource: record.ResponseProviderSource,
+			RequestSpeed:           record.RequestSpeed,
+			ResponseSpeed:          record.ResponseSpeed,
+			CacheReadReported:      record.CacheReadReported || usageDetail.CacheReadReported,
+			CacheWriteReported: coreusage.NormalizeCacheWriteReported(
+				usageDetail.CacheWriteReported, usageDetail.CacheCreationTokens,
+			),
+			BillingMetadata:  coreusage.CloneBillingMetadata(usageDetail.BillingMetadata),
+			ExecutorType:     executorType,
+			Thinking:         thinkingFromCore(record.Thinking),
+			ResponseHeaders:  sanitizeResponseHeaders(record.ResponseHeaders),
+			Tokens:           tokens,
+			Failed:           failed,
+			generateRecorded: true,
 		}
 		if !persister.Record(detail) {
 			log.Warn("usage: SQLite persister did not accept live usage record")
@@ -236,38 +262,69 @@ type modelStats struct {
 
 // requestDetail stores the timestamp and token usage for a single request.
 type requestDetail struct {
-	Timestamp           time.Time                `json:"timestamp"`
-	Source              string                   `json:"source"`
-	AuthIndex           string                   `json:"auth_index"`
-	LatencyMs           int64                    `json:"latency_ms,omitempty"`
-	RequestID           string                   `json:"request_id,omitempty"`
-	TimeToFirstByteMs   int64                    `json:"time_to_first_byte_ms,omitempty"`
-	TotalDurationMs     int64                    `json:"total_duration_ms,omitempty"`
-	Completed           bool                     `json:"completed"`
-	Generate            bool                     `json:"generate"`
-	ClientIP            string                   `json:"client_ip,omitempty"`
-	XForwardedFor       string                   `json:"x_forwarded_for,omitempty"`
-	UserAgent           string                   `json:"user_agent,omitempty"`
-	AccountingVersion   int                      `json:"accounting_version,omitempty"`
-	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown,omitempty"`
-	ReasoningEffort     string                   `json:"reasoning_effort,omitempty"`
-	ServiceTier         string                   `json:"service_tier,omitempty"`
-	RequestServiceTier  string                   `json:"request_service_tier,omitempty"`
-	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
-	ExecutorType        string                   `json:"executor_type,omitempty"`
-	Thinking            *Thinking                `json:"thinking,omitempty"`
-	ResponseHeaders     http.Header              `json:"response_headers,omitempty"`
-	Tokens              tokenStats               `json:"tokens"`
-	Failed              bool                     `json:"failed"`
-	generateRecorded    bool
+	Timestamp              time.Time                  `json:"timestamp"`
+	Source                 string                     `json:"source"`
+	Provider               string                     `json:"provider,omitempty"`
+	AuthIndex              string                     `json:"auth_index"`
+	LatencyMs              int64                      `json:"latency_ms,omitempty"`
+	RequestID              string                     `json:"request_id,omitempty"`
+	TimeToFirstByteMs      int64                      `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs        int64                      `json:"total_duration_ms,omitempty"`
+	Completed              bool                       `json:"completed"`
+	Generate               bool                       `json:"generate"`
+	ClientIP               string                     `json:"client_ip,omitempty"`
+	XForwardedFor          string                     `json:"x_forwarded_for,omitempty"`
+	UserAgent              string                     `json:"user_agent,omitempty"`
+	AccountingVersion      int                        `json:"accounting_version,omitempty"`
+	TokenBreakdown         coreusage.TokenBreakdown   `json:"token_breakdown"`
+	ReasoningEffort        string                     `json:"reasoning_effort,omitempty"`
+	ServiceTier            string                     `json:"service_tier,omitempty"`
+	RequestServiceTier     string                     `json:"request_service_tier,omitempty"`
+	ResponseServiceTier    string                     `json:"response_service_tier,omitempty"`
+	RequestSpeed           string                     `json:"request_speed,omitempty"`
+	ResponseSpeed          string                     `json:"response_speed,omitempty"`
+	CacheReadReported      bool                       `json:"cache_read_reported,omitempty"`
+	CacheWriteReported     *bool                      `json:"cache_write_reported,omitempty"`
+	BillingMetadata        *coreusage.BillingMetadata `json:"billing_metadata,omitempty"`
+	ClientModel            string                     `json:"client_model,omitempty"`
+	UpstreamURL            string                     `json:"upstream_url,omitempty"`
+	ResponseURL            string                     `json:"response_url,omitempty"`
+	ResponseURLSource      string                     `json:"response_url_source,omitempty"`
+	ResponseURLStatus      string                     `json:"response_url_status,omitempty"`
+	UpstreamNextHopStatus  string                     `json:"upstream_next_hop_status,omitempty"`
+	UpstreamModel          string                     `json:"upstream_model,omitempty"`
+	ResponseModel          string                     `json:"response_model,omitempty"`
+	ResponseProvider       string                     `json:"response_provider,omitempty"`
+	ResponseProviderSource string                     `json:"response_provider_source,omitempty"`
+	ExecutorType           string                     `json:"executor_type,omitempty"`
+	Thinking               *Thinking                  `json:"thinking,omitempty"`
+	ResponseHeaders        http.Header                `json:"response_headers,omitempty"`
+	Tokens                 tokenStats                 `json:"tokens"`
+	Failed                 bool                       `json:"failed"`
+	latencyRecorded        bool
+	generateRecorded       bool
+}
+
+// MarshalJSON keeps measured zero latency distinct from an unknown latency.
+// noinspection GoMixedReceiverTypes
+func (d requestDetail) MarshalJSON() ([]byte, error) {
+	type detailAlias requestDetail
+	return json.Marshal(
+		struct {
+			*detailAlias
+			LatencyMs *int64 `json:"latency_ms,omitempty"`
+		}{detailAlias: (*detailAlias)(&d), LatencyMs: recordedLatencyValue(d.LatencyMs, d.latencyRecorded)},
+	)
 }
 
 // UnmarshalJSON preserves generation for snapshots written before the field existed.
+// noinspection GoMixedReceiverTypes
 func (d *requestDetail) UnmarshalJSON(data []byte) error {
 	type requestDetailAlias requestDetail
 	*d = requestDetail{}
 	decoded := struct {
-		Generate *bool `json:"generate"`
+		Generate  *bool  `json:"generate"`
+		LatencyMs *int64 `json:"latency_ms"`
 		*requestDetailAlias
 	}{requestDetailAlias: (*requestDetailAlias)(d)}
 	if err := json.Unmarshal(data, &decoded); err != nil {
@@ -275,6 +332,10 @@ func (d *requestDetail) UnmarshalJSON(data []byte) error {
 	}
 	d.Generate = decoded.Generate == nil || *decoded.Generate
 	d.generateRecorded = decoded.Generate != nil
+	d.latencyRecorded = decoded.LatencyMs != nil
+	if decoded.LatencyMs != nil {
+		d.LatencyMs = *decoded.LatencyMs
+	}
 	return nil
 }
 
@@ -349,7 +410,13 @@ func (s *RequestStatistics) record(ctx context.Context, record coreusage.Record)
 		timestamp = time.Now()
 	}
 	timestamp = timestamp.UTC()
+	if record.Detail.CacheWriteReported == nil {
+		record.Detail.CacheWriteReported = record.CacheWriteReported
+	}
 	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
+	if usageDetail.BillingMetadata == nil {
+		usageDetail.BillingMetadata = coreusage.CloneBillingMetadata(record.BillingMetadata)
+	}
 	detail := normaliseDetail(usageDetail)
 	totalTokens := detail.TotalTokens
 	statsKey := record.APIKey
@@ -401,30 +468,49 @@ func (s *RequestStatistics) record(ctx context.Context, record coreusage.Record)
 	}
 	modelStatsValue := s.updateAPIStats(
 		stats, modelName, requestDetail{
-			Timestamp:           timestamp,
-			Source:              record.Source,
-			AuthIndex:           record.AuthIndex,
-			LatencyMs:           latencyMilliseconds(record.Latency),
-			RequestID:           strings.TrimSpace(record.RequestID),
-			TimeToFirstByteMs:   record.TimeToFirstByteMs,
-			TotalDurationMs:     record.TotalDurationMs,
-			Completed:           record.Completed,
-			Generate:            coreusage.GenerateEnabled(record.Generate),
-			ClientIP:            strings.TrimSpace(record.ClientIP),
-			XForwardedFor:       strings.TrimSpace(record.XForwardedFor),
-			UserAgent:           strings.TrimSpace(record.UserAgent),
-			AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
-			TokenBreakdown:      usageDetail.TokenBreakdown,
-			ReasoningEffort:     reasoningEffort,
-			ServiceTier:         requestServiceTier,
-			RequestServiceTier:  requestServiceTier,
-			ResponseServiceTier: responseServiceTier,
-			ExecutorType:        executorType,
-			Thinking:            thinkingFromCore(record.Thinking),
-			ResponseHeaders:     sanitizeResponseHeaders(record.ResponseHeaders),
-			Tokens:              detail,
-			Failed:              failed,
-			generateRecorded:    true,
+			Timestamp:              timestamp,
+			Source:                 record.Source,
+			Provider:               strings.TrimSpace(record.Provider),
+			AuthIndex:              record.AuthIndex,
+			LatencyMs:              latencyMilliseconds(record.Latency),
+			latencyRecorded:        record.Latency > 0,
+			RequestID:              strings.TrimSpace(record.RequestID),
+			TimeToFirstByteMs:      record.TimeToFirstByteMs,
+			TotalDurationMs:        record.TotalDurationMs,
+			Completed:              record.Completed,
+			Generate:               coreusage.GenerateEnabled(record.Generate),
+			ClientIP:               strings.TrimSpace(record.ClientIP),
+			XForwardedFor:          strings.TrimSpace(record.XForwardedFor),
+			UserAgent:              strings.TrimSpace(record.UserAgent),
+			AccountingVersion:      coreusage.TokenAccountingSchemaVersion,
+			TokenBreakdown:         usageDetail.TokenBreakdown,
+			ReasoningEffort:        reasoningEffort,
+			ServiceTier:            requestServiceTier,
+			RequestServiceTier:     requestServiceTier,
+			ResponseServiceTier:    responseServiceTier,
+			ClientModel:            record.ClientModel,
+			UpstreamURL:            util.SanitizeUpstreamURL(record.UpstreamURL),
+			ResponseURL:            util.SanitizeUpstreamURL(record.ResponseURL),
+			ResponseURLSource:      record.ResponseURLSource,
+			ResponseURLStatus:      record.ResponseURLStatus,
+			UpstreamNextHopStatus:  record.UpstreamNextHopStatus,
+			UpstreamModel:          record.UpstreamModel,
+			ResponseModel:          record.ResponseModel,
+			ResponseProvider:       record.ResponseProvider,
+			ResponseProviderSource: record.ResponseProviderSource,
+			RequestSpeed:           record.RequestSpeed,
+			ResponseSpeed:          record.ResponseSpeed,
+			CacheReadReported:      record.CacheReadReported || usageDetail.CacheReadReported,
+			CacheWriteReported: coreusage.NormalizeCacheWriteReported(
+				usageDetail.CacheWriteReported, usageDetail.CacheCreationTokens,
+			),
+			BillingMetadata:  coreusage.CloneBillingMetadata(usageDetail.BillingMetadata),
+			ExecutorType:     executorType,
+			Thinking:         thinkingFromCore(record.Thinking),
+			ResponseHeaders:  sanitizeResponseHeaders(record.ResponseHeaders),
+			Tokens:           detail,
+			Failed:           failed,
+			generateRecorded: true,
 		},
 	)
 
@@ -594,8 +680,29 @@ func estimateRequestDetailBytes(detail requestDetail) int64 {
 				len(detail.ServiceTier)+
 				len(detail.RequestServiceTier)+
 				len(detail.ResponseServiceTier)+
+				len(detail.ClientModel)+
+				len(detail.UpstreamURL)+
+				len(detail.ResponseURL)+
+				len(detail.ResponseURLSource)+
+				len(detail.ResponseURLStatus)+
+				len(detail.UpstreamNextHopStatus)+
+				len(detail.UpstreamModel)+
+				len(detail.ResponseModel)+
+				len(detail.ResponseProvider)+
+				len(detail.ResponseProviderSource)+
+				len(detail.RequestSpeed)+
+				len(detail.ResponseSpeed)+
 				len(detail.ExecutorType),
 		)*legacySnapshotJSONStringExpansion
+	if metadata := detail.BillingMetadata; metadata != nil {
+		estimatedBytes += int64(len(metadata.Region)+len(metadata.RegionSource))*legacySnapshotJSONStringExpansion + 128
+		for _, value := range metadata.Modalities {
+			estimatedBytes += int64(len(value.Category)+len(value.Modality))*legacySnapshotJSONStringExpansion + 128
+		}
+		for _, value := range metadata.Charges {
+			estimatedBytes += int64(len(value.Kind)+len(value.Unit)+len(value.Resolution))*legacySnapshotJSONStringExpansion + 128
+		}
+	}
 	if detail.Thinking != nil {
 		estimatedBytes += int64(
 			len(detail.Thinking.Intensity)+
@@ -688,6 +795,10 @@ func (s *RequestStatistics) snapshotLockedContext(
 						return StatisticsSnapshot{}, err
 					}
 					requestDetails[i] = detail
+					requestDetails[i].CacheWriteReported = coreusage.NormalizeCacheWriteReported(
+						detail.CacheWriteReported, detail.Tokens.CacheWriteTokens,
+					)
+					requestDetails[i].BillingMetadata = coreusage.CloneBillingMetadata(detail.BillingMetadata)
 					requestDetails[i].Thinking = cloneThinking(detail.Thinking)
 					requestDetails[i].ResponseHeaders = cloneHTTPHeader(detail.ResponseHeaders)
 				}
@@ -817,32 +928,50 @@ func (s *RequestStatistics) mergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 					}
 					hooks[0](
 						FlatDetail{
-							Timestamp:           detail.Timestamp,
-							Model:               modelName,
-							Source:              detail.Source,
-							AuthIndex:           detail.AuthIndex,
-							APIKey:              apiName,
-							LatencyMs:           detail.LatencyMs,
-							RequestID:           strings.TrimSpace(detail.RequestID),
-							TimeToFirstByteMs:   detail.TimeToFirstByteMs,
-							TotalDurationMs:     detail.TotalDurationMs,
-							Completed:           detail.Completed,
-							Generate:            detail.Generate,
-							ClientIP:            strings.TrimSpace(detail.ClientIP),
-							XForwardedFor:       strings.TrimSpace(detail.XForwardedFor),
-							UserAgent:           strings.TrimSpace(detail.UserAgent),
-							AccountingVersion:   detail.AccountingVersion,
-							TokenBreakdown:      detail.TokenBreakdown,
-							ReasoningEffort:     strings.TrimSpace(detail.ReasoningEffort),
-							ServiceTier:         requestServiceTier,
-							RequestServiceTier:  requestServiceTier,
-							ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
-							ExecutorType:        strings.TrimSpace(detail.ExecutorType),
-							Thinking:            cloneThinking(detail.Thinking),
-							ResponseHeaders:     cloneHTTPHeader(detail.ResponseHeaders),
-							Tokens:              detail.Tokens,
-							Failed:              detail.Failed,
-							generateRecorded:    true,
+							Timestamp:              detail.Timestamp,
+							Model:                  modelName,
+							Source:                 detail.Source,
+							AuthIndex:              detail.AuthIndex,
+							APIKey:                 apiName,
+							LatencyMs:              detail.LatencyMs,
+							latencyRecorded:        detail.latencyRecorded,
+							RequestID:              strings.TrimSpace(detail.RequestID),
+							TimeToFirstByteMs:      detail.TimeToFirstByteMs,
+							TotalDurationMs:        detail.TotalDurationMs,
+							Completed:              detail.Completed,
+							Generate:               detail.Generate,
+							ClientIP:               strings.TrimSpace(detail.ClientIP),
+							XForwardedFor:          strings.TrimSpace(detail.XForwardedFor),
+							UserAgent:              strings.TrimSpace(detail.UserAgent),
+							AccountingVersion:      detail.AccountingVersion,
+							TokenBreakdown:         detail.TokenBreakdown,
+							ReasoningEffort:        strings.TrimSpace(detail.ReasoningEffort),
+							ServiceTier:            requestServiceTier,
+							RequestServiceTier:     requestServiceTier,
+							ResponseServiceTier:    strings.TrimSpace(detail.ResponseServiceTier),
+							ClientModel:            detail.ClientModel,
+							UpstreamURL:            util.SanitizeUpstreamURL(detail.UpstreamURL),
+							ResponseURL:            util.SanitizeUpstreamURL(detail.ResponseURL),
+							ResponseURLSource:      detail.ResponseURLSource,
+							ResponseURLStatus:      detail.ResponseURLStatus,
+							UpstreamNextHopStatus:  detail.UpstreamNextHopStatus,
+							UpstreamModel:          detail.UpstreamModel,
+							ResponseModel:          detail.ResponseModel,
+							ResponseProvider:       detail.ResponseProvider,
+							ResponseProviderSource: detail.ResponseProviderSource,
+							RequestSpeed:           detail.RequestSpeed,
+							ResponseSpeed:          detail.ResponseSpeed,
+							CacheReadReported:      detail.CacheReadReported,
+							CacheWriteReported: coreusage.NormalizeCacheWriteReported(
+								detail.CacheWriteReported, detail.Tokens.CacheWriteTokens,
+							),
+							BillingMetadata:  coreusage.CloneBillingMetadata(detail.BillingMetadata),
+							ExecutorType:     strings.TrimSpace(detail.ExecutorType),
+							Thinking:         cloneThinking(detail.Thinking),
+							ResponseHeaders:  cloneHTTPHeader(detail.ResponseHeaders),
+							Tokens:           detail.Tokens,
+							Failed:           detail.Failed,
+							generateRecorded: true,
 						},
 					)
 				}
@@ -854,6 +983,10 @@ func (s *RequestStatistics) mergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 }
 
 func (s *RequestStatistics) recordImported(_, modelName string, stats *apiStats, detail requestDetail) {
+	detail.CacheWriteReported = coreusage.NormalizeCacheWriteReported(
+		detail.CacheWriteReported, detail.Tokens.CacheWriteTokens,
+	)
+	detail.BillingMetadata = coreusage.CloneBillingMetadata(detail.BillingMetadata)
 	detail.Timestamp = detail.Timestamp.UTC()
 	totalTokens := detail.Tokens.TotalTokens
 
@@ -1079,6 +1212,10 @@ func (s *RequestStatistics) trimDetails(cutoff time.Time) []archivedDetail {
 			}
 			var kept []requestDetail
 			for _, d := range ms.Details {
+				d.CacheWriteReported = coreusage.NormalizeCacheWriteReported(
+					d.CacheWriteReported, d.Tokens.CacheWriteTokens,
+				)
+				d.BillingMetadata = coreusage.CloneBillingMetadata(d.BillingMetadata)
 				d.ResponseHeaders = cloneHTTPHeader(d.ResponseHeaders)
 				if d.Timestamp.Before(cutoff) {
 					removedCount++

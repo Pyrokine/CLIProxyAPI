@@ -95,9 +95,6 @@ func presentRedactedUsageAPIKeysContext(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if len(presenter.byRedactedIdentity) == 0 {
-		return nil
-	}
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {

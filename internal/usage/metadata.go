@@ -17,6 +17,7 @@ import (
 const (
 	maxEventMetadataBytes       = 64 << 10
 	maxEventMetadataStringBytes = 512
+	maxEventURLBytes            = 8 << 10
 	maxEventHeaderBytes         = 8 << 10
 	maxEventHeaderNameBytes     = 256
 	maxEventHeaderValueBytes    = 512
@@ -25,25 +26,40 @@ const (
 )
 
 type eventMetadata struct {
-	LatencyMs           int64                     `json:"latency_ms,omitempty"`
-	RequestID           string                    `json:"request_id,omitempty"`
-	TimeToFirstByteMs   int64                     `json:"time_to_first_byte_ms,omitempty"`
-	TotalDurationMs     int64                     `json:"total_duration_ms,omitempty"`
-	Completed           bool                      `json:"completed"`
-	Generate            *bool                     `json:"generate,omitempty"`
-	ClientIP            string                    `json:"client_ip,omitempty"`
-	XForwardedFor       string                    `json:"x_forwarded_for,omitempty"`
-	UserAgent           string                    `json:"user_agent,omitempty"`
-	AccountingVersion   int                       `json:"accounting_version,omitempty"`
-	TokenBreakdown      *coreusage.TokenBreakdown `json:"token_breakdown,omitempty"`
-	ReasoningEffort     string                    `json:"reasoning_effort,omitempty"`
-	ServiceTier         string                    `json:"service_tier,omitempty"`
-	RequestServiceTier  string                    `json:"request_service_tier,omitempty"`
-	ResponseServiceTier string                    `json:"response_service_tier,omitempty"`
-	ExecutorType        string                    `json:"executor_type,omitempty"`
-	Thinking            *Thinking                 `json:"thinking,omitempty"`
-	ResponseHeaders     http.Header               `json:"response_headers,omitempty"`
-	Truncated           bool                      `json:"truncated,omitempty"`
+	LatencyMs              *int64                     `json:"latency_ms,omitempty"`
+	RequestID              string                     `json:"request_id,omitempty"`
+	TimeToFirstByteMs      int64                      `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs        int64                      `json:"total_duration_ms,omitempty"`
+	Completed              bool                       `json:"completed"`
+	Generate               *bool                      `json:"generate,omitempty"`
+	ClientIP               string                     `json:"client_ip,omitempty"`
+	XForwardedFor          string                     `json:"x_forwarded_for,omitempty"`
+	UserAgent              string                     `json:"user_agent,omitempty"`
+	AccountingVersion      int                        `json:"accounting_version,omitempty"`
+	TokenBreakdown         *coreusage.TokenBreakdown  `json:"token_breakdown,omitempty"`
+	ReasoningEffort        string                     `json:"reasoning_effort,omitempty"`
+	ServiceTier            string                     `json:"service_tier,omitempty"`
+	RequestServiceTier     string                     `json:"request_service_tier,omitempty"`
+	ResponseServiceTier    string                     `json:"response_service_tier,omitempty"`
+	RequestSpeed           string                     `json:"request_speed,omitempty"`
+	ResponseSpeed          string                     `json:"response_speed,omitempty"`
+	CacheReadReported      bool                       `json:"cache_read_reported,omitempty"`
+	CacheWriteReported     *bool                      `json:"cache_write_reported,omitempty"`
+	BillingMetadata        *coreusage.BillingMetadata `json:"billing_metadata,omitempty"`
+	ClientModel            string                     `json:"client_model,omitempty"`
+	UpstreamURL            string                     `json:"upstream_url,omitempty"`
+	ResponseURL            string                     `json:"response_url,omitempty"`
+	ResponseURLSource      string                     `json:"response_url_source,omitempty"`
+	ResponseURLStatus      string                     `json:"response_url_status,omitempty"`
+	UpstreamNextHopStatus  string                     `json:"upstream_next_hop_status,omitempty"`
+	UpstreamModel          string                     `json:"upstream_model,omitempty"`
+	ResponseModel          string                     `json:"response_model,omitempty"`
+	ResponseProvider       string                     `json:"response_provider,omitempty"`
+	ResponseProviderSource string                     `json:"response_provider_source,omitempty"`
+	ExecutorType           string                     `json:"executor_type,omitempty"`
+	Thinking               *Thinking                  `json:"thinking,omitempty"`
+	ResponseHeaders        http.Header                `json:"response_headers,omitempty"`
+	Truncated              bool                       `json:"truncated,omitempty"`
 }
 
 func validEventTokenBreakdown(d *FlatDetail) (*coreusage.TokenBreakdown, error) {
@@ -72,6 +88,9 @@ func encodeEventMetadata(d *FlatDetail) (any, error) {
 	if d.metadataTrusted {
 		responseHeaders = cloneHTTPHeader(d.ResponseHeaders)
 	}
+	if !d.BillingMetadata.Valid() {
+		return nil, errors.New("usage: invalid billing metadata")
+	}
 	tokenBreakdown, err := validEventTokenBreakdown(d)
 	if err != nil {
 		return nil, err
@@ -85,28 +104,73 @@ func encodeEventMetadata(d *FlatDetail) (any, error) {
 		generate = d.Generate
 	}
 	meta := eventMetadata{
-		LatencyMs:           d.LatencyMs,
-		RequestID:           strings.TrimSpace(d.RequestID),
-		TimeToFirstByteMs:   d.TimeToFirstByteMs,
-		TotalDurationMs:     d.TotalDurationMs,
-		Completed:           d.Completed,
-		Generate:            &generate,
-		ClientIP:            strings.TrimSpace(d.ClientIP),
-		XForwardedFor:       strings.TrimSpace(d.XForwardedFor),
-		UserAgent:           strings.TrimSpace(d.UserAgent),
-		AccountingVersion:   accountingVersion,
-		TokenBreakdown:      tokenBreakdown,
-		ReasoningEffort:     strings.TrimSpace(d.ReasoningEffort),
-		ServiceTier:         requestServiceTier,
-		RequestServiceTier:  requestServiceTier,
-		ResponseServiceTier: strings.TrimSpace(d.ResponseServiceTier),
-		ExecutorType:        strings.TrimSpace(d.ExecutorType),
-		Thinking:            cloneThinking(d.Thinking),
-		ResponseHeaders:     responseHeaders,
-		Truncated:           d.MetadataTruncated,
+		LatencyMs:              recordedLatencyValue(d.LatencyMs, d.latencyRecorded),
+		RequestID:              strings.TrimSpace(d.RequestID),
+		TimeToFirstByteMs:      d.TimeToFirstByteMs,
+		TotalDurationMs:        d.TotalDurationMs,
+		Completed:              d.Completed,
+		Generate:               &generate,
+		ClientIP:               strings.TrimSpace(d.ClientIP),
+		XForwardedFor:          strings.TrimSpace(d.XForwardedFor),
+		UserAgent:              strings.TrimSpace(d.UserAgent),
+		AccountingVersion:      accountingVersion,
+		TokenBreakdown:         tokenBreakdown,
+		ReasoningEffort:        strings.TrimSpace(d.ReasoningEffort),
+		ServiceTier:            requestServiceTier,
+		RequestServiceTier:     requestServiceTier,
+		ResponseServiceTier:    strings.TrimSpace(d.ResponseServiceTier),
+		ClientModel:            d.ClientModel,
+		UpstreamURL:            util.SanitizeUpstreamURL(d.UpstreamURL),
+		ResponseURL:            util.SanitizeUpstreamURL(d.ResponseURL),
+		ResponseURLSource:      d.ResponseURLSource,
+		ResponseURLStatus:      d.ResponseURLStatus,
+		UpstreamNextHopStatus:  d.UpstreamNextHopStatus,
+		UpstreamModel:          d.UpstreamModel,
+		ResponseModel:          d.ResponseModel,
+		ResponseProvider:       d.ResponseProvider,
+		ResponseProviderSource: d.ResponseProviderSource,
+		RequestSpeed:           d.RequestSpeed,
+		ResponseSpeed:          d.ResponseSpeed,
+		CacheReadReported:      d.CacheReadReported,
+		CacheWriteReported:     coreusage.NormalizeCacheWriteReported(d.CacheWriteReported, d.Tokens.CacheWriteTokens),
+		BillingMetadata:        coreusage.CloneBillingMetadata(d.BillingMetadata),
+		ExecutorType:           strings.TrimSpace(d.ExecutorType),
+		Thinking:               cloneThinking(d.Thinking),
+		ResponseHeaders:        responseHeaders,
+		Truncated:              d.MetadataTruncated,
 	}
 	boundEventMetadata(&meta)
-	if meta.LatencyMs <= 0 && meta.RequestID == "" && meta.TimeToFirstByteMs <= 0 && meta.TotalDurationMs <= 0 && !meta.Completed && meta.Generate != nil && *meta.Generate && meta.ClientIP == "" && meta.XForwardedFor == "" && meta.UserAgent == "" && meta.AccountingVersion == 0 && meta.TokenBreakdown == nil && meta.ReasoningEffort == "" && meta.ServiceTier == "" && meta.ResponseServiceTier == "" && meta.ExecutorType == "" && meta.Thinking == nil && len(meta.ResponseHeaders) == 0 && !meta.Truncated {
+	if meta.LatencyMs == nil && meta.RequestID == "" && meta.TimeToFirstByteMs <= 0 && meta.TotalDurationMs <= 0 &&
+		!meta.Completed &&
+		meta.Generate != nil &&
+		*meta.Generate &&
+		meta.ClientIP == "" &&
+		meta.XForwardedFor == "" &&
+		meta.UserAgent == "" &&
+		meta.AccountingVersion == 0 &&
+		meta.TokenBreakdown == nil &&
+		meta.ReasoningEffort == "" &&
+		meta.ServiceTier == "" &&
+		meta.ResponseServiceTier == "" &&
+		meta.ClientModel == "" &&
+		meta.UpstreamURL == "" &&
+		meta.ResponseURL == "" &&
+		meta.ResponseURLSource == "" &&
+		meta.ResponseURLStatus == "" &&
+		meta.UpstreamNextHopStatus == "" &&
+		meta.UpstreamModel == "" &&
+		meta.ResponseModel == "" &&
+		meta.ResponseProvider == "" &&
+		meta.ResponseProviderSource == "" &&
+		meta.RequestSpeed == "" &&
+		meta.ResponseSpeed == "" &&
+		!meta.CacheReadReported &&
+		meta.CacheWriteReported == nil &&
+		meta.BillingMetadata == nil &&
+		meta.ExecutorType == "" &&
+		meta.Thinking == nil &&
+		len(meta.ResponseHeaders) == 0 &&
+		!meta.Truncated {
 		return nil, nil
 	}
 	raw, err := json.Marshal(meta)
@@ -119,6 +183,16 @@ func encodeEventMetadata(d *FlatDetail) (any, error) {
 		raw, err = json.Marshal(meta)
 		if err != nil {
 			return nil, fmt.Errorf("encode bounded event metadata: %w", err)
+		}
+	}
+	if len(raw) > maxEventMetadataBytes && meta.BillingMetadata != nil {
+		meta.BillingMetadata.Modalities = nil
+		meta.BillingMetadata.Charges = nil
+		meta.BillingMetadata.ChargesReported = false
+		meta.Truncated = true
+		raw, err = json.Marshal(meta)
+		if err != nil {
+			return nil, fmt.Errorf("encode bounded billing metadata: %w", err)
 		}
 	}
 	if len(raw) > maxEventMetadataBytes {
@@ -140,9 +214,24 @@ func boundEventMetadata(meta *eventMetadata) {
 		&meta.ServiceTier,
 		&meta.RequestServiceTier,
 		&meta.ResponseServiceTier,
+		&meta.ClientModel,
+		&meta.UpstreamModel,
+		&meta.ResponseModel,
+		&meta.ResponseProvider,
+		&meta.ResponseProviderSource,
+		&meta.ResponseURLSource,
+		&meta.ResponseURLStatus,
+		&meta.UpstreamNextHopStatus,
+		&meta.RequestSpeed,
+		&meta.ResponseSpeed,
 		&meta.ExecutorType,
 	} {
 		bounded, truncated := truncateUTF8Bytes(*value, maxEventMetadataStringBytes)
+		*value = bounded
+		meta.Truncated = meta.Truncated || truncated
+	}
+	for _, value := range []*string{&meta.UpstreamURL, &meta.ResponseURL} {
+		bounded, truncated := truncateUTF8Bytes(*value, maxEventURLBytes)
 		*value = bounded
 		meta.Truncated = meta.Truncated || truncated
 	}
@@ -152,6 +241,34 @@ func boundEventMetadata(meta *eventMetadata) {
 			&meta.Thinking.Mode,
 			&meta.Thinking.Level,
 		} {
+			bounded, truncated := truncateUTF8Bytes(*value, maxEventMetadataStringBytes)
+			*value = bounded
+			meta.Truncated = meta.Truncated || truncated
+		}
+	}
+	if billing := meta.BillingMetadata; billing != nil {
+		stringsToBound := []*string{&billing.Region, &billing.RegionSource}
+		if len(billing.Modalities) > maxEventHeaderNames {
+			billing.Modalities = billing.Modalities[:maxEventHeaderNames]
+			meta.Truncated = true
+		}
+		if len(billing.Charges) > maxEventHeaderNames {
+			billing.Charges = billing.Charges[:maxEventHeaderNames]
+			billing.ChargesReported = false
+			meta.Truncated = true
+		}
+		for index := range billing.Modalities {
+			stringsToBound = append(
+				stringsToBound, &billing.Modalities[index].Category, &billing.Modalities[index].Modality,
+			)
+		}
+		for index := range billing.Charges {
+			stringsToBound = append(
+				stringsToBound, &billing.Charges[index].Kind, &billing.Charges[index].Unit,
+				&billing.Charges[index].Resolution,
+			)
+		}
+		for _, value := range stringsToBound {
 			bounded, truncated := truncateUTF8Bytes(*value, maxEventMetadataStringBytes)
 			*value = bounded
 			meta.Truncated = meta.Truncated || truncated
@@ -230,7 +347,10 @@ func decodeEventMetadata(d *FlatDetail, raw sql.NullString) error {
 	}
 	d.Generate = true
 	d.generateRecorded = false
+	d.LatencyMs = 0
+	d.latencyRecorded = false
 	if !raw.Valid || raw.String == "" {
+		d.CacheWriteReported = coreusage.NormalizeCacheWriteReported(d.CacheWriteReported, d.Tokens.CacheWriteTokens)
 		return nil
 	}
 	d.MetadataRecorded = true
@@ -239,7 +359,10 @@ func decodeEventMetadata(d *FlatDetail, raw sql.NullString) error {
 	if err := json.Unmarshal([]byte(raw.String), &meta); err != nil {
 		return fmt.Errorf("decode event metadata: %w", err)
 	}
-	d.LatencyMs = meta.LatencyMs
+	d.latencyRecorded = meta.LatencyMs != nil
+	if meta.LatencyMs != nil {
+		d.LatencyMs = *meta.LatencyMs
+	}
 	d.RequestID = strings.TrimSpace(meta.RequestID)
 	d.TimeToFirstByteMs = meta.TimeToFirstByteMs
 	d.TotalDurationMs = meta.TotalDurationMs
@@ -265,6 +388,24 @@ func decodeEventMetadata(d *FlatDetail, raw sql.NullString) error {
 	}
 	d.ServiceTier = d.RequestServiceTier
 	d.ResponseServiceTier = strings.TrimSpace(meta.ResponseServiceTier)
+	d.ClientModel = strings.TrimSpace(meta.ClientModel)
+	d.UpstreamURL = util.SanitizeUpstreamURL(meta.UpstreamURL)
+	d.ResponseURL = util.SanitizeUpstreamURL(meta.ResponseURL)
+	d.ResponseURLSource = strings.TrimSpace(meta.ResponseURLSource)
+	d.ResponseURLStatus = strings.TrimSpace(meta.ResponseURLStatus)
+	d.UpstreamNextHopStatus = strings.TrimSpace(meta.UpstreamNextHopStatus)
+	d.UpstreamModel = strings.TrimSpace(meta.UpstreamModel)
+	d.ResponseModel = strings.TrimSpace(meta.ResponseModel)
+	d.ResponseProvider = strings.TrimSpace(meta.ResponseProvider)
+	d.ResponseProviderSource = strings.TrimSpace(meta.ResponseProviderSource)
+	d.RequestSpeed = strings.TrimSpace(meta.RequestSpeed)
+	d.ResponseSpeed = strings.TrimSpace(meta.ResponseSpeed)
+	d.CacheReadReported = meta.CacheReadReported
+	d.CacheWriteReported = coreusage.NormalizeCacheWriteReported(meta.CacheWriteReported, d.Tokens.CacheWriteTokens)
+	if !meta.BillingMetadata.Valid() {
+		return errors.New("usage: invalid billing metadata")
+	}
+	d.BillingMetadata = coreusage.CloneBillingMetadata(meta.BillingMetadata)
 	d.ExecutorType = strings.TrimSpace(meta.ExecutorType)
 	d.MetadataTruncated = meta.Truncated
 	d.Thinking = cloneThinking(meta.Thinking)
@@ -276,18 +417,22 @@ func decodeEventTokenBreakdown(raw sql.NullString) (*coreusage.TokenBreakdown, e
 	if !raw.Valid || raw.String == "" {
 		return nil, nil
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw.String), &fields); err != nil {
+	if !json.Valid([]byte(raw.String)) {
 		return nil, nil
 	}
-	if _, hasVersion := fields["accounting_version"]; !hasVersion {
-		if _, hasBreakdown := fields["token_breakdown"]; !hasBreakdown {
-			return nil, nil
-		}
+	var accounting struct {
+		AccountingVersion int                       `json:"accounting_version"`
+		TokenBreakdown    *coreusage.TokenBreakdown `json:"token_breakdown"`
 	}
-	var detail FlatDetail
-	if err := decodeEventMetadata(&detail, raw); err != nil {
-		return nil, err
+	if err := json.Unmarshal([]byte(raw.String), &accounting); err != nil {
+		return nil, fmt.Errorf("decode token accounting metadata: %w", err)
+	}
+	detail := FlatDetail{AccountingVersion: accounting.AccountingVersion}
+	if accounting.TokenBreakdown != nil {
+		if !accounting.TokenBreakdown.Valid() || accounting.AccountingVersion != coreusage.TokenAccountingSchemaVersion {
+			return nil, errors.New("usage: invalid token breakdown metadata")
+		}
+		detail.TokenBreakdown = *accounting.TokenBreakdown
 	}
 	return validEventTokenBreakdown(&detail)
 }

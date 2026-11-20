@@ -20,7 +20,8 @@ func TestGetUsageEventsCompactProjectsAndBoundsResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
-	persister := usage.NewPersister(t.TempDir(), config.UsageRetention{Days: -1})
+	directory := t.TempDir()
+	persister := usage.NewPersister(directory, config.UsageRetention{Days: -1})
 	persister.Start(context.Background())
 	t.Cleanup(persister.Stop)
 	if !persister.IsReady() {
@@ -31,7 +32,7 @@ func TestGetUsageEventsCompactProjectsAndBoundsResponse(t *testing.T) {
 	apiKey := "compact-secret-api-key"
 	for index := range 50 {
 		budget := 4096
-		persister.Record(
+		if !persister.Record(
 			usage.FlatDetail{
 				Timestamp:         base.Add(time.Duration(index) * time.Second),
 				Model:             "compact-model",
@@ -59,7 +60,9 @@ func TestGetUsageEventsCompactProjectsAndBoundsResponse(t *testing.T) {
 				},
 				Failed: index%7 == 0,
 			},
-		)
+		) {
+			t.Fatalf("compact record %d was not accepted", index)
+		}
 	}
 	if !persister.SubmitRequestLogArtifact(
 		logging.RequestLogArtifact{
@@ -74,12 +77,27 @@ func TestGetUsageEventsCompactProjectsAndBoundsResponse(t *testing.T) {
 		t.Fatal("request log artifact was not accepted")
 	}
 
+	persister.Stop()
+	persister = usage.NewPersister(directory, config.UsageRetention{Days: -1})
+	persister.Start(t.Context())
+	t.Cleanup(persister.Stop)
+	if !persister.IsReady() {
+		t.Fatal("usage persister did not reopen")
+	}
+
 	handler := NewHandler(
 		&config.Config{APIKeyAliases: map[string]string{apiKey: "compact-alias"}},
 		"",
 		nil,
 		withEnvSecret(""),
 		withUsagePersister(persister),
+	)
+	t.Cleanup(
+		func() {
+			if err := handler.Close(); err != nil {
+				t.Error(err)
+			}
+		},
 	)
 	path := fmt.Sprintf(
 		"/usage/events?view=compact&from=%s&to=%s&page=1&page_size=50&sort=timestamp&order=desc",
@@ -109,32 +127,28 @@ func TestGetUsageEventsCompactProjectsAndBoundsResponse(t *testing.T) {
 		return recorder, response
 	}
 
-	var recorder *httptest.ResponseRecorder
-	var response compactEnvelope
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		recorder, response = request()
-		artifactReady := false
-		for _, event := range response.Events {
-			var requestID string
-			var homeIP string
-			_ = json.Unmarshal(event["request_id"], &requestID)
-			_ = json.Unmarshal(event["request_log_home_ip"], &homeIP)
-			if requestID == "compact-request-00" && homeIP == "203.0.113.1" {
-				artifactReady = true
-				break
-			}
+	recorder, response := request()
+	artifactReady := false
+	for _, event := range response.Events {
+		var requestID string
+		var homeIP string
+		if err := json.Unmarshal(event["request_id"], &requestID); err != nil {
+			t.Fatal(err)
 		}
-		if response.Total == 50 && len(response.Events) == 50 && artifactReady {
-			break
+		if requestID != "compact-request-00" {
+			continue
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf(
-				"compact events were not persisted before deadline: total=%d events=%d", response.Total,
-				len(response.Events),
-			)
+		if err := json.Unmarshal(event["request_log_home_ip"], &homeIP); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(25 * time.Millisecond)
+		artifactReady = homeIP == "203.0.113.1"
+		break
+	}
+	if response.Total != 50 || len(response.Events) != 50 || !artifactReady {
+		t.Fatalf(
+			"persisted compact events: total=%d events=%d artifact=%t", response.Total, len(response.Events),
+			artifactReady,
+		)
 	}
 
 	if recorder.Body.Len() >= 60<<10 {
@@ -144,8 +158,9 @@ func TestGetUsageEventsCompactProjectsAndBoundsResponse(t *testing.T) {
 		"timestamp": {}, "model": {}, "source": {}, "auth_index": {}, "api_key": {},
 		"api_key_alias": {}, "provider": {}, "latency_ms": {}, "request_id": {},
 		"request_log_state": {}, "request_log_home_ip": {}, "time_to_first_byte_ms": {},
-		"total_duration_ms": {}, "completed": {}, "metadata_recorded": {}, "thinking": {},
+		"total_duration_ms": {}, "completed": {}, "metadata_recorded": {}, "thinking": {}, "reasoning_effort": {},
 		"tokens": {}, "cost": {}, "cost_status": {}, "cost_reason": {}, "pricing_receipt": {}, "failed": {},
+		"speed": {},
 	}
 	for index, event := range response.Events {
 		for key := range event {
@@ -156,11 +171,18 @@ func TestGetUsageEventsCompactProjectsAndBoundsResponse(t *testing.T) {
 		for _, key := range []string{
 			"timestamp", "model", "source", "auth_index", "api_key", "api_key_alias", "provider",
 			"latency_ms", "request_id", "time_to_first_byte_ms", "total_duration_ms", "completed",
-			"metadata_recorded", "thinking", "tokens", "cost", "cost_status", "pricing_receipt", "failed",
+			"metadata_recorded", "thinking", "reasoning_effort", "tokens", "cost", "cost_status",
+			"pricing_receipt", "failed", "speed",
 		} {
 			if _, ok := event[key]; !ok {
 				t.Fatalf("compact event[%d] missing field %q", index, key)
 			}
+		}
+		if string(event["speed"]) != `"unknown"` {
+			t.Fatalf("compact event[%d] speed = %s, want unknown", index, event["speed"])
+		}
+		if string(event["reasoning_effort"]) != `"high"` {
+			t.Fatalf("compact event[%d] reasoning effort = %s, want high", index, event["reasoning_effort"])
 		}
 		var receipt usage.PricingReceipt
 		if err := json.Unmarshal(event["pricing_receipt"], &receipt); err != nil {
@@ -178,6 +200,101 @@ func TestGetUsageEventsCompactProjectsAndBoundsResponse(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), apiKey) {
 		t.Fatalf("compact response returned raw API key: %s", recorder.Body.String())
 	}
+}
+
+func TestGetUsageEventsCompactPreservesReasoningSettings(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	directory := t.TempDir()
+	persister := usage.NewPersister(directory, config.UsageRetention{Days: -1})
+	persister.Start(t.Context())
+	t.Cleanup(persister.Stop)
+	base := time.Date(2026, 11, 19, 8, 0, 0, 0, time.UTC)
+	cases := []struct {
+		id        string
+		effort    string
+		reasoning int64
+	}{
+		{id: "effort-max-zero", effort: "max", reasoning: 0},
+		{id: "effort-max-positive", effort: "max", reasoning: 7},
+		{id: "effort-low-positive", effort: "low", reasoning: 7},
+		{id: "tokens-only", reasoning: 7},
+	}
+	for index, tc := range cases {
+		detail := usage.FlatDetail{
+			Timestamp:       base.Add(time.Duration(index) * time.Second),
+			Model:           "reasoning-settings-model",
+			RequestID:       tc.id,
+			ReasoningEffort: tc.effort,
+			Completed:       true,
+		}
+		detail.Tokens.InputTokens = 2
+		detail.Tokens.OutputTokens = 10
+		detail.Tokens.ReasoningTokens = tc.reasoning
+		detail.Tokens.TotalTokens = 12
+		if !persister.Record(detail) {
+			t.Fatalf("record %s was not accepted", tc.id)
+		}
+	}
+	persister.Stop()
+	persister = usage.NewPersister(directory, config.UsageRetention{Days: -1})
+	persister.Start(t.Context())
+	t.Cleanup(persister.Stop)
+	handler := NewHandler(&config.Config{}, "", nil, withUsagePersister(persister))
+	t.Cleanup(
+		func() {
+			if err := handler.Close(); err != nil {
+				t.Error(err)
+			}
+		},
+	)
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(
+		http.MethodGet, fmt.Sprintf(
+			"/usage/events?view=compact&from=%s&to=%s&sort=timestamp&order=asc",
+			base.Add(-time.Minute).Format(time.RFC3339), base.Add(time.Minute).Format(time.RFC3339),
+		), nil,
+	)
+	handler.GetUsageEvents(ginContext)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("compact status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Events []map[string]json.RawMessage `json:"events"`
+		Total  int                          `json:"total"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != len(cases) || len(response.Events) != len(cases) {
+		t.Fatalf("compact total/events = %d/%d, want %d", response.Total, len(response.Events), len(cases))
+	}
+	for index, tc := range cases {
+		event := response.Events[index]
+		var requestID, effort string
+		if err := json.Unmarshal(event["request_id"], &requestID); err != nil {
+			t.Fatal(err)
+		}
+		if value, ok := event["reasoning_effort"]; ok {
+			if err := json.Unmarshal(value, &effort); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var tokens struct {
+			Reasoning int64 `json:"reasoning_tokens"`
+			Total     int64 `json:"total_tokens"`
+		}
+		if err := json.Unmarshal(event["tokens"], &tokens); err != nil {
+			t.Fatal(err)
+		}
+		if requestID != tc.id || effort != tc.effort || tokens.Reasoning != tc.reasoning || tokens.Total != 12 {
+			t.Fatalf("compact event[%d] changed recorded settings or token usage: %s", index, event)
+		}
+		if _, ok := event["thinking"]; ok {
+			t.Fatalf("compact event[%d] synthesized thinking from usage: %s", index, event["thinking"])
+		}
+	}
+	t.Logf("reasoning-settings-fixture=%s", recorder.Body.Bytes())
 }
 
 func TestGetUsageEventsRejectsInvalidView(t *testing.T) {

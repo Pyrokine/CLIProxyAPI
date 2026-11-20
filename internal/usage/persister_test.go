@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"maps"
 	"math"
@@ -404,13 +405,16 @@ func TestComputeCostUsesMutuallyExclusiveCanonicalBuckets(t *testing.T) {
 						return tt.price, true
 					},
 				}
-				got, err := computeCost(tokens, &breakdown, pricing, "model", time.Now())
+				got, err := computeCost(tokens, &breakdown, pricing, "model", time.Now(), nil)
 				if err != nil {
 					t.Fatalf("computeCost: %v", err)
 				}
 				if got.Micro != tt.wantMicro || got.Status != tt.wantStatus || got.Reason != tt.wantReason {
 					t.Fatalf(
-						"computeCost = %+v, want micro=%d status=%q reason=%q", got, tt.wantMicro, tt.wantStatus,
+						"computeCost = %+v, want micro=%d status=%q reason=%q",
+						got,
+						tt.wantMicro,
+						tt.wantStatus,
 						tt.wantReason,
 					)
 				}
@@ -462,13 +466,16 @@ func TestComputeCostHonorsCanonicalAccountingQuality(t *testing.T) {
 				if !tt.breakdown.Valid() {
 					t.Fatalf("breakdown is invalid: %+v", tt.breakdown)
 				}
-				got, err := computeCost(flatTokens, &tt.breakdown, pricing, "model", time.Now())
+				got, err := computeCost(flatTokens, &tt.breakdown, pricing, "model", time.Now(), nil)
 				if err != nil {
 					t.Fatalf("computeCost: %v", err)
 				}
 				if got.Micro != tt.wantMicro || got.Status != tt.wantStatus || got.Reason != tt.wantReason {
 					t.Fatalf(
-						"computeCost = %+v, want micro=%d status=%q reason=%q", got, tt.wantMicro, tt.wantStatus,
+						"computeCost = %+v, want micro=%d status=%q reason=%q",
+						got,
+						tt.wantMicro,
+						tt.wantStatus,
 						tt.wantReason,
 					)
 				}
@@ -596,7 +603,10 @@ func TestDetailedPricingPersistsReferenceCostWithoutCanonicalMetadata(t *testing
 		t.Fatalf("event count = %d/%d, want 1/1", total, len(events))
 	}
 	if got := events[0]; got.Cost != 0.0047 || got.CostStatus != costStatusPartial ||
-		got.CostReason != "legacy cache overlap is ambiguous; applied subset assumption; cache-write reference price uses prompt rate" {
+		got.CostReason !=
+			("legacy cache overlap is ambiguous; applied subset assumption; "+
+				"cache-write reference price uses prompt "+
+				"rate") {
 		t.Fatalf("queried event = %+v", got)
 	}
 	var costMicro int64
@@ -1393,6 +1403,41 @@ func TestRepriceModelEventsSkipsUnchangedCosts(t *testing.T) {
 	}
 }
 
+func TestCostRecalculationStatusPreservesPersistedCompletionTime(t *testing.T) {
+	store := openTestStore(t)
+	p := &Persister{store: store}
+	task := costRecalculationTask{
+		ID: "completed-history", Status: "ok", Phase: "complete", EventCount: 1787583, ProcessedEvents: 1787583,
+		StartedAt: "2026-11-19T05:45:13.449294484Z", UpdatedAt: "2026-11-19T09:03:24.397998031Z",
+		CompletedAt: "2026-11-19T09:03:24.397998031Z",
+	}
+	for _, completedAt := range []string{task.CompletedAt, ""} {
+		task.CompletedAt = completedAt
+		if err := writeCostRecalculationTask(t.Context(), store.db, task); err != nil {
+			t.Fatal(err)
+		}
+		p.restoreCostRecalculation(t.Context())
+		status := p.RecalculateCostsStatus()
+		if status.Status != "ok" || status.Running || status.Percent != 100 || status.StartedAt != task.StartedAt || status.UpdatedAt != task.UpdatedAt || status.CompletedAt != completedAt {
+			t.Fatalf("persisted status=%+v", status)
+		}
+		data, err := json.Marshal(status)
+		if err != nil || strings.Contains(string(data), `"completed_at"`) != (completedAt != "") {
+			t.Fatalf("completed JSON=%s error=%v", data, err)
+		}
+	}
+}
+
+func waitForCostRecalculation(persister *Persister) CostRecalculationStatus {
+	for {
+		status := persister.RecalculateCostsStatus()
+		if !status.Running {
+			return status
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestStartRecalculateCostsPublishesStatus(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
@@ -1418,6 +1463,7 @@ func TestStartRecalculateCostsPublishesStatus(t *testing.T) {
 	}
 
 	persister := &Persister{store: store, pricesFn: priceFn}
+	t.Cleanup(func() { waitForCostRecalculation(persister) })
 	unlock, err := persister.acquireMaintenance(ctx)
 	if err != nil {
 		t.Fatalf("acquire maintenance: %v", err)
@@ -1441,17 +1487,7 @@ func TestStartRecalculateCostsPublishesStatus(t *testing.T) {
 	unlock()
 	released = true
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		status = persister.RecalculateCostsStatus()
-		if !status.Running {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("recalculation did not finish: %+v", status)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	status = waitForCostRecalculation(persister)
 	if status.Status != "ok" || status.Error != "" {
 		t.Fatalf("completed status = %+v", status)
 	}
@@ -1492,6 +1528,11 @@ func TestStartRecalculateCostsQueuesLatestPrices(t *testing.T) {
 	}
 
 	persister := &Persister{store: store, pricesFn: oldPriceFn}
+	releasePricing := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(func() {
+		releasePricing()
+		waitForCostRecalculation(persister)
+	})
 	if !persister.StartRecalculateCosts() {
 		t.Fatal("first recalculation did not start")
 	}
@@ -1509,28 +1550,17 @@ func TestStartRecalculateCostsQueuesLatestPrices(t *testing.T) {
 	select {
 	case <-updated:
 	case <-time.After(time.Second):
-		close(release)
+		releasePricing()
 		t.Fatal("price update blocked behind running recalculation")
 	}
 	if persister.StartRecalculateCosts() {
-		close(release)
+		releasePricing()
 		t.Fatal("second recalculation started instead of being queued")
 	}
-	close(release)
+	releasePricing()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		status := persister.RecalculateCostsStatus()
-		if !status.Running {
-			if status.Status != "ok" || status.Error != "" {
-				t.Fatalf("completed status = %+v", status)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("queued recalculation did not finish: %+v", status)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if status := waitForCostRecalculation(persister); status.Status != "ok" || status.Error != "" {
+		t.Fatalf("completed status = %+v", status)
 	}
 
 	var cost int64
@@ -2080,33 +2110,34 @@ func TestTrimBeforeWaitsForPricingMaintenanceGate(t *testing.T) {
 
 	persister := &Persister{store: store}
 	persister.pricingMu.Lock()
+	unlockPricing := sync.OnceFunc(persister.pricingMu.Unlock)
 	done := make(chan error, 1)
+	t.Cleanup(func() {
+		unlockPricing()
+		<-done
+	})
 	go func() {
+		defer close(done)
 		done <- persister.trimBefore(timestamp.Add(time.Minute))
 	}()
 	select {
 	case err := <-done:
-		persister.pricingMu.Unlock()
+		unlockPricing()
 		t.Fatalf("trimBefore returned before pricing gate released: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 	var count int64
 	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&count); err != nil {
-		persister.pricingMu.Unlock()
+		unlockPricing()
 		t.Fatalf("query blocked trim events: %v", err)
 	}
 	if count != 1 {
-		persister.pricingMu.Unlock()
+		unlockPricing()
 		t.Fatalf("events changed while trim was blocked: %d", count)
 	}
-	persister.pricingMu.Unlock()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("trimBefore: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("trimBefore did not finish after pricing gate released")
+	unlockPricing()
+	if err := <-done; err != nil {
+		t.Fatalf("trimBefore: %v", err)
 	}
 	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&count); err != nil {
 		t.Fatalf("query trimmed events: %v", err)
@@ -2161,7 +2192,10 @@ func TestMigrateDataDirCrossDevicePublishesCompleteDirectory(t *testing.T) {
 	if _, errStat := os.Stat(newBaseDir + migrationStagingSuffix); !errors.Is(errStat, os.ErrNotExist) {
 		t.Fatalf("staging directory still exists: %v", errStat)
 	}
-	if _, errStat := os.Stat(filepath.Join(newBaseDir, migrationReadyMarkerFile)); !errors.Is(errStat, os.ErrNotExist) {
+	if _, errStat := os.Stat(filepath.Join(newBaseDir, migrationReadyMarkerFile)); !errors.Is(
+		errStat,
+		os.ErrNotExist,
+	) {
 		t.Fatalf("migration marker still exists: %v", errStat)
 	}
 }
@@ -2265,25 +2299,31 @@ func TestPersisterStopWaitsForConcurrentStartCleanup(t *testing.T) {
 	persister.SetPriceProvider(provider)
 
 	startDone := make(chan struct{})
+	releasePricing := sync.OnceFunc(func() { close(provider.release) })
+	t.Cleanup(func() {
+		releasePricing()
+		<-startDone
+		persister.Stop()
+	})
 	go func() {
 		persister.Start(context.Background())
 		close(startDone)
 	}()
 	select {
 	case <-provider.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Start did not reach the blocked pricing snapshot")
+	case <-startDone:
+		t.Fatal("Start returned before reaching the blocked pricing snapshot")
 	}
 
 	stopCtx, cancelStop := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	errStop := persister.StopContext(stopCtx)
 	cancelStop()
 	if !errors.Is(errStop, context.DeadlineExceeded) {
-		close(provider.release)
+		releasePricing()
 		t.Fatalf("StopContext error = %v, want deadline exceeded while Start is blocked", errStop)
 	}
 	if persister.IsReady() {
-		close(provider.release)
+		releasePricing()
 		t.Fatal("persister reported ready after shutdown was requested")
 	}
 	request := apiKeyReservationRequest(
@@ -2293,7 +2333,7 @@ func TestPersisterStopWaitsForConcurrentStartCleanup(t *testing.T) {
 	)
 	if _, err := persister.ReserveAPIKey(context.Background(), request); err == nil ||
 		!strings.Contains(err.Error(), "reservation store is unavailable") {
-		close(provider.release)
+		releasePricing()
 		t.Fatalf("ReserveAPIKey error = %v, want unavailable", err)
 	}
 
@@ -2303,12 +2343,12 @@ func TestPersisterStopWaitsForConcurrentStartCleanup(t *testing.T) {
 	}()
 	select {
 	case err := <-secondStopDone:
-		close(provider.release)
+		releasePricing()
 		t.Fatalf("second StopContext returned before Start cleanup could run: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	close(provider.release)
+	releasePricing()
 	select {
 	case <-startDone:
 	case <-time.After(5 * time.Second):
@@ -2438,32 +2478,37 @@ func TestPersisterAPIKeyReservationStoreUnavailableAcrossLifecycle(t *testing.T)
 
 func TestPersisterWriterSurvivesRunContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	persister := NewPersister(t.TempDir(), config.UsageRetention{})
+	t.Cleanup(persister.Stop)
 	persister.Start(ctx)
 	if !persister.IsReady() {
 		t.Fatal("persister did not start")
 	}
 	cancel()
-	persister.Record(
+	if !persister.Record(
 		FlatDetail{
 			Timestamp: time.Now().UTC(),
 			Model:     "after-run-cancel",
 			Tokens:    tokenStats{InputTokens: 1, TotalTokens: 1},
 		},
-	)
+	) {
+		t.Fatal("record was not accepted after caller cancellation")
+	}
 
-	deadline := time.Now().Add(time.Second)
 	for {
 		snapshot, err := persister.querySnapshot()
-		if err == nil && snapshot.TotalRequests == 1 {
-			break
+		if err != nil {
+			t.Fatalf("query record after caller cancellation: %v", err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("record was not persisted after caller cancellation: snapshot=%#v error=%v", snapshot, err)
+		if snapshot.TotalRequests > 0 {
+			if snapshot.TotalRequests != 1 {
+				t.Fatalf("requests after caller cancellation = %d, want 1", snapshot.TotalRequests)
+			}
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	persister.Stop()
 }
 
 func TestPersisterShutdownCancelsMaintenanceLockWait(t *testing.T) {
@@ -2561,7 +2606,11 @@ func TestRecalculateCostsPreservesPreUnixEpochBucketsAndLatency(t *testing.T) {
 		}
 		if bucket != wantBucket || latencyTotal != 25 || latencySamples != 1 {
 			t.Fatalf(
-				"%s = bucket:%d latency:%d samples:%d, want %d/25/1", table, bucket, latencyTotal, latencySamples,
+				"%s = bucket:%d latency:%d samples:%d, want %d/25/1",
+				table,
+				bucket,
+				latencyTotal,
+				latencySamples,
 				wantBucket,
 			)
 		}
@@ -2727,7 +2776,7 @@ func TestRepriceCostRecalculationPageRetriesLockedDatabase(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db}
+	store := &sqliteStore{db: db}
 	ctx := context.Background()
 
 	tx, err := db.BeginTx(ctx, nil)

@@ -52,8 +52,13 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 		return
 	}
 
+	type credentialKey struct{ baseURL, apiKey string }
+	type usageGroup struct {
+		index string
+		entry apiKeyUsageEntry
+	}
 	now := time.Now()
-	out := make(map[string]map[string]apiKeyUsageEntry)
+	groups := make(map[string]map[credentialKey]*usageGroup)
 	for _, auth := range manager.List() {
 		if auth == nil {
 			continue
@@ -73,31 +78,53 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 				baseURL = strings.TrimSpace(auth.Attributes["base-url"])
 			}
 		}
-		compositeKey := baseURL + "|" + util.HideAPIKey(apiKey)
 		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if compatName := strings.TrimSpace(auth.Attributes["compat_name"]); compatName != "" {
+			provider = strings.ToLower(compatName)
+		}
 		if provider == "" {
 			provider = "unknown"
 		}
 
 		recent := auth.RecentRequestsSnapshot(now)
-		providerBucket, ok := out[provider]
-		if !ok {
-			providerBucket = make(map[string]apiKeyUsageEntry)
-			out[provider] = providerBucket
+		providerGroups := groups[provider]
+		if providerGroups == nil {
+			providerGroups = make(map[credentialKey]*usageGroup)
+			groups[provider] = providerGroups
 		}
-		if existing, exists := providerBucket[compositeKey]; exists {
-			existing.Success += auth.Success
-			existing.Failed += auth.Failed
-			existing.RecentRequests = mergeRecentRequestBuckets(existing.RecentRequests, recent)
-			providerBucket[compositeKey] = existing
+		key := credentialKey{baseURL: baseURL, apiKey: apiKey}
+		if existing := providerGroups[key]; existing != nil {
+			if index := auth.EnsureIndex(); index < existing.index {
+				existing.index = index
+			}
+			existing.entry.Success += auth.Success
+			existing.entry.Failed += auth.Failed
+			existing.entry.RecentRequests = mergeRecentRequestBuckets(existing.entry.RecentRequests, recent)
 			continue
 		}
-		providerBucket[compositeKey] = apiKeyUsageEntry{
-			Success:        auth.Success,
-			Failed:         auth.Failed,
-			RecentRequests: recent,
+		providerGroups[key] = &usageGroup{
+			index: auth.EnsureIndex(),
+			entry: apiKeyUsageEntry{
+				Success: auth.Success, Failed: auth.Failed, RecentRequests: recent,
+			},
 		}
 	}
 
+	out := make(map[string]map[string]apiKeyUsageEntry, len(groups))
+	for provider, providerGroups := range groups {
+		maskedCounts := make(map[string]int, len(providerGroups))
+		for key := range providerGroups {
+			maskedCounts[key.baseURL+"|"+util.HideAPIKey(key.apiKey)]++
+		}
+		entries := make(map[string]apiKeyUsageEntry, len(providerGroups))
+		for key, group := range providerGroups {
+			maskedKey := key.baseURL + "|" + util.HideAPIKey(key.apiKey)
+			if maskedCounts[maskedKey] > 1 {
+				maskedKey += "|" + group.index
+			}
+			entries[maskedKey] = group.entry
+		}
+		out[provider] = entries
+	}
 	c.JSON(http.StatusOK, out)
 }

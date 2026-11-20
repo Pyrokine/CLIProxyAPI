@@ -25,18 +25,28 @@ func TestParseAny_DetectsAllFormats(t *testing.T) {
 		wantParser string
 	}{
 		{
-			name:       "v2 detail envelope",
-			data:       []byte(`{"date":"2026-04-27","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m"}]}`),
+			name: "v2 detail envelope",
+			data: []byte(
+				`{"date":"2026-04-27","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m"}]}`,
+			),
 			wantParser: "flatDetailsParser",
 		},
 		{
-			name:       "v2 today envelope",
-			data:       []byte(`{"date":"2026-04-27","saved_at":"2026-04-27T11:00:00Z","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m"}]}`),
+			name: "v2 today envelope",
+			data: []byte(
+				`{"date":"2026-04-27","saved_at":"2026-04-27T11:00:00Z","details":` +
+					`[{"timestamp":"2026-04-27T10:00:00Z","model":` +
+					`"m"}]}`,
+			),
 			wantParser: "flatDetailsParser",
 		},
 		{
-			name:       "v1 nested snapshot",
-			data:       []byte(`{"version":1,"usage":{"apis":{"key1":{"models":{"m":{"details":[{"timestamp":"2026-04-27T10:00:00Z"}]}}}}}}`),
+			name: "v1 nested snapshot",
+			data: []byte(
+				`{"version":1,"usage":{"apis":{"key1":{"models":{"m":{"details":` +
+					`[{"timestamp":"2026-04-27T10:00:` +
+					`00Z"}]}}}}}}`,
+			),
 			wantParser: "statisticsSnapshotParser",
 		},
 		{
@@ -48,7 +58,9 @@ func TestParseAny_DetectsAllFormats(t *testing.T) {
 			name: "csv with required headers",
 			data: []byte(strings.Join(
 				[]string{
-					"timestamp,model,source,api_key,user,result,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens",
+					"timestamp,model,source,api_key,user,result,input_tokens,output_tokens," +
+						"reasoning_tokens,cached_tokens," +
+						"total_tokens",
 					`2026-04-27T10:00:00Z,m,src,k,u,success,10,20,0,0,30`,
 				}, "\n",
 			)),
@@ -135,6 +147,7 @@ func TestCSVParserStrictValidation(t *testing.T) {
 }
 
 func TestCSVParserDoesNotUseMaskedAPIKeyAsIdentity(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	payload := []byte(strings.Join(
 		[]string{
 			"timestamp,model,source,api_key,result,input_tokens,output_tokens,total_tokens",
@@ -372,7 +385,8 @@ func TestFingerprint_StableAcrossFormats(t *testing.T) {
 func TestCSVParserPreservesRuntimeMetadata(t *testing.T) {
 	legacyPayload := []byte(strings.Join(
 		[]string{
-			"timestamp,model,source,api_key,result,input_tokens,output_tokens,total_tokens,reasoning_effort,service_tier,executor_type",
+			"timestamp,model,source,api_key,result,input_tokens,output_tokens,total" +
+				"_tokens,reasoning_effort,service_tier,executor_type",
 			`2026-04-27T10:00:00Z,m,src,k,success,10,20,30,medium,flex,OpenAICompatExecutor`,
 		}, "\n",
 	))
@@ -402,7 +416,8 @@ func TestCSVParserPreservesRuntimeMetadata(t *testing.T) {
 
 	payload := []byte(strings.Join(
 		[]string{
-			"timestamp,model,source,api_key,result,input_tokens,output_tokens,total_tokens,reasoning_effort,service_tier,request_service_tier,response_service_tier,executor_type",
+			"timestamp,model,source,api_key,result,input_tokens,output_tokens,total_tokens,reasoning_effort," +
+				"service_tier,request_service_tier,response_service_tier,executor_type",
 			`2026-04-27T10:00:00Z,m,src,k,success,10,20,30,medium,auto,flex,default,OpenAICompatExecutor`,
 		}, "\n",
 	))
@@ -515,7 +530,8 @@ func TestImport_CrossFormatDedup(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	v2 := []byte(`{"date":"2026-04-27","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m","api_key":"k","source":"src","tokens":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}]}`)
+	v2 := []byte((`{"date":"2026-04-27","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m","api_key":"` +
+		`k","source":"src","tokens":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}]}`))
 	r1, err := importBytes(ctx, store, nil, v2)
 	if err != nil {
 		t.Fatalf("v2 import: %v", err)
@@ -524,7 +540,8 @@ func TestImport_CrossFormatDedup(t *testing.T) {
 		t.Fatalf("v2 added=%d want 1", r1.Added)
 	}
 
-	v1 := []byte(`{"version":1,"usage":{"apis":{"k":{"models":{"m":{"details":[{"timestamp":"2026-04-27T10:00:00Z","source":"src","tokens":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}]}}}}}}`)
+	v1 := []byte((`{"version":1,"usage":{"apis":{"k":{"models":{"m":{"details":[{"timestamp":"2026-04-27T10:` +
+		`00:00Z","source":"src","tokens":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}]}}}}}}`))
 	r2, err := importBytes(ctx, store, nil, v1)
 	if err != nil {
 		t.Fatalf("v1 import: %v", err)
@@ -556,7 +573,13 @@ func TestImportBytes_ReturnsDayRange(t *testing.T) {
 	wantEarliest := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC).UnixNano()
 	wantLatest := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC).UnixNano()
 	if result.EarliestDayNs != wantEarliest || result.LatestDayNs != wantLatest {
-		t.Fatalf("day range=(%d,%d), want (%d,%d)", result.EarliestDayNs, result.LatestDayNs, wantEarliest, wantLatest)
+		t.Fatalf(
+			"day range=(%d,%d), want (%d,%d)",
+			result.EarliestDayNs,
+			result.LatestDayNs,
+			wantEarliest,
+			wantLatest,
+		)
 	}
 }
 
@@ -688,31 +711,14 @@ func TestImportBytes_LegacySnapshotPreservesFailedFlags(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 
-	payload := []byte(`{
-		"version":1,
-		"usage":{
-			"total_requests":2,
-			"success_count":1,
-			"failure_count":1,
-			"total_tokens":35,
-			"apis":{
-				"k":{
-					"total_requests":2,
-					"total_tokens":35,
-					"models":{
-						"m":{
-							"total_requests":2,
-							"total_tokens":35,
-							"details":[
-								{"timestamp":"2026-04-27T10:00:00Z","source":"src","tokens":{"total_tokens":30},"failed":false},
-								{"timestamp":"2026-04-27T10:01:00Z","source":"src","tokens":{"total_tokens":5},"failed":true}
-							]
-						}
-					}
-				}
-			}
-		}
-	}`)
+	payload := []byte(("{\n\t\t\"version\":1,\n\t\t\"usage\":{\n\t\t\t\"total_requests\":2,\n\t\t\t\"" +
+		"success_count\":1,\n\t\t\t\"failure_count\":1,\n\t\t\t\"total_tokens\":35,\n\t\t\t\"apis\":{\n\t\t\t" +
+		"\t\"k\":{\n\t\t\t\t\t\"total_requests\":2,\n\t\t\t\t\t\"total_tokens\":35,\n\t\t\t\t\t\"models\":{\n" +
+		"\t\t\t\t\t\t\"m\":{\n\t\t\t\t\t\t\t\"total_requests\":2,\n\t\t\t\t\t\t\t\"total_tokens\":35,\n\t\t\t" +
+		"\t\t\t\t\"details\":[\n\t\t\t\t\t\t\t\t{\"timestamp\":\"2026-04-27T10:00:00Z\",\"source\":\"src\",\"" +
+		"tokens\":{\"total_tokens\":30},\"failed\":false},\n\t\t\t\t\t\t\t\t{\"timestamp\":\"2026-04-27T10:" +
+		"01:00Z\",\"source\":\"src\",\"tokens\":{\"total_tokens\":5},\"failed\":true}\n\t\t\t\t\t\t\t]\n\t\t" +
+		"\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}"))
 
 	result, err := importBytes(ctx, store, nil, payload)
 	if err != nil {
@@ -750,7 +756,11 @@ func TestCsvParser_RoundTrip(t *testing.T) {
 
 	csv := bytes.Join(
 		[][]byte{
-			[]byte("timestamp,model,source,api_key,user,result,input_tokens,output_tokens,reasoning_tokens,cached_tokens,total_tokens"),
+			[]byte(
+				"timestamp,model,source,api_key,user,result,input_tokens,output_tokens," +
+					"reasoning_tokens,cached_tokens," +
+					"total_tokens",
+			),
 			[]byte("2026-04-27T10:00:00Z,m,src,k,user,success,10,20,0,0,30"),
 			[]byte("2026-04-27T10:01:00Z,m,src,k,user,failed,5,0,0,0,5"),
 		}, []byte("\n"),
@@ -811,7 +821,7 @@ func TestImportFile_RejectsLargeInput(t *testing.T) {
 		t.Fatalf("close large file: %v", err)
 	}
 
-	_, err = importFile(context.Background(), store, nil, largeFile)
+	_, err = importFile(context.Background(), store, pricingSnapshot{}, largeFile)
 	if err == nil {
 		t.Fatal("expected oversized import file to be rejected")
 	}
@@ -833,7 +843,7 @@ func TestMigrateLegacy_EmptyDirIsIdempotent(t *testing.T) {
 	}()
 
 	ctx := context.Background()
-	if err := migrateLegacyToSQLite(ctx, store, nil, baseDir); err != nil {
+	if err := migrateLegacyToSQLite(ctx, store, pricingSnapshot{}, baseDir); err != nil {
 		t.Fatalf("first migrate: %v", err)
 	}
 	status1, err := checkMigrationStatus(ctx, store)
@@ -844,7 +854,7 @@ func TestMigrateLegacy_EmptyDirIsIdempotent(t *testing.T) {
 		t.Fatalf("expected meta marker after first migrate")
 	}
 
-	if err := migrateLegacyToSQLite(ctx, store, nil, baseDir); err != nil {
+	if err := migrateLegacyToSQLite(ctx, store, pricingSnapshot{}, baseDir); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
 	status2, err := checkMigrationStatus(ctx, store)

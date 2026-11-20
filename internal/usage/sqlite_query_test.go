@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,6 +16,32 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
+
+func TestEmptyEventsRejectMissingSelectedColumn(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.db.Exec(
+		"ALTER TABLE events RENAME COLUMN input_tokens TO " +
+			"synthetic_missing_input_tokens",
+	); err !=
+		nil {
+		t.Fatal(err)
+	}
+	for _, compact := range []bool{false, true} {
+		query := store.queryEvents
+		if compact {
+			query = store.queryCompactEvents
+		}
+		if _, _, err := query(
+			t.Context(), store.db, 0, math.MaxInt64, EventFilters{}, 1, 0, "timestamp", false,
+		); err == nil {
+			t.Fatalf("compact=%t accepted missing projected column", compact)
+		}
+	}
+}
 
 // TestStore_QueryStaysWithinMemoryBudget is the regression test for the
 // 2026-04-26 LA OOM. The pre-SQLite path read 60MB+ of detail JSONs into
@@ -54,8 +81,12 @@ func TestStore_QueryStaysWithinMemoryBudget(t *testing.T) {
 			Model:     "m" + string(rune('0'+i%5)),
 			APIKey:    "k" + string(rune('0'+i%3)),
 			Source:    "src" + string(rune('0'+i%4)),
-			Tokens:    tokenStats{InputTokens: int64(i * 10), OutputTokens: int64(i * 20), TotalTokens: int64(i * 30)},
-			Failed:    i%7 == 0,
+			Tokens: tokenStats{
+				InputTokens:  int64(i * 10),
+				OutputTokens: int64(i * 20),
+				TotalTokens:  int64(i * 30),
+			},
+			Failed: i%7 == 0,
 		}
 		if _, err := persistEvent(ctx, tx, store, &d, nil); err != nil {
 			t.Fatalf("persist[%d]: %v", i, err)
@@ -74,7 +105,9 @@ func TestStore_QueryStaysWithinMemoryBudget(t *testing.T) {
 	to := base.Add(48 * time.Hour)
 
 	// Hit every read path that the LA incident touched.
-	if _, err := store.querySummary(ctx, from, to, EventFilters{Model: "m1,m2", APIKey: "k0"}, "hourly", true); err != nil {
+	if _, err := store.querySummary(
+		ctx, from, to, EventFilters{Model: "m1,m2", APIKey: "k0"}, "hourly", true,
+	); err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 	if _, _, err := store.queryEventDetails(ctx, from, to, EventFilters{}, 1, 100, "timestamp", false); err != nil {
@@ -296,7 +329,8 @@ func TestQueryEventsPreservesUsageV2AndDefaultsLegacyGenerate(t *testing.T) {
 		t.Fatalf("QueryEvents(v2) count = %d, want 1", len(events))
 	}
 	got := events[0]
-	if got.Generate || got.ClientIP != detail.ClientIP || got.XForwardedFor != detail.XForwardedFor || got.UserAgent != detail.UserAgent {
+	if got.Generate || got.ClientIP != detail.ClientIP || got.XForwardedFor != detail.XForwardedFor ||
+		got.UserAgent != detail.UserAgent {
 		t.Fatalf("v2 event metadata changed: %+v", got)
 	}
 	if got.AccountingVersion != coreusage.TokenAccountingSchemaVersion || got.TokenBreakdown != breakdown {
@@ -312,7 +346,8 @@ func TestQueryEventsPreservesUsageV2AndDefaultsLegacyGenerate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueryEvents(legacy): %v", err)
 	}
-	if len(events) != 1 || !events[0].Generate || events[0].AccountingVersion != 0 || events[0].TokenBreakdown.Valid() {
+	if len(events) != 1 || !events[0].Generate || events[0].AccountingVersion != 0 ||
+		events[0].TokenBreakdown.Valid() {
 		t.Fatalf("legacy event = %+v, want Generate=true without v2 metadata", events)
 	}
 }
@@ -353,18 +388,28 @@ func TestQuerySnapshotFilteredUsesExactEventRangeForAllAggregates(t *testing.T) 
 	}
 	if snap.TotalRequests != 1 || snap.SuccessCount != 0 || snap.FailureCount != 1 || snap.TotalTokens != 2 {
 		t.Fatalf(
-			"totals = requests:%d success:%d failure:%d tokens:%d, want 1/0/1/2", snap.TotalRequests, snap.SuccessCount,
-			snap.FailureCount, snap.TotalTokens,
+			"totals = requests:%d success:%d failure:%d tokens:%d, want 1/0/1/2",
+			snap.TotalRequests,
+			snap.SuccessCount,
+			snap.FailureCount,
+			snap.TotalTokens,
 		)
 	}
-	if snap.RequestsByDay["2026-05-20"] != 1 || snap.RequestsByHour["10"] != 1 || snap.TokensByDay["2026-05-20"] != 2 || snap.TokensByHour["10"] != 2 {
+	if snap.RequestsByDay["2026-05-20"] != 1 || snap.RequestsByHour["10"] != 1 ||
+		snap.TokensByDay["2026-05-20"] != 2 ||
+		snap.TokensByHour["10"] != 2 {
 		t.Fatalf(
-			"time maps = %#v %#v %#v %#v", snap.RequestsByDay, snap.RequestsByHour, snap.TokensByDay, snap.TokensByHour,
+			"time maps = %#v %#v %#v %#v",
+			snap.RequestsByDay,
+			snap.RequestsByHour,
+			snap.TokensByDay,
+			snap.TokensByHour,
 		)
 	}
 	api := snap.APIs[coreusage.HashAPIKeyIdentity("k")]
 	model := api.Models["m"]
-	if api.TotalRequests != 1 || api.TotalTokens != 2 || model.TotalRequests != 1 || model.TotalTokens != 2 || len(model.Details) != 1 {
+	if api.TotalRequests != 1 || api.TotalTokens != 2 || model.TotalRequests != 1 || model.TotalTokens != 2 ||
+		len(model.Details) != 1 {
 		t.Fatalf("API/model aggregate mismatch: api=%+v model=%+v", api, model)
 	}
 }
@@ -722,7 +767,10 @@ func TestSummarySeriesLimitBoundsBucketsPointsAndOverflow(t *testing.T) {
 	if !errors.Is(err, ErrSummaryQueryTooLarge) {
 		t.Fatalf("oversized bucket range error = %v, want %v", err, ErrSummaryQueryTooLarge)
 	}
-	if _, err = timeSeriesBucketCount(math.MinInt64, math.MaxInt64, 1); !errors.Is(err, ErrSummaryQueryTooLarge) {
+	if _, err = timeSeriesBucketCount(math.MinInt64, math.MaxInt64, 1); !errors.Is(
+		err,
+		ErrSummaryQueryTooLarge,
+	) {
 		t.Fatalf("overflowing bucket span error = %v, want %v", err, ErrSummaryQueryTooLarge)
 	}
 }
@@ -801,80 +849,6 @@ func TestQueryDaySummaryUsesHourBucketsForDirtyDays(t *testing.T) {
 	}
 }
 
-func TestEnsureSummaryInputBudgetRejectsExcessRowsBeforeAggregation(t *testing.T) {
-	store := openTestStore(t)
-	ctx := context.Background()
-	if _, err := store.db.ExecContext(
-		ctx, "CREATE TEMP TABLE summary_budget_rows(bucket_ts_ns INTEGER NOT NULL)",
-	); err != nil {
-		t.Fatalf("create summary budget table: %v", err)
-	}
-	if _, err := store.db.ExecContext(
-		ctx,
-		`WITH RECURSIVE seq(value) AS (
-			SELECT 0
-			UNION ALL
-			SELECT value + 1 FROM seq WHERE value < ?
-		)
-		INSERT INTO summary_budget_rows(bucket_ts_ns)
-		SELECT 0 FROM seq`,
-		maxSummaryInputRows,
-	); err != nil {
-		t.Fatalf("insert summary budget rows: %v", err)
-	}
-
-	err := ensureSummaryInputBudget(
-		ctx,
-		store.db,
-		"summary_budget_rows",
-		0,
-		0,
-		resolvedFilter{},
-		resolvedCredentialFilter{},
-		resolvedFilter{},
-	)
-	if !errors.Is(err, ErrSummaryQueryTooLarge) {
-		t.Fatalf("ensureSummaryInputBudget error = %v, want %v", err, ErrSummaryQueryTooLarge)
-	}
-}
-
-func TestEnsureAuthIndexInputBudgetRejectsExcessRowsBeforeAggregation(t *testing.T) {
-	store := openTestStore(t)
-	ctx := context.Background()
-	if _, err := store.db.ExecContext(
-		ctx,
-		"CREATE TEMP TABLE events(ts_ns INTEGER NOT NULL, auth_index_id INTEGER)",
-	); err != nil {
-		t.Fatalf("create auth-index budget table: %v", err)
-	}
-	if _, err := store.db.ExecContext(
-		ctx,
-		`WITH RECURSIVE seq(value) AS (
-			SELECT 0
-			UNION ALL
-			SELECT value + 1 FROM seq WHERE value < ?
-		)
-		INSERT INTO events(ts_ns, auth_index_id)
-		SELECT 0, 1 FROM seq`,
-		maxSummaryInputRows,
-	); err != nil {
-		t.Fatalf("insert auth-index budget rows: %v", err)
-	}
-
-	err := ensureAuthIndexInputBudget(
-		ctx,
-		store.db,
-		0,
-		0,
-		resolvedFilter{},
-		resolvedCredentialFilter{},
-		resolvedFilter{},
-	)
-	if !errors.Is(err, ErrSummaryQueryTooLarge) {
-		t.Fatalf("ensureAuthIndexInputBudget error = %v, want %v", err, ErrSummaryQueryTooLarge)
-	}
-}
-
 func TestQueryRejectsExcessSummaryDimensions(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
@@ -883,7 +857,7 @@ func TestQueryRejectsExcessSummaryDimensions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	for index := 0; index <= maxSummarySeriesCount; index++ {
+	for index := 0; index <= maxSummaryDimensionCount; index++ {
 		detail := FlatDetail{
 			Timestamp: base,
 			Model:     fmt.Sprintf("model-%03d", index),
@@ -898,7 +872,7 @@ func TestQueryRejectsExcessSummaryDimensions(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	_, err = store.querySummary(ctx, base, base.Add(time.Hour), EventFilters{}, "hourly", true)
+	_, err = store.querySummary(ctx, base, base.Add(time.Hour), EventFilters{}, "hourly", false)
 	if !errors.Is(err, ErrSummaryQueryTooLarge) {
 		t.Fatalf("Query error = %v, want %v", err, ErrSummaryQueryTooLarge)
 	}
@@ -1077,6 +1051,7 @@ func TestQueryCompactEventsProjectsRequestListFields(t *testing.T) {
 		got.AuthIndex != detail.AuthIndex || got.APIKey != detail.APIKey || got.Provider != detail.Provider ||
 		got.LatencyMs != detail.LatencyMs || got.RequestID != detail.RequestID ||
 		got.TimeToFirstByteMs != detail.TimeToFirstByteMs || got.TotalDurationMs != detail.TotalDurationMs ||
+		got.ReasoningEffort != detail.ReasoningEffort ||
 		!got.Completed || !got.MetadataRecorded || got.Thinking == nil || got.Thinking.Budget == nil ||
 		*got.Thinking.Budget != budget || got.Tokens != detail.Tokens || got.Cost != 0.00125 ||
 		got.CostStatus != costStatusPartial || got.CostReason != detail.CostReason || !got.Failed ||
@@ -1084,7 +1059,7 @@ func TestQueryCompactEventsProjectsRequestListFields(t *testing.T) {
 		t.Fatalf("compact event = %#v, want projected request-list fields", got)
 	}
 	if got.ClientIP != "" || got.XForwardedFor != "" || got.UserAgent != "" ||
-		got.ReasoningEffort != "" || got.ResponseHeaders != nil || got.AccountingVersion != 0 ||
+		got.ResponseHeaders != nil || got.AccountingVersion != 0 ||
 		got.TokenBreakdown.Valid() {
 		t.Fatalf("compact event retained detail-only metadata: %#v", got)
 	}
@@ -1789,7 +1764,9 @@ func TestQueryTimeSeriesByCredential_PopulatesCost(t *testing.T) {
 	}
 	if totalCost <= 0 {
 		t.Fatalf(
-			"expected non-zero cost in time_series_by_credential, got %v across %d points", totalCost, len(credSeries),
+			"expected non-zero cost in time_series_by_credential, got %v across %d points",
+			totalCost,
+			len(credSeries),
 		)
 	}
 }
@@ -1894,99 +1871,141 @@ func BenchmarkStoreQuerySummaryAndEvents(b *testing.B) {
 		},
 	)
 
-	b.Run(
-		"summary_365d_large_bucketized", func(b *testing.B) {
-			largeStore, err := openStore(filepath.Join(b.TempDir(), "events.db"))
-			if err != nil {
-				b.Fatalf("OpenStore large: %v", err)
-			}
-			defer func() { _ = largeStore.Close() }()
-			largeCtx := context.Background()
-			largeBase := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-			tx, err := largeStore.db.BeginTx(largeCtx, nil)
-			if err != nil {
-				b.Fatalf("begin large preload: %v", err)
-			}
-			modelIDs := make([]int64, 16)
-			for modelIdx := range modelIDs {
-				modelIDs[modelIdx], err = largeStore.resolveModelID(largeCtx, tx, fmt.Sprintf("model-%02d", modelIdx))
-				if err != nil {
-					b.Fatalf("ResolveModelID: %v", err)
+	for _, days := range []int{365, 730} {
+		b.Run(
+			fmt.Sprintf("summary_%dd_large_bucketized", days), func(b *testing.B) {
+				dbPath := os.Getenv("CPA_USAGE_BENCHMARK_DB")
+				reuseFixture := dbPath != ""
+				if !reuseFixture {
+					dbPath = filepath.Join(b.TempDir(), "events.db")
 				}
-			}
-			apiKeyIDs := make([]sql.NullInt64, 16)
-			for apiIdx := range apiKeyIDs {
-				apiKeyIDs[apiIdx], err = largeStore.resolveAPIKeyID(largeCtx, tx, fmt.Sprintf("key-%02d", apiIdx))
+				largeStore, err := openStore(dbPath)
 				if err != nil {
-					b.Fatalf("ResolveAPIKeyID: %v", err)
+					b.Fatalf("OpenStore large: %v", err)
 				}
-			}
-			credentialIDs := make([]sql.NullInt64, 2048)
-			for credIdx := range credentialIDs {
-				credentialIDs[credIdx], err = largeStore.resolveCredentialID(
-					largeCtx, tx, fmt.Sprintf("cred-%04d", credIdx), "",
-				)
-				if err != nil {
-					b.Fatalf("ResolveCredentialID: %v", err)
-				}
-			}
-			providerIDs := make([]sql.NullInt64, 4)
-			for providerIdx, provider := range []string{"claude", "codex", "openai", "gemini"} {
-				providerIDs[providerIdx], err = largeStore.resolveProviderID(largeCtx, tx, provider)
-				if err != nil {
-					b.Fatalf("ResolveProviderID: %v", err)
-				}
-			}
-			for i := range 365 {
-				bucketDay := largeBase.AddDate(0, 0, i)
-				for bucketIdx := range 8192 {
-					credIdx := bucketIdx % len(credentialIDs)
-					modelID := modelIDs[bucketIdx%len(modelIDs)]
-					apiKeyID := apiKeyIDs[(bucketIdx/len(credentialIDs))%len(apiKeyIDs)]
-					credentialID := credentialIDs[credIdx]
-					providerID := providerIDs[credIdx%len(providerIDs)]
-					if _, err := tx.ExecContext(
-						largeCtx, `INSERT INTO day_bucket (
+				defer func() { _ = largeStore.Close() }()
+				largeCtx := context.Background()
+				largeBase := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+				if reuseFixture {
+					var count int64
+					if err := largeStore.db.QueryRowContext(
+						largeCtx, "SELECT COUNT(*) FROM day_bucket WHERE bucket_ts_ns>=? AND bucket_ts_ns<?",
+						largeBase.UnixNano(), largeBase.AddDate(0, 0, days).UnixNano(),
+					).Scan(&count); err != nil || count != int64(days*8192) {
+						b.Fatalf("reused %dd fixture rows=%d want=%d: %v", days, count, days*8192, err)
+					}
+				} else {
+					tx, err := largeStore.db.BeginTx(largeCtx, nil)
+					if err != nil {
+						b.Fatalf("begin large preload: %v", err)
+					}
+					modelIDs := make([]int64, 16)
+					for modelIdx := range modelIDs {
+						modelIDs[modelIdx], err = largeStore.resolveModelID(
+							largeCtx, tx, fmt.Sprintf("model-%02d", modelIdx),
+						)
+						if err != nil {
+							b.Fatalf("ResolveModelID: %v", err)
+						}
+					}
+					apiKeyIDs := make([]sql.NullInt64, 16)
+					for apiIdx := range apiKeyIDs {
+						apiKeyIDs[apiIdx], err = largeStore.resolveAPIKeyID(
+							largeCtx, tx, fmt.Sprintf("key-%02d", apiIdx),
+						)
+						if err != nil {
+							b.Fatalf("ResolveAPIKeyID: %v", err)
+						}
+					}
+					credentialIDs := make([]sql.NullInt64, 2048)
+					for credIdx := range credentialIDs {
+						credentialIDs[credIdx], err = largeStore.resolveCredentialID(
+							largeCtx, tx, fmt.Sprintf("cred-%04d", credIdx), "",
+						)
+						if err != nil {
+							b.Fatalf("ResolveCredentialID: %v", err)
+						}
+					}
+					providerIDs := make([]sql.NullInt64, 4)
+					for providerIdx, provider := range []string{"claude", "codex", "openai", "gemini"} {
+						providerIDs[providerIdx], err = largeStore.resolveProviderID(largeCtx, tx, provider)
+						if err != nil {
+							b.Fatalf("ResolveProviderID: %v", err)
+						}
+					}
+					for i := range days {
+						bucketDay := largeBase.AddDate(0, 0, i)
+						for bucketIdx := range 8192 {
+							credIdx := bucketIdx % len(credentialIDs)
+							modelID := modelIDs[bucketIdx%len(modelIDs)]
+							apiKeyID := apiKeyIDs[(bucketIdx/len(credentialIDs))%len(apiKeyIDs)]
+							credentialID := credentialIDs[credIdx]
+							providerID := providerIDs[credIdx%len(providerIDs)]
+							if _, err := tx.ExecContext(
+								largeCtx, `INSERT INTO day_bucket (
 				    bucket_ts_ns, model_id, credential_id, api_key_id, provider_id,
 				    requests, success, failure,
 				    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_micro
 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-						bucketDay.UnixNano(),
-						modelID,
-						nullableID(credentialID),
-						nullableID(apiKeyID),
-						nullableID(providerID),
-						200,
-						196,
-						4,
-						200000,
-						120000,
-						10000,
-						30000,
-						360000,
-						540000,
-					); err != nil {
-						b.Fatalf("insert day_bucket: %v", err)
+								bucketDay.UnixNano(),
+								modelID,
+								nullableID(credentialID),
+								nullableID(apiKeyID),
+								nullableID(providerID),
+								200,
+								196,
+								4,
+								200000,
+								120000,
+								10000,
+								30000,
+								360000,
+								540000,
+							); err != nil {
+								b.Fatalf("insert day_bucket: %v", err)
+							}
+						}
+					}
+					if err := tx.Commit(); err != nil {
+						b.Fatalf("commit large preload: %v", err)
 					}
 				}
-			}
-			if err := tx.Commit(); err != nil {
-				b.Fatalf("commit large preload: %v", err)
-			}
-			largeFrom := largeBase
-			largeTo := largeBase.AddDate(1, 0, 0)
-			b.ResetTimer()
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				if _, err := largeStore.querySummary(
-					largeCtx, largeFrom, largeTo,
-					EventFilters{Model: "model-03", Source: "cred-0007", APIKey: "key-05"}, "daily", true,
-				); err != nil {
-					b.Fatalf("large Query: %v", err)
+				largeFrom := largeBase
+				largeTo := largeBase.AddDate(0, 0, days).Add(-time.Nanosecond)
+				b.ResetTimer()
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					result, err := largeStore.querySummary(
+						largeCtx,
+						largeFrom,
+						largeTo,
+						EventFilters{
+							Model:  "model-07",
+							Source: "gemini:cred-0007",
+							APIKey: "key-02",
+						},
+						"daily",
+						true,
+					)
+					if err != nil {
+						b.Fatalf("large Query: %v", err)
+					}
+					if result.Totals.Requests != int64(days*200) || len(result.ByModel) != 1 ||
+						len(result.ByCredential) != 1 ||
+						len(result.ByAPIKey) != 1 {
+						b.Fatalf(
+							"nonempty %dd query requests=%d models=%d credentials=%d keys=%d",
+							days,
+							result.Totals.Requests,
+							len(result.ByModel),
+							len(result.ByCredential),
+							len(result.ByAPIKey),
+						)
+					}
 				}
-			}
-		},
-	)
+			},
+		)
+	}
 }
 
 func TestQuery_HourBucketFloorsFrom(t *testing.T) {
@@ -2022,7 +2041,8 @@ func TestQuery_HourBucketFloorsFrom(t *testing.T) {
 
 	if qr.Totals.Requests != 1 {
 		t.Fatalf(
-			"expected 1 request when from is mid-bucket, got %d (10:00 bucket likely excluded)", qr.Totals.Requests,
+			"expected 1 request when from is mid-bucket, got %d (10:00 bucket likely excluded)",
+			qr.Totals.Requests,
 		)
 	}
 }
@@ -2066,7 +2086,10 @@ func TestQuery_DayBucketFloorsFrom(t *testing.T) {
 	}
 
 	if qr.Totals.Requests != 1 {
-		t.Fatalf("expected 1 request when from is mid-day, got %d (day bucket likely excluded)", qr.Totals.Requests)
+		t.Fatalf(
+			"expected 1 request when from is mid-day, got %d (day bucket likely excluded)",
+			qr.Totals.Requests,
+		)
 	}
 }
 
@@ -2165,6 +2188,7 @@ func TestAPIKeyFilterHandlesDisplayCollisionsAndLiteralSentinels(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+	//goland:noinspection SpellCheckingInspection
 	keys := []string{
 		"abcd...wxyz",
 		"abcd-secret-wxyz",
@@ -2195,6 +2219,7 @@ func TestAPIKeyFilterHandlesDisplayCollisionsAndLiteralSentinels(t *testing.T) {
 
 	from := base.Add(-time.Hour)
 	to := base.Add(time.Hour)
+	//goland:noinspection SpellCheckingInspection
 	queries := []struct {
 		name       string
 		filters    EventFilters
@@ -2237,6 +2262,7 @@ func TestAPIKeyFilterHandlesDisplayCollisionsAndLiteralSentinels(t *testing.T) {
 		)
 	}
 
+	//goland:noinspection SpellCheckingInspection
 	repeated := []string{
 		coreusage.HashAPIKeyIdentity("ab,c-first-zzzz"),
 		coreusage.HashAPIKeyIdentity("ab,c-second-zzzz"),

@@ -32,7 +32,7 @@ func apiKeyReservationRequest(
 	}
 }
 
-func readAPIKeyReservationState(t *testing.T, store *Store, reservationID string) string {
+func readAPIKeyReservationState(t *testing.T, store *sqliteStore, reservationID string) string {
 	t.Helper()
 	var state string
 	if err := store.db.QueryRow(
@@ -46,7 +46,7 @@ func readAPIKeyReservationState(t *testing.T, store *Store, reservationID string
 
 func readAPIKeyReservationWindow(
 	t *testing.T,
-	store *Store,
+	store *sqliteStore,
 	reservationID string,
 ) (reservedRequests, reservedTokens, reservedCost, actualRequests, actualTokens, actualCost int64) {
 	t.Helper()
@@ -284,7 +284,7 @@ func TestReserveAPIKeyExpiresUnknownReservationConservatively(t *testing.T) {
 	}
 }
 
-func persistAPIKeyReservationUsage(t *testing.T, store *Store, detail FlatDetail) bool {
+func persistAPIKeyReservationUsage(t *testing.T, store *sqliteStore, detail FlatDetail) bool {
 	t.Helper()
 	tx, err := store.db.BeginTx(context.Background(), nil)
 	if err != nil {

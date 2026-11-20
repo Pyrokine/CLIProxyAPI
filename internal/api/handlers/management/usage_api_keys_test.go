@@ -32,7 +32,8 @@ func TestUsageAPIKeyPresenterIncludesEveryConfiguredKeySource(t *testing.T) {
 	for _, test := range tests {
 		for _, value := range []string{test.raw, coreusage.HashAPIKeyIdentity(test.raw)} {
 			presentation := presenter.present(value)
-			if presentation.display != util.HideAPIKey(test.raw) || presentation.alias != test.alias {
+			if presentation.display != test.raw[:2]+"..."+test.raw[len(test.raw)-2:] ||
+				presentation.alias != test.alias {
 				t.Fatalf("Present(%q) = %+v", value, presentation)
 			}
 		}
@@ -40,6 +41,7 @@ func TestUsageAPIKeyPresenterIncludesEveryConfiguredKeySource(t *testing.T) {
 }
 
 func TestUsageAPIKeyPresenterExpandsLiteralAndMaskedFilters(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	literalMask := "abcd...wxyz"
 	maskedKey := "abcd-secret-wxyz"
 	commaA := "ab,c-first-zzzz"
@@ -50,7 +52,7 @@ func TestUsageAPIKeyPresenterExpandsLiteralAndMaskedFilters(t *testing.T) {
 		},
 	)
 
-	_, expanded := presenter.expandFilters(literalMask, nil)
+	_, expanded := presenter.expandFilters(literalMask, nil, false)
 	want := map[string]bool{
 		coreusage.HashAPIKeyIdentity(literalMask): true,
 		coreusage.HashAPIKeyIdentity(maskedKey):   true,
@@ -64,7 +66,7 @@ func TestUsageAPIKeyPresenterExpandsLiteralAndMaskedFilters(t *testing.T) {
 		}
 	}
 
-	_, expanded = presenter.expandFilters("(none)", nil)
+	_, expanded = presenter.expandFilters("(none)", nil, false)
 	want = map[string]bool{
 		"(none)":                               true,
 		coreusage.HashAPIKeyIdentity("(none)"): true,
@@ -78,8 +80,13 @@ func TestUsageAPIKeyPresenterExpandsLiteralAndMaskedFilters(t *testing.T) {
 		}
 	}
 
+	_, expanded = presenter.expandFilters("(none)", nil, true)
+	if len(expanded) != 1 || expanded[0] != "(none)" {
+		t.Fatalf("canonical none expansion = %#v", expanded)
+	}
+
 	mask := util.HideAPIKey(commaA)
-	_, expanded = presenter.expandFilters("", []string{mask + "#2", mask, mask})
+	_, expanded = presenter.expandFilters("", []string{mask + "#2", mask, mask}, false)
 	if len(expanded) != 2 {
 		t.Fatalf("ordinal and repeated expansion = %#v", expanded)
 	}
@@ -124,7 +131,7 @@ func TestPresentRedactedUsageAPIKeysRestoresConfiguredDisplaysWithoutCollisionLo
 		t.Fatalf("presented API keys = %#v", apis)
 	}
 	for raw, identity := range map[string]string{rawA: identityA, rawB: identityB} {
-		display := util.HideAPIKey(raw)
+		display := raw[:2] + "..." + raw[len(raw)-2:]
 		entry, ok := apis[display].(map[string]any)
 		if !ok {
 			t.Fatalf("missing display %q in %#v", display, apis)

@@ -2,13 +2,13 @@ package management
 
 import (
 	"errors"
-	"math"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
@@ -94,6 +94,8 @@ type summaryTimePoint struct {
 
 // summaryAPIKeyStats holds per-API-key aggregation.
 type summaryAPIKeyStats struct {
+	Alias              string        `json:"alias,omitempty"`
+	DisplayName        string        `json:"display_name,omitempty"`
 	Requests           int64         `json:"requests"`
 	Success            int64         `json:"success"`
 	Failure            int64         `json:"failure"`
@@ -174,6 +176,13 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid granularity parameter"})
 		return
 	}
+	apiKeyIdentity := strings.TrimSpace(c.Query("api_key_identity"))
+	if apiKeyIdentity != "" && apiKeyIdentity != "canonical" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid api_key_identity parameter"})
+		return
+	}
+	canonicalAPIKeys := apiKeyIdentity == "canonical"
+
 	authIndexGranularity := strings.ToLower(strings.TrimSpace(c.Query("auth_index_granularity")))
 	if authIndexGranularity != "" && authIndexGranularity != "10m" &&
 		authIndexGranularity != "hourly" && authIndexGranularity != "daily" {
@@ -188,22 +197,22 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 	includeGroups := c.DefaultQuery("groups", "all") != "none"
 	includeAuthIndex := strings.EqualFold(strings.TrimSpace(c.Query("auth_index_groups")), "true")
 
-	if h.usagePersister == nil {
-		c.JSON(http.StatusOK, emptySummaryResponse(from, to))
-		return
-	}
-
 	apiKeyPresenter := newUsageAPIKeyPresenter(h.configSnapshot())
-	apiKeyFilter, apiKeyFilters = apiKeyPresenter.expandFilters(apiKeyFilter, apiKeyFilters)
+	apiKeyFilter, apiKeyFilters = apiKeyPresenter.expandFilters(apiKeyFilter, apiKeyFilters, canonicalAPIKeys)
 	filters := usage.EventFilters{
-		Model:   modelFilter,
-		Source:  credentialFilter,
-		APIKey:  apiKeyFilter,
-		APIKeys: apiKeyFilters,
+		Model:            modelFilter,
+		Source:           credentialFilter,
+		APIKey:           apiKeyFilter,
+		APIKeys:          apiKeyFilters,
+		CanonicalAPIKeys: canonicalAPIKeys,
 	}
 	var qr usage.QueryResult
 	var err error
-	if includeAuthIndex {
+	if h.usagePersister == nil {
+		qr, err = h.usageStats.QuerySummary(
+			c.Request.Context(), from, to, filters, granularity, authIndexGranularity, includeGroups, includeAuthIndex,
+		)
+	} else if includeAuthIndex {
 		qr, err = h.usagePersister.QueryWithAuthIndexGranularity(
 			from,
 			to,
@@ -217,6 +226,14 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 	}
 	if err != nil {
 		switch {
+		case errors.Is(err, usage.ErrSummaryPrecisionUnavailable):
+			c.JSON(
+				http.StatusConflict, gin.H{
+					"error":   "summary_precision_unavailable",
+					"message": "historical aggregates do not contain the requested time or credential precision",
+				},
+			)
+			return
 		case errors.Is(err, usage.ErrSummaryQueryTooLarge):
 			c.JSON(
 				http.StatusBadRequest,
@@ -238,6 +255,7 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 		qr,
 		newUsageCredentialMasker(h.configSnapshot()),
 		apiKeyPresenter,
+		canonicalAPIKeys,
 	)
 
 	log.Debugf(
@@ -247,31 +265,23 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-func emptySummaryResponse(from, to time.Time) summaryResponse {
-	return summaryResponse{
-		Period: summaryPeriod{
-			From: from.Format(time.RFC3339),
-			To:   to.Format(time.RFC3339),
-		},
-		ByModel:                make(map[string]*summaryModelStats),
-		ByCredential:           make(map[string]*summaryCredentialStats),
-		ByProvider:             make(map[string]*summaryProviderStats),
-		ByAPIKey:               make(map[string]*summaryAPIKeyStats),
-		ByAuthIndex:            make(map[string]*summaryAPIKeyStats),
-		TimeSeriesByModel:      make(map[string][]summaryTimePoint),
-		TimeSeriesByCredential: make(map[string][]summaryTimePoint),
-		TimeSeriesByAPIKey:     make(map[string][]summaryTimePoint),
-		TimeSeriesByAuthIndex:  make(map[string][]summaryTimePoint),
-	}
-}
-
 func buildSummaryResponse(
 	from,
 	to time.Time,
 	qr usage.QueryResult,
 	credentialMasker usageCredentialMasker,
 	apiKeyPresenter usageAPIKeyPresenter,
+	canonicalAPIKeys bool,
 ) summaryResponse {
+	apiKeyMapKey := func(key string) string {
+		if !canonicalAPIKeys {
+			return apiKeyPresenter.present(key).display
+		}
+		if key == "(none)" || strings.TrimSpace(key) == "" {
+			return "(none)"
+		}
+		return coreusage.EnsureAPIKeyIdentity(key)
+	}
 	totalAverageLatency, totalLatency, totalLatencySamples := latencyResponseFields(
 		qr.Totals.Latency.TotalMs,
 		qr.Totals.Latency.SampleCount,
@@ -294,7 +304,7 @@ func buildSummaryResponse(
 				Reasoning:  qr.Totals.Tokens.ReasoningTokens,
 				Total:      qr.Totals.Tokens.TotalTokens,
 			},
-			Cost: roundCost(qr.Totals.Cost),
+			Cost: qr.Totals.Cost,
 			CostCoverage: summaryCostCoverage{
 				Complete: summaryCostCoverageCount{
 					Requests: qr.Totals.CostCoverage.Complete.Requests,
@@ -342,7 +352,7 @@ func buildSummaryResponse(
 				Reasoning:  ms.Tokens.ReasoningTokens,
 				Total:      ms.Tokens.TotalTokens,
 			},
-			Cost:               roundCost(ms.Cost),
+			Cost:               ms.Cost,
 			AverageLatencyMs:   averageLatency,
 			TotalLatencyMs:     totalLatency,
 			LatencySampleCount: latencySamples,
@@ -407,11 +417,11 @@ func buildSummaryResponse(
 
 	apiKeyAccumulators := make(map[string]*summaryAPIKeyAccumulator, len(qr.ByAPIKey))
 	for key, aks := range qr.ByAPIKey {
-		maskedKey := apiKeyPresenter.present(key).display
-		accumulator := apiKeyAccumulators[maskedKey]
+		groupKey := apiKeyMapKey(key)
+		accumulator := apiKeyAccumulators[groupKey]
 		if accumulator == nil {
 			accumulator = &summaryAPIKeyAccumulator{}
-			apiKeyAccumulators[maskedKey] = accumulator
+			apiKeyAccumulators[groupKey] = accumulator
 		}
 		accumulator.Requests += aks.Requests
 		accumulator.Success += aks.Success
@@ -437,10 +447,15 @@ func buildSummaryResponse(
 			Success:            accumulator.Success,
 			Failure:            accumulator.Failure,
 			Tokens:             accumulator.Tokens,
-			Cost:               roundCost(accumulator.Cost),
+			Cost:               accumulator.Cost,
 			AverageLatencyMs:   averageLatency,
 			TotalLatencyMs:     totalLatency,
 			LatencySampleCount: latencySamples,
+		}
+		if canonicalAPIKeys {
+			presentation := apiKeyPresenter.present(key)
+			resp.ByAPIKey[key].Alias = presentation.alias
+			resp.ByAPIKey[key].DisplayName = presentation.display
 		}
 	}
 
@@ -462,7 +477,7 @@ func buildSummaryResponse(
 				Reasoning:  stats.Tokens.ReasoningTokens,
 				Total:      stats.Tokens.TotalTokens,
 			},
-			Cost:               roundCost(stats.Cost),
+			Cost:               stats.Cost,
 			AverageLatencyMs:   averageLatency,
 			TotalLatencyMs:     totalLatency,
 			LatencySampleCount: latencySamples,
@@ -485,7 +500,7 @@ func buildSummaryResponse(
 				Reasoning:  tp.Tokens.ReasoningTokens,
 				Total:      tp.Tokens.TotalTokens,
 			},
-			Cost:    roundCost(tp.Cost),
+			Cost:    tp.Cost,
 			HasCost: tp.Cost > 0,
 		}
 	}
@@ -507,7 +522,7 @@ func buildSummaryResponse(
 					Reasoning:  tp.Tokens.ReasoningTokens,
 					Total:      tp.Tokens.TotalTokens,
 				},
-				Cost:    roundCost(tp.Cost),
+				Cost:    tp.Cost,
 				HasCost: tp.Cost > 0,
 			}
 		}
@@ -563,7 +578,7 @@ func buildSummaryResponse(
 					Success:  accumulator.Success,
 					Failure:  accumulator.Failure,
 					Tokens:   accumulator.Tokens,
-					Cost:     roundCost(accumulator.Cost),
+					Cost:     accumulator.Cost,
 					HasCost:  accumulator.Cost > 0,
 				},
 			)
@@ -576,11 +591,11 @@ func buildSummaryResponse(
 		len(qr.TimeSeriesByAPIKey),
 	)
 	for key, points := range qr.TimeSeriesByAPIKey {
-		maskedKey := apiKeyPresenter.present(key).display
-		byTime := timeSeriesAccumulators[maskedKey]
+		groupKey := apiKeyMapKey(key)
+		byTime := timeSeriesAccumulators[groupKey]
 		if byTime == nil {
 			byTime = make(map[string]*summaryTimePointAccumulator, len(points))
-			timeSeriesAccumulators[maskedKey] = byTime
+			timeSeriesAccumulators[groupKey] = byTime
 		}
 		for _, tp := range points {
 			accumulator := byTime[tp.Time]
@@ -617,7 +632,7 @@ func buildSummaryResponse(
 					Success:  accumulator.Success,
 					Failure:  accumulator.Failure,
 					Tokens:   accumulator.Tokens,
-					Cost:     roundCost(accumulator.Cost),
+					Cost:     accumulator.Cost,
 					HasCost:  accumulator.Cost > 0,
 				},
 			)
@@ -642,7 +657,7 @@ func buildSummaryResponse(
 					Reasoning:  point.Tokens.ReasoningTokens,
 					Total:      point.Tokens.TotalTokens,
 				},
-				Cost:    roundCost(point.Cost),
+				Cost:    point.Cost,
 				HasCost: point.Cost > 0,
 			}
 		}
@@ -701,8 +716,4 @@ func parseTimeParam(value string, fallback time.Time) (time.Time, error) {
 		}
 	}
 	return t.UTC(), nil
-}
-
-func roundCost(v float64) float64 {
-	return math.Round(v*100) / 100
 }

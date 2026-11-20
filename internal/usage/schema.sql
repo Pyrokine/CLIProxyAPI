@@ -153,8 +153,8 @@ CREATE TABLE IF NOT EXISTS dim_credential
 ) > 0)
     );
 
--- v2 dimension. Provider is the upstream vendor (claude / codex / gemini /
--- openai / anthropic / ...) recorded by the runtime. dim_credential captures
+-- v2 dimension. Provider is the upstream vendor (Claude / Codex / Gemini /
+-- OpenAI / Anthropic / ...) recorded by the runtime. dim_credential captures
 -- the human credential, dim_provider captures which vendor the credential
 -- spoke to — together they uniquely identify a (credential, vendor) pair so
 -- shared OAuth emails no longer alias.
@@ -212,27 +212,27 @@ CREATE TABLE IF NOT EXISTS events
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
     source_id INTEGER REFERENCES dim_source
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
     auth_index_id INTEGER REFERENCES dim_auth_index
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
     credential_id INTEGER REFERENCES dim_credential
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
     provider_id INTEGER REFERENCES dim_provider
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
 
     failed INTEGER NOT NULL CHECK
 (
@@ -482,17 +482,17 @@ CREATE TABLE IF NOT EXISTS hour_bucket
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
     api_key_id INTEGER REFERENCES dim_api_key
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
     provider_id INTEGER REFERENCES dim_provider
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
 
     requests INTEGER NOT NULL DEFAULT 0 CHECK
 (
@@ -658,17 +658,17 @@ CREATE TABLE IF NOT EXISTS day_bucket
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
     api_key_id INTEGER REFERENCES dim_api_key
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
     provider_id INTEGER REFERENCES dim_provider
 (
     id
 )
-  ON DELETE RESTRICT,
+    ON DELETE RESTRICT,
 
     requests INTEGER NOT NULL DEFAULT 0 CHECK
 (
@@ -1112,7 +1112,7 @@ CREATE TABLE IF NOT EXISTS api_key_reservation_window
     window_start_ns
 )
     )
-  WITHOUT ROWID;
+    WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS idx_api_key_reservation_window_lookup
     ON api_key_reservation_window(window_ns, window_start_ns, window_end_ns);
@@ -1162,4 +1162,4 @@ CREATE TABLE IF NOT EXISTS api_key_reservation_event
     event_fingerprint
 )
     )
-  WITHOUT ROWID;
+    WITHOUT ROWID;

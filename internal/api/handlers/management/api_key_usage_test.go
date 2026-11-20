@@ -118,3 +118,45 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 		t.Fatalf("claude recent totals = %d/%d, want 1/0", claudeSuccess, claudeFailed)
 	}
 }
+
+func TestGetAPIKeyUsage_GroupsOpenAICompatibleByCompatName(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(
+		t.Context(), &coreauth.Auth{
+			ID: "vast-auth", Provider: "openai-compatible-vast",
+			Attributes: map[string]string{
+				"api_key": "vast-key", "base_url": "https://www.vastnum.com/v1", "compat_name": "VAST",
+			},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	manager.MarkResult(
+		t.Context(),
+		coreauth.Result{AuthID: "vast-auth", Provider: "openai-compatible-vast", Model: "gpt-5", Success: true},
+	)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	h.GetAPIKeyUsage(c)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "vast-key") {
+		t.Fatalf("usage status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["openai-compatible-vast"]; exists {
+		t.Fatalf("namespaced provider bucket remains: %v", payload)
+	}
+	bucket, exists := payload["vast"]
+	if !exists || len(bucket) != 1 {
+		t.Fatalf("compat provider bucket = %v", payload)
+	}
+	entry, key := firstAPIKeyUsageEntry(bucket)
+	if !strings.HasPrefix(key, "https://www.vastnum.com/v1|") || entry.Success != 1 || entry.Failed != 0 {
+		t.Fatalf("compat usage key = %q, entry = %+v", key, entry)
+	}
+}

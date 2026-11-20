@@ -121,9 +121,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
-	requestServiceTier := strings.TrimSpace(record.RequestServiceTier)
+	requestServiceTier := strings.TrimSpace(record.ServiceTier)
 	if requestServiceTier == "" {
-		requestServiceTier = strings.TrimSpace(record.ServiceTier)
+		requestServiceTier = strings.TrimSpace(record.RequestServiceTier)
 	}
 	if requestServiceTier == "" {
 		requestServiceTier = coreusage.ServiceTierFromContext(ctx)
@@ -139,13 +139,14 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
 	tokens := tokenStats{
-		InputTokens:         usageDetail.InputTokens,
-		OutputTokens:        usageDetail.OutputTokens,
-		ReasoningTokens:     usageDetail.ReasoningTokens,
-		CachedTokens:        usageDetail.CachedTokens,
-		CacheReadTokens:     usageDetail.CacheReadTokens,
-		CacheCreationTokens: usageDetail.CacheCreationTokens,
-		TotalTokens:         usageDetail.TotalTokens,
+		InputTokens:            usageDetail.InputTokens,
+		OutputTokens:           usageDetail.OutputTokens,
+		ReasoningTokens:        usageDetail.ReasoningTokens,
+		CachedTokens:           usageDetail.CachedTokens,
+		CacheReadTokens:        usageDetail.CacheReadTokens,
+		CacheReadTokensPresent: true,
+		CacheCreationTokens:    usageDetail.CacheCreationTokens,
+		TotalTokens:            usageDetail.TotalTokens,
 	}
 	clientMetadata := internallogging.GetClientRequestMetadata(ctx)
 	sessionID := strings.TrimSpace(record.SessionID)
@@ -176,21 +177,22 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	fail := resolveFail(ctx, record, failed)
 
 	detail := requestDetail{
-		Timestamp:       timestamp,
-		LatencyMs:       record.Latency.Milliseconds(),
-		TTFTMs:          record.TimeToFirstByteMs,
-		Thinking:        cloneThinking(record.Thinking),
-		Source:          record.Source,
-		AuthIndex:       record.AuthIndex,
-		AccessTokenHash: record.AccessTokenSHA256,
-		ClientIP:        strings.TrimSpace(clientMetadata.ClientIP),
-		XForwardedFor:   strings.TrimSpace(clientMetadata.XForwardedFor),
-		UserAgent:       strings.TrimSpace(clientMetadata.UserAgent),
-		Tokens:          tokens,
-		Failed:          failed,
-		Generate:        coreusage.GenerateEnabled(record.Generate),
-		Fail:            fail,
-		ResponseHeaders: sanitizeResponseHeaders(record.ResponseHeaders),
+		Timestamp:        timestamp,
+		LatencyMs:        record.Latency.Milliseconds(),
+		TTFTMs:           record.TimeToFirstByteMs,
+		Thinking:         cloneThinking(record.Thinking),
+		Source:           record.Source,
+		AuthIndex:        record.AuthIndex,
+		AccessTokenHash:  record.AccessTokenSHA256,
+		ClientIP:         strings.TrimSpace(clientMetadata.ClientIP),
+		ResolvedClientIP: strings.TrimSpace(clientMetadata.ResolvedClientIP),
+		XForwardedFor:    strings.TrimSpace(clientMetadata.XForwardedFor),
+		UserAgent:        strings.TrimSpace(clientMetadata.UserAgent),
+		Tokens:           tokens,
+		Failed:           failed,
+		Generate:         coreusage.GenerateEnabled(record.Generate),
+		Fail:             fail,
+		ResponseHeaders:  sanitizeResponseHeaders(record.ResponseHeaders),
 	}
 
 	payload, err := json.Marshal(
@@ -217,7 +219,6 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 			IsCompaction:        isCompaction,
 			ReasoningEffort:     reasoningEffort,
 			ServiceTier:         requestServiceTier,
-			RequestServiceTier:  requestServiceTier,
 			ResponseServiceTier: responseServiceTier,
 			ResponseModel:       strings.TrimSpace(record.ResponseModel),
 		},
@@ -251,37 +252,38 @@ type queuedUsageDetail struct {
 	IsCompaction        bool                     `json:"is_compaction,omitempty"`
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
-	RequestServiceTier  string                   `json:"request_service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
 	ResponseModel       string                   `json:"response_model,omitempty"`
 }
 
 type requestDetail struct {
-	Timestamp       time.Time           `json:"timestamp"`
-	LatencyMs       int64               `json:"latency_ms"`
-	TTFTMs          int64               `json:"ttft_ms"`
-	Thinking        *coreusage.Thinking `json:"thinking,omitempty"`
-	Source          string              `json:"source"`
-	AuthIndex       string              `json:"auth_index"`
-	AccessTokenHash string              `json:"access_token_sha256,omitempty"`
-	ClientIP        string              `json:"client_ip"`
-	XForwardedFor   string              `json:"x_forwarded_for"`
-	UserAgent       string              `json:"user_agent"`
-	Tokens          tokenStats          `json:"tokens"`
-	Failed          bool                `json:"failed"`
-	Generate        bool                `json:"generate"`
-	Fail            failDetail          `json:"fail"`
-	ResponseHeaders http.Header         `json:"response_headers,omitempty"`
+	Timestamp        time.Time           `json:"timestamp"`
+	LatencyMs        int64               `json:"latency_ms"`
+	TTFTMs           int64               `json:"ttft_ms"`
+	Thinking         *coreusage.Thinking `json:"thinking,omitempty"`
+	Source           string              `json:"source"`
+	AuthIndex        string              `json:"auth_index"`
+	AccessTokenHash  string              `json:"access_token_sha256,omitempty"`
+	ClientIP         string              `json:"client_ip"`
+	ResolvedClientIP string              `json:"resolved_client_ip"`
+	XForwardedFor    string              `json:"x_forwarded_for"`
+	UserAgent        string              `json:"user_agent"`
+	Tokens           tokenStats          `json:"tokens"`
+	Failed           bool                `json:"failed"`
+	Generate         bool                `json:"generate"`
+	Fail             failDetail          `json:"fail"`
+	ResponseHeaders  http.Header         `json:"response_headers,omitempty"`
 }
 
 type tokenStats struct {
-	InputTokens         int64 `json:"input_tokens"`
-	OutputTokens        int64 `json:"output_tokens"`
-	ReasoningTokens     int64 `json:"reasoning_tokens"`
-	CachedTokens        int64 `json:"cached_tokens"`
-	CacheReadTokens     int64 `json:"cache_read_tokens"`
-	CacheCreationTokens int64 `json:"cache_creation_tokens"`
-	TotalTokens         int64 `json:"total_tokens"`
+	InputTokens            int64 `json:"input_tokens"`
+	OutputTokens           int64 `json:"output_tokens"`
+	ReasoningTokens        int64 `json:"reasoning_tokens"`
+	CachedTokens           int64 `json:"cached_tokens"`
+	CacheReadTokens        int64 `json:"cache_read_tokens"`
+	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
+	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
+	TotalTokens            int64 `json:"total_tokens"`
 }
 
 type failDetail struct {
@@ -292,7 +294,7 @@ type failDetail struct {
 func resolveFail(ctx context.Context, record coreusage.Record, failed bool) failDetail {
 	fail := failDetail{
 		StatusCode: record.Fail.StatusCode,
-		Body:       strings.TrimSpace(record.Fail.Body),
+		Body:       record.Fail.Body,
 	}
 	if !failed {
 		return failDetail{StatusCode: 200}

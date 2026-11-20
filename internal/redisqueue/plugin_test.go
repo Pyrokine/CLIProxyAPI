@@ -92,7 +92,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireStringField(t, payload, "execution_id", "execution-attempt-id")
 			requireStringField(t, payload, "reasoning_effort", "medium")
 			requireStringField(t, payload, "service_tier", "flex")
-			requireStringField(t, payload, "request_service_tier", "flex")
+			requireMissingField(t, payload, "request_service_tier")
 			requireStringField(t, payload, "response_service_tier", "default")
 			requireStringField(t, payload, "client_ip", "203.0.113.10")
 			requireStringField(t, payload, "x_forwarded_for", "198.51.100.2, 203.0.113.10")
@@ -136,25 +136,33 @@ func TestUsageQueuePluginSessionParentFallbackIsSameOrigin(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			withEnabledQueue(t, func() {
-				ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
-					SessionID:       "session:old-child",
-					ParentSessionID: "session:old-parent",
-					NodeKind:        "fork",
-					IsFork:          true,
-				})
-				test.record.Provider = "openai"
-				test.record.Model = "gpt-test"
-				(&usageQueuePlugin{}).HandleUsage(ctx, test.record)
-				payload := popSinglePayload(t)
-				requireStringField(t, payload, "session_id", coresession.NormalizeToCanonicalUUID(test.record.SessionID))
-				requireMissingField(t, payload, "parent_session_id")
-				requireMissingField(t, payload, "node_kind")
-				requireMissingField(t, payload, "is_fork")
-				requireMissingField(t, payload, "is_compaction")
-			})
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				withEnabledQueue(
+					t, func() {
+						ctx := internallogging.WithClientRequestMetadata(
+							context.Background(), internallogging.ClientRequestMetadata{
+								SessionID:       "session:old-child",
+								ParentSessionID: "session:old-parent",
+								NodeKind:        "fork",
+								IsFork:          true,
+							},
+						)
+						test.record.Provider = "openai"
+						test.record.Model = "gpt-test"
+						(&usageQueuePlugin{}).HandleUsage(ctx, test.record)
+						payload := popSinglePayload(t)
+						requireStringField(
+							t, payload, "session_id", coresession.NormalizeToCanonicalUUID(test.record.SessionID),
+						)
+						requireMissingField(t, payload, "parent_session_id")
+						requireMissingField(t, payload, "node_kind")
+						requireMissingField(t, payload, "is_fork")
+						requireMissingField(t, payload, "is_compaction")
+					},
+				)
+			},
+		)
 	}
 }
 
@@ -278,6 +286,7 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 			mgr.Register(
 				pluginFunc(
 					func(_ context.Context, _ coreusage.Record) {
+						//goland:noinspection HttpUrlsUsage
 						ginCtx.Request = httptest.NewRequest(http.MethodGet, "http://example.com/v1/responses", nil)
 						ginCtx.Status(http.StatusOK)
 					},
@@ -377,50 +386,66 @@ func TestUsageQueuePluginExecutionID(t *testing.T) {
 			{name: "whitespace", recordID: " \t ", contextID: " \n "},
 			{name: "context", contextID: " context-execution ", want: "context-execution"},
 			{name: "record", recordID: " record-execution ", want: "record-execution"},
-			{name: "record overrides context", recordID: "record-execution", contextID: "context-execution", want: "record-execution"},
+			{
+				name: "record overrides context", recordID: "record-execution", contextID: "context-execution",
+				want: "record-execution",
+			},
 		} {
 			path := "direct/"
 			if async {
 				path = "publisher/"
 			}
-			t.Run(path+test.name, func(t *testing.T) {
-				withEnabledQueue(t, func() {
-					ctx := internallogging.WithRequestID(context.Background(), "http-request-id")
-					ctx = coreusage.WithExecutionID(ctx, test.contextID)
-					plugin := NewUsagePluginForQueue(defaultQueue)
-					var publish func(coreusage.Record) error
-					if async {
-						manager := coreusage.NewManager(16)
-						defer manager.Stop()
-						manager.Register(plugin)
-						ctx = coreusage.WithManager(ctx, manager)
-						publish = func(record coreusage.Record) error { return coreusage.PublishRecord(ctx, record) }
-					} else {
-						publish = func(record coreusage.Record) error {
-							plugin.HandleUsage(ctx, record)
-							return nil
-						}
-					}
-					var previous string
-					for range 2 {
-						if err := publish(coreusage.Record{Provider: "fixture", Model: "fixture-model", RequestID: "trace-id", ExecutionID: test.recordID}); err != nil {
-							t.Fatal(err)
-						}
-						payload := waitForSinglePayload(t, 2*time.Second)
-						requireStringField(t, payload, "request_id", "http-request-id")
-						requireStringField(t, payload, "trace_id", "trace-id")
-						if test.want != "" {
-							requireStringField(t, payload, "execution_id", test.want)
-							continue
-						}
-						id := requireExecutionUUIDField(t, payload)
-						if id == previous {
-							t.Fatal("separate records reused an execution ID")
-						}
-						previous = id
-					}
-				})
-			})
+			t.Run(
+				path+test.name, func(t *testing.T) {
+					withEnabledQueue(
+						t, func() {
+							ctx := internallogging.WithRequestID(context.Background(), "http-request-id")
+							ctx = coreusage.WithExecutionID(ctx, test.contextID)
+							plugin := NewUsagePluginForQueue(defaultQueue)
+							var publish func(coreusage.Record) error
+							if async {
+								manager := coreusage.NewManager(16)
+								defer manager.Stop()
+								manager.Register(plugin)
+								ctx = coreusage.WithManager(ctx, manager)
+								publish = func(record coreusage.Record) error {
+									return coreusage.PublishRecord(
+										ctx, record,
+									)
+								}
+							} else {
+								publish = func(record coreusage.Record) error {
+									plugin.HandleUsage(ctx, record)
+									return nil
+								}
+							}
+							var previous string
+							for range 2 {
+								if err := publish(
+									coreusage.Record{
+										Provider: "fixture", Model: "fixture-model", RequestID: "trace-id",
+										ExecutionID: test.recordID,
+									},
+								); err != nil {
+									t.Fatal(err)
+								}
+								payload := waitForSinglePayload(t, 2*time.Second)
+								requireStringField(t, payload, "request_id", "http-request-id")
+								requireStringField(t, payload, "trace_id", "trace-id")
+								if test.want != "" {
+									requireStringField(t, payload, "execution_id", test.want)
+									continue
+								}
+								id := requireExecutionUUIDField(t, payload)
+								if id == previous {
+									t.Fatal("separate records reused an execution ID")
+								}
+								previous = id
+							}
+						},
+					)
+				},
+			)
 		}
 	}
 }
@@ -463,6 +488,7 @@ func newTestGinContext(t *testing.T, method, path string, status int) *gin.Conte
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
+	//goland:noinspection HttpUrlsUsage
 	ginCtx.Request = httptest.NewRequest(method, "http://example.com"+path, nil)
 	if status != 0 {
 		ginCtx.Status(status)
@@ -577,11 +603,28 @@ func requireTokenField(t *testing.T, payload map[string]json.RawMessage, key str
 	if !ok {
 		t.Fatalf("payload missing %q", "tokens")
 	}
-	var tokens map[string]int64
+	var tokens map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &tokens); err != nil {
 		t.Fatalf("unmarshal tokens: %v", err)
 	}
-	if got := tokens[key]; got != want {
+	var got int64
+	for field, value := range tokens {
+		if field == "cache_read_tokens_present" {
+			var present bool
+			if err := json.Unmarshal(value, &present); err != nil {
+				t.Fatalf("unmarshal token presence: %v", err)
+			}
+			continue
+		}
+		var count int64
+		if err := json.Unmarshal(value, &count); err != nil {
+			t.Fatalf("unmarshal tokens[%q]: %v", field, err)
+		}
+		if field == key {
+			got = count
+		}
+	}
+	if got != want {
 		t.Fatalf("tokens[%q] = %d, want %d", key, got, want)
 	}
 }
@@ -602,7 +645,8 @@ func requireTokenBreakdown(
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal token_breakdown: %v", err)
 	}
-	if !got.Valid() || got.Quality != wantQuality || got.TotalTokens != wantTotal || got.UnclassifiedTokens != wantUnclassified {
+	if !got.Valid() || got.Quality != wantQuality || got.TotalTokens != wantTotal ||
+		got.UnclassifiedTokens != wantUnclassified {
 		t.Fatalf(
 			"token_breakdown = %+v, want quality=%s total=%d unclassified=%d", got, wantQuality, wantTotal,
 			wantUnclassified,
