@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -15,9 +16,15 @@ func TestRestoreUsageMetadata(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "cpaUsageMetadata renamed to usageMetadata",
-			input:    []byte(`{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100,"candidatesTokenCount":200}}`),
-			expected: `{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":200}}`,
+			name: "cpaUsageMetadata renamed to usageMetadata",
+			input: []byte(
+				`{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":` +
+					`100,"candidatesTokenCount":` +
+					`200}}`,
+			),
+			expected: `{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":` +
+				`100,"candidatesTokenCount":` +
+				`200}}`,
 		},
 		{
 			name:     "no cpaUsageMetadata unchanged",
@@ -50,13 +57,17 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "cpaUsageMetadata restored in response",
-			input:    []byte(`{"response":{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100}}}`),
+			name: "cpaUsageMetadata restored in response",
+			input: []byte(
+				`{"response":{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100}}}`,
+			),
 			expected: `{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":100}}`,
 		},
 		{
-			name:     "usageMetadata preserved",
-			input:    []byte(`{"response":{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":100}}}`),
+			name: "usageMetadata preserved",
+			input: []byte(
+				`{"response":{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":100}}}`,
+			),
 			expected: `{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":100}}`,
 		},
 	}
@@ -64,9 +75,20 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				result := convertAntigravityResponseToGeminiNonStream(context.Background(), "", nil, nil, tt.input, nil)
+				result := convertAntigravityResponseToGeminiNonStream(
+					context.Background(),
+					"",
+					nil,
+					nil,
+					tt.input,
+					nil,
+				)
 				if string(result) != tt.expected {
-					t.Errorf("ConvertAntigravityResponseToGeminiNonStream() = %s, want %s", string(result), tt.expected)
+					t.Errorf(
+						"ConvertAntigravityResponseToGeminiNonStream() = %s, want %s",
+						string(result),
+						tt.expected,
+					)
 				}
 			},
 		)
@@ -82,8 +104,10 @@ func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "cpaUsageMetadata restored in streaming response",
-			input:    []byte(`data: {"response":{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100}}}`),
+			name: "cpaUsageMetadata restored in streaming response",
+			input: []byte(
+				`data: {"response":{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100}}}`,
+			),
 			expected: `{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":100}}`,
 		},
 	}
@@ -96,7 +120,11 @@ func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
 					t.Fatalf("expected 1 result, got %d", len(results))
 				}
 				if string(results[0]) != tt.expected {
-					t.Errorf("ConvertAntigravityResponseToGemini() = %s, want %s", string(results[0]), tt.expected)
+					t.Errorf(
+						"ConvertAntigravityResponseToGemini() = %s, want %s",
+						string(results[0]),
+						tt.expected,
+					)
 				}
 			},
 		)
@@ -208,5 +236,41 @@ func TestConvertAntigravityResponseToGeminiRestoresExternalToolNameChain(t *test
 		if got := gjson.GetBytes(nonStream, path).String(); got != clientName {
 			t.Fatalf("non-stream %s = %q, want %q; output=%s", path, got, clientName, nonStream)
 		}
+	}
+}
+
+func TestAntigravityAltArraySDKPreservesResponses(t *testing.T) {
+	request := []byte(`{"tools":[{"functionDeclarations":[{"name":"1lookup"}]}]}`)
+	alias := util.SanitizedFunctionNameMap(request)["1lookup"]
+	body := []byte(
+		`[{"response":{"candidates":[{"content":{"parts":[{"functionCall":` +
+			`{"name":` +
+			`"` +
+			alias +
+			(`","args":{}}}]},"finishReason":"MAX_TOKENS"}],"cpaUsageMetadata":{"tot` +
+				`alTokenCount":9}}},{"response":{"candidates":[{"content":{"parts":[{"t` +
+				`ext":"second"}]}}],"usageMetadata":{"totalTokenCount":4}}}]`),
+	)
+	var state any
+	out := sdktranslator.Default().TranslateStream(
+		util.WithAlt(context.Background(), "json"), sdktranslator.FormatAntigravity, sdktranslator.FormatGemini,
+		"fixture", request, nil, body, &state,
+	)
+	if len(out) != 1 || gjson.GetBytes(out[0], "#").Int() != 2 {
+		t.Fatalf("array responses missing: %s", out)
+	}
+	for path, want := range map[string]string{
+		"0.candidates.0.content.parts.0.functionCall.name": "1lookup", "0.candidates.0.finishReason": "MAX_TOKENS",
+		"0.usageMetadata.totalTokenCount": "9", "1.candidates.0.content.parts.0.text": "second",
+		"1.usageMetadata.totalTokenCount": "4",
+	} {
+		if got := gjson.GetBytes(out[0], path).String(); got != want {
+			t.Fatalf("%s=%q want %q; %s", path, got, want, out[0])
+		}
+	}
+	if gjson.GetBytes(out[0], "1.candidates.0.finishReason").Exists() || gjson.GetBytes(
+		out[0], "0.cpaUsageMetadata",
+	).Exists() {
+		t.Fatalf("finish reason invented or internal usage retained: %s", out[0])
 	}
 }

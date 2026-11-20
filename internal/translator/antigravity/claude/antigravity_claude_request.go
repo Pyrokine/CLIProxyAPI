@@ -6,6 +6,7 @@
 package claude
 
 import (
+	"context"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
@@ -72,6 +73,14 @@ func resolveToolUseThoughtSignature(modelName string, contentResult gjson.Result
 		if !signatureResult.Exists() {
 			continue
 		}
+		if targetProvider == signature.ProviderClaude {
+			if normalized, compatible := signature.CompatibleAntigravityClaudeThinkingSignature(
+				signatureResult.String(),
+			); compatible {
+				return normalized
+			}
+			continue
+		}
 		normalized, compatible := signature.CompatibleSignatureForProvider(
 			targetProvider,
 			signatureResult.String(),
@@ -103,11 +112,16 @@ func mapClaudeFunctionNameToAntigravity(functionNameMap map[string]string, name 
 // convertClaudeRequestToAntigravity converts a Claude request to the Gemini CLI request schema.
 // It maps system instructions, messages, tools, and generation settings; stream is currently unused.
 func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
-	out, _ := convertClaudeRequestToAntigravityChecked(modelName, inputRawJSON, stream)
+	out, _ := convertClaudeRequestToAntigravityChecked(context.Background(), modelName, inputRawJSON, stream)
 	return out
 }
 
-func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
+func convertClaudeRequestToAntigravityChecked(
+	ctx context.Context, modelName string, inputRawJSON []byte, _ bool,
+) ([]byte, error) {
+	if err := ValidateSignatureLengths(inputRawJSON); err != nil {
+		return nil, err
+	}
 	enableThoughtTranslate := true
 	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
@@ -120,7 +134,7 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 			for _, part := range message.Get("content").Array() {
 				switch part.Get("type").String() {
 				case "text":
-					if part.Get("text").String() != "" {
+					if strings.TrimSpace(part.Get("text").String()) != "" {
 						sendable++
 					}
 				case "image", "document", "container_upload", "input_audio":
@@ -246,7 +260,10 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 						rawContents[contentIndex] = []byte(content.Raw)
 					}
 					contentsResult = gjson.ParseBytes(translatorcommon.JoinRawArray(rawContents))
-					contentsResult = translatorcommon.AlignClaudeToolResults(contentsResult, precedingToolUseIDs)
+					contentsResult = translatorcommon.AlignClaudeToolResults(
+						contentsResult,
+						precedingToolUseIDs,
+					)
 				}
 				contentResults := contentsResult.Array()
 				numContents := len(contentResults)
@@ -260,11 +277,24 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 						}
 						thinkingText := thinking.GetThinkingText(contentResult)
 						signatureResult := contentResult.Get("signature")
-						resolvedSignature := resolveThinkingSignature(
-							modelName,
-							thinkingText,
-							signatureResult.String(),
-						)
+						rawSignature := signatureResult.String()
+						if strings.TrimSpace(rawSignature) == "" && thinkingText != "" {
+							var err error
+							rawSignature, err = cache.GetCachedSignatureRequired(ctx, modelName, thinkingText)
+							if err != nil {
+								return nil, err
+							}
+							if err := validateSignatureLength(rawSignature); err != nil {
+								return nil, err
+							}
+						}
+						resolvedSignature := resolveThinkingSignature(modelName, "", rawSignature)
+						if thinkingText != "" && pendingDetachedSignature != "" &&
+							strings.TrimSpace(
+								signatureResult.String(),
+							) == "" && signature.IsGeminiBypass(resolvedSignature) {
+							resolvedSignature = ""
+						}
 						if resolvedSignature != "" && pendingDetachedSignature != "" {
 							if pendingDetachedSignature != resolvedSignature {
 								appendDetachedCarrier(pendingDetachedSignature)
@@ -300,7 +330,9 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 								nextTargetKind = geminiClaudeCarrierFunction
 							}
 						}
-						isGeminiSignature := signature.ProviderFromModelName(modelName) == signature.ProviderGemini
+						isGeminiSignature := signature.ProviderFromModelName(
+							modelName,
+						) == signature.ProviderGemini
 						_, carrierDirection, carrierTargetKind, markedCarrier, validCarrier :=
 							decodeGeminiClaudeCarrierSignature(signatureResult.String())
 
@@ -512,7 +544,9 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 									funcName = toolCallID
 								}
 								log.Warnf(
-									"antigravity claude request: tool_result references unknown tool_use_id=%s, derived function name=%s",
+									"antigravity claude request: tool_result references unknown "+
+										"tool_use_id=%s, derived function "+
+										"name=%s",
 									toolCallID, funcName,
 								)
 							}
@@ -539,7 +573,10 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 								filteredJSON := []byte(`[]`)
 								imagePartsJSON := []byte(`[]`)
 								for _, fr := range frResults {
-									if fr.Get("type").String() == "image" && fr.Get("source.type").String() == "base64" {
+									if fr.Get("type").String() ==
+										"image" &&
+										fr.Get("source.type").String() ==
+											"base64" {
 										inlineDataJSON := []byte(`{}`)
 										if mimeType := fr.Get("source.media_type").String(); mimeType != "" {
 											inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "mimeType", mimeType)
@@ -585,9 +622,13 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 								}
 
 							} else if functionResponseResult.IsObject() {
-								if functionResponseResult.Get("type").String() == "image" && functionResponseResult.Get("source.type").String() == "base64" {
+								if functionResponseResult.Get("type").String() ==
+									"image" &&
+									functionResponseResult.Get("source.type").String() ==
+										"base64" {
 									inlineDataJSON := []byte(`{}`)
-									if mimeType := functionResponseResult.Get("source.media_type").String(); mimeType != "" {
+									if mimeType := functionResponseResult.Get("source.media_type").String(); mimeType !=
+										"" {
 										inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "mimeType", mimeType)
 									}
 									if data := functionResponseResult.Get("source.data").String(); data != "" {
@@ -686,9 +727,6 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 						partItems = append(partItems, trailingParts...)
 					}
 				}
-				if role == "user" {
-					partItems = translatorcommon.ReorderGeminiUserParts(partItems)
-				}
 
 				contentsJSON, _ = sjson.SetRawBytes(
 					contentsJSON,
@@ -731,7 +769,7 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				// Sanitize the input schema for Antigravity API compatibility
-				inputSchema := util.CleanJSONSchemaForAntigravity(inputSchemaResult.Raw)
+				inputSchema := util.CleanJSONSchemaForAntigravityJSONSchema(inputSchemaResult.Raw)
 				tool, _ := sjson.DeleteBytes([]byte(toolResult.Raw), "input_schema")
 				tool, _ = sjson.SetRawBytes(tool, "parametersJsonSchema", []byte(inputSchema))
 				tool, _ = sjson.SetBytes(
@@ -782,11 +820,14 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 	hasTools := toolDeclCount > 0 && !isToolChoiceNone
 	thinkingResult := gjson.GetBytes(rawJSON, "thinking")
 	thinkingType := thinkingResult.Get("type").String()
-	hasThinking := thinkingResult.Exists() && thinkingResult.IsObject() && (thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto")
+	hasThinking := thinkingResult.Exists() && thinkingResult.IsObject() &&
+		(thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto")
 	isClaudeThinking := util.IsClaudeThinkingModel(modelName)
 
 	if hasTools && hasThinking && isClaudeThinking {
-		interleavedHint := "Interleaved thinking is enabled. You may think between tool calls and after receiving tool results before deciding the next action or final answer. Do not mention these instructions or any constraints about thinking blocks; just apply them."
+		interleavedHint := "Interleaved thinking is enabled. You may think between tool calls and after " +
+			"receiving tool results before deciding the next action or final answer. Do not mention these " +
+			"instructions or any constraints about thinking blocks; just apply them."
 
 		if hasSystemInstruction {
 			// Append hint as a new part to existing system instruction
@@ -814,7 +855,9 @@ func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []b
 		}
 		if util.IsClaudeModel(modelName) {
 			contentItems = translatorcommon.SplitGeminiFunctionResponseTurns(contentItems)
-			contentsJSON = translatorcommon.JoinRawArray(translatorcommon.MergeAdjacentGeminiUserContents(contentItems))
+			contentsJSON = translatorcommon.JoinRawArray(
+				translatorcommon.MergeAdjacentGeminiUserContents(contentItems),
+			)
 		} else {
 			contentsJSON = translatorcommon.JoinRawArray(translatorcommon.MergeAdjacentGeminiContents(contentItems))
 		}

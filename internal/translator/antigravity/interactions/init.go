@@ -17,5 +17,8 @@ func init() {
 			NonStream: convertAntigravityResponseToInteractionsNonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatInteractions, sdktranslator.FormatAntigravity, convertInteractionsRequestToAntigravityChecked)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatInteractions, sdktranslator.FormatAntigravity,
+		convertInteractionsRequestToAntigravityChecked,
+	)
 }

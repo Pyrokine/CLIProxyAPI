@@ -24,7 +24,9 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadToleratesHomeKVFailure(t 
 	homekv.SetCurrent(homekv.New(config.HomeConfig{Enabled: true}))
 	t.Cleanup(func() { homekv.SetCurrent(previous) })
 
-	payload := []byte(`{"sessionId":"kv-failure","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+	payload := []byte(
+		`{"sessionId":"kv-failure","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
+	)
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(),
 		"gemini-3-flash-agent",
@@ -44,8 +46,12 @@ func TestClearAntigravityReasoningReplayOnInvalidSignatureKeepsNewGeneration(t *
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 	const model, session = "gemini-3.6-flash-high", "session:invalid-signature-generation"
-	oldItem := []byte(`{"type":"thought_signature","contentIndex":0,"partIndex":0,"thoughtSignature":"old-signature-123456789"}`)
-	newItem := []byte(`{"type":"thought_signature","contentIndex":0,"partIndex":0,"thoughtSignature":"new-signature-123456789"}`)
+	oldItem := []byte(
+		`{"type":"thought_signature","contentIndex":0,"partIndex":0,"thoughtSignature":"old-signature-123456789"}`,
+	)
+	newItem := []byte(
+		`{"type":"thought_signature","contentIndex":0,"partIndex":0,"thoughtSignature":"new-signature-123456789"}`,
+	)
 	if !internalcache.AntigravityReasoningReplayItems(model, session, [][]byte{oldItem}) {
 		t.Fatal("initial replay cache write failed")
 	}
@@ -69,7 +75,8 @@ func TestClearAntigravityReasoningReplayOnInvalidSignatureKeepsNewGeneration(t *
 		t.Fatalf("invalid-signature cleanup error = %v", errClear)
 	}
 	items, ok := internalcache.GetAntigravityReasoningReplayItems(model, session)
-	if !ok || len(items) != 1 || gjson.GetBytes(items[0], "thoughtSignature").String() != "new-signature-123456789" {
+	if !ok || len(items) != 1 ||
+		gjson.GetBytes(items[0], "thoughtSignature").String() != "new-signature-123456789" {
 		t.Fatalf("new replay generation was deleted: found=%t items=%q", ok, items)
 	}
 }
@@ -78,7 +85,9 @@ func TestAntigravityReasoningReplayAccumulatorMultiToolSSEChunks(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	requestPayload := []byte(`{"sessionId":"sess-1","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+	requestPayload := []byte(
+		`{"sessionId":"sess-1","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
+	)
 	scope := antigravityReasoningReplayScope{modelName: "gemini-3-flash-agent", sessionKey: "session:sess-1"}
 	acc := newAntigravityReasoningReplayAccumulator(scope, requestPayload)
 	if acc == nil {
@@ -88,8 +97,11 @@ func TestAntigravityReasoningReplayAccumulatorMultiToolSSEChunks(t *testing.T) {
 		t.Fatalf("pending model slot = %d/%d, want 1/0", acc.contentIndex, acc.nextPartIndex)
 	}
 
-	line1 := []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig-first","functionCall":{"name":"Read","args":{"file_path":"/a"},"id":"id1"}}]}}]}}`)
-	line2 := []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"Read","args":{"file_path":"/b"},"id":"id2"}}]},"finishReason":"STOP"}]}}`)
+	line1 := []byte((`data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig-first","` +
+		`functionCall":{"name":"Read","args":{"file_path":"/a"},"id":"id1"}}]}}]}}`))
+	line2 := []byte((`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":` +
+		`{"name":"Read","args":{"file_path":"/b"},"id":"id2"}}]},"finishReason"` +
+		`:"STOP"}]}}`))
 	acc.observeSSELine(line1)
 	acc.observeSSELine(line2)
 	acc.commit(context.Background())
@@ -109,9 +121,19 @@ func TestAntigravityReasoningReplayAccumulatorMultiToolSSEChunks(t *testing.T) {
 }
 
 func TestPrepareAntigravityGeminiReasoningReplayPayloadRejectsToolOutputsAcrossUserBoundary(t *testing.T) {
-	payload := []byte(`{"sessionId":"tool-output-boundary","request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}},{"functionCall":{"id":"call-2","name":"run","args":{}}}]},{"role":"model","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"one"}}}]},{"role":"user","parts":[{"text":"boundary"}]},{"role":"model","parts":[{"functionResponse":{"id":"call-2","name":"run","response":{"result":"two"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"tool-output-boundary","request":{"contents":[{"role":"mo` +
+		`del","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}},` +
+		`{"functionCall":{"id":"call-2","name":"run","args":{}}}]},{"role":"mod` +
+		`el","parts":[{"functionResponse":{"id":"call-1","name":"run","response` +
+		`":{"result":"one"}}}]},{"role":"user","parts":[{"text":"boundary"}]},{` +
+		`"role":"model","parts":[{"functionResponse":{"id":"call-2","name":"run` +
+		`","response":{"result":"two"}}}]}]}}`))
 	_, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare == nil {
 		t.Fatal("invalid tool output history was not rejected")
@@ -126,11 +148,16 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadKeepsCacheForAlreadyInval
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 	const model, sessionKey = "gemini-3.6-flash-high", "session:invalid-injected-tool-history"
-	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"call_id":"call-2","name":"run","args":{},"thoughtSignature":"injected-tool-signature-123456789"}`)
+	item := []byte((`{"type":"function_call_part","contentIndex":0,"partIndex":0,"call_id":` +
+		`"call-2","name":"run","args":{},"thoughtSignature":"injected-tool-sign` +
+		`ature-123456789"}`))
 	if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
 		t.Fatal("cache write failed")
 	}
-	payload := []byte(`{"sessionId":"invalid-injected-tool-history","request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}}]},{"role":"model","parts":[{"functionResponse":{"id":"call-2","name":"run","response":{"result":"two"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"invalid-injected-tool-history","request":{"contents":[{"` +
+		`role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","ar` +
+		`gs":{}}}]},{"role":"model","parts":[{"functionResponse":{"id":"call-2"` +
+		`,"name":"run","response":{"result":"two"}}}]}]}}`))
 	_, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
 	)
@@ -146,7 +173,9 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadKeepsCacheForClientMalfor
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 	const model, sessionKey = "gemini-3.6-flash-high", "session:client-malformed-history"
-	payload := []byte(`{"sessionId":"client-malformed-history","request":{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":"model","parts":[{"functionResponse":{"id":"orphan","name":"run","response":{"result":"bad"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"client-malformed-history","request":{"contents":[{"role":"model","parts"` +
+		`:[{"text":"answer"}]},{"role":"model","parts":[{"functionResponse":{"id":"orphan","name":"run","` +
+		`response":{"result":"bad"}}}]}]}}`))
 	kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"answer"}`))
 	item := buildAntigravityThoughtSignatureItem(0, 0, "valid-cache-signature-123456789", kind, fingerprint)
 	item = antigravitySetReplayItemContextHash(item, payload, 0)
@@ -168,14 +197,22 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadInjectsCachedToolPart(t *
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Read","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-first"}`)
-	if !internalcache.AntigravityReasoningReplayItems("gemini-3-flash-agent", "session:sess-2", [][]byte{item}) {
+	item := []byte((`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Re` +
+		`ad","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-` +
+		`first"}`))
+	if !internalcache.AntigravityReasoningReplayItems(
+		"gemini-3-flash-agent",
+		"session:sess-2",
+		[][]byte{item},
+	) {
 		t.Fatal("cache write failed")
 	}
 
 	req := cliproxyexecutor.Request{}
 	opts := cliproxyexecutor.Options{}
-	payload := []byte(`{"sessionId":"sess-2","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"sess-2","request":{"contents":[{"role":"user","parts":[{` +
+		`"text":"hi"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1"` +
+		`,"name":"Read","response":{"result":"ok"}}}]}]}}`))
 	out, scope, err := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), "gemini-3-flash-agent", req, opts, payload,
 	)
@@ -203,17 +240,27 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadSanitizesInsertedUnsigned
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Read","call_id":"id1","args":{"file_path":"/a"}}`)
+	item := []byte(
+		(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":` +
+			`"Read","call_id":"id1","args":{"file_path":"/` +
+			`a"}}`),
+	)
 	if !internalcache.AntigravityReasoningReplayItems(
 		"gemini-3-flash-agent", "session:sess-unsigned-replay", [][]byte{item},
 	) {
 		t.Fatal("cache write failed")
 	}
 
-	payload := []byte(`{"sessionId":"sess-unsigned-replay","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"sess-unsigned-replay","request":{"contents":[{"role":"user","parts":[{"` +
+		`text":"hi"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"` +
+		`result":"ok"}}}]}]}}`))
 	payload = sanitizeAntigravityGeminiRequestSignatures("gemini-3-flash-agent", payload)
 	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3-flash-agent",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if err != nil {
 		t.Fatalf("prepare error: %v", err)
@@ -221,7 +268,11 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadSanitizesInsertedUnsigned
 	if got := gjson.GetBytes(
 		out, "request.contents.1.parts.0.thoughtSignature",
 	).String(); got != "skip_thought_signature_validator" {
-		t.Fatalf("inserted first synthetic functionCall signature = %q, want bypass sentinel; output=%s", got, out)
+		t.Fatalf(
+			"inserted first synthetic functionCall signature = %q, want bypass sentinel; output=%s",
+			got,
+			out,
+		)
 	}
 	if got := gjson.GetBytes(out, "request.contents.2.role").String(); got != "model" {
 		t.Fatalf("replayed functionResponse role = %q, want native model role; output=%s", got, out)
@@ -232,12 +283,20 @@ func TestPrepareAntigravityGeminiReasoningReplayInsertsBeforeModelFunctionRespon
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Read","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-first"}`)
+	item := []byte((`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Re` +
+		`ad","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-` +
+		`first"}`))
 	internalcache.AntigravityReasoningReplayItems("gemini-3-flash-agent", "session:sess-3", [][]byte{item})
 
-	payload := []byte(`{"sessionId":"sess-3","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"sess-3","request":{"contents":[{"role":"user","parts":[{` +
+		`"text":"hi"}]},{"role":"model","parts":[{"functionResponse":{"id":"id1` +
+		`","name":"Read","response":{"result":"ok"}}}]}]}}`))
 	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3-flash-agent",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -256,12 +315,22 @@ func TestMergeAntigravityFunctionCallPartReplayMergesSignatureIntoExistingFuncti
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Read","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-first"}`)
+	item := []byte((`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Re` +
+		`ad","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-` +
+		`first"}`))
 	internalcache.AntigravityReasoningReplayItems("gemini-3-flash-agent", "session:sess-merge", [][]byte{item})
 
-	payload := []byte(`{"sessionId":"sess-merge","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"Read","args":{"file_path":"/a"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"sess-merge","request":{"contents":[{"role":"user","parts` +
+		`":[{"text":"hi"}]},{"role":"model","parts":[{"functionCall":{"id":"id1` +
+		`","name":"Read","args":{"file_path":"/a"}}}]},{"role":"user","parts":[` +
+		`{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok` +
+		`"}}}]}]}}`))
 	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3-flash-agent",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -275,14 +344,22 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadDropsStaleThoughtSignatur
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"thought_signature","contentIndex":8,"partIndex":3,"thoughtSignature":"stale-thought-sig-ok12"}`)
+	item := []byte(
+		`{"type":"thought_signature","contentIndex":8,"partIndex":3,"thoughtSignature":"stale-thought-sig-ok12"}`,
+	)
 	internalcache.AntigravityReasoningReplayItems(
 		"gemini-3-flash-agent", "session:sess-stale-text", [][]byte{item},
 	)
 
-	payload := []byte(`{"sessionId":"sess-stale-text","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"visible answer"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	payload := []byte((`{"sessionId":"sess-stale-text","request":{"contents":[{"role":"user","parts":[{"text":` +
+		`"hi"}]},{"role":"model","parts":[{"text":"visible answer"}]},{"role":"user","parts":[{"text":"next"}` +
+		`]}]}}`))
 	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3-flash-agent",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -312,14 +389,28 @@ func TestAntigravityReasoningReplayAccumulatesCompleteTextSignatureChain(t *test
 	)
 	scope := antigravityReasoningReplayScope{modelName: model, sessionKey: sessionKey}
 
-	request1 := []byte(`{"sessionId":"chain-session","request":{"contents":[{"role":"user","parts":[{"text":"turn one"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"chain-session","request":{"contents":[{"role":"user","parts":[{"text":"turn one"}]}]}}`,
+	)
 	acc1 := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc1.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer-"}]}}]}}`))
+	acc1.observeSSELine(
+		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer-"}]}}]}}`),
+	)
 	acc1.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"one"}]}}]}}`))
-	acc1.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + sig1 + `"}]},"finishReason":"STOP"}]}}`))
+	acc1.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+				`"thoughtSignature":` +
+				`"`) +
+				sig1 +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	acc1.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"chain-session","request":{"contents":[{"role":"user","parts":[{"text":"turn one"}]},{"role":"model","parts":[{"text":"answer-one"}]},{"role":"user","parts":[{"text":"turn two"}]}]}}`)
+	request2 := []byte((`{"sessionId":"chain-session","request":{"contents":[{"role":"user","pa` +
+		`rts":[{"text":"turn one"}]},{"role":"model","parts":[{"text":"answer-o` +
+		`ne"}]},{"role":"user","parts":[{"text":"turn two"}]}]}}`))
 	prepared2, _, errPrepare2 := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -334,8 +425,18 @@ func TestAntigravityReasoningReplayAccumulatesCompleteTextSignatureChain(t *test
 	}
 
 	acc2 := newAntigravityReasoningReplayAccumulator(scope, prepared2)
-	acc2.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer-two"}]}}]}}`))
-	acc2.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + sig2 + `"}]},"finishReason":"STOP"}]}}`))
+	acc2.observeSSELine(
+		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer-two"}]}}]}}`),
+	)
+	acc2.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+				`"thoughtSignature":` +
+				`"`) +
+				sig2 +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	acc2.commit(context.Background())
 
 	items, ok := internalcache.GetAntigravityReasoningReplayItems(model, sessionKey)
@@ -343,7 +444,11 @@ func TestAntigravityReasoningReplayAccumulatesCompleteTextSignatureChain(t *test
 		t.Fatalf("cached chain length = %d ok=%v, want 2", len(items), ok)
 	}
 
-	request3 := []byte(`{"sessionId":"chain-session","request":{"contents":[{"role":"user","parts":[{"text":"turn one"}]},{"role":"model","parts":[{"text":"answer-one"}]},{"role":"user","parts":[{"text":"turn two"}]},{"role":"model","parts":[{"text":"answer-two"}]},{"role":"user","parts":[{"text":"turn three"}]}]}}`)
+	request3 := []byte((`{"sessionId":"chain-session","request":{"contents":[{"role":"user","pa` +
+		`rts":[{"text":"turn one"}]},{"role":"model","parts":[{"text":"answer-o` +
+		`ne"}]},{"role":"user","parts":[{"text":"turn two"}]},{"role":"model","` +
+		`parts":[{"text":"answer-two"}]},{"role":"user","parts":[{"text":"turn ` +
+		`three"}]}]}}`))
 	prepared3, _, errPrepare3 := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request3,
 	)
@@ -361,7 +466,11 @@ func TestAntigravityReasoningReplayAccumulatesCompleteTextSignatureChain(t *test
 			prepared3, "request.contents.3.parts",
 		).Array(),
 	); got != 2 {
-		t.Fatalf("signatures must remain attached to native text parts, total parts=%d; body=%s", got, prepared3)
+		t.Fatalf(
+			"signatures must remain attached to native text parts, total parts=%d; body=%s",
+			got,
+			prepared3,
+		)
 	}
 }
 
@@ -376,14 +485,34 @@ func TestAntigravityReasoningReplaySplitsConsecutiveSignedTextSegments(t *testin
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:consecutive-signed-text",
 	}
-	request1 := []byte(`{"sessionId":"consecutive-signed-text","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"consecutive-signed-text","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
 	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"a"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"b","thoughtSignature":"` + sig1 + `"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"c","thoughtSignature":"` + sig2 + `"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"b",` +
+				`"thoughtSignature":` +
+				`"`) +
+				sig1 +
+				`"}]}}]}}`,
+		),
+	)
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"c",` +
+				`"thoughtSignature":` +
+				`"`) +
+				sig2 +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"consecutive-signed-text","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"ab"},{"text":"c"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"consecutive-signed-text","request":{"contents":[{"role":` +
+		`"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"ab` +
+		`"},{"text":"c"}]},{"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -409,15 +538,31 @@ func TestAntigravityReasoningReplaySignatureOnlyCarrierEndsTextSegment(t *testin
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:trailing-signed-text",
 	}
-	request1 := []byte(`{"sessionId":"trailing-signed-text","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"trailing-signed-text","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
 	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"a"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + sig1 + `"}]}}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + sig1 + `"}]}}]}}`,
+		),
+	)
 	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"b"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"c","thoughtSignature":"` + sig2 + `"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"c",` +
+				`"thoughtSignature":` +
+				`"`) +
+				sig2 +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"trailing-signed-text","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"a"},{"text":"bc"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"trailing-signed-text","request":{"contents":[{"role":"us` +
+		`er","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"a"},{` +
+		`"text":"bc"}]},{"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -444,12 +589,28 @@ func TestAntigravityReasoningReplayDropsUnmatchedConsecutiveCarrier(t *testing.T
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:unmatched-detached",
 	}
-	request1 := []byte(`{"sessionId":"unmatched-detached","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"unmatched-detached","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"a"},{"text":"","thoughtSignature":"` + sig1 + `"},{"text":"","thoughtSignature":"` + sig2 + `"},{"text":"b","thoughtSignature":"` + sig3 + `"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"a"},` +
+				`{"text":"","thoughtSignature":` +
+				`"`) +
+				sig1 +
+				`"},{"text":"","thoughtSignature":"` +
+				sig2 +
+				`"},{"text":"b","thoughtSignature":"` +
+				sig3 +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"unmatched-detached","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"a"},{"text":"b"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"unmatched-detached","request":{"contents":[{"role":"user` +
+		`","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"a"},{"t` +
+		`ext":"b"}]},{"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -478,12 +639,29 @@ func TestAntigravityReasoningReplayDuplicateCarrierDoesNotSplitSegment(t *testin
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:duplicate-carrier",
 	}
-	request1 := []byte(`{"sessionId":"duplicate-carrier","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"duplicate-carrier","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"a","thought":true},{"text":"","thought":true,"thoughtSignature":"` + sig1 + `"},{"text":"b","thought":true},{"text":"","thought":true,"thoughtSignature":"` + sig1 + `"},{"text":"c","thought":true,"thoughtSignature":"` + sig2 + `"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte((`data: {"response":{"candidates":[{"content":{"parts":[{"text":"a","thought":` +
+			`true},{"text":"","thought":true,"thoughtSignature":"`) +
+			sig1 +
+			(`"},{"text":"b","thought":` +
+				`true},{"text":"","thought":` +
+				`true,"thoughtSignature":` +
+				`"`) +
+			sig1 +
+			`"},{"text":"c","thought":true,"thoughtSignature":"` +
+			sig2 +
+			`"}]},"finishReason":"STOP"}]}}`),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"duplicate-carrier","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"a","thought":true},{"text":"bc","thought":true}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"duplicate-carrier","request":{"contents":[{"role":"user"` +
+		`,"parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"a","thou` +
+		`ght":true},{"text":"bc","thought":true}]},{"role":"user","parts":[{"te` +
+		`xt":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -509,12 +687,26 @@ func TestAntigravityReasoningReplayDirectTextSignatureWinsOverUnboundPrefix(t *t
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:direct-over-prefix",
 	}
-	request1 := []byte(`{"sessionId":"direct-over-prefix","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"direct-over-prefix","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"` + prefixSig + `"},{"text":"hidden","thought":true,"thoughtSignature":"` + directSig + `"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+				`"thought":true,"thoughtSignature":` +
+				`"`) +
+				prefixSig +
+				`"},{"text":"hidden","thought":true,"thoughtSignature":"` +
+				directSig +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"direct-over-prefix","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"hidden","thought":true}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"direct-over-prefix","request":{"contents":[{"role":"user` +
+		`","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"hidden"` +
+		`,"thought":true}]},{"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -537,12 +729,26 @@ func TestAntigravityReasoningReplaySameDirectSignatureReplacesPrefix(t *testing.
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:same-direct-prefix",
 	}
-	request1 := []byte(`{"sessionId":"same-direct-prefix","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"same-direct-prefix","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"` + signature + `"},{"text":"hidden","thought":true,"thoughtSignature":"` + signature + `"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+				`"thought":true,"thoughtSignature":` +
+				`"`) +
+				signature +
+				`"},{"text":"hidden","thought":true,"thoughtSignature":"` +
+				signature +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"same-direct-prefix","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"hidden","thought":true}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"same-direct-prefix","request":{"contents":[{"role":"user` +
+		`","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"hidden"` +
+		`,"thought":true}]},{"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -565,12 +771,30 @@ func TestAntigravityReasoningReplayDirectToolSignatureWinsOverPrefix(t *testing.
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:direct-tool-over-prefix",
 	}
-	request1 := []byte(`{"sessionId":"direct-tool-over-prefix","request":{"contents":[{"role":"user","parts":[{"text":"run"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"direct-tool-over-prefix","request":{"contents":[{"role":"user","parts":[{"text":"run"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + prefixSig + `"},{"functionCall":{"id":"call-1","name":"run","args":{}},"thoughtSignature":"` + directSig + `"},{"text":"after"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+				`"thoughtSignature":` +
+				`"`) +
+				prefixSig +
+				`"},{"functionCall":{"id":"call-1","name":"run","args":{}},"thoughtSignature":"` +
+				directSig +
+				(`"},{"text":` +
+					`"after"}]},` +
+					`"finishReason"` +
+					`:"STOP"}]}}`),
+		),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"direct-tool-over-prefix","request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}},{"text":"after"}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"ok"}}}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"direct-tool-over-prefix","request":{"contents":[{"role":"user","parts":` +
+		`[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}},{` +
+		`"text":"after"}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"run","response"` +
+		`:{"result":"ok"}}}]},{"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -593,12 +817,22 @@ func TestAntigravityReasoningReplayAttachesDetachedSignatureToFunctionCall(t *te
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:detached-function",
 	}
-	request1 := []byte(`{"sessionId":"detached-function","request":{"contents":[{"role":"user","parts":[{"text":"run"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"detached-function","request":{"contents":[{"role":"user","parts":[{"text":"run"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"run","args":{"n":1}}},{"text":"","thoughtSignature":"` + signature + `"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte((`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"` +
+			`call-1","name":"run","args":{"n":1}}},{"text":"","thoughtSignature":"`) + signature +
+			`"}]},"finishReason":"STOP"}]}}`),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"detached-function","request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{"n":1}}}]},{"role":"function","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"ok"}}}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"detached-function","request":{"contents":[{"role":"user"` +
+		`,"parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"` +
+		`id":"call-1","name":"run","args":{"n":1}}}]},{"role":"function","parts` +
+		`":[{"functionResponse":{"id":"call-1","name":"run","response":{"result` +
+		`":"ok"}}}]},{"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -618,13 +852,21 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresParallelOmittedCalls(t *
 		model      = "gemini-3.6-flash-high"
 		sessionKey = "session:parallel-omitted-calls"
 	)
-	full := []byte(`{"sessionId":"parallel-omitted-calls","request":{"contents":[{"role":"user","parts":[{"text":"run both"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"run","args":{"n":1}},"thoughtSignature":"parallel-call-signature-one-123456"},{"functionCall":{"id":"id2","name":"run","args":{"n":2}},"thoughtSignature":"parallel-call-signature-two-123456"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}},{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]},{"role":"user","parts":[{"text":"finish"}]}]}}`)
+	full := []byte((`{"sessionId":"parallel-omitted-calls","request":{"contents":[{"role":"user","parts":[{"` +
+		`text":"run both"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"run","args":{"n":1}` +
+		`},"thoughtSignature":"parallel-call-signature-one-123456"},{"functionCall":{"id":"id2","name":"run",` +
+		`"args":{"n":2}},"thoughtSignature":"parallel-call-signature-two-123456"}]},{"role":"user","parts":[{` +
+		`"functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}},{"functionResponse":{"id":` +
+		`"id2","name":"run","response":{"result":"two"}}}]},{"role":"user","parts":[{"text":"finish"}]}]}}`))
 	items := antigravityReasoningReplayItemsFromRequest(full)
 	if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, items) {
 		t.Fatal("cache write failed")
 	}
 
-	rebuilt := []byte(`{"sessionId":"parallel-omitted-calls","request":{"contents":[{"role":"user","parts":[{"text":"run both"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}},{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]},{"role":"user","parts":[{"text":"finish"}]}]}}`)
+	rebuilt := []byte((`{"sessionId":"parallel-omitted-calls","request":{"contents":[{"role":"user","parts":[{` +
+		`"text":"run both"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"run","response"` +
+		`:{"result":"one"}}},{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]},{"` +
+		`role":"user","parts":[{"text":"finish"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, rebuilt,
 	)
@@ -635,7 +877,8 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresParallelOmittedCalls(t *
 		t.Fatalf("parallel replay is invalid: %v; body=%s", errValidate, out)
 	}
 	calls := gjson.GetBytes(out, "request.contents.1.parts").Array()
-	if len(calls) != 2 || calls[0].Get("functionCall.id").String() != "id1" || calls[1].Get("functionCall.id").String() != "id2" {
+	if len(calls) != 2 || calls[0].Get("functionCall.id").String() != "id1" ||
+		calls[1].Get("functionCall.id").String() != "id2" {
 		t.Fatalf("parallel calls were not restored together: %s", out)
 	}
 }
@@ -648,14 +891,22 @@ func TestPrepareAntigravityGeminiReasoningReplayReordersResponsesAfterRestoringP
 		model      = "gemini-3.6-flash-high"
 		sessionKey = "session:parallel-reversed-responses"
 	)
-	full := []byte(`{"sessionId":"parallel-reversed-responses","request":{"contents":[{"role":"user","parts":[{"text":"run both"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"run","args":{"n":1}},"thoughtSignature":"parallel-call-signature-one-123456"},{"functionCall":{"id":"id2","name":"run","args":{"n":2}}}]},{"role":"model","parts":[{"functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}},{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]}]}}`)
+	full := []byte((`{"sessionId":"parallel-reversed-responses","request":{"contents":[{"role":"user","parts":` +
+		`[{"text":"run both"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"run","args":{"n"` +
+		`:1}},"thoughtSignature":"parallel-call-signature-one-123456"},{"functionCall":{"id":"id2","name":"` +
+		`run","args":{"n":2}}}]},{"role":"model","parts":[{"functionResponse":{"id":"id1","name":"run","` +
+		`response":{"result":"one"}}},{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"` +
+		`}}}]}]}}`))
 	if !internalcache.AntigravityReasoningReplayItems(
 		model, sessionKey, antigravityReasoningReplayItemsFromRequest(full),
 	) {
 		t.Fatal("cache write failed")
 	}
 
-	rebuilt := []byte(`{"sessionId":"parallel-reversed-responses","request":{"contents":[{"role":"user","parts":[{"text":"run both"}]},{"role":"user","parts":[{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}},{"functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}}]}]}}`)
+	rebuilt := []byte((`{"sessionId":"parallel-reversed-responses","request":{"contents":[{"role":"user","` +
+		`parts":[{"text":"run both"}]},{"role":"user","parts":[{"functionResponse":{"id":"id2","name":"run","` +
+		`response":{"result":"two"}}},{"functionResponse":{"id":"id1","name":"run","response":{"result":"one"` +
+		`}}}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, rebuilt,
 	)
@@ -666,7 +917,8 @@ func TestPrepareAntigravityGeminiReasoningReplayReordersResponsesAfterRestoringP
 		t.Fatalf("restored reverse responses are invalid: %v; body=%s", errValidate, out)
 	}
 	responses := gjson.GetBytes(out, "request.contents.2.parts").Array()
-	if len(responses) != 2 || responses[0].Get("functionResponse.id").String() != "id1" || responses[1].Get("functionResponse.id").String() != "id2" {
+	if len(responses) != 2 || responses[0].Get("functionResponse.id").String() != "id1" ||
+		responses[1].Get("functionResponse.id").String() != "id2" {
 		t.Fatalf("restored responses were not reordered: %s", out)
 	}
 	if got := gjson.GetBytes(out, "request.contents.2.role").String(); got != "model" {
@@ -674,7 +926,9 @@ func TestPrepareAntigravityGeminiReasoningReplayReordersResponsesAfterRestoringP
 	}
 }
 
-func TestPrepareAntigravityGeminiReasoningReplayRestoresSyntheticParallelCallsWithFirstBypassOnly(t *testing.T) {
+func TestPrepareAntigravityGeminiReasoningReplayRestoresSyntheticParallelCallsWithFirstBypassOnly(
+	t *testing.T,
+) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
@@ -682,13 +936,22 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresSyntheticParallelCallsWi
 		model      = "gemini-3.6-flash-high"
 		sessionKey = "session:parallel-omitted-synthetic-calls"
 	)
-	full := []byte(`{"sessionId":"parallel-omitted-synthetic-calls","request":{"contents":[{"role":"user","parts":[{"text":"run both"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"run","args":{"n":1}},"thoughtSignature":"skip_thought_signature_validator"},{"functionCall":{"id":"id2","name":"run","args":{"n":2}}}]},{"role":"model","parts":[{"functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}},{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]}]}}`)
+	full := []byte((`{"sessionId":"parallel-omitted-synthetic-calls","request":{"contents":[{"role":"user","` +
+		`parts":[{"text":"run both"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"run","` +
+		`args":{"n":1}},"thoughtSignature":"skip_thought_signature_validator"},{"functionCall":{"id":"id2","` +
+		`name":"run","args":{"n":2}}}]},{"role":"model","parts":[{"functionResponse":{"id":"id1","name":"run"` +
+		`,"response":{"result":"one"}}},{"functionResponse":{"id":"id2","name":"run","response":{"result":"` +
+		`two"}}}]}]}}`))
 	items := antigravityReasoningReplayItemsFromRequest(full)
 	if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, items) {
 		t.Fatal("cache write failed")
 	}
 
-	rebuilt := []byte(`{"sessionId":"parallel-omitted-synthetic-calls","request":{"contents":[{"role":"user","parts":[{"text":"run both"}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}},{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]}]}}`)
+	rebuilt := []byte((`{"sessionId":"parallel-omitted-synthetic-calls","request":{"contents":` +
+		`[{"role":"user","parts":[{"text":"run both"}]},{"role":"user","parts":` +
+		`[{"functionResponse":{"id":"id1","name":"run","response":{"result":"on` +
+		`e"}}},{"functionResponse":{"id":"id2","name":"run","response":{"result` +
+		`":"two"}}}]}]}}`))
 	rebuilt = sanitizeAntigravityGeminiRequestSignatures(model, rebuilt)
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, rebuilt,
@@ -716,13 +979,22 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresSequentialOmittedCalls(t
 		model      = "gemini-3.6-flash-high"
 		sessionKey = "session:sequential-omitted-calls"
 	)
-	full := []byte(`{"sessionId":"sequential-omitted-calls","request":{"contents":[{"role":"user","parts":[{"text":"run1"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"run","args":{"n":1}},"thoughtSignature":"omitted-call-signature-one-123456"}]},{"role":"function","parts":[{"functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}}]},{"role":"user","parts":[{"text":"run2"}]},{"role":"model","parts":[{"functionCall":{"id":"id2","name":"run","args":{"n":2}},"thoughtSignature":"omitted-call-signature-two-123456"}]},{"role":"function","parts":[{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]}]}}`)
+	full := []byte((`{"sessionId":"sequential-omitted-calls","request":{"contents":[{"role":"user","parts":[{"` +
+		`text":"run1"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"run","args":{"n":1}},"` +
+		`thoughtSignature":"omitted-call-signature-one-123456"}]},{"role":"function","parts":[{"` +
+		`functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}}]},{"role":"user","parts":[{` +
+		`"text":"run2"}]},{"role":"model","parts":[{"functionCall":{"id":"id2","name":"run","args":{"n":2}},"` +
+		`thoughtSignature":"omitted-call-signature-two-123456"}]},{"role":"function","parts":[{"` +
+		`functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]}]}}`))
 	items := antigravityReasoningReplayItemsFromRequest(full)
 	if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, items) {
 		t.Fatal("cache write failed")
 	}
 
-	rebuilt := []byte(`{"sessionId":"sequential-omitted-calls","request":{"contents":[{"role":"user","parts":[{"text":"run1"}]},{"role":"function","parts":[{"functionResponse":{"id":"id1","name":"run","response":{"result":"one"}}}]},{"role":"user","parts":[{"text":"run2"}]},{"role":"function","parts":[{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]}]}}`)
+	rebuilt := []byte((`{"sessionId":"sequential-omitted-calls","request":{"contents":[{"role":"user","parts":` +
+		`[{"text":"run1"}]},{"role":"function","parts":[{"functionResponse":{"id":"id1","name":"run","` +
+		`response":{"result":"one"}}}]},{"role":"user","parts":[{"text":"run2"}]},{"role":"function","parts":` +
+		`[{"functionResponse":{"id":"id2","name":"run","response":{"result":"two"}}}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, rebuilt,
 	)
@@ -759,12 +1031,26 @@ func TestAntigravityReasoningReplayAccumulatesCompleteToolSignatureChain(t *test
 		sig2       = "native-tool-signature-two-123456"
 	)
 	scope := antigravityReasoningReplayScope{modelName: model, sessionKey: sessionKey}
-	request1 := []byte(`{"sessionId":"tool-chain","request":{"contents":[{"role":"user","parts":[{"text":"run first"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"tool-chain","request":{"contents":[{"role":"user","parts":[{"text":"run first"}]}]}}`,
+	)
 	acc1 := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc1.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + sig1 + `","functionCall":{"id":"call-1","name":"run_command","args":{"command":"one"}}}]},"finishReason":"STOP"}]}}`))
+	acc1.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":` +
+				`[{"thoughtSignature":` +
+				`"`) +
+				sig1 +
+				(`","functionCall":{"id":"call-1","name":"run_command","args":{"command":"one"}}}]},"` +
+					`finishReason":"STOP"}]}}`),
+		),
+	)
 	acc1.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"tool-chain","request":{"contents":[{"role":"user","parts":[{"text":"run first"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run_command","args":{"command":"one"}}}]},{"role":"function","parts":[{"functionResponse":{"id":"call-1","name":"run_command","response":{"result":"ok"}}}]},{"role":"user","parts":[{"text":"run second"}]}]}}`)
+	request2 := []byte((`{"sessionId":"tool-chain","request":{"contents":[{"role":"user","parts":[{"text":"` +
+		`run first"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run_command","args":{"` +
+		`command":"one"}}}]},{"role":"function","parts":[{"functionResponse":{"id":"call-1","name":"` +
+		`run_command","response":{"result":"ok"}}}]},{"role":"user","parts":[{"text":"run second"}]}]}}`))
 	request2 = normalizeAntigravityGeminiFunctionResponseRoles(request2)
 	prepared2, _, errPrepare2 := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
@@ -777,10 +1063,32 @@ func TestAntigravityReasoningReplayAccumulatesCompleteToolSignatureChain(t *test
 	}
 
 	acc2 := newAntigravityReasoningReplayAccumulator(scope, prepared2)
-	acc2.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + sig2 + `","functionCall":{"id":"call-2","name":"view_file","args":{"path":"two"}}}]},"finishReason":"STOP"}]}}`))
+	acc2.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":` +
+				`[{"thoughtSignature":` +
+				`"`) +
+				sig2 +
+				(`","functionCal` +
+					`l":{"id":` +
+					`"call-2",` +
+					`"name":"view_f` +
+					`ile","args":` +
+					`{"path":` +
+					`"two"}}}]},` +
+					`"finishReason"` +
+					`:"STOP"}]}}`),
+		),
+	)
 	acc2.commit(context.Background())
 
-	request3 := []byte(`{"sessionId":"tool-chain","request":{"contents":[{"role":"user","parts":[{"text":"run first"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run_command","args":{"command":"one"}}}]},{"role":"function","parts":[{"functionResponse":{"id":"call-1","name":"run_command","response":{"result":"ok"}}}]},{"role":"user","parts":[{"text":"run second"}]},{"role":"model","parts":[{"functionCall":{"id":"call-2","name":"view_file","args":{"path":"two"}}}]},{"role":"function","parts":[{"functionResponse":{"id":"call-2","name":"view_file","response":{"result":"ok"}}}]},{"role":"user","parts":[{"text":"finish"}]}]}}`)
+	request3 := []byte((`{"sessionId":"tool-chain","request":{"contents":[{"role":"user","parts":[{"text":"` +
+		`run first"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run_command","args":{"` +
+		`command":"one"}}}]},{"role":"function","parts":[{"functionResponse":{"id":"call-1","name":"` +
+		`run_command","response":{"result":"ok"}}}]},{"role":"user","parts":[{"text":"run second"}]},{"role":` +
+		`"model","parts":[{"functionCall":{"id":"call-2","name":"view_file","args":{"path":"two"}}}]},{"role"` +
+		`:"function","parts":[{"functionResponse":{"id":"call-2","name":"view_file","response":{"result":"ok"` +
+		`}}}]},{"role":"user","parts":[{"text":"finish"}]}]}}`))
 	request3 = normalizeAntigravityGeminiFunctionResponseRoles(request3)
 	prepared3, _, errPrepare3 := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request3,
@@ -804,13 +1112,29 @@ func TestAntigravityReasoningReplayDirectSignatureClosesSegmentBeforeUnsignedTex
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:direct-signed-unsigned",
 	}
-	request1 := []byte(`{"sessionId":"direct-signed-unsigned","request":{"contents":[{"role":"user","parts":[{"text":"start"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"direct-signed-unsigned","request":{"contents":[{"role":"user","parts":[{"text":"start"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"signed","thoughtSignature":"` + signature + `"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+				`"signed","thoughtSignature":` +
+				`"`) +
+				signature +
+				`"}]}}]}}`,
+		),
+	)
+	acc.observeSSELine(
+		[]byte(
+			`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"direct-signed-unsigned","request":{"contents":[{"role":"user","parts":[{"text":"start"}]},{"role":"model","parts":[{"text":"signed"},{"text":"unsigned"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"direct-signed-unsigned","request":{"contents":[{"role":"user","parts":[` +
+		`{"text":"start"}]},{"role":"model","parts":[{"text":"signed"},{"text":"unsigned"}]},{"role":"user","` +
+		`parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -818,7 +1142,8 @@ func TestAntigravityReasoningReplayDirectSignatureClosesSegmentBeforeUnsignedTex
 		t.Fatal(errPrepare)
 	}
 	parts := gjson.GetBytes(out, "request.contents.1.parts").Array()
-	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != signature || parts[1].Get("thoughtSignature").String() != "" {
+	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != signature ||
+		parts[1].Get("thoughtSignature").String() != "" {
 		t.Fatalf("direct signature crossed into unsigned text: %s", out)
 	}
 }
@@ -832,28 +1157,58 @@ func TestAntigravityReasoningReplayKeepsMixedTextToolTextFingerprintsSeparate(t 
 		toolSig  = "mixed-tool-signature-123456789"
 		textSig2 = "mixed-text-signature-two-123456"
 	)
-	scope := antigravityReasoningReplayScope{modelName: "gemini-3.6-flash-high", sessionKey: "session:mixed-segments"}
-	request1 := []byte(`{"sessionId":"mixed-segments","request":{"contents":[{"role":"user","parts":[{"text":"mixed"}]}]}}`)
+	scope := antigravityReasoningReplayScope{
+		modelName:  "gemini-3.6-flash-high",
+		sessionKey: "session:mixed-segments",
+	}
+	request1 := []byte(
+		`{"sessionId":"mixed-segments","request":{"contents":[{"role":"user","parts":[{"text":"mixed"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
 	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"sa"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"me","thoughtSignature":"` + textSig1 + `"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"run_command","args":{"command":"true"}},"thoughtSignature":"` + toolSig + `"}]}}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"me",` +
+				`"thoughtSignature":` +
+				`"`) +
+				textSig1 +
+				`"}]}}]}}`,
+		),
+	)
+	acc.observeSSELine(
+		[]byte((`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":` +
+			`{"id":"call-1","name":"run_command","args":{"command":"true"}},"though` +
+			`tSignature":"`) + toolSig + `"}]}}]}}`),
+	)
 	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"sa"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"me","thoughtSignature":"` + textSig2 + `"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"me",` +
+				`"thoughtSignature":` +
+				`"`) +
+				textSig2 +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	acc.commit(context.Background())
 
 	items, ok := internalcache.GetAntigravityReasoningReplayItems(scope.modelName, scope.sessionKey)
 	if !ok || len(items) != 3 {
 		t.Fatalf("cached mixed items = %d ok=%v, want 3", len(items), ok)
 	}
-	if occurrence := gjson.GetBytes(items[0], "targetOccurrence"); !occurrence.Exists() || occurrence.Int() != 0 {
+	if occurrence := gjson.GetBytes(items[0], "targetOccurrence"); !occurrence.Exists() ||
+		occurrence.Int() != 0 {
 		t.Fatalf("first text targetOccurrence = %s, want 0; item=%s", occurrence.Raw, items[0])
 	}
 	if got := gjson.GetBytes(items[2], "targetOccurrence").Int(); got != 1 {
 		t.Fatalf("second text targetOccurrence = %d, want 1; item=%s", got, items[2])
 	}
 
-	request2 := []byte(`{"sessionId":"mixed-segments","request":{"contents":[{"role":"user","parts":[{"text":"mixed"}]},{"role":"model","parts":[{"text":"same"},{"functionCall":{"id":"call-1","name":"run_command","args":{"command":"true"}}},{"text":"same"}]},{"role":"function","parts":[{"functionResponse":{"id":"call-1","name":"run_command","response":{"result":"ok"}}}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"mixed-segments","request":{"contents":[{"role":"user","parts":[{"text":` +
+		`"mixed"}]},{"role":"model","parts":[{"text":"same"},{"functionCall":{"id":"call-1","name":"` +
+		`run_command","args":{"command":"true"}}},{"text":"same"}]},{"role":"function","parts":[{"` +
+		`functionResponse":{"id":"call-1","name":"run_command","response":{"result":"ok"}}}]},{"role":"user",` +
+		`"parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -870,15 +1225,25 @@ func TestAntigravityReasoningReplayKeepsMixedTextToolTextFingerprintsSeparate(t 
 }
 
 func TestAntigravityReasoningReplayAccumulatorCountsExistingSegmentOccurrences(t *testing.T) {
-	request := []byte(`{"request":{"contents":[{"role":"model","parts":[{"text":"same"},{"text":"same","thought":true}]}]}}`)
+	request := []byte(
+		`{"request":{"contents":[{"role":"model","parts":[{"text":"same"},{"text":"same","thought":true}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(
-		antigravityReasoningReplayScope{modelName: "gemini-3.6-flash-high", sessionKey: "session:existing-segments"},
+		antigravityReasoningReplayScope{
+			modelName:  "gemini-3.6-flash-high",
+			sessionKey: "session:existing-segments",
+		},
 		request,
 	)
 	if acc == nil {
 		t.Fatal("reasoning replay accumulator is nil")
 	}
-	acc.observeResponsePayload([]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"same","thoughtSignature":"text-signature-123456789"},{"text":"same","thought":true,"thoughtSignature":"thought-signature-123456789"}]},"finishReason":"STOP"}]}}`))
+	acc.observeResponsePayload(
+		[]byte((`{"response":{"candidates":[{"content":{"parts":[{"text":"same","though` +
+			`tSignature":"text-signature-123456789"},{"text":"same","thought":true,` +
+			`"thoughtSignature":"thought-signature-123456789"}]},"finishReason":"ST` +
+			`OP"}]}}`)),
+	)
 	acc.appendPendingThoughtSignatures()
 	if len(acc.items) != 2 {
 		t.Fatalf("captured items = %d, want 2: %q", len(acc.items), acc.items)
@@ -902,18 +1267,29 @@ func TestAntigravityReasoningReplayAccumulatorCountsExistingFunctionOccurrenceTh
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:existing-function",
 	}
-	request := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"run","args":{"value":"same"}}}]}]}}`)
+	request := []byte(
+		`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"run","args":{"value":"same"}}}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request)
-	acc.observeResponsePayload([]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"run","args":{"value":"same"}},"thoughtSignature":"` + signature + `"}]},"finishReason":"STOP"}]}}`))
+	acc.observeResponsePayload(
+		[]byte((`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name` +
+			`":"run","args":{"value":"same"}},"thoughtSignature":"`) + signature + `"}]},"finishReason":"STOP"}]}}`),
+	)
 	acc.commit(context.Background())
 
 	items, ok := internalcache.GetAntigravityReasoningReplayItems(scope.modelName, scope.sessionKey)
 	if !ok || len(items) != 2 || gjson.GetBytes(items[1], "targetOccurrence").Int() != 1 {
 		t.Fatalf("function occurrences were not committed: ok=%v items=%q", ok, items)
 	}
-	replayPayload := []byte(`{"sessionId":"existing-function","request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"run","args":{"value":"same"}}},{"functionCall":{"name":"run","args":{"value":"same"}}}]}]}}`)
+	replayPayload := []byte((`{"sessionId":"existing-function","request":{"contents":[{"role":"model` +
+		`","parts":[{"functionCall":{"name":"run","args":{"value":"same"}}},{"f` +
+		`unctionCall":{"name":"run","args":{"value":"same"}}}]}]}}`))
 	prepared, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, replayPayload,
+		context.Background(),
+		scope.modelName,
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		replayPayload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
@@ -930,14 +1306,32 @@ func TestAntigravityReasoningReplayCapturesSignatureBeforeThoughtText(t *testing
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
 	const signature = "thought-first-signature-123456789"
-	scope := antigravityReasoningReplayScope{modelName: "gemini-3.6-flash-high", sessionKey: "session:thought-first"}
-	request1 := []byte(`{"sessionId":"thought-first","request":{"contents":[{"role":"user","parts":[{"text":"think"}]}]}}`)
+	scope := antigravityReasoningReplayScope{
+		modelName:  "gemini-3.6-flash-high",
+		sessionKey: "session:thought-first",
+	}
+	request1 := []byte(
+		`{"sessionId":"thought-first","request":{"contents":[{"role":"user","parts":[{"text":"think"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"` + signature + `"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"hidden thought","thought":true}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+				`"thought":true,"thoughtSignature":` +
+				`"`) +
+				signature +
+				`"}]}}]}}`,
+		),
+	)
+	acc.observeSSELine(
+		[]byte((`data: {"response":{"candidates":[{"content":{"parts":[{"text":"hidden ` +
+			`thought","thought":true}]},"finishReason":"STOP"}]}}`)),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"thought-first","request":{"contents":[{"role":"user","parts":[{"text":"think"}]},{"role":"model","parts":[{"text":"hidden thought","thought":true}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	request2 := []byte((`{"sessionId":"thought-first","request":{"contents":[{"role":"user","pa` +
+		`rts":[{"text":"think"}]},{"role":"model","parts":[{"text":"hidden thou` +
+		`ght","thought":true}]},{"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -953,11 +1347,20 @@ func TestPrepareAntigravityGeminiReasoningReplayReplacesIDLessFunctionCallBypass
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"run_command","args":{"command":"same"},"thoughtSignature":"idless-native-signature-123456"}`)
+	item := []byte((`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"ru` +
+		`n_command","args":{"command":"same"},"thoughtSignature":"idless-native` +
+		`-signature-123456"}`))
 	internalcache.AntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:idless", [][]byte{item})
-	payload := []byte(`{"sessionId":"idless","request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"command":"same"}},"thoughtSignature":"skip_thought_signature_validator"}]},{"role":"function","parts":[{"functionResponse":{"name":"run_command","response":{"result":"ok"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"idless","request":{"contents":[{"role":"user","parts":[{"text":"run"}]},` +
+		`{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"command":"same"}},"` +
+		`thoughtSignature":"skip_thought_signature_validator"}]},{"role":"function","parts":[{"` +
+		`functionResponse":{"name":"run_command","response":{"result":"ok"}}}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
@@ -970,8 +1373,15 @@ func TestPrepareAntigravityGeminiReasoningReplayReplacesIDLessFunctionCallBypass
 }
 
 func TestAntigravityReasoningReplayContextFingerprintCanonicalizesJSON(t *testing.T) {
-	payload1 := []byte(`{"request":{"tools":[{"functionDeclarations":[{"name":"run","parameters":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"number"}}}}]}],"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"functionCall":{"name":"run","args":{"a":"x","b":2}}}]}]}}`)
-	payload2 := []byte(`{"request":{"tools":[{"functionDeclarations":[{"parameters":{"properties":{"b":{"type":"number"},"a":{"type":"string"}},"type":"object"},"name":"run"}]}],"contents":[{"parts":[{"text":"turn"}],"role":"user"},{"parts":[{"functionCall":{"args":{"b":2,"a":"x"},"name":"run"}}],"role":"model"}]}}`)
+	payload1 := []byte((`{"request":{"tools":[{"functionDeclarations":[{"name":"run","parameter` +
+		`s":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"n` +
+		`umber"}}}}]}],"contents":[{"role":"user","parts":[{"text":"turn"}]},{"` +
+		`role":"model","parts":[{"functionCall":{"name":"run","args":{"a":"x","` +
+		`b":2}}}]}]}}`))
+	payload2 := []byte((`{"request":{"tools":[{"functionDeclarations":[{"parameters":{"properties":{"b":{"` +
+		`type":"number"},"a":{"type":"string"}},"type":"object"},"name":"run"}]}],"contents":[{"parts":[{"` +
+		`text":"turn"}],"role":"user"},{"parts":[{"functionCall":{"args":{"b":2,"a":"x"},"name":"run"}}],"` +
+		`role":"model"}]}}`))
 	if got1, got2 := antigravityReplayContextFingerprint(payload1, 2), antigravityReplayContextFingerprint(
 		payload2, 2,
 	); got1 == "" || got1 != got2 {
@@ -988,11 +1398,24 @@ func TestPrepareAntigravityGeminiReasoningReplayMatchesRewrittenToolCallID(t *te
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"call_id":"native-call-id","name":"run_command","args":{"command":"same"},"thoughtSignature":"rewritten-id-signature-123456"}`)
-	internalcache.AntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:rewritten-id", [][]byte{item})
-	payload := []byte(`{"sessionId":"rewritten-id","request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"id":"claude-generated-id","name":"run_command","args":{"command":"same"}}}]},{"role":"function","parts":[{"functionResponse":{"id":"claude-generated-id","name":"run_command","response":{"result":"ok"}}}]}]}}`)
+	item := []byte((`{"type":"function_call_part","contentIndex":1,"partIndex":0,"call_id":"native-call-id","` +
+		`name":"run_command","args":{"command":"same"},"thoughtSignature":"rewritten-id-signature-123456"}`))
+	internalcache.AntigravityReasoningReplayItems(
+		"gemini-3.6-flash-high",
+		"session:rewritten-id",
+		[][]byte{item},
+	)
+	payload := []byte((`{"sessionId":"rewritten-id","request":{"contents":[{"role":"user","par` +
+		`ts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"id":"` +
+		`claude-generated-id","name":"run_command","args":{"command":"same"}}}]` +
+		`},{"role":"function","parts":[{"functionResponse":{"id":"claude-genera` +
+		`ted-id","name":"run_command","response":{"result":"ok"}}}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
@@ -1008,11 +1431,22 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsReusedIDWithChangedCall(t
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"call_id":"reused-id","name":"run_command","args":{"command":"old"},"thoughtSignature":"reused-id-stale-signature-123456"}`)
+	item := []byte((`{"type":"function_call_part","contentIndex":1,"partIndex":0,"call_id":"reused-id","name":` +
+		`"run_command","args":{"command":"old"},"thoughtSignature":"reused-id-stale-signature-123456"}`))
 	internalcache.AntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:reused-id", [][]byte{item})
-	payload := []byte(`{"sessionId":"reused-id","request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"id":"reused-id","name":"run_command","args":{"command":"new"}}},{"functionCall":{"id":"other-id","name":"run_command","args":{"command":"old"}}}]},{"role":"function","parts":[{"functionResponse":{"id":"reused-id","name":"run_command","response":{"result":"ok"}}},{"functionResponse":{"id":"other-id","name":"run_command","response":{"result":"ok"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"reused-id","request":{"contents":[{"role":"user","parts"` +
+		`:[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"id":"reu` +
+		`sed-id","name":"run_command","args":{"command":"new"}}},{"functionCall` +
+		`":{"id":"other-id","name":"run_command","args":{"command":"old"}}}]},{` +
+		`"role":"function","parts":[{"functionResponse":{"id":"reused-id","name` +
+		`":"run_command","response":{"result":"ok"}}},{"functionResponse":{"id"` +
+		`:"other-id","name":"run_command","response":{"result":"ok"}}}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
@@ -1048,13 +1482,23 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsChangedIDLessCallAtSamePo
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"run_command","args":{"command":"old"},"thoughtSignature":"idless-stale-signature-123456"}`)
+	item := []byte((`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"ru` +
+		`n_command","args":{"command":"old"},"thoughtSignature":"idless-stale-s` +
+		`ignature-123456"}`))
 	internalcache.AntigravityReasoningReplayItems(
 		"gemini-3.6-flash-high", "session:idless-changed", [][]byte{item},
 	)
-	payload := []byte(`{"sessionId":"idless-changed","request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"command":"new"}}}]},{"role":"function","parts":[{"functionResponse":{"name":"run_command","response":{"result":"ok"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"idless-changed","request":{"contents":[{"role":"user","p` +
+		`arts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"nam` +
+		`e":"run_command","args":{"command":"new"}}}]},{"role":"function","part` +
+		`s":[{"functionResponse":{"name":"run_command","response":{"result":"ok` +
+		`"}}}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
@@ -1074,13 +1518,42 @@ func TestAntigravityReasoningReplayPreservesRepeatedIDLessCalls(t *testing.T) {
 		sig1 = "repeated-idless-signature-one-123456"
 		sig2 = "repeated-idless-signature-two-123456"
 	)
-	scope := antigravityReasoningReplayScope{modelName: "gemini-3.6-flash-high", sessionKey: "session:repeated-idless"}
-	request1 := []byte(`{"sessionId":"repeated-idless","request":{"contents":[{"role":"user","parts":[{"text":"run twice"}]}]}}`)
+	scope := antigravityReasoningReplayScope{
+		modelName:  "gemini-3.6-flash-high",
+		sessionKey: "session:repeated-idless",
+	}
+	request1 := []byte(
+		`{"sessionId":"repeated-idless","request":{"contents":[{"role":"user","parts":[{"text":"run twice"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + sig1 + `","functionCall":{"name":"run_command","args":{"command":"same"}}},{"thoughtSignature":"` + sig2 + `","functionCall":{"name":"run_command","args":{"command":"same"}}}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":` +
+				`[{"thoughtSignature":` +
+				`"`) +
+				sig1 +
+				(`","functionCal` +
+					`l":{"name":` +
+					`"run_command",` +
+					`"args":{"comma` +
+					`nd":"same"}}},` +
+					`{"thoughtSigna` +
+					`ture":` +
+					`"`) +
+				sig2 +
+				(`","functionCall":{"name":"run_command","args":{"command":"same"}}}]},"finishReason":"STOP"}]` +
+					`}}`),
+		),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"repeated-idless","request":{"contents":[{"role":"user","parts":[{"text":"run twice"}]},{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"command":"same"}}},{"functionCall":{"name":"run_command","args":{"command":"same"}}}]},{"role":"model","parts":[{"functionResponse":{"name":"run_command","response":{"result":"one"}}},{"functionResponse":{"name":"run_command","response":{"result":"two"}}}]},{"role":"user","parts":[{"text":"continue"}]}]}}`)
+	request2 := []byte((`{"sessionId":"repeated-idless","request":{"contents":[{"role":"user","` +
+		`parts":[{"text":"run twice"}]},{"role":"model","parts":[{"functionCall` +
+		`":{"name":"run_command","args":{"command":"same"}}},{"functionCall":{"` +
+		`name":"run_command","args":{"command":"same"}}}]},{"role":"model","par` +
+		`ts":[{"functionResponse":{"name":"run_command","response":{"result":"o` +
+		`ne"}}},{"functionResponse":{"name":"run_command","response":{"result":` +
+		`"two"}}}]},{"role":"user","parts":[{"text":"continue"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -1106,11 +1579,37 @@ func TestAntigravityReasoningReplayPreservesRepeatedIDLessCallsAcrossSplitSSEPar
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:split-repeated-idless",
 	}
-	request1 := []byte(`{"sessionId":"split-repeated-idless","request":{"contents":[{"role":"user","parts":[{"text":"run twice"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"split-repeated-idless","request":{"contents":[{"role":"user","parts":[{"text":"run twice"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"hidden","thought":true}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + sig1 + `","functionCall":{"name":"run_command","args":{"command":"same"}}}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + sig2 + `","functionCall":{"name":"run_command","args":{"command":"same"}}}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"hidden","thought":true}]}}]}}`),
+	)
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":` +
+				`[{"thoughtSignature":` +
+				`"`) +
+				sig1 +
+				(`","functionCal` +
+					`l":{"name":` +
+					`"run_command",` +
+					`"args":{"comma` +
+					`nd":"same"}}}]` +
+					`}}]}}`),
+		),
+	)
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":` +
+				`[{"thoughtSignature":` +
+				`"`) +
+				sig2 +
+				(`","functionCall":{"name":"run_command","args":{"command":"same"}}}]},"finishReason":"STOP"}]` +
+					`}}`),
+		),
+	)
 	acc.commit(context.Background())
 
 	items, ok := internalcache.GetAntigravityReasoningReplayItems(scope.modelName, scope.sessionKey)
@@ -1125,7 +1624,12 @@ func TestAntigravityReasoningReplayPreservesRepeatedIDLessCallsAcrossSplitSSEPar
 		}
 	}
 
-	request2 := []byte(`{"sessionId":"split-repeated-idless","request":{"contents":[{"role":"user","parts":[{"text":"run twice"}]},{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"command":"same"}}},{"functionCall":{"name":"run_command","args":{"command":"same"}}}]},{"role":"model","parts":[{"functionResponse":{"name":"run_command","response":{"result":"one"}}},{"functionResponse":{"name":"run_command","response":{"result":"two"}}}]},{"role":"user","parts":[{"text":"continue"}]}]}}`)
+	request2 := []byte((`{"sessionId":"split-repeated-idless","request":{"contents":[{"role":"user","parts":[{` +
+		`"text":"run twice"}]},{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"` +
+		`command":"same"}}},{"functionCall":{"name":"run_command","args":{"command":"same"}}}]},{"role":"` +
+		`model","parts":[{"functionResponse":{"name":"run_command","response":{"result":"one"}}},{"` +
+		`functionResponse":{"name":"run_command","response":{"result":"two"}}}]},{"role":"user","parts":[{"` +
+		`text":"continue"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -1148,8 +1652,11 @@ func TestAntigravityReasoningReplayPreservesRepeatedIDLessCallsAcrossSplitSSEPar
 }
 
 func TestAntigravityReasoningReplayLegacyAmbiguousIDLessCallFailsClosed(t *testing.T) {
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":1,"name":"run_command","args":{"command":"same"},"thoughtSignature":"legacy-ambiguous-signature-123456"}`)
-	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"command":"same"}}},{"functionCall":{"name":"run_command","args":{"command":"same"}}}]}]}}`)
+	item := []byte((`{"type":"function_call_part","contentIndex":1,"partIndex":1,"name":"run_command","args":{` +
+		`"command":"same"},"thoughtSignature":"legacy-ambiguous-signature-123456"}`))
+	payload := []byte((`{"request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","` +
+		`parts":[{"functionCall":{"name":"run_command","args":{"command":"same"}}},{"functionCall":{"name":"` +
+		`run_command","args":{"command":"same"}}}]}]}}`))
 	out, changed := insertAntigravityReasoningReplayItems(payload, [][]byte{item})
 	if changed || strings.Contains(string(out), "legacy-ambiguous-signature") {
 		t.Fatalf("legacy ambiguous ID-less replay must fail closed: changed=%v body=%s", changed, out)
@@ -1164,13 +1671,30 @@ func TestAntigravityReasoningReplayAssociatesSignatureBeforeFunctionCall(t *test
 	scope := antigravityReasoningReplayScope{
 		modelName: "gemini-3.6-flash-high", sessionKey: "session:signature-first-tool",
 	}
-	request1 := []byte(`{"sessionId":"signature-first-tool","request":{"contents":[{"role":"user","parts":[{"text":"run"}]}]}}`)
+	request1 := []byte(
+		`{"sessionId":"signature-first-tool","request":{"contents":[{"role":"user","parts":[{"text":"run"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request1)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature + `"}]}}]}}`))
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"run_command","args":{"command":"one"}}}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+				`"thoughtSignature":` +
+				`"`) +
+				signature +
+				`"}]}}]}}`,
+		),
+	)
+	acc.observeSSELine(
+		[]byte((`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"` +
+			`call-1","name":"run_command","args":{"command":"one"}}}]},"finishReason":"STOP"}]}}`)),
+	)
 	acc.commit(context.Background())
 
-	request2 := []byte(`{"sessionId":"signature-first-tool","request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run_command","args":{"command":"one"}}}]},{"role":"function","parts":[{"functionResponse":{"id":"call-1","name":"run_command","response":{"result":"ok"}}}]}]}}`)
+	request2 := []byte((`{"sessionId":"signature-first-tool","request":{"contents":[{"role":"us` +
+		`er","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall"` +
+		`:{"id":"call-1","name":"run_command","args":{"command":"one"}}}]},{"ro` +
+		`le":"function","parts":[{"functionResponse":{"id":"call-1","name":"run` +
+		`_command","response":{"result":"ok"}}}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), scope.modelName, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, request2,
 	)
@@ -1186,13 +1710,26 @@ func TestAntigravityReasoningReplayTerminalEmptyChainClearsCache(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	scope := antigravityReasoningReplayScope{modelName: "gemini-3.6-flash-high", sessionKey: "session:empty-reset"}
-	old := []byte(`{"type":"thought_signature","contentIndex":1,"partIndex":0,"thoughtSignature":"old-signature-123456789"}`)
+	scope := antigravityReasoningReplayScope{
+		modelName:  "gemini-3.6-flash-high",
+		sessionKey: "session:empty-reset",
+	}
+	old := []byte(
+		`{"type":"thought_signature","contentIndex":1,"partIndex":0,"thoughtSignature":"old-signature-123456789"}`,
+	)
 	internalcache.AntigravityReasoningReplayItems(scope.modelName, scope.sessionKey, [][]byte{old})
 
-	request := []byte(`{"sessionId":"empty-reset","request":{"contents":[{"role":"user","parts":[{"text":"new conversation"}]}]}}`)
+	request := []byte(
+		`{"sessionId":"empty-reset","request":{"contents":[{"role":"user","parts":[{"text":"new conversation"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer without signature"}]},"finishReason":"STOP"}]}}`))
+	acc.observeSSELine(
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer ` +
+				`without signature"}]},"finishReason":` +
+				`"STOP"}]}}`),
+		),
+	)
 	acc.commit(context.Background())
 	if items, ok := internalcache.GetAntigravityReasoningReplayItems(
 		scope.modelName, scope.sessionKey,
@@ -1206,9 +1743,14 @@ func TestAntigravityReasoningReplayDoesNotCommitPartialResponse(t *testing.T) {
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
 	scope := antigravityReasoningReplayScope{modelName: "gemini-3.6-flash-high", sessionKey: "session:partial"}
-	request := []byte(`{"sessionId":"partial","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`)
+	request := []byte(
+		`{"sessionId":"partial","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]}]}}`,
+	)
 	acc := newAntigravityReasoningReplayAccumulator(scope, request)
-	acc.observeSSELine([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"partial"},{"text":"","thoughtSignature":"partial-signature-123456789"}]}}]}}`))
+	acc.observeSSELine(
+		[]byte((`data: {"response":{"candidates":[{"content":{"parts":[{"text":"partial` +
+			`"},{"text":"","thoughtSignature":"partial-signature-123456789"}]}}]}}`)),
+	)
 	acc.commit(context.Background())
 
 	if items, ok := internalcache.GetAntigravityReasoningReplayItems(
@@ -1218,27 +1760,39 @@ func TestAntigravityReasoningReplayDoesNotCommitPartialResponse(t *testing.T) {
 	}
 }
 
-func TestPrepareAntigravityGeminiReasoningReplayKeepsTextSignatureOnContextDrift(t *testing.T) {
+func TestPrepareAntigravityGeminiReasoningReplayRejectsTextSignatureOnContextDrift(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
 	kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"same answer"}`))
 	item := buildAntigravityThoughtSignatureItem(1, 0, "fingerprinted-signature-123456", kind, fingerprint)
-	originalPayload := []byte(`{"sessionId":"rebuilt","request":{"contents":[{"role":"user","parts":[{"text":"old context"}]},{"role":"model","parts":[{"text":"same answer"}]},{"role":"user","parts":[{"text":"old next"}]}]}}`)
+	originalPayload := []byte(`{"sessionId":"rebuilt","request":{"contents":[{"role":"user",` +
+		`"parts":[{"text":"old context"}]},{"role":"model",` +
+		`"parts":[{"text":"same answer"}]},{"role":"user",` +
+		`"parts":[{"text":"old next"}]}]}}`)
 	item = antigravitySetReplayItemContextHash(item, originalPayload, 1)
 	internalcache.AntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:rebuilt", [][]byte{item})
 
-	payload := []byte(`{"sessionId":"rebuilt","request":{"contents":[{"role":"user","parts":[{"text":"new context"}]},{"role":"model","parts":[{"text":"same answer"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	payload := []byte(`{"sessionId":"rebuilt","request":{"contents":[{"role":"user",` +
+		`"parts":[{"text":"new context"}]},{"role":"model",` +
+		`"parts":[{"text":"same answer"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	if path, matched := antigravityThoughtSignatureReplayPartPath(payload, gjson.ParseBytes(item)); matched {
+		t.Fatalf("sequential replay accepted a different context at %s", path)
+	}
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
 	if got := gjson.GetBytes(
 		out, "request.contents.1.parts.0.thoughtSignature",
-	).String(); got != "fingerprinted-signature-123456" {
-		t.Fatalf("signature = %q, want replay across context drift; body=%s", got, out)
+	).String(); got != "" {
+		t.Fatalf("mismatched rebuilt context received stale signature %q; body=%s", got, out)
 	}
 }
 
@@ -1250,9 +1804,15 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsFingerprintMismatch(t *te
 	item := buildAntigravityThoughtSignatureItem(1, 0, "fingerprinted-signature-123456", kind, fingerprint)
 	internalcache.AntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:edited", [][]byte{item})
 
-	payload := []byte(`{"sessionId":"edited","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"edited answer"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	payload := []byte((`{"sessionId":"edited","request":{"contents":[{"role":"user","parts":[{` +
+		`"text":"turn"}]},{"role":"model","parts":[{"text":"edited answer"}]},{` +
+		`"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
@@ -1266,14 +1826,26 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsLegacyTextSignatureOnCont
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"thought_signature","contentIndex":1,"partIndex":0,"thoughtSignature":"legacy-signature-123456"}`)
-	originalPayload := []byte(`{"sessionId":"legacy-drift","request":{"contents":[{"role":"user","parts":[{"text":"old context"}]},{"role":"model","parts":[{"text":"same answer"}]}]}}`)
+	item := []byte(
+		`{"type":"thought_signature","contentIndex":1,"partIndex":0,"thoughtSignature":"legacy-signature-123456"}`,
+	)
+	originalPayload := []byte((`{"sessionId":"legacy-drift","request":{"contents":[{"role":"user","parts":[{"` +
+		`text":"old context"}]},{"role":"model","parts":[{"text":"same answer"}]}]}}`))
 	item = antigravitySetReplayItemContextHash(item, originalPayload, 1)
-	internalcache.AntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:legacy-drift", [][]byte{item})
+	internalcache.AntigravityReasoningReplayItems(
+		"gemini-3.6-flash-high",
+		"session:legacy-drift",
+		[][]byte{item},
+	)
 
-	payload := []byte(`{"sessionId":"legacy-drift","request":{"contents":[{"role":"user","parts":[{"text":"new context"}]},{"role":"model","parts":[{"text":"same answer"}]}]}}`)
+	payload := []byte((`{"sessionId":"legacy-drift","request":{"contents":[{"role":"user","parts":[{"text":"` +
+		`new context"}]},{"role":"model","parts":[{"text":"same answer"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
@@ -1292,9 +1864,16 @@ func TestPrepareAntigravityGeminiReasoningReplayMovesClientSignatureToNativePart
 	internalcache.AntigravityReasoningReplayItems(
 		"gemini-3.6-flash-high", "session:client-carried", [][]byte{item},
 	)
-	payload := []byte(`{"sessionId":"client-carried","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"hidden","thought":true,"thoughtSignature":"client-carried-signature-123456"},{"text":"visible answer"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	payload := []byte((`{"sessionId":"client-carried","request":{"contents":[{"role":"user","p` +
+		`arts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"hidden","th` +
+		`ought":true,"thoughtSignature":"client-carried-signature-123456"},{"te` +
+		`xt":"visible answer"}]},{"role":"user","parts":[{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
@@ -1313,11 +1892,20 @@ func TestPrepareAntigravityGeminiReasoningReplayReplacesBypassSignature(t *testi
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	item := []byte(`{"type":"thought_signature","contentIndex":1,"partIndex":0,"thoughtSignature":"native-real-signature-123456"}`)
+	item := []byte(
+		`{"type":"thought_signature","contentIndex":1,"partIndex":0,"thoughtSignature":"native-real-signature-123456"}`,
+	)
 	internalcache.AntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:bypass", [][]byte{item})
-	payload := []byte(`{"sessionId":"bypass","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"answer","thoughtSignature":"skip_thought_signature_validator"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
+	payload := []byte((`{"sessionId":"bypass","request":{"contents":[{"role":"user","parts":[{` +
+		`"text":"turn"}]},{"role":"model","parts":[{"text":"answer","thoughtSig` +
+		`nature":"skip_thought_signature_validator"}]},{"role":"user","parts":[` +
+		`{"text":"next"}]}]}}`))
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload,
+		context.Background(),
+		"gemini-3.6-flash-high",
+		cliproxyexecutor.Request{},
+		cliproxyexecutor.Options{},
+		payload,
 	)
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
@@ -1330,8 +1918,12 @@ func TestPrepareAntigravityGeminiReasoningReplayReplacesBypassSignature(t *testi
 }
 
 func TestAntigravityReasoningReplayScopePrefersExecutionSession(t *testing.T) {
-	req := cliproxyexecutor.Request{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "client-session"}}
-	payload := []byte(`{"sessionId":"provider-session","request":{"contents":[{"role":"user","parts":[{"text":"same prompt"}]}]}}`)
+	req := cliproxyexecutor.Request{
+		Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "client-session"},
+	}
+	payload := []byte(
+		`{"sessionId":"provider-session","request":{"contents":[{"role":"user","parts":[{"text":"same prompt"}]}]}}`,
+	)
 	scope := antigravityReasoningReplayScopeFromRequest(
 		context.Background(), "gemini-3.6-flash-high", req, cliproxyexecutor.Options{}, payload,
 	)
@@ -1355,18 +1947,20 @@ func TestAntigravityReasoningReplayScopePrefersStableSessionOverExecutionUUID(t 
 
 func TestAntigravityReasoningReplayScopeUsesUnderscoreSessionHeader(t *testing.T) {
 	for _, header := range []string{"Session_id", "session_id"} {
-		t.Run(header, func(t *testing.T) {
-			opts := cliproxyexecutor.Options{
-				Headers:  http.Header{header: {"stable-session"}},
-				Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "socket-uuid"},
-			}
-			scope := antigravityReasoningReplayScopeFromRequest(
-				context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, opts, nil,
-			)
-			if got := scope.sessionKey; got != "responses:stable-session" {
-				t.Fatalf("session key = %q, want stable Responses session", got)
-			}
-		})
+		t.Run(
+			header, func(t *testing.T) {
+				opts := cliproxyexecutor.Options{
+					Headers:  http.Header{header: {"stable-session"}},
+					Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "socket-uuid"},
+				}
+				scope := antigravityReasoningReplayScopeFromRequest(
+					context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, opts, nil,
+				)
+				if got := scope.sessionKey; got != "responses:stable-session" {
+					t.Fatalf("session key = %q, want stable Responses session", got)
+				}
+			},
+		)
 	}
 }
 
@@ -1392,14 +1986,28 @@ func TestAntigravityReasoningReplayScopeSeparatesPromptCacheAndExplicitSessionNa
 		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{},
 		cliproxyexecutor.Options{OriginalRequest: []byte(`{"session_id":"same-value"}`)}, nil,
 	)
-	if promptScope.sessionKey != "prompt-cache:same-value" || sessionScope.sessionKey != "responses:same-value" || promptScope.sessionKey == sessionScope.sessionKey {
-		t.Fatalf("prompt/session namespaces collided: %q vs %q", promptScope.sessionKey, sessionScope.sessionKey)
+	if promptScope.sessionKey != "prompt-cache:same-value" ||
+		sessionScope.sessionKey != "responses:same-value" ||
+		promptScope.sessionKey == sessionScope.sessionKey {
+		t.Fatalf(
+			"prompt/session namespaces collided: %q vs %q",
+			promptScope.sessionKey,
+			sessionScope.sessionKey,
+		)
 	}
 }
 
 func TestAntigravityReasoningReplayScopeUsesClaudeMetadataSession(t *testing.T) {
-	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"user_id":"{\"session_id\":\"claude-session\",\"device_id\":\"device\"}"}}`)}
-	payload := []byte(`{"sessionId":"generated-from-prompt","request":{"contents":[{"role":"user","parts":[{"text":"same prompt"}]}]}}`)
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(
+			`{"metadata":{"user_id":"{\"session_id\":\"claude-session\",\"device_id\":\"device\"}"}}`,
+		),
+	}
+	payload := []byte(
+		(`{"sessionId":"generated-from-prompt","request":{"contents":[{"role":` +
+			`"user","parts":[{"text":"same ` +
+			`prompt"}]}]}}`),
+	)
 	scope := antigravityReasoningReplayScopeFromRequest(
 		context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, opts, payload,
 	)
@@ -1418,20 +2026,36 @@ func TestAntigravityReasoningReplaySeparatesClaudeSessionTitleFromResumedTranscr
 		sig2  = "claude-resume-signature-two-123456"
 	)
 	headers := http.Header{"X-Claude-Code-Session-Id": []string{"claude-resume-session"}}
-	mainOriginal1 := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"root prompt"}]}],"system":[{"type":"text","text":"You are Claude Code."}],"thinking":{"type":"enabled"},"tools":[{"name":"Read"}]}`)
+	mainOriginal1 := []byte((`{"messages":[{"role":"user","content":[{"type":"text","text":"root prompt"}]}],"` +
+		`system":[{"type":"text","text":"You are Claude Code."}],"thinking":{"type":"enabled"},"tools":[{"` +
+		`name":"Read"}]}`))
 	mainRequest1 := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"root prompt"}]}]}}`)
 	mainScope := antigravityReasoningReplayScopeFromRequest(
 		context.Background(), model, cliproxyexecutor.Request{},
 		cliproxyexecutor.Options{Headers: headers, OriginalRequest: mainOriginal1}, mainRequest1,
 	)
 	mainAccumulator1 := newAntigravityReasoningReplayAccumulator(mainScope, mainRequest1)
-	mainAccumulator1.observeResponsePayload([]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"answer one"},{"text":"","thoughtSignature":"` + sig1 + `"}]},"finishReason":"STOP"}]}}`))
+	mainAccumulator1.observeResponsePayload(
+		[]byte(
+			(`{"response":{"candidates":[{"content":{"parts":[{"text":"answer one"},` +
+				`{"text":"","thoughtSignature":` +
+				`"`) +
+				sig1 +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	mainAccumulator1.commit(context.Background())
 
 	// Prepare the next main turn before the auxiliary request commits. This
 	// reproduces Claude Code's concurrent title/main request ordering.
-	mainOriginal2 := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"root prompt"}]},{"role":"assistant","content":[{"type":"text","text":"answer one"}]},{"role":"user","content":[{"type":"text","text":"next prompt"}]}],"system":[{"type":"text","text":"You are Claude Code."}],"thinking":{"type":"enabled"},"tools":[{"name":"Read"}]}`)
-	mainRequest2 := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"root prompt"}]},{"role":"model","parts":[{"text":"answer one"}]},{"role":"user","parts":[{"text":"next prompt"}]}]}}`)
+	mainOriginal2 := []byte((`{"messages":[{"role":"user","content":[{"type":"text","text":"root pro` +
+		`mpt"}]},{"role":"assistant","content":[{"type":"text","text":"answer o` +
+		`ne"}]},{"role":"user","content":[{"type":"text","text":"next prompt"}]` +
+		`}],"system":[{"type":"text","text":"You are Claude Code."}],"thinking"` +
+		`:{"type":"enabled"},"tools":[{"name":"Read"}]}`))
+	mainRequest2 := []byte((`{"request":{"contents":[{"role":"user","parts":[{"text":"root prompt"}` +
+		`]},{"role":"model","parts":[{"text":"answer one"}]},{"role":"user","pa` +
+		`rts":[{"text":"next prompt"}]}]}}`))
 	prepared2, scope2, errPrepare2 := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{},
 		cliproxyexecutor.Options{Headers: headers, OriginalRequest: mainOriginal2}, mainRequest2,
@@ -1443,7 +2067,9 @@ func TestAntigravityReasoningReplaySeparatesClaudeSessionTitleFromResumedTranscr
 		t.Fatalf("main replay scope changed: first=%q second=%q", mainScope.sessionKey, scope2.sessionKey)
 	}
 
-	titleOriginal := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"root prompt"}]}],"system":[{"type":"text","text":"Generate a concise title that summarizes this session."}],"tools":[]}`)
+	titleOriginal := []byte((`{"messages":[{"role":"user","content":[{"type":"text","text":"root pro` +
+		`mpt"}]}],"system":[{"type":"text","text":"Generate a concise title tha` +
+		`t summarizes this session."}],"tools":[]}`))
 	titleRequest := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"root prompt"}]}]}}`)
 	preparedTitle, titleScope, errPrepareTitle := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{},
@@ -1456,22 +2082,44 @@ func TestAntigravityReasoningReplaySeparatesClaudeSessionTitleFromResumedTranscr
 		mainScope.sessionKey, ":context:",
 	) || !strings.Contains(titleScope.sessionKey, ":context:") {
 		t.Fatalf(
-			"Claude title/main replay scopes collided: main=%q title=%q", mainScope.sessionKey, titleScope.sessionKey,
+			"Claude title/main replay scopes collided: main=%q title=%q",
+			mainScope.sessionKey,
+			titleScope.sessionKey,
 		)
 	}
 	titleAccumulator := newAntigravityReasoningReplayAccumulator(titleScope, preparedTitle)
-	titleAccumulator.observeResponsePayload([]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"session title"},{"text":"","thoughtSignature":"claude-title-signature-123456"}]},"finishReason":"STOP"}]}}`))
+	titleAccumulator.observeResponsePayload(
+		[]byte((`{"response":{"candidates":[{"content":{"parts":[{"text":"session title"},{"text":"","` +
+			`thoughtSignature":"claude-title-signature-123456"}]},"finishReason":"STOP"}]}}`)),
+	)
 	titleAccumulator.commit(context.Background())
 
 	if got := gjson.GetBytes(prepared2, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("first main signature after title request = %q, want %q; body=%s", got, sig1, prepared2)
 	}
 	mainAccumulator2 := newAntigravityReasoningReplayAccumulator(scope2, prepared2)
-	mainAccumulator2.observeResponsePayload([]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"answer two"},{"text":"","thoughtSignature":"` + sig2 + `"}]},"finishReason":"STOP"}]}}`))
+	mainAccumulator2.observeResponsePayload(
+		[]byte(
+			(`{"response":{"candidates":[{"content":{"parts":[{"text":"answer two"},` +
+				`{"text":"","thoughtSignature":` +
+				`"`) +
+				sig2 +
+				`"}]},"finishReason":"STOP"}]}}`,
+		),
+	)
 	mainAccumulator2.commit(context.Background())
 
-	resumeOriginal := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"root prompt"}]},{"role":"assistant","content":[{"type":"text","text":"answer one"}]},{"role":"user","content":[{"type":"text","text":"next prompt"}]},{"role":"assistant","content":[{"type":"text","text":"answer two"}]},{"role":"user","content":[{"type":"text","text":"resumed prompt"}]}],"system":[{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}],"thinking":{"type":"enabled"},"tools":[{"name":"Read"}]}`)
-	resumeRequest := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"root prompt"}]},{"role":"model","parts":[{"text":"answer one"}]},{"role":"user","parts":[{"text":"next prompt"}]},{"role":"model","parts":[{"text":"answer two"}]},{"role":"user","parts":[{"text":"resumed prompt"}]}]}}`)
+	resumeOriginal := []byte((`{"messages":[{"role":"user","content":[{"type":"text","text":"root pro` +
+		`mpt"}]},{"role":"assistant","content":[{"type":"text","text":"answer o` +
+		`ne"}]},{"role":"user","content":[{"type":"text","text":"next prompt"}]` +
+		`},{"role":"assistant","content":[{"type":"text","text":"answer two"}]}` +
+		`,{"role":"user","content":[{"type":"text","text":"resumed prompt"}]}],` +
+		`"system":[{"type":"text","text":"You are Claude Code.","cache_control"` +
+		`:{"type":"ephemeral"}}],"thinking":{"type":"enabled"},"tools":[{"name"` +
+		`:"Read"}]}`))
+	resumeRequest := []byte((`{"request":{"contents":[{"role":"user","parts":[{"text":"root prompt"}]},{"role"` +
+		`:"model","parts":[{"text":"answer one"}]},{"role":"user","parts":[{"text":"next prompt"}]},{"role":"` +
+		`model","parts":[{"text":"answer two"}]},{"role":"user","parts":[{"text":"resumed prompt"}]}]}}`))
 	resumed, resumeScope, errResume := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{},
 		cliproxyexecutor.Options{Headers: headers, OriginalRequest: resumeOriginal}, resumeRequest,
@@ -1599,7 +2247,12 @@ func TestPrepareAntigravityGeminiReasoningReplayRepairsSequentialCompactedUnknow
 	fcID := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.id").String()
 	fcSig := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String()
 	if fcName != "Read" || fcID != "call_seq_1" || fcSig != "EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg" {
-		t.Fatalf("restored functionCall = name:%q id:%q sig:%q, want Read/call_seq_1/signature", fcName, fcID, fcSig)
+		t.Fatalf(
+			"restored functionCall = name:%q id:%q sig:%q, want Read/call_seq_1/signature",
+			fcName,
+			fcID,
+			fcSig,
+		)
 	}
 
 	// Verify user functionResponse.name was repaired from "unknown" to "Read"
@@ -1739,14 +2392,40 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresClaudeToolProvenanceWith
 	const signature = "EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"
 	const nativeArgs = `{"file_path":"/tmp/a","old_string":"x","new_string":"y"}`
 	clientID := util.GeminiClaudeToolUseID(nativeID, "Edit", nativeArgs)
-	payload := []byte(`{"sessionId":"sess-claude-default","request":{"contents":[{"role":"user","parts":[{"text":"edit"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + clientID + `","name":"Edit","args":{"file_path":"/tmp/a","old_string":"x","new_string":"y","replace_all":false}}}]},{"role":"user","parts":[{"functionResponse":{"id":"` + clientID + `","name":"Edit","response":{"result":"ok"}}}]}]}}`)
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"targetOccurrence":0,"name":"Edit","call_id":"` + nativeID + `","args":` + nativeArgs + `,"thoughtSignature":"` + signature + `"}`)
+	payload := []byte((`{"sessionId":"sess-claude-default","request":{"contents":[{"role":"user","parts":[{"` +
+		`text":"edit"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","` +
+		`functionCall":{"id":"`) +
+		clientID +
+		(`","name":"Edit","args":{"file_path":"/tmp/a","old_string":"x","new_string":"y","replace_all":false}}` +
+			`}]},{"role":"user","parts":[{"functionResponse":{"id":"`) + clientID +
+		`","name":"Edit","response":{"result":"ok"}}}]}]}}`)
+	item := []byte(
+		(`{"type":"function_call_part","contentIndex":1,"partIndex":0,` +
+			`"targetOccurrence":0,"name":"Edit","call_id":` +
+			`"`) +
+			nativeID +
+			`","args":` +
+			nativeArgs +
+			(`,"thoughtSigna` +
+				`ture":` +
+				`"`) +
+			signature +
+			`"}`,
+	)
 	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
 	if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
 		t.Fatal("failed to cache native Edit provenance")
 	}
-	original := []byte(`{"model":"` + model + `","tools":[{"name":"Edit","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}}}}]}`)
-	opts := cliproxyexecutor.Options{OriginalRequest: original, SourceFormat: sdktranslator.FromString("claude")}
+	original := []byte(
+		`{"model":"` + model + (`","tools":[{"name":"Edit","input_schema":{"type":"object","properties"` +
+			`:{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_st` +
+			`ring":{"type":"string"},"replace_all":{"type":"boolean","default":fals` +
+			`e}}}}]}`),
+	)
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: original,
+		SourceFormat:    sdktranslator.FromString("claude"),
+	}
 
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload,
@@ -1755,7 +2434,8 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresClaudeToolProvenanceWith
 		t.Fatalf("prepare failed: %v", errPrepare)
 	}
 	call := gjson.GetBytes(out, "request.contents.1.parts.0")
-	if call.Get("functionCall.id").String() != nativeID || call.Get("functionCall.name").String() != "Edit" || call.Get("thoughtSignature").String() != signature {
+	if call.Get("functionCall.id").String() != nativeID || call.Get("functionCall.name").String() != "Edit" ||
+		call.Get("thoughtSignature").String() != signature {
 		t.Fatalf("native call provenance was not restored: %s", call.Raw)
 	}
 	if call.Get("functionCall.args.replace_all").Exists() {
@@ -1775,9 +2455,24 @@ func TestApplyAntigravityReasoningReplayRejectsDuplicateStableIDInSequentialFall
 	const args = `{"file_path":"/tmp/a"}`
 	stableID := util.GeminiClaudeToolUseID(nativeID, "Read", args)
 	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[` +
-		`{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}},` +
+		(`{"thoughtSignature":"skip_thought_signature_validator","functionCall":` +
+			`{"id":` +
+			`"`) +
+		stableID +
+		(`","name":` +
+			`"Read","args":`) +
+		args +
+		`}},` +
 		`{"functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}}]}]}}`)
-	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `,"thoughtSignature":"duplicate-stable-signature-123456789"}`)
+	item := []byte(
+		(`{"type":"function_call_part","contentIndex":0,"partIndex":0,` +
+			`"targetOccurrence":0,"name":"Read","call_id":` +
+			`"`) +
+			nativeID +
+			`","args":` +
+			args +
+			`,"thoughtSignature":"duplicate-stable-signature-123456789"}`,
+	)
 
 	out, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item}, nil)
 	if changed {
@@ -1794,11 +2489,42 @@ func TestApplyAntigravityReasoningReplayRebuildsIndexAfterIdentityMutation(t *te
 	const args = `{"file_path":"/tmp/a"}`
 	stableID := util.GeminiClaudeToolUseID(nativeID, "Read", args)
 	payload := []byte(`{"request":{"contents":[` +
-		`{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}}]},` +
-		`{"role":"user","parts":[{"functionResponse":{"id":"` + stableID + `","name":"unknown","response":{"result":"ok"}}}]}]}}`)
+		(`{"role":"model","parts":[{"thoughtSignature":` +
+			`"skip_thought_signature_validator","functionCall":{"id":` +
+			`"`) +
+		stableID +
+		(`","name":` +
+			`"Read","args":`) +
+		args +
+		`}}]},` +
+		(`{"role":"user","parts":[{"functionResponse":{"id":` +
+			`"`) +
+		stableID +
+		(`","name":"unknown","response":` +
+			`{"result":"ok"}}}]}]}}`))
 	items := [][]byte{
-		[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `}`),
-		[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `,"thoughtSignature":"` + signature + `"}`),
+		[]byte(
+			(`{"type":"function_call_part","contentIndex":0,"partIndex":0,` +
+				`"targetOccurrence":0,"name":"Read","call_id":` +
+				`"`) +
+				nativeID +
+				`","args":` +
+				args +
+				`}`,
+		),
+		[]byte(
+			(`{"type":"function_call_part","contentIndex":0,"partIndex":0,` +
+				`"targetOccurrence":0,"name":"Read","call_id":` +
+				`"`) +
+				nativeID +
+				`","args":` +
+				args +
+				(`,"thoughtSigna` +
+					`ture":` +
+					`"`) +
+				signature +
+				`"}`,
+		),
 	}
 
 	out, changed := applyAntigravityReasoningReplayItems(payload, items, nil)
@@ -1821,9 +2547,32 @@ func TestApplyAntigravityReasoningReplayCompletesFinalIdentityMutation(t *testin
 	const args = `{"file_path":"/tmp/a"}`
 	stableID := util.GeminiClaudeToolUseID(nativeID, "Read", args)
 	payload := []byte(`{"request":{"contents":[` +
-		`{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}}]},` +
-		`{"role":"user","parts":[{"functionResponse":{"id":"` + stableID + `","name":"unknown","response":{"result":"ok"}}}]}]}}`)
-	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `,"thoughtSignature":"` + signature + `"}`)
+		(`{"role":"model","parts":[{"thoughtSignature":` +
+			`"skip_thought_signature_validator","functionCall":{"id":` +
+			`"`) +
+		stableID +
+		(`","name":` +
+			`"Read","args":`) +
+		args +
+		`}}]},` +
+		(`{"role":"user","parts":[{"functionResponse":{"id":` +
+			`"`) +
+		stableID +
+		(`","name":"unknown","response":` +
+			`{"result":"ok"}}}]}]}}`))
+	item := []byte(
+		(`{"type":"function_call_part","contentIndex":0,"partIndex":0,` +
+			`"targetOccurrence":0,"name":"Read","call_id":` +
+			`"`) +
+			nativeID +
+			`","args":` +
+			args +
+			(`,"thoughtSigna` +
+				`ture":` +
+				`"`) +
+			signature +
+			`"}`,
+	)
 
 	out, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item}, nil)
 	if !changed {
@@ -1845,12 +2594,24 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresLegacyClaudeToolIDWithSc
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
 	const model = "gemini-3.6-flash-high"
-	payload := []byte(`{"sessionId":"sess-claude-legacy-default","request":{"contents":[{"role":"user","parts":[{"text":"edit"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"Edit-legacy-client-id","name":"Edit","args":{"file_path":"/tmp/a","old_string":"x","new_string":"y","replace_all":false}}}]},{"role":"user","parts":[{"functionResponse":{"id":"Edit-legacy-client-id","name":"Edit","response":{"result":"ok"}}}]}]}}`)
-	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"targetOccurrence":0,"name":"Edit","call_id":"native-edit-legacy","args":{"file_path":"/tmp/a","old_string":"x","new_string":"y"},"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+	payload := []byte((`{"sessionId":"sess-claude-legacy-default","request":{"contents":[{"rol` +
+		`e":"user","parts":[{"text":"edit"}]},{"role":"model","parts":[{"though` +
+		`tSignature":"skip_thought_signature_validator","functionCall":{"id":"E` +
+		`dit-legacy-client-id","name":"Edit","args":{"file_path":"/tmp/a","old_` +
+		`string":"x","new_string":"y","replace_all":false}}}]},{"role":"user","` +
+		`parts":[{"functionResponse":{"id":"Edit-legacy-client-id","name":"Edit` +
+		`","response":{"result":"ok"}}}]}]}}`))
+	item := []byte((`{"type":"function_call_part","contentIndex":1,"partIndex":0,"targetOccurrence":0,"name":"` +
+		`Edit","call_id":"native-edit-legacy","args":{"file_path":"/tmp/a","old_string":"x","new_string":"y"}` +
+		`,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`))
 	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
 	internalcache.AntigravityReasoningReplayItems(model, sessionKey, [][]byte{item})
-	original := []byte(`{"tools":[{"name":"Edit","input_schema":{"type":"object","properties":{"replace_all":{"type":"boolean","default":false}}}}]}`)
-	opts := cliproxyexecutor.Options{OriginalRequest: original, SourceFormat: sdktranslator.FromString("claude")}
+	original := []byte((`{"tools":[{"name":"Edit","input_schema":{"type":"object","properties":` +
+		`{"replace_all":{"type":"boolean","default":false}}}}]}`))
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: original,
+		SourceFormat:    sdktranslator.FromString("claude"),
+	}
 
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload,
@@ -1874,7 +2635,16 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWithoutClaudeToolProvena
 
 	const model = "gemini-3.6-flash-high"
 	clientID := util.GeminiClaudeToolUseID("native-missing", "Read", `{"file_path":"/tmp/a"}`)
-	payload := []byte(`{"sessionId":"sess-missing-provenance","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + clientID + `","name":"Read","args":{"file_path":"/tmp/a"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"` + clientID + `","name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload := []byte((`{"sessionId":"sess-missing-provenance","request":{"contents":[{"role":` +
+		`"model","parts":[{"thoughtSignature":"skip_thought_signature_validator` +
+		(`","functionCall":{"id":` +
+			`"`)) +
+		clientID +
+		(`","name":"Read","args":{"file_path":"/tmp/a"}}}]},{"role":` +
+			`"user","parts":[{"functionResponse":{"id":` +
+			`"`) +
+		clientID +
+		`","name":"Read","response":{"result":"ok"}}}]}]}}`)
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}
 
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
@@ -1894,7 +2664,11 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWithoutClaudeToolProvena
 	response := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse")
 	callID := call.Get("functionCall.id").String()
 	if callID == "" || callID != response.Get("id").String() {
-		t.Fatalf("degraded call/response pairing broken: call=%q response=%q", callID, response.Get("id").String())
+		t.Fatalf(
+			"degraded call/response pairing broken: call=%q response=%q",
+			callID,
+			response.Get("id").String(),
+		)
 	}
 	if got := call.Get("thoughtSignature").String(); got != internalsignature.GeminiSkipThoughtSignatureValidator {
 		t.Fatalf("first degraded call thoughtSignature = %q, want bypass sentinel", got)
@@ -1905,47 +2679,106 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWithoutClaudeToolProvena
 }
 
 func TestPrepareAntigravityGeminiReasoningReplayRestoresParallelClaudeToolProvenance(t *testing.T) {
-	internalcache.ClearAntigravityReasoningReplayCache()
-	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+	for _, mixedUserText := range []bool{false, true} {
+		t.Run(
+			fmt.Sprintf("mixed_user_text=%t", mixedUserText), func(t *testing.T) {
+				internalcache.ClearAntigravityReasoningReplayCache()
+				t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	const model = "gemini-3.6-flash-high"
-	const args1 = `{"file_path":"/tmp/a"}`
-	const args2 = `{"file_path":"/tmp/b"}`
-	clientID1 := util.GeminiClaudeToolUseID("native-read-1", "Read", args1)
-	clientID2 := util.GeminiClaudeToolUseID("native-read-2", "Read", args2)
-	payload := []byte(`{"sessionId":"sess-parallel-provenance","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + clientID1 + `","name":"Read","args":{"file_path":"/tmp/a","offset":0}}},{"functionCall":{"id":"` + clientID2 + `","name":"Read","args":{"file_path":"/tmp/b","offset":0}}}]},{"role":"user","parts":[{"functionResponse":{"id":"` + clientID2 + `","name":"Read","response":{"result":"b"}}},{"functionResponse":{"id":"` + clientID1 + `","name":"Read","response":{"result":"a"}}}]}]}}`)
-	items := [][]byte{
-		[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"native-read-1","args":` + args1 + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`),
-		[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":1,"targetOccurrence":0,"name":"Read","call_id":"native-read-2","args":` + args2 + `}`),
-	}
-	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
-	if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, items) {
-		t.Fatal("failed to cache parallel provenance")
-	}
-	original := []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","default":0}}}}]}`)
-	opts := cliproxyexecutor.Options{OriginalRequest: original, SourceFormat: sdktranslator.FromString("claude")}
+				const model = "gemini-3.6-flash-high"
+				const args1 = `{"file_path":"/tmp/a"}`
+				const args2 = `{"file_path":"/tmp/b"}`
+				clientID1 := util.GeminiClaudeToolUseID("native-read-1", "Read", args1)
+				clientID2 := util.GeminiClaudeToolUseID("native-read-2", "Read", args2)
+				payload := []byte(`{"sessionId":"sess-parallel-provenance",` +
+					`"request":{"contents":[{"role":"model",` +
+					`"parts":[{"thoughtSignature":"skip_thought_signature_validator",` +
+					(`"functionCall":{"id":` +
+						`"`) +
+					clientID1 +
+					(`","name":"Read","args":{"file_path":"/tmp/a",` +
+						`"offset":0}}},`) +
+					`{"functionCall":{"id":"` + clientID2 + `","name":"Read","args":{"file_path":"/tmp/b",` +
+					`"offset":0}}}]},{"role":"user",` +
+					`"parts":[{"text":"results follow"},{"functionResponse":{"id":"` +
+					clientID2 +
+					`","name":"Read","response":{"result":"b"}}},` +
+					`{"functionResponse":{"id":"` + clientID1 + `","name":"Read","response":{"result":"a"}}},` +
+					`{"text":"continue"}]}]}}`)
+				if !mixedUserText {
+					payload = bytes.Replace(payload, []byte(`{"text":"results follow"},`), nil, 1)
+					payload = bytes.Replace(payload, []byte(`,{"text":"continue"}`), nil, 1)
+				}
+				items := [][]byte{
+					[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,` +
+						`"targetOccurrence":0,"name":"Read",` +
+						`"call_id":"native-read-1","args":` +
+						args1 +
+						`,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`),
+					[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":1,` +
+						`"targetOccurrence":0,"name":"Read",` +
+						`"call_id":"native-read-2","args":` + args2 + `}`),
+				}
+				sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+				if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, items) {
+					t.Fatal("failed to cache parallel provenance")
+				}
+				original := []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object",` +
+					`"properties":{"file_path":{"type":"string"},` +
+					`"offset":{"type":"integer",` +
+					`"default":0}}}}]}`)
+				opts := cliproxyexecutor.Options{
+					OriginalRequest: original, SourceFormat: sdktranslator.FromString("claude"),
+				}
 
-	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
-		context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload,
-	)
-	if errPrepare != nil {
-		t.Fatalf("prepare failed: %v", errPrepare)
-	}
-	calls := gjson.GetBytes(out, "request.contents.0.parts").Array()
-	if len(calls) != 2 || calls[0].Get("functionCall.id").String() != "native-read-1" || calls[1].Get("functionCall.id").String() != "native-read-2" {
-		t.Fatalf("parallel calls were not restored in native order: %s", out)
-	}
-	if calls[0].Get("thoughtSignature").String() == "" || calls[1].Get("thoughtSignature").Exists() {
-		t.Fatalf("signed/unsigned parallel provenance changed: %s", gjson.GetBytes(out, "request.contents.0").Raw)
-	}
-	responses := gjson.GetBytes(out, "request.contents.1.parts").Array()
-	if len(responses) != 2 || responses[0].Get("functionResponse.id").String() != "native-read-1" || responses[1].Get("functionResponse.id").String() != "native-read-2" {
-		t.Fatalf(
-			"parallel responses were not normalized to native order: %s", gjson.GetBytes(out, "request.contents.1").Raw,
+				out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
+					context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts,
+					payload,
+				)
+				if errPrepare != nil {
+					t.Fatalf("prepare failed: %v", errPrepare)
+				}
+				calls := gjson.GetBytes(out, "request.contents.0.parts").Array()
+				if len(calls) != 2 || calls[0].Get("functionCall.id").String() != "native-read-1" ||
+					calls[1].Get("functionCall.id").String() != "native-read-2" {
+					t.Fatalf("parallel calls were not restored in native order: %s", out)
+				}
+				if calls[0].Get("thoughtSignature").String() == "" ||
+					calls[1].Get("thoughtSignature").Exists() {
+					t.Fatalf(
+						"signed/unsigned parallel provenance changed: %s",
+						gjson.GetBytes(out, "request.contents.0").Raw,
+					)
+				}
+				responses := gjson.GetBytes(out, "request.contents.1.parts").Array()
+				wantParts, wantRole := 2, "model"
+				if mixedUserText {
+					wantParts, wantRole = 4, "user"
+				}
+				if len(responses) != wantParts ||
+					responses[0].Get("functionResponse.id").String() != "native-read-1" ||
+					responses[1].Get("functionResponse.id").String() != "native-read-2" {
+					t.Fatalf(
+						"parallel responses were not normalized to native order: %s",
+						gjson.GetBytes(out, "request.contents.1").Raw,
+					)
+				}
+				if mixedUserText &&
+					(responses[2].Get("text").String() !=
+						("results "+
+							"follow") ||
+						responses[3].Get("text").String() !=
+							"continue") {
+					t.Fatalf("mixed user text changed after parallel responses: %s", out)
+				}
+				if role := gjson.GetBytes(out, "request.contents.1.role").String(); role != wantRole {
+					t.Fatalf("response role=%q, want %s: %s", role, wantRole, out)
+				}
+				if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+					t.Fatalf("parallel restored history is invalid: %v", errPairing)
+				}
+			},
 		)
-	}
-	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
-		t.Fatalf("parallel restored history is invalid: %v", errPairing)
 	}
 }
 
@@ -1956,12 +2789,23 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsChangedClaudeToolArgument
 	const model = "gemini-3.6-flash-high"
 	const nativeArgs = `{"file_path":"/tmp/a","old_string":"x","new_string":"y"}`
 	clientID := util.GeminiClaudeToolUseID("native-edit-changed", "Edit", nativeArgs)
-	payload := []byte(`{"sessionId":"sess-changed-args","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + clientID + `","name":"Edit","args":{"file_path":"/tmp/a","old_string":"x","new_string":"y","replace_all":true}}}]},{"role":"user","parts":[{"functionResponse":{"id":"` + clientID + `","name":"Edit","response":{"result":"ok"}}}]}]}}`)
-	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Edit","call_id":"native-edit-changed","args":` + nativeArgs + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+	payload := []byte((`{"sessionId":"sess-changed-args","request":{"contents":[{"role":"model","parts":[{"` +
+		`thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"`) + clientID +
+		(`","name":"Edit","args":{"file_path":"/tmp/a","old_string":"x","` +
+			`new_string":"y","replace_all":true}}}]},{"role":"user","parts":[{"functionResponse":{"id":"`) +
+		clientID + `","name":"Edit","response":{"result":"ok"}}}]}]}}`)
+	item := []byte((`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"` +
+		`Edit","call_id":"native-edit-changed","args":`) +
+		nativeArgs +
+		`,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
 	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
 	internalcache.AntigravityReasoningReplayItems(model, sessionKey, [][]byte{item})
-	original := []byte(`{"tools":[{"name":"Edit","input_schema":{"type":"object","properties":{"replace_all":{"type":"boolean","default":false}}}}]}`)
-	opts := cliproxyexecutor.Options{OriginalRequest: original, SourceFormat: sdktranslator.FromString("claude")}
+	original := []byte((`{"tools":[{"name":"Edit","input_schema":{"type":"object","properties":` +
+		`{"replace_all":{"type":"boolean","default":false}}}}]}`))
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: original,
+		SourceFormat:    sdktranslator.FromString("claude"),
+	}
 
 	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(),
@@ -1996,7 +2840,10 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsUnmatchedNonPlaceholderRe
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
 	model := "gemini-3.6-flash-high"
-	sessionKey := antigravityReasoningReplayScopeFromPayload(model, []byte(`{"sessionId":"sess-mismatch"}`)).sessionKey
+	sessionKey := antigravityReasoningReplayScopeFromPayload(
+		model,
+		[]byte(`{"sessionId":"sess-mismatch"}`),
+	).sessionKey
 
 	item := []byte(`{
 		"type": "function_call_part",
@@ -2055,8 +2902,22 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresIdentityOnContextDrift(t
 	const model = "gemini-3.6-flash-high"
 	const args = `{"file_path":"/tmp/a"}`
 	clientID := util.GeminiClaudeToolUseID("native-drift", "Read", args)
-	payload := []byte(`{"sessionId":"sess-context-drift","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + clientID + `","name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"id":"` + clientID + `","name":"Read","response":{"result":"ok"}}}]}]}}`)
-	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"native-drift","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg","contextHash":"0000000000000000000000000000000000000000000000000000000000000000"}`)
+	payload := []byte(`{"sessionId":"sess-context-drift",` +
+		`"request":{"contents":[{"role":"model",` +
+		`"parts":[{"thoughtSignature":"skip_thought_signature_validator",` +
+		`"functionCall":{"id":"` +
+		clientID +
+		`","name":"Read","args":` +
+		args +
+		`}}]},{"role":"user","parts":[{"functionResponse":{"id":"` +
+		clientID +
+		`","name":"Read","response":{"result":"ok"}}}]}]}}`)
+	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,` +
+		`"targetOccurrence":0,"name":"Read","call_id":"native-drift",` +
+		`"args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg",` +
+		`"contextHash":"000000000000000000000000000000000000000000000` +
+		`0000000000000000000"` +
+		`}`)
 	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
 	if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
 		t.Fatal("failed to cache drifted provenance")
@@ -2083,8 +2944,17 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresIdentityOnContextDrift(t
 	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.id").String(); got != "native-drift" {
 		t.Fatalf("functionResponse.id = %q, want native-drift", got)
 	}
-	if got := call.Get("thoughtSignature").String(); !antigravityHasNativeThoughtSignature(got) {
-		t.Fatalf("thoughtSignature = %q, want native signature replayed across context drift", got)
+	if got := call.Get("thoughtSignature").String(); got != internalsignature.GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("thoughtSignature = %q, want unsigned-call sentinel after context drift", got)
+	}
+	sequential, changed := insertAntigravityReasoningReplayItems(payload, [][]byte{item})
+	if !changed || gjson.GetBytes(
+		sequential, "request.contents.0.parts.0.functionCall.id",
+	).String() != "native-drift" ||
+		antigravityHasNativeThoughtSignature(
+			gjson.GetBytes(sequential, "request.contents.0.parts.0.thoughtSignature").String(),
+		) {
+		t.Fatalf("sequential replay changed identity or copied a signature across contexts: %s", sequential)
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
 		t.Fatalf("restored history is invalid: %v", errPairing)
@@ -2101,7 +2971,14 @@ func TestDegradeAntigravityClaudeToolProvenanceIDsKeepsParallelShape(t *testing.
 		)
 	}
 	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[` +
-		`{"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg","functionCall":{"id":"` + ids[0] + `","name":"Read","args":{"file_path":"/tmp/a"}}},` +
+		(`{"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg","functionCall":` +
+			`{"id":` +
+			`"`) +
+		ids[0] +
+		(`","name":` +
+			`"Read","args":` +
+			`{"file_path":` +
+			`"/tmp/a"}}},`) +
 		`{"functionCall":{"id":"` + ids[1] + `","name":"Read","args":{"file_path":"/tmp/b"}}},` +
 		`{"functionCall":{"id":"` + ids[2] + `","name":"Read","args":{"file_path":"/tmp/c"}}}` +
 		`]},{"role":"user","parts":[` +
@@ -2114,6 +2991,14 @@ func TestDegradeAntigravityClaudeToolProvenanceIDsKeepsParallelShape(t *testing.
 	out = antigravityRepairUnsignedFirstFunctionCalls(out)
 	if degraded != 6 {
 		t.Fatalf("degraded = %d, want 6", degraded)
+	}
+	if repeated, count := degradeAntigravityClaudeToolProvenanceIDs(payload); count != degraded ||
+		!bytes.Equal(repeated, out) {
+		t.Fatal("identical provenance inputs produced different tool identities")
+	}
+	if repeated, count := degradeAntigravityClaudeToolProvenanceIDs(out); count != 0 ||
+		!bytes.Equal(repeated, out) {
+		t.Fatal("already neutral tool identities changed on repeated preparation")
 	}
 	if antigravityPayloadHasClaudeToolProvenanceID(out) {
 		t.Fatalf("reserved provenance IDs leaked upstream: %s", out)
@@ -2131,12 +3016,143 @@ func TestDegradeAntigravityClaudeToolProvenanceIDsKeepsParallelShape(t *testing.
 		if index > 0 && signature != "" {
 			t.Fatalf("parallel sibling %d gained signature %q", index, signature)
 		}
-		if got := call.Get("functionCall.id").String(); got != responses[index].Get("functionResponse.id").String() {
+		if got := call.Get("functionCall.id").String(); got != responses[index].Get("functionResponse.id").
+			String() {
 			t.Fatalf("call/response pairing broken at %d: %q", index, got)
 		}
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
 		t.Fatalf("degraded history is invalid: %v", errPairing)
+	}
+}
+
+func TestDegradeAntigravityClaudeToolProvenanceIDsPreservesFirstOfSignedParallelCalls(t *testing.T) {
+	ids := make([]string, 3)
+	for index := range ids {
+		ids[index] = util.GeminiClaudeToolUseID(
+			fmt.Sprintf("native-signed-%d", index), "Read", `{"file_path":"/tmp/a"}`,
+		)
+	}
+	const firstSignature = "EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"
+	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[` +
+		`{"thoughtSignature":"` +
+		firstSignature +
+		`","functionCall":{"id":"` +
+		ids[0] +
+		`","name":"Read","args":{"file_path":"/tmp/a"}}},` +
+		`{"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xh",` +
+		`"functionCall":{"id":"` + ids[1] + `","name":"Read","args":{"file_path":"/tmp/b"}}},` +
+		`{"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xi",` +
+		`"functionCall":{"id":"` + ids[2] + `","name":"Read","args":{"file_path":"/tmp/c"}}}` +
+		`]},{"role":"user","parts":[` +
+		`{"functionResponse":{"id":"` + ids[0] + `","name":"Read","response":{"result":"a"}}},` +
+		`{"functionResponse":{"id":"` + ids[1] + `","name":"Read","response":{"result":"b"}}},` +
+		`{"functionResponse":{"id":"` + ids[2] + `","name":"Read","response":{"result":"c"}}}` +
+		`]}]}}`)
+	out, degraded := degradeAntigravityClaudeToolProvenanceIDs(payload)
+	out = antigravityRepairUnsignedFirstFunctionCalls(out)
+	if degraded != 6 {
+		t.Fatalf("degraded=%d, want 6", degraded)
+	}
+	calls := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(calls) != 3 || calls[0].Get("thoughtSignature").String() != firstSignature {
+		t.Fatalf("first native signature changed: %s", out)
+	}
+	for index, call := range calls {
+		if index > 0 && call.Get("thoughtSignature").Exists() {
+			t.Fatalf("parallel sibling %d retained a stale signature: %s", index, out)
+		}
+	}
+	if err := internalsignature.ValidateGeminiFunctionCallPairing(out); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDegradeAntigravityClaudeToolProvenanceIDs_StrictMonotonicOffsets(t *testing.T) {
+	id := util.GeminiClaudeToolUseID("native-1", "Read", `{"file_path":"/tmp/a"}`)
+	payload := []byte(fmt.Sprintf(
+		`{"request":{"contents":[{"role":"model",`+
+			`"parts":[{"thoughtSignature":"sig-1",`+
+			`"functionCall":{"id":"%s","name":"Read",`+
+			`"args":{"file_path":"/tmp/a"}}}]},{"role":"user",`+
+			`"parts":[{"functionResponse":{"id":"%s","name":"Read",`+
+			`"response":{"result":"ok"}}}]}]}}`, id, id,
+	))
+	out, degraded := degradeAntigravityClaudeToolProvenanceIDs(payload)
+	if degraded != 2 || bytes.Equal(out, payload) || bytes.Contains(out, []byte(id)) {
+		t.Fatalf("reserved identity replacements=%d, output=%s", degraded, out)
+	}
+	want := antigravitySyntheticToolCallID(id)
+	if !gjson.ValidBytes(out) ||
+		gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.id").String() != want ||
+		gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.id").String() != want {
+		t.Fatalf("call and response identity changed during ordered edits: %s", out)
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplay_ReordersPermutedParallelToolResponsesWithDegradedIDs(
+	t *testing.T,
+) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+	const model, count = "gemini-3.7-flash-high", 12
+	calls, responses, ids := make([]string, count), make([]string, count), make([]string, count)
+	for index := range count {
+		ids[index] = util.GeminiClaudeToolUseID(
+			fmt.Sprintf("native-%d", index),
+			"Read",
+			`{"file_path":"/tmp/a"}`,
+		)
+		signature := ""
+		if index == 0 {
+			signature = `,"thoughtSignature":"skip_thought_signature_validator"`
+		}
+		calls[index] = fmt.Sprintf(
+			`{"functionCall":{"id":%q,"name":"Read",`+
+				`"args":{"file_path":"/tmp/a"}}%s}`, ids[index], signature,
+		)
+	}
+	for index := range count {
+		permuted := count - 1 - index
+		responses[index] = fmt.Sprintf(
+			`{"functionResponse":{"id":%q,"name":"Read",`+
+				`"response":{"result":"ok-%d"}}}`, ids[permuted], permuted,
+		)
+	}
+	payload := []byte(fmt.Sprintf(
+		`{"sessionId":"sess-permuted",`+
+			`"request":{"contents":[{"role":"model","parts":[%s]},`+
+			`{"role":"user","parts":[%s]}]}}`,
+		strings.Join(calls, ","), strings.Join(responses, ","),
+	))
+	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(
+		t.Context(), model,
+		cliproxyexecutor.Request{Model: model, Payload: payload},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, payload,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := internalsignature.ValidateGeminiFunctionCallPairing(out); err != nil {
+		t.Fatal(err)
+	}
+	outCalls := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	outResponses := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	if len(outCalls) != count || len(outResponses) != count {
+		t.Fatalf("calls=%d, responses=%d", len(outCalls), len(outResponses))
+	}
+	for index := range count {
+		wantID := antigravitySyntheticToolCallID(ids[index])
+		if outCalls[index].Get("functionCall.id").String() != wantID ||
+			outResponses[index].Get("functionResponse.id").String() != wantID ||
+			outResponses[index].Get("functionResponse.response.result").
+				String() !=
+				fmt.Sprintf(
+					"ok-%d",
+					index,
+				) {
+			t.Fatalf("parallel call/response order changed at %d: %s", index, out)
+		}
 	}
 }
 
@@ -2152,14 +3168,37 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesAndDeletesReplayThatBrea
 	stableID := util.GeminiClaudeToolUseID(nativeID, "Read", args)
 	payload := []byte(`{"sessionId":"sess-replay-pairing-failure","request":{"contents":[` +
 		`{"role":"model","parts":[{"functionCall":{"name":"unknown","args":{"phase":1}}}]},` +
-		`{"role":"user","parts":[{"functionResponse":{"id":"` + stableID + `","name":"unknown","response":{"result":"old"}}}]},` +
-		`{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}}]},` +
-		`{"role":"user","parts":[{"functionResponse":{"id":"` + stableID + `","name":"Read","response":{"result":"new"}}}]}` +
+		(`{"role":"user","parts":[{"functionResponse":{"id":` +
+			`"`) +
+		stableID +
+		(`","name":"unknown","response":` +
+			`{"result":"old"}}}]},`) +
+		(`{"role":"model","parts":[{"thoughtSignature":` +
+			`"skip_thought_signature_validator","functionCall":{"id":` +
+			`"`) +
+		stableID +
+		(`","name":` +
+			`"Read","args":`) +
+		args +
+		`}}]},` +
+		(`{"role":"user","parts":[{"functionResponse":{"id":` +
+			`"`) +
+		stableID +
+		(`","name":"Read","response":` +
+			`{"result":"new"}}}]}`) +
 		`]}}`)
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(payload); errPairing != nil {
 		t.Fatalf("test payload pairing = %v", errPairing)
 	}
-	item := []byte(`{"type":"function_call_part","contentIndex":2,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `,"thoughtSignature":"pairing-failure-signature-123456789"}`)
+	item := []byte(
+		(`{"type":"function_call_part","contentIndex":2,"partIndex":0,` +
+			`"targetOccurrence":0,"name":"Read","call_id":` +
+			`"`) +
+			nativeID +
+			`","args":` +
+			args +
+			`,"thoughtSignature":"pairing-failure-signature-123456789"}`,
+	)
 	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
 	if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
 		t.Fatal("failed to cache pairing-failure replay item")
@@ -2189,7 +3228,13 @@ func TestPrepareAntigravityGeminiReasoningReplayStillRejectsBrokenPairing(t *tes
 
 	const model = "gemini-3.6-flash-high"
 	clientID := util.GeminiClaudeToolUseID("native-orphan", "Read", `{"file_path":"/tmp/a"}`)
-	payload := []byte(`{"sessionId":"sess-orphan","request":{"contents":[{"role":"user","parts":[{"functionResponse":{"id":"` + clientID + `","name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload := []byte(
+		(`{"sessionId":"sess-orphan","request":{"contents":[{"role":"user",` +
+			`"parts":[{"functionResponse":{"id":` +
+			`"`) +
+			clientID +
+			`","name":"Read","response":{"result":"ok"}}}]}]}}`,
+	)
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}
 
 	_, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(

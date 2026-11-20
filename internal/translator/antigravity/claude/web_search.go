@@ -25,7 +25,13 @@ type webSearchCitedTextBlock struct {
 	Citations []map[string]any
 }
 
-const antigravityWebSearchSystemInstruction = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar."
+const antigravityWebSearchSystemInstruction = ("You are a search engine bot. You will be given a query from " +
+	"a user. " +
+	"Yo") +
+	"ur task is to search the web for relevant information that will help t" +
+	"he user. You MUST perform a web search. Do not respond or interact wit" +
+	"h the user, please respond as if they typed the query into a search ba" +
+	"r."
 
 func antigravitySupportsNativeGoogleSearch(model string) bool {
 	return registry.AntigravityWebSearchModelFor(model) != ""
@@ -102,10 +108,18 @@ func buildAntigravityWebSearchRequest(model string, payload []byte) []byte {
 	query := extractClaudeWebSearchQuery(payload)
 	maxResultCount := extractClaudeWebSearchMaxUses(payload)
 	includedDomains := extractClaudeWebSearchAllowedDomains(payload)
-	out := []byte(`{"model":"","requestType":"web_search","request":{"contents":[{"role":"user","parts":[{"text":""}]}],"systemInstruction":{"role":"user","parts":[{"text":""}]},"tools":[{"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}}],"generationConfig":{"candidateCount":1}}}`)
+	out := []byte(`{"model":"","requestType":"web_search","request":{"contents":[{"role":` +
+		`"user","parts":[{"text":""}]}],"systemInstruction":{"role":"user","par` +
+		`ts":[{"text":""}]},"tools":[{"googleSearch":{"enhancedContent":{"image` +
+		`Search":{"maxResultCount":5}}}}],"generationConfig":{"candidateCount":` +
+		`1}}}`)
 	out, _ = sjson.SetBytes(out, "model", model)
 	out, _ = sjson.SetBytes(out, "request.contents.0.parts.0.text", query)
-	out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.0.text", antigravityWebSearchSystemInstruction)
+	out, _ = sjson.SetBytes(
+		out,
+		"request.systemInstruction.parts.0.text",
+		antigravityWebSearchSystemInstruction,
+	)
 	out, _ = sjson.SetBytes(
 		out, "request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount", maxResultCount,
 	)
@@ -331,7 +345,10 @@ func parseWebSearchGroundingSupports(groundingMetadata gjson.Result) []webSearch
 	return supports
 }
 
-func buildWebSearchCitedTextBlocks(textContent string, supports []webSearchGroundingSupport) []webSearchCitedTextBlock {
+func buildWebSearchCitedTextBlocks(
+	textContent string,
+	supports []webSearchGroundingSupport,
+) []webSearchCitedTextBlock {
 	if len(supports) == 0 {
 		if textContent == "" {
 			return nil
@@ -432,7 +449,8 @@ func appendClaudeWebSearchStreamBlocks(
 	contentIndex := startIndex
 
 	serverToolUseStart := fmt.Sprintf(
-		`{"type":"content_block_start","index":%d,"content_block":{"type":"server_tool_use","id":"%s","name":"web_search","input":{}}}`,
+		`{"type":"content_block_start","index":%d,"content_block":{"type":"server_tool_use","id":"%s","name":`+
+			`"web_search","input":{}}}`,
 		contentIndex, toolUseID,
 	)
 	appendEvent("content_block_start", serverToolUseStart)
@@ -449,11 +467,14 @@ func appendClaudeWebSearchStreamBlocks(
 	contentIndex++
 
 	webSearchToolResultStart := fmt.Sprintf(
-		`{"type":"content_block_start","index":%d,"content_block":{"type":"web_search_tool_result","tool_use_id":"%s","content":[]}}`,
+		`{"type":"content_block_start","index":%d,"content_block":{"type":"web_`+
+			`search_tool_result","tool_use_id":"%s","content":[]}}`,
 		contentIndex, toolUseID,
 	)
 	webSearchToolResultStart, _ = sjson.SetRaw(
-		webSearchToolResultStart, "content_block.content", string(webSearchResultsFromGrounding(groundingMetadata)),
+		webSearchToolResultStart,
+		"content_block.content",
+		string(webSearchResultsFromGrounding(groundingMetadata)),
 	)
 	appendEvent("content_block_start", webSearchToolResultStart)
 	appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, contentIndex))
@@ -485,7 +506,8 @@ func appendClaudeWebSearchStreamBlocks(
 		}
 		for _, chunk := range splitRunesForWebSearch(block.Text, 50) {
 			textDelta := fmt.Sprintf(
-				`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, contentIndex,
+				`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`,
+				contentIndex,
 			)
 			textDelta, _ = sjson.Set(textDelta, "delta.text", chunk)
 			appendEvent("content_block_delta", textDelta)

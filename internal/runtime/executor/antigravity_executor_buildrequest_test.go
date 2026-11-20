@@ -17,11 +17,11 @@ func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
 	body := buildRequestBodyFromPayload(t, "gemini-2.5-pro")
 
 	decl := extractFirstFunctionDeclaration(t, body)
-	if _, ok := decl["parametersJsonSchema"]; ok {
-		t.Fatalf("parametersJsonSchema should be renamed to parameters")
+	if _, ok := decl["parameters"]; ok {
+		t.Fatal("native parametersJsonSchema was downgraded to parameters")
 	}
 
-	params, ok := decl["parameters"].(map[string]any)
+	params, ok := decl["parametersJsonSchema"].(map[string]any)
 	if !ok {
 		t.Fatalf("parameters missing or invalid type")
 	}
@@ -32,7 +32,7 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 	body := buildRequestBodyFromPayload(t, "claude-opus-4-6")
 
 	decl := extractFirstFunctionDeclaration(t, body)
-	params, ok := decl["parameters"].(map[string]any)
+	params, ok := decl["parametersJsonSchema"].(map[string]any)
 	if !ok {
 		t.Fatalf("parameters missing or invalid type")
 	}
@@ -46,64 +46,81 @@ func TestAntigravityBuildRequestRoutesImageGeneration(t *testing.T) {
 		wantRequestType string
 	}{
 		{
-			name:            "default image request type",
-			payload:         []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"draw a cat"}]}]}}`),
+			name: "default image request type",
+			payload: []byte(
+				`{"request":{"contents":[{"role":"user","parts":[{"text":"draw a cat"}]}]}}`,
+			),
 			wantRequestType: "image_gen",
 		},
 		{
-			name:            "explicit request type",
-			payload:         []byte(`{"requestType":"custom_image","request":{"contents":[{"role":"user","parts":[{"text":"draw a cat"}]}]}}`),
+			name: "explicit request type",
+			payload: []byte(
+				(`{"requestType":"custom_image","request":{"contents":[{"role":"user",` +
+					`"parts":[{"text":"draw a ` +
+					`cat"}]}]}}`),
+			),
 			wantRequestType: "custom_image",
 		},
 	}
-	requestIDPattern := regexp.MustCompile(`^image_gen/[0-9]+/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/12$`)
+	requestIDPattern := regexp.MustCompile(
+		`^image_gen/[0-9]+/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/12$`,
+	)
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			executor := &AntigravityExecutor{}
-			auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "test-project"}}
-			payload, err := executor.prepareAntigravityRequestPayload(context.Background(), auth,
-				cliproxyexecutor.Request{Model: "gemini-3.1-flash-image"},
-				cliproxyexecutor.Options{Metadata: map[string]any{"session_id": "derived-session-id"}}, test.payload, test.payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			req, err := executor.buildRequest(
-				context.Background(),
-				auth,
-				"token",
-				payload,
-				false,
-				"",
-				"https://example.com",
-			)
-			if err != nil {
-				t.Fatalf("buildRequest error: %v", err)
-			}
-			if req.URL.Path != antigravityGeneratePath || req.URL.RawQuery != "" {
-				t.Fatalf("request URL = %s, want non-stream generation path", req.URL.String())
-			}
-			body, errRead := io.ReadAll(req.Body)
-			if errRead != nil {
-				t.Fatalf("read request body: %v", errRead)
-			}
-			if got := gjson.GetBytes(body, "requestType").String(); got != test.wantRequestType {
-				t.Fatalf("requestType = %q, want %q; body=%s", got, test.wantRequestType, body)
-			}
-			if requestID := gjson.GetBytes(body, "requestId").String(); !requestIDPattern.MatchString(requestID) {
-				t.Fatalf("requestId = %q, want image_gen/<millis>/<uuid>/12", requestID)
-			}
-			if sessionID := gjson.GetBytes(body, "request.sessionId"); sessionID.Exists() {
-				t.Fatalf("image request generated sessionId = %s; body=%s", sessionID.Raw, body)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				executor := &AntigravityExecutor{}
+				auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "test-project"}}
+				payload, err := executor.prepareAntigravityRequestPayload(
+					context.Background(), auth,
+					cliproxyexecutor.Request{Model: "gemini-3.1-flash-image"},
+					cliproxyexecutor.Options{Metadata: map[string]any{"session_id": "derived-session-id"}},
+					test.payload, test.payload,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req, err := executor.buildRequest(
+					context.Background(),
+					auth,
+					"token",
+					payload,
+					false,
+					"",
+					"https://example.com",
+				)
+				if err != nil {
+					t.Fatalf("buildRequest error: %v", err)
+				}
+				if req.URL.Path != antigravityGeneratePath || req.URL.RawQuery != "" {
+					t.Fatalf("request URL = %s, want non-stream generation path", req.URL.String())
+				}
+				body, errRead := io.ReadAll(req.Body)
+				if errRead != nil {
+					t.Fatalf("read request body: %v", errRead)
+				}
+				if got := gjson.GetBytes(body, "requestType").String(); got != test.wantRequestType {
+					t.Fatalf("requestType = %q, want %q; body=%s", got, test.wantRequestType, body)
+				}
+				if requestID := gjson.GetBytes(body, "requestId").String(); !requestIDPattern.MatchString(
+					requestID,
+				) {
+					t.Fatalf("requestId = %q, want image_gen/<millis>/<uuid>/12", requestID)
+				}
+				if sessionID := gjson.GetBytes(body, "request.sessionId"); sessionID.Exists() {
+					t.Fatalf("image request generated sessionId = %s; body=%s", sessionID.Raw, body)
+				}
+			},
+		)
 	}
 }
 
 func TestValidateAntigravityRequestSignatures_DropsInvalidClaudeThinkingSignature(t *testing.T) {
-	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"bad","signature":"skip_thought_signature_validator"},{"type":"text","text":"visible"}]}]}`)
+	payload := []byte((`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"bad","` +
+		`signature":"skip_thought_signature_validator"},{"type":"text","text":"visible"}]}]}`))
 
 	out, err := validateAntigravityRequestSignatures(
+		t.Context(),
 		"claude-opus-4-6",
 		sdktranslator.FromString("claude"),
 		payload,
@@ -161,8 +178,10 @@ func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any 
 		}
 	}`)
 
-	payload, err := executor.prepareAntigravityRequestPayload(context.Background(), auth,
-		cliproxyexecutor.Request{Model: modelName}, cliproxyexecutor.Options{}, payload, payload)
+	payload, err := executor.prepareAntigravityRequestPayload(
+		context.Background(), auth,
+		cliproxyexecutor.Request{Model: modelName}, cliproxyexecutor.Options{}, payload, payload,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

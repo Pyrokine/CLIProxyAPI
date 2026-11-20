@@ -53,25 +53,49 @@ func TestFetchAntigravityModelsUsesOneCatalogEndpoint(t *testing.T) {
 		wantHost   string
 	}{
 		{"default", nil, "daily-cloudcode-pa.googleapis.com"},
-		{"configured-list", map[string]string{"base_url": "https://ignored.invalid", "base_urls": " https://first.invalid/ ,https://second.invalid"}, "first.invalid"},
-		{"empty-list-elements", map[string]string{"base_urls": " , https://first.invalid///, https://second.invalid"}, "first.invalid"},
+		{
+			"configured-list", map[string]string{
+				"base_url": "https://ignored.invalid", "base_urls": " https://first.invalid/ ,https://second.invalid",
+			}, "first.invalid",
+		},
+		{
+			"empty-list-elements",
+			map[string]string{"base_urls": " , https://first.invalid///, https://second.invalid"}, "first.invalid",
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			calls := 0
-			transport := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				calls++
-				if req.URL.Host != test.wantHost || req.URL.Path != antigravityModelsPath {
-					t.Errorf("catalog endpoint = %s, want https://%s%s", req.URL, test.wantHost, antigravityModelsPath)
+		t.Run(
+			test.name, func(t *testing.T) {
+				calls := 0
+				transport := antigravityRoundTripFunc(
+					func(req *http.Request) (*http.Response, error) {
+						calls++
+						if req.URL.Host != test.wantHost || req.URL.Path != antigravityModelsPath {
+							t.Errorf(
+								"catalog endpoint = %s, want https://%s%s", req.URL, test.wantHost,
+								antigravityModelsPath,
+							)
+						}
+						return &http.Response{
+							StatusCode: http.StatusServiceUnavailable, Header: make(http.Header),
+							Body: io.NopCloser(
+								strings.NewReader(`{"error":"synthetic unavailable"}`),
+							), Request: req,
+						}, nil
+					},
+				)
+				auth := antigravityModelDiscoveryAuth("https://unused.invalid")
+				auth.Attributes = test.attributes
+				result := FetchAntigravityModels(
+					util.WithRoundTripper(context.Background(), transport), auth, &config.Config{},
+				)
+				if calls != 1 || result.Outcome != ModelDiscoveryFailed || result.Err == nil {
+					t.Fatalf(
+						"catalog retried another endpoint: calls=%d outcome=%s error=%v", calls, result.Outcome,
+						result.Err,
+					)
 				}
-				return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"synthetic unavailable"}`)), Request: req}, nil
-			})
-			auth := antigravityModelDiscoveryAuth("https://unused.invalid")
-			auth.Attributes = test.attributes
-			result := FetchAntigravityModels(util.WithRoundTripper(context.Background(), transport), auth, &config.Config{})
-			if calls != 1 || result.Outcome != ModelDiscoveryFailed || result.Err == nil {
-				t.Fatalf("catalog retried another endpoint: calls=%d outcome=%s error=%v", calls, result.Outcome, result.Err)
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -84,33 +108,56 @@ func TestFetchAntigravityModelsRejectsUntrustworthyCatalog(t *testing.T) {
 		{"trailing-json", `{"models":{}} {"models":{"other":{}}}`},
 		{"oversized-catalog", `{"models":{}}` + strings.Repeat(" ", 8<<20)},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			transport := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(test.body)), Request: req}, nil
-			})
-			result := FetchAntigravityModels(util.WithRoundTripper(context.Background(), transport), antigravityModelDiscoveryAuth("https://synthetic.invalid"), &config.Config{})
-			if result.Outcome == ModelDiscoveryComplete || result.Err == nil || len(result.Models) != 0 {
-				t.Fatalf("untrustworthy response became an authoritative catalog: outcome=%s error=%v", result.Outcome, result.Err)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				transport := antigravityRoundTripFunc(
+					func(req *http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusOK, Header: make(http.Header),
+							Body: io.NopCloser(strings.NewReader(test.body)), Request: req,
+						}, nil
+					},
+				)
+				result := FetchAntigravityModels(
+					util.WithRoundTripper(context.Background(), transport),
+					antigravityModelDiscoveryAuth("https://synthetic.invalid"), &config.Config{},
+				)
+				if result.Outcome == ModelDiscoveryComplete || result.Err == nil || len(result.Models) != 0 {
+					t.Fatalf(
+						"untrustworthy response became an authoritative catalog: outcome=%s error=%v",
+						result.Outcome,
+						result.Err,
+					)
+				}
+			},
+		)
 	}
 }
 
 func TestFetchAntigravityModelsEscapesProject(t *testing.T) {
 	const project = "synthetic-project\"\\\nname"
-	transport := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		var payload map[string]string
-		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
-			t.Errorf("invalid project request JSON: %v", err)
-		}
-		if payload["project"] != project || len(payload) != 1 {
-			t.Errorf("request project was changed or introduced another field: %#v", payload)
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":{}}`)), Request: req}, nil
-	})
+	transport := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			var payload map[string]string
+			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+				t.Errorf("invalid project request JSON: %v", err)
+			}
+			if payload["project"] != project || len(payload) != 1 {
+				t.Errorf("request project was changed or introduced another field: %#v", payload)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK, Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader(`{"models":{}}`)), Request: req,
+			}, nil
+		},
+	)
 	auth := antigravityModelDiscoveryAuth("https://synthetic.invalid")
 	auth.Metadata["project_id"] = project
-	result := FetchAntigravityModels(util.WithRoundTripper(context.Background(), transport), auth, &config.Config{})
+	result := FetchAntigravityModels(
+		util.WithRoundTripper(context.Background(), transport),
+		auth,
+		&config.Config{},
+	)
 	if result.Outcome != ModelDiscoveryComplete || result.Err != nil {
 		t.Fatalf("escaped project discovery failed: %s %v", result.Outcome, result.Err)
 	}
@@ -127,44 +174,86 @@ func TestFetchAntigravityModelsPreservesKnownMetadata(t *testing.T) {
 	if known == nil {
 		t.Fatal("no known Antigravity context length is available")
 	}
-	body, err := json.Marshal(map[string]any{"models": map[string]any{known.ID: map[string]any{"maxTokens": 1}}})
+	body, err := json.Marshal(
+		map[string]any{"models": map[string]any{known.ID: map[string]any{"maxTokens": 1}}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body))), Request: req}, nil
-	})
-	result := FetchAntigravityModels(util.WithRoundTripper(context.Background(), transport), antigravityModelDiscoveryAuth("https://synthetic.invalid"), &config.Config{})
+	transport := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK, Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader(string(body))), Request: req,
+			}, nil
+		},
+	)
+	result := FetchAntigravityModels(
+		util.WithRoundTripper(context.Background(), transport),
+		antigravityModelDiscoveryAuth("https://synthetic.invalid"), &config.Config{},
+	)
 	if result.Outcome != ModelDiscoveryComplete || result.Err != nil || len(result.Models) != 1 {
 		t.Fatalf("known model discovery = %s %v", result.Outcome, result.Err)
 	}
 	discovered := result.Models[0]
-	if discovered.ContextLength != known.ContextLength || discovered.MaxCompletionTokens != known.MaxCompletionTokens {
-		t.Fatalf("discovery discarded catalog metadata for %s: context=%d completion=%d", known.ID, discovered.ContextLength, discovered.MaxCompletionTokens)
+	if discovered.ContextLength != known.ContextLength ||
+		discovered.MaxCompletionTokens != known.MaxCompletionTokens {
+		t.Fatalf(
+			"discovery discarded catalog metadata for %s: context=%d completion=%d",
+			known.ID,
+			discovered.ContextLength,
+			discovered.MaxCompletionTokens,
+		)
 	}
-	if discovered.Created == 0 || known.Created != 0 && discovered.Created != known.Created || !reflect.DeepEqual(discovered.Thinking, known.Thinking) ||
-		len(known.SupportedInputModalities) > 0 && !reflect.DeepEqual(discovered.SupportedInputModalities, known.SupportedInputModalities) ||
-		len(known.SupportedOutputModalities) > 0 && !reflect.DeepEqual(discovered.SupportedOutputModalities, known.SupportedOutputModalities) ||
-		len(known.SupportedGenerationMethods) > 0 && !reflect.DeepEqual(discovered.SupportedGenerationMethods, known.SupportedGenerationMethods) {
+	if discovered.Created == 0 || known.Created != 0 && discovered.Created != known.Created ||
+		!reflect.DeepEqual(
+			discovered.Thinking, known.Thinking,
+		) ||
+		len(known.SupportedInputModalities) > 0 && !reflect.DeepEqual(
+			discovered.SupportedInputModalities, known.SupportedInputModalities,
+		) ||
+		len(known.SupportedOutputModalities) > 0 && !reflect.DeepEqual(
+			discovered.SupportedOutputModalities, known.SupportedOutputModalities,
+		) ||
+		len(known.SupportedGenerationMethods) > 0 && !reflect.DeepEqual(
+			discovered.SupportedGenerationMethods, known.SupportedGenerationMethods,
+		) {
 		t.Fatalf("discovery discarded known capabilities for %s: %+v", known.ID, discovered)
 	}
-	if current := registry.LookupStaticModelInfoByChannel(known.ID, "antigravity"); !reflect.DeepEqual(current, known) {
+	if current := registry.LookupStaticModelInfoByChannel(known.ID, "antigravity"); !reflect.DeepEqual(
+		current,
+		known,
+	) {
 		t.Fatal("model discovery mutated shared static metadata")
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestFetchAntigravityModelsDoesNotAcquireCredentialsAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	calls := 0
-	transport := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"synthetic unavailable"}`)), Request: req}, nil
-	})
-	auth := &cliproxyauth.Auth{ID: "synthetic-already-canceled", Provider: "antigravity", Metadata: map[string]any{"refresh_token": "synthetic-refresh-token"}}
+	transport := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable, Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader(`{"error":"synthetic unavailable"}`)), Request: req,
+			}, nil
+		},
+	)
+	auth := &cliproxyauth.Auth{
+		ID: "synthetic-already-canceled", Provider: "antigravity",
+		Metadata: map[string]any{"refresh_token": "synthetic-refresh-token"},
+	}
 	result := FetchAntigravityModels(util.WithRoundTripper(ctx, transport), auth, &config.Config{})
 	if calls != 0 || result.Outcome != ModelDiscoveryInconclusive || result.Err != context.Canceled {
-		t.Fatalf("canceled discovery acquired credentials: calls=%d outcome=%s error=%v", calls, result.Outcome, result.Err)
+		t.Fatalf(
+			"canceled discovery acquired credentials: calls=%d outcome=%s error=%v",
+			calls,
+			result.Outcome,
+			result.Err,
+		)
 	}
 }
 
@@ -273,7 +362,8 @@ func TestFetchAntigravityModelsPublishesDiscoveredWebSearchCapability(t *testing
 	}{
 		{
 			name: "known account capabilities",
-			body: `{"models":{"gemini-search":{"displayName":"Search"},"gemini-plain":{"displayName":"Plain"}},"webSearchModelIds":[" GEMINI-SEARCH "]}`,
+			body: `{"models":{"gemini-search":{"displayName":"Search"},"gemini-plain":{"displayName":"Plain"}` +
+				`},"webSearchModelIds":[" GEMINI-SEARCH "]}`,
 			want: map[string]*bool{"gemini-search": &trueValue, "gemini-plain": &falseValue},
 		},
 		{
@@ -287,45 +377,62 @@ func TestFetchAntigravityModelsPublishesDiscoveredWebSearchCapability(t *testing
 			want: map[string]*bool{"gemini-search": nil},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = io.WriteString(w, test.body)
-			}))
-			defer server.Close()
+		t.Run(
+			test.name, func(t *testing.T) {
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, _ *http.Request) {
+							_, _ = io.WriteString(w, test.body)
+						},
+					),
+				)
+				defer server.Close()
 
-			result := FetchAntigravityModels(context.Background(), antigravityModelDiscoveryAuth(server.URL), &config.Config{})
-			if result.Outcome != ModelDiscoveryComplete || len(result.Models) != len(test.want) {
-				t.Fatalf("discovery = %q, %v, models=%+v", result.Outcome, result.Err, result.Models)
-			}
-			for _, model := range result.Models {
-				want, ok := test.want[model.ID]
-				if !ok {
-					t.Fatalf("unexpected model %q", model.ID)
+				result := FetchAntigravityModels(
+					context.Background(), antigravityModelDiscoveryAuth(server.URL), &config.Config{},
+				)
+				if result.Outcome != ModelDiscoveryComplete || len(result.Models) != len(test.want) {
+					t.Fatalf("discovery = %q, %v, models=%+v", result.Outcome, result.Err, result.Models)
 				}
-				var got *bool
-				if model.NativeCapabilities != nil {
-					got = model.NativeCapabilities.WebSearch
+				for _, model := range result.Models {
+					want, ok := test.want[model.ID]
+					if !ok {
+						t.Fatalf("unexpected model %q", model.ID)
+					}
+					var got *bool
+					if model.NativeCapabilities != nil {
+						got = model.NativeCapabilities.WebSearch
+					}
+					if (got == nil) != (want == nil) || got != nil && *got != *want {
+						t.Fatalf("%s web search = %v, want %v", model.ID, got, want)
+					}
 				}
-				if (got == nil) != (want == nil) || got != nil && *got != *want {
-					t.Fatalf("%s web search = %v, want %v", model.ID, got, want)
-				}
-			}
-		})
+			},
+		)
 	}
 }
 
 func TestFetchAntigravityModelsReturnsRefreshedAuth(t *testing.T) {
+	creditsStarted := make(chan struct{}, 1)
 	roundTripper := antigravityRoundTripFunc(
 		func(req *http.Request) (*http.Response, error) {
 			var body string
 			switch {
 			case req.URL.Host == "oauth2.googleapis.com" && req.URL.Path == "/token":
-				body = `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600,"token_type":"Bearer"}`
+				body = `{"access_token":"new-access","refresh_token":"new-refresh",` +
+					`"expires_in":3600,"token_type":` +
+					`"Bearer"}`
 			case req.URL.Host == "models.example" && req.URL.Path == antigravityModelsPath:
 				if got := req.Header.Get("Authorization"); got != "Bearer new-access" {
 					t.Errorf("Authorization = %q, want refreshed access token", got)
 				}
 				body = `{"models":{"claude-sonnet-4-5":{"displayName":"Claude Sonnet 4.5"}}}`
+			case req.URL.Host == "models.example" && req.URL.Path == antigravityLoadCodeAssistPath:
+				if got := req.Header.Get("Authorization"); got != "Bearer new-access" {
+					t.Errorf("credits Authorization = %q, want refreshed access token", got)
+				}
+				body = `{"paidTier":{"id":"synthetic-tier","availableCredits":[]}}`
+				creditsStarted <- struct{}{}
 			default:
 				t.Fatalf("unexpected request URL %s", req.URL)
 			}
@@ -362,23 +469,31 @@ func TestFetchAntigravityModelsReturnsRefreshedAuth(t *testing.T) {
 		metaStringValue(auth.Metadata, "refresh_token") != "model-discovery-refresh-token" {
 		t.Fatalf("source auth was mutated: %#v", auth.Metadata)
 	}
+	select {
+	case <-creditsStarted:
+	case <-time.After(time.Second):
+		t.Fatal("refreshed model discovery did not queue its balance observation")
+	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestFetchAntigravityModelsCancellationDuringBodyReadIsExact(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started := make(chan struct{})
-	roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body: &antigravityCancelReadBody{
-				ctx:     req.Context(),
-				started: started,
-			},
-			Request: req,
-		}, nil
-	})
+	roundTripper := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: &antigravityCancelReadBody{
+					ctx:     req.Context(),
+					started: started,
+				},
+				Request: req,
+			}, nil
+		},
+	)
 	resultCh := make(chan ModelDiscoveryResult, 1)
 	go func() {
 		resultCh <- FetchAntigravityModels(
@@ -404,6 +519,7 @@ func TestFetchAntigravityModelsCancellationDuringBodyReadIsExact(t *testing.T) {
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestFetchAntigravityModelsCancellationIsInconclusive(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

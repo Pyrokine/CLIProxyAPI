@@ -17,6 +17,9 @@ type fakeAntigravityReasoningReplayKVClient struct {
 	mu          sync.Mutex
 	values      map[string][]byte
 	expireCount int
+	expireTTL   time.Duration
+	setOptions  homekv.KVSetOptions
+	getErr      error
 	casErr      error
 }
 
@@ -35,6 +38,9 @@ func (c *fakeAntigravityReasoningReplayKVClient) HeartbeatOK() bool {
 func (c *fakeAntigravityReasoningReplayKVClient) KVGet(_ context.Context, key string) ([]byte, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.getErr != nil {
+		return nil, false, c.getErr
+	}
 	value, ok := c.values[key]
 	return append([]byte(nil), value...), ok, nil
 }
@@ -43,10 +49,11 @@ func (c *fakeAntigravityReasoningReplayKVClient) KVSet(
 	_ context.Context,
 	key string,
 	value []byte,
-	_ homekv.KVSetOptions,
+	opts homekv.KVSetOptions,
 ) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.setOptions = opts
 	c.values[key] = append([]byte(nil), value...)
 	return true, nil
 }
@@ -85,10 +92,15 @@ func (c *fakeAntigravityReasoningReplayKVClient) KVDel(_ context.Context, keys .
 	return deleted, nil
 }
 
-func (c *fakeAntigravityReasoningReplayKVClient) KVExpire(_ context.Context, _ string, _ time.Duration) (bool, error) {
+func (c *fakeAntigravityReasoningReplayKVClient) KVExpire(
+	_ context.Context,
+	_ string,
+	ttl time.Duration,
+) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.expireCount++
+	c.expireTTL = ttl
 	return true, nil
 }
 
@@ -515,6 +527,50 @@ func TestAntigravityReasoningReplayHomeGenerationRejectsSuccessfulValueABA(t *te
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
+func TestAntigravityReasoningReplayHomeReadFailurePreservesNewerState(t *testing.T) {
+	client := newFakeAntigravityReasoningReplayKVClient()
+	ctx := homekv.WithClientScope(t.Context(), homekv.ClientScope{Client: client, ID: t.Name(), Enabled: true})
+	const model, session = "gemini-3.6-flash-high", "home-read-recovery"
+	failure := fmt.Errorf("synthetic Home read failure")
+	client.getErr = failure
+	_, snapshot, found, err := GetAntigravityReasoningReplayItemsWithSnapshotRequired(ctx, model, session)
+	if err != failure || found {
+		t.Fatalf("failed Home read: found=%v err=%v", found, err)
+	}
+	client.mu.Lock()
+	client.getErr = nil
+	client.mu.Unlock()
+	latest := antigravityReplayTestItem("newer-home-recovery-signature-123456")
+	if !CacheAntigravityReasoningReplayItemsBestEffort(ctx, model, session, [][]byte{latest}) {
+		t.Fatal("newer Home write failed")
+	}
+	key := antigravityReasoningReplayKVKey(model, session)
+	before, exists, err := client.KVGet(ctx, key)
+	if err != nil || !exists {
+		t.Fatalf("newer Home value missing: exists=%v err=%v", exists, err)
+	}
+	stale := antigravityReplayTestItem("stale-home-recovery-signature-123456")
+	if replaced, err := ReplaceAntigravityReasoningReplayItemsIfUnchanged(
+		ctx, model, session, snapshot, [][]byte{stale},
+	); err != nil || replaced {
+		t.Fatalf("failed-read snapshot replaced newer state: replaced=%v err=%v", replaced, err)
+	}
+	if deleted, err := DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, model, session, snapshot); err != nil ||
+		deleted {
+		t.Fatalf("failed-read snapshot deleted newer state: deleted=%v err=%v", deleted, err)
+	}
+	after, exists, err := client.KVGet(ctx, key)
+	if err != nil || !exists || !bytes.Equal(after, before) {
+		t.Fatalf("failed-read mutation changed the stored value: exists=%v err=%v", exists, err)
+	}
+	items, _, found, err := GetAntigravityReasoningReplayItemsWithSnapshotRequired(ctx, model, session)
+	if err != nil || !found || len(items) != 1 ||
+		gjson.GetBytes(items[0], "thoughtSignature").String() != gjson.GetBytes(latest, "thoughtSignature").String() {
+		t.Fatalf("newer Home state changed: items=%q found=%v err=%v", items, found, err)
+	}
+}
+
 func TestAntigravityReasoningReplayHomeReportsCASErrors(t *testing.T) {
 	client := newFakeAntigravityReasoningReplayKVClient()
 	client.casErr = fmt.Errorf("ERR unknown command 'cas'")
@@ -578,7 +634,7 @@ func TestAntigravityReasoningReplayLocalTombstonesStayWithinEntryBound(t *testin
 	ClearAntigravityReasoningReplayCache()
 	t.Cleanup(ClearAntigravityReasoningReplayCache)
 	for index := 0; index <= antigravityReasoningReplayCacheMaxEntries; index++ {
-		if errDelete := deleteAntigravityReasoningReplayItemRequired(
+		if errDelete := DeleteAntigravityReasoningReplayItemRequired(
 			context.Background(), "gemini-3.6-flash-high", fmt.Sprintf("tombstone-%d", index),
 		); errDelete != nil {
 			t.Fatal(errDelete)
@@ -648,7 +704,7 @@ func TestAntigravityReasoningReplayLocalStateIsolatedByServiceScope(t *testing.T
 	ctxB := homekv.WithClientScope(context.Background(), homekv.ClientScope{ID: "service-b"})
 	itemA := antigravityReplayTestItem("service-a-signature-123456")
 	itemB := antigravityReplayTestItem("service-b-signature-123456")
-	if !cacheAntigravityReasoningReplayItemsBestEffort(
+	if !CacheAntigravityReasoningReplayItemsBestEffort(
 		ctxA,
 		"gemini-3.6-flash-high",
 		"shared-session",
@@ -656,7 +712,7 @@ func TestAntigravityReasoningReplayLocalStateIsolatedByServiceScope(t *testing.T
 	) {
 		t.Fatal("service A local store failed")
 	}
-	if !cacheAntigravityReasoningReplayItemsBestEffort(
+	if !CacheAntigravityReasoningReplayItemsBestEffort(
 		ctxB,
 		"gemini-3.6-flash-high",
 		"shared-session",
@@ -701,7 +757,7 @@ func TestAntigravityReasoningReplayUsesRequestScopedHomeClient(t *testing.T) {
 		},
 	)
 	item := antigravityReplayTestItem("request-scoped-home-signature-123456")
-	if !cacheAntigravityReasoningReplayItemsBestEffort(
+	if !CacheAntigravityReasoningReplayItemsBestEffort(
 		ctxA,
 		"gemini-3.6-flash-high",
 		"shared-session",
@@ -731,7 +787,8 @@ func TestAntigravityReasoningReplayHomeReadNormalizesAndRejectsMixedInvalidChain
 	useFakeAntigravityReasoningReplayKVClient(t, client, true)
 	const model, session = "gemini-3.6-flash-high", "home-validation"
 	key := antigravityReasoningReplayKVKey(model, session)
-	valid := []byte(`{"type":"function_call_part","name":"run","args":{"b":2,"a":1},"targetOccurrence":1,"thoughtSignature":"valid-home-signature-123456"}`)
+	valid := []byte((`{"type":"function_call_part","name":"run","args":{"b":2,"a":1},"target` +
+		`Occurrence":1,"thoughtSignature":"valid-home-signature-123456"}`))
 	raw, errMarshal := json.Marshal([][]byte{valid})
 	if errMarshal != nil {
 		t.Fatal(errMarshal)

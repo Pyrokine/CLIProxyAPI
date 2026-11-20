@@ -15,10 +15,17 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const antigravityWebSearchSystemInstruction = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar."
+const antigravityWebSearchSystemInstruction = ("You are a search engine bot. You will be given a query from " +
+	"a user. " +
+	"Yo") +
+	"ur task is to search the web for relevant information that will help t" +
+	"he user. You MUST perform a web search. Do not respond or interact wit" +
+	"h the user, please respond as if they typed the query into a search ba" +
+	"r."
 
 func antigravitySupportsNativeResponsesWebSearch(model string, modelInfo *registry.ModelInfo) bool {
-	if modelInfo != nil && modelInfo.NativeCapabilities != nil && modelInfo.NativeCapabilities.WebSearch != nil {
+	if modelInfo != nil && modelInfo.NativeCapabilities != nil &&
+		modelInfo.NativeCapabilities.WebSearch != nil {
 		return *modelInfo.NativeCapabilities.WebSearch
 	}
 	model = strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
@@ -26,10 +33,12 @@ func antigravitySupportsNativeResponsesWebSearch(model string, modelInfo *regist
 		return false
 	}
 	for _, info := range registry.GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
-		if info == nil || !strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(info.ID).ModelName), model) {
+		if info == nil ||
+			!strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(info.ID).ModelName), model) {
 			continue
 		}
-		if info.NativeCapabilities != nil && info.NativeCapabilities.WebSearch != nil && !*info.NativeCapabilities.WebSearch {
+		if info.NativeCapabilities != nil && info.NativeCapabilities.WebSearch != nil &&
+			!*info.NativeCapabilities.WebSearch {
 			return false
 		}
 		return info.SupportsWebSearch
@@ -55,7 +64,9 @@ func convertOpenAIResponsesRequestToAntigravityChecked(
 		}
 	}
 	rawJSON, outputsByCallID := normalizeOpenAIResponsesBridgeRequest(inputRawJSON)
-	geminiRequest, err := geminiresp.ConvertOpenAIResponsesRequestToGeminiChecked(modelName, rawJSON, stream, &nativeWebSearch)
+	geminiRequest, err := geminiresp.ConvertOpenAIResponsesRequestToGeminiChecked(
+		modelName, rawJSON, stream, &nativeWebSearch,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +100,9 @@ func restoreOpenAIResponsesClaudeReasoning(geminiRequest, request []byte, model 
 		rawSignature := item.Get("encrypted_content").String()
 		if strings.TrimSpace(rawSignature) == "" && index+1 < len(items) {
 			next := items[index+1]
-			if next.Get("type").String() == "reasoning" && strings.Contains(next.Get("id").String(), "_detached_after_") &&
+			if next.Get("type").String() == "reasoning" && strings.Contains(
+				next.Get("id").String(), "_detached_after_",
+			) &&
 				strings.TrimSpace(next.Get("summary.0.text").String()) == "" {
 				rawSignature = next.Get("encrypted_content").String()
 			}
@@ -152,7 +165,11 @@ func applyAntigravityResponsesWebSearch(payload []byte, search gjson.Result) ([]
 			return nil, err
 		}
 	}
-	return sjson.SetBytes(payload, "request.systemInstruction.parts.-1", map[string]string{"text": antigravityWebSearchSystemInstruction})
+	return sjson.SetBytes(
+		payload,
+		"request.systemInstruction.parts.-1",
+		map[string]string{"text": antigravityWebSearchSystemInstruction},
+	)
 }
 
 func normalizeOpenAIResponsesBridgeRequest(inputRawJSON []byte) ([]byte, map[string]gjson.Result) {
@@ -253,9 +270,11 @@ func reorderOpenAIResponsesToolOutputSlots(items []gjson.Result) []gjson.Result 
 	if len(matchedOutputs) < 2 {
 		return items
 	}
-	sort.SliceStable(matchedOutputs, func(left, right int) bool {
-		return matchedOutputs[left].order < matchedOutputs[right].order
-	})
+	sort.SliceStable(
+		matchedOutputs, func(left, right int) bool {
+			return matchedOutputs[left].order < matchedOutputs[right].order
+		},
+	)
 
 	ordered := append([]gjson.Result(nil), items...)
 	for index, slot := range matchedSlots {
@@ -301,7 +320,11 @@ func restoreOpenAIResponsesToolOutputs(
 				partItems = append(partItems, partJSON)
 			}
 			if partsChanged {
-				contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts", translatorcommon.JoinRawArray(partItems))
+				contentJSON, _ = sjson.SetRawBytes(
+					contentJSON,
+					"parts",
+					translatorcommon.JoinRawArray(partItems),
+				)
 			}
 		}
 		contentItems = append(contentItems, contentJSON)
@@ -324,7 +347,11 @@ type antigravityResponsesToolOutput struct {
 // The shared Gemini bridge accepts broader image data URLs and stringifies
 // scalar outputs. Reapply the original output at the Antigravity boundary so
 // only inline base64 image/* blocks become functionResponse parts.
-func setOpenAIResponsesFunctionOutput(partJSON []byte, functionResponsePath string, output gjson.Result) []byte {
+func setOpenAIResponsesFunctionOutput(
+	partJSON []byte,
+	functionResponsePath string,
+	output gjson.Result,
+) []byte {
 	translated := translateOpenAIResponsesToolOutput(output)
 	resultPath := functionResponsePath + ".response.result"
 	partsPath := functionResponsePath + ".parts"
@@ -345,7 +372,15 @@ func setOpenAIResponsesFunctionOutput(partJSON []byte, functionResponsePath stri
 
 func translateOpenAIResponsesToolOutput(output gjson.Result) antigravityResponsesToolOutput {
 	if output.Type == gjson.String {
-		return antigravityResponsesToolOutput{result: output.String(), hasResult: true}
+		value := output.String()
+		if gjson.Valid(value) {
+			if parsed := gjson.Parse(value); parsed.IsArray() || parsed.IsObject() {
+				if translated := translateOpenAIResponsesToolOutput(parsed); len(translated.images) > 0 {
+					return translated
+				}
+			}
+		}
+		return antigravityResponsesToolOutput{result: value, hasResult: true}
 	}
 	if output.IsArray() {
 		return translateOpenAIResponsesArrayOutput(output)
@@ -382,14 +417,18 @@ func translateOpenAIResponsesArrayOutput(output gjson.Result) antigravityRespons
 		switch block.Get("type").String() {
 		case "input_text", "output_text", "text":
 			hasContentBlock = true
-			entries = append(entries, antigravityResponsesOutputEntry{
-				text: block.Get("text").String(), raw: block.Raw, isText: true,
-			})
+			entries = append(
+				entries, antigravityResponsesOutputEntry{
+					text: block.Get("text").String(), raw: block.Raw, isText: true,
+				},
+			)
 		case "":
 			if block.Type == gjson.String {
-				entries = append(entries, antigravityResponsesOutputEntry{
-					text: block.String(), raw: block.Raw, isText: true,
-				})
+				entries = append(
+					entries, antigravityResponsesOutputEntry{
+						text: block.String(), raw: block.Raw, isText: true,
+					},
+				)
 				continue
 			}
 			hasStructuredEntry = true
@@ -429,7 +468,9 @@ func translateOpenAIResponsesArrayOutput(output gjson.Result) antigravityRespons
 		rawEntries = append(rawEntries, []byte(entry.raw))
 	}
 	return antigravityResponsesToolOutput{
-		result: string(translatorcommon.JoinRawArray(rawEntries)), resultRaw: true, hasResult: true, images: images,
+		result: string(
+			translatorcommon.JoinRawArray(rawEntries),
+		), resultRaw: true, hasResult: true, images: images,
 	}
 }
 

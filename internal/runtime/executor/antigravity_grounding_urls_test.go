@@ -91,26 +91,48 @@ func TestAntigravityTypedSearchResolvesGroundingAtConsumer(t *testing.T) {
 		{"preview_dated", sdktranslator.FormatOpenAIResponse, "web_search_preview_2025_03_11", 1},
 		{"ordinary_function", sdktranslator.FormatOpenAI, "function", 0},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			calls := 0
-			ctx := util.WithRoundTripper(context.Background(), groundingURLRoundTripper(func(req *http.Request) (*http.Response, error) {
-				calls++
-				if req.Method != http.MethodHead || req.URL.String() != "https://vertexaisearch.cloud.google.com/grounding-api-redirect/synthetic" {
-					return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL)
+		t.Run(
+			test.name, func(t *testing.T) {
+				calls := 0
+				ctx := util.WithRoundTripper(
+					context.Background(), groundingURLRoundTripper(
+						func(req *http.Request) (*http.Response, error) {
+							calls++
+							if req.Method != http.MethodHead ||
+								req.URL.String() !=
+									("https://vertexaisearch.cloud.google.com/"+
+										"grounding-api-redirect/"+
+										"synthetic") {
+								return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL)
+							}
+							return &http.Response{
+								StatusCode: http.StatusFound,
+								Header: http.Header{
+									"Location": {"https://example.com/article"},
+								}, Body: http.NoBody,
+								Request: req,
+							}, nil
+						},
+					),
+				)
+				original := []byte(fmt.Sprintf(`{"tools":[{"type":%q,"name":"web_search"}]}`, test.tool))
+				response := []byte((`{"response":{"candidates":[{"groundingMetadata":{"groundingChunks":[{"` +
+					`web":{"uri":"https://vertexaisearch.cloud.google.com/grounding-api-red` +
+					`irect/synthetic"}}]}}]}}`))
+				output := NewAntigravityExecutor(&config.Config{}).resolveWebSearchGroundingURLs(
+					ctx, nil, test.format, original,
+					[]byte(`{"requestType":"web_search","request":{"tools":[{"googleSearch":{}}]}}`), response,
+				)
+				want := "https://vertexaisearch.cloud.google.com/grounding-api-redirect/synthetic"
+				if test.wantCalls > 0 {
+					want = "https://example.com/article"
 				}
-				return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"https://example.com/article"}}, Body: http.NoBody, Request: req}, nil
-			}))
-			original := []byte(fmt.Sprintf(`{"tools":[{"type":%q,"name":"web_search"}]}`, test.tool))
-			response := []byte(`{"response":{"candidates":[{"groundingMetadata":{"groundingChunks":[{"web":{"uri":"https://vertexaisearch.cloud.google.com/grounding-api-redirect/synthetic"}}]}}]}}`)
-			output := NewAntigravityExecutor(&config.Config{}).resolveWebSearchGroundingURLs(ctx, nil, test.format, original,
-				[]byte(`{"requestType":"web_search","request":{"tools":[{"googleSearch":{}}]}}`), response)
-			want := "https://vertexaisearch.cloud.google.com/grounding-api-redirect/synthetic"
-			if test.wantCalls > 0 {
-				want = "https://example.com/article"
-			}
-			if calls != test.wantCalls || gjson.GetBytes(output, "response.candidates.0.groundingMetadata.groundingChunks.0.web.uri").String() != want {
-				t.Fatalf("grounding callbacks=%d, want %d; payload=%s", calls, test.wantCalls, output)
-			}
-		})
+				if calls != test.wantCalls || gjson.GetBytes(
+					output, "response.candidates.0.groundingMetadata.groundingChunks.0.web.uri",
+				).String() != want {
+					t.Fatalf("grounding callbacks=%d, want %d; payload=%s", calls, test.wantCalls, output)
+				}
+			},
+		)
 	}
 }

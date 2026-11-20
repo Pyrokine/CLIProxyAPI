@@ -26,6 +26,7 @@ import (
 type convertCliResponseToOpenAIChatParams struct {
 	UnixTimestamp        int64
 	FunctionIndex        int
+	ImageIndex           int
 	SawToolCall          bool   // Tracks if any tool call was seen in the entire stream
 	UpstreamFinishReason string // Caches the upstream finish reason for final chunk
 	SanitizedNameMap     map[string]string
@@ -88,7 +89,9 @@ func convertAntigravityResponseToOpenAI(
 	}
 
 	// Initialize the OpenAI SSE template.
-	template := []byte(`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
+	template := []byte((`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[` +
+		`{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"` +
+		`finish_reason":null,"native_finish_reason":null}]}`))
 
 	if len(params.LastChunk) > 0 {
 		for _, field := range []string{"id", "model"} {
@@ -125,7 +128,9 @@ func convertAntigravityResponseToOpenAI(
 	if finishReasonResult := gjson.GetBytes(
 		rawJSON, "response.candidates.0.finishReason",
 	); finishReasonResult.Exists() {
-		(*param).(*convertCliResponseToOpenAIChatParams).UpstreamFinishReason = strings.ToUpper(finishReasonResult.String())
+		(*param).(*convertCliResponseToOpenAIChatParams).UpstreamFinishReason = strings.ToUpper(
+			finishReasonResult.String(),
+		)
 	}
 
 	// Extract and set usage metadata (token counts).
@@ -136,7 +141,10 @@ func convertAntigravityResponseToOpenAI(
 	}
 	if usageResult.Exists() {
 		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
-		template, _ = sjson.SetBytes(template, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int()+usageResult.Get("thoughtsTokenCount").Int())
+		template, _ = sjson.SetBytes(
+			template, "usage.completion_tokens",
+			usageResult.Get("candidatesTokenCount").Int()+usageResult.Get("thoughtsTokenCount").Int(),
+		)
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
 		}
@@ -151,7 +159,11 @@ func convertAntigravityResponseToOpenAI(
 		// Include cached token count if present (indicates prompt caching is working)
 		if usageResult.Get("cachedContentTokenCount").Exists() {
 			var err error
-			template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
+			template, err = sjson.SetBytes(
+				template,
+				"usage.prompt_tokens_details.cached_tokens",
+				cachedTokenCount,
+			)
 			if err != nil {
 				log.Warnf("antigravity openai response: failed to set cached_tokens: %v", err)
 			}
@@ -189,7 +201,8 @@ func convertAntigravityResponseToOpenAI(
 			}
 
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
-			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() ||
+				inlineDataResult.Exists()
 
 			// Ignore encrypted thoughtSignature but keep any actual content in the same part.
 			if hasThoughtSignature && !hasContentPayload {
@@ -222,7 +235,9 @@ func convertAntigravityResponseToOpenAI(
 					template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
 				}
 
-				functionCallTemplate := []byte(`{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`)
+				functionCallTemplate := []byte((`{"id": "","index": 0,"type": "function","function": {"name": ` +
+					`"","arguments": ` +
+					`""}}`))
 				fcName := restoreOpenAIFunctionNameFromAntigravity(
 					(*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap,
 					functionCallResult.Get("name").String(),
@@ -257,10 +272,18 @@ func convertAntigravityResponseToOpenAI(
 				if !imagesResult.Exists() || !imagesResult.IsArray() {
 					template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
 				}
-				imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
+				imageIndex := params.ImageIndex
+				params.ImageIndex++
 				imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 				imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
 				imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+				signature := partResult.Get("thoughtSignature").String()
+				if signature == "" {
+					signature = partResult.Get("thought_signature").String()
+				}
+				if signature != "" {
+					imagePayload, _ = sjson.SetBytes(imagePayload, "extra_content.google.thought_signature", signature)
+				}
 				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 				template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
 			}
@@ -284,7 +307,9 @@ func finishAntigravityOpenAIChunk(template []byte, params *convertCliResponseToO
 	}
 	template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
 	if params.UpstreamFinishReason != "" {
-		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", strings.ToLower(params.UpstreamFinishReason))
+		template, _ = sjson.SetBytes(
+			template, "choices.0.native_finish_reason", strings.ToLower(params.UpstreamFinishReason),
+		)
 	}
 	if len(params.Usage) > 0 {
 		template, _ = sjson.SetRawBytes(template, "usage", params.Usage)
@@ -295,7 +320,8 @@ func finishAntigravityOpenAIChunk(template []byte, params *convertCliResponseToO
 	return template
 }
 
-// convertAntigravityResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
+// convertAntigravityResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming
+// OpenAI response.
 // This function processes the complete Gemini CLI response and transforms it into a single OpenAI-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the OpenAI API format.

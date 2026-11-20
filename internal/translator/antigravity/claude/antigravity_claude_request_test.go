@@ -864,6 +864,7 @@ func TestConvertClaudeRequestToAntigravity_ImageContent(t *testing.T) {
 	if inlineData.Get("mimeType").String() != "image/png" {
 		t.Error("mimeType mismatch")
 	}
+	//goland:noinspection SpellCheckingInspection
 	if !strings.Contains(inlineData.Get("data").String(), "iVBORw0KGgo") {
 		t.Error("data mismatch")
 	}
@@ -1251,6 +1252,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithImage(t *testing.T) {
 	if inlineData.Get("mimeType").String() != "image/png" {
 		t.Errorf("Expected mimeType 'image/png', got '%s'", inlineData.Get("mimeType").String())
 	}
+	//goland:noinspection SpellCheckingInspection
 	if !strings.Contains(inlineData.Get("data").String(), "iVBORw0KGgo") {
 		t.Error("data mismatch")
 	}
@@ -1663,11 +1665,10 @@ func TestConvertClaudeRequestToAntigravity_MapsTypedWebSearchToIndependentSearch
 	)
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch") })
 
-	inputJSON := []byte(`{
-		"model": "gemini-3.1-flash-lite",
-		"messages": [{"role": "user", "content": "北京天气 2026-06-12"}],
-		"tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8, "allowed_domains": ["www.baidu.com", "weather.com.cn"]}]
-	}`)
+	inputJSON := []byte(("{\n\t\t\"model\": \"gemini-3.1-flash-lite\",\n\t\t\"messages\": [{\"role\": \"user\"" +
+		", \"content\": \"北京天气 2026-06-12\"}],\n\t\t\"tools\": [{\"type\": \"web_search_20250305\", \"name\":" +
+		" \"web_search\", \"max_uses\": 8, \"allowed_domains\": [\"www.baidu.com\", \"weather.com.cn\"]}]\n\t" +
+		"}"))
 
 	output := convertClaudeRequestToAntigravity("gemini-3.1-flash-lite", inputJSON, true)
 	if got := gjson.GetBytes(output, "requestType").String(); got != "web_search" {
@@ -1917,8 +1918,9 @@ func TestResolveThinkingSignaturePrefersExplicitClientValue(t *testing.T) {
 
 func TestConvertClaudeRequestToAntigravityKeepsMidSessionSystemMessagesInUserTurn(t *testing.T) {
 	for _, role := range []string{"system", "developer"} {
-		t.Run(role, func(t *testing.T) {
-			input := []byte(`{
+		t.Run(
+			role, func(t *testing.T) {
+				input := []byte(`{
 				"system":"global instruction",
 				"messages":[
 					{"role":"user","content":"first user"},
@@ -1928,25 +1930,28 @@ func TestConvertClaudeRequestToAntigravityKeepsMidSessionSystemMessagesInUserTur
 				]
 			}`)
 
-			out := convertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
-			if got := gjson.GetBytes(out, "request.systemInstruction.parts.0.text").String(); got != "global instruction" {
-				t.Fatalf("global system instruction = %q; output=%s", got, out)
-			}
-			contents := gjson.GetBytes(out, "request.contents").Array()
-			if len(contents) != 3 {
-				t.Fatalf("contents count = %d, want 3; output=%s", len(contents), out)
-			}
-			parts := contents[2].Get("parts").Array()
-			if len(parts) != 2 {
-				t.Fatalf("merged user parts count = %d, want 2; output=%s", len(parts), out)
-			}
-			if !strings.Contains(parts[0].Get("text").String(), "mid-session notice") {
-				t.Fatalf("mid-session notice missing from user boundary; output=%s", out)
-			}
-			if got := parts[1].Get("text").String(); got != "second user" {
-				t.Fatalf("second user text = %q; output=%s", got, out)
-			}
-		})
+				out := convertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
+				if got := gjson.GetBytes(
+					out, "request.systemInstruction.parts.0.text",
+				).String(); got != "global instruction" {
+					t.Fatalf("global system instruction = %q; output=%s", got, out)
+				}
+				contents := gjson.GetBytes(out, "request.contents").Array()
+				if len(contents) != 3 {
+					t.Fatalf("contents count = %d, want 3; output=%s", len(contents), out)
+				}
+				parts := contents[2].Get("parts").Array()
+				if len(parts) != 2 {
+					t.Fatalf("merged user parts count = %d, want 2; output=%s", len(parts), out)
+				}
+				if !strings.Contains(parts[0].Get("text").String(), "mid-session notice") {
+					t.Fatalf("mid-session notice missing from user boundary; output=%s", out)
+				}
+				if got := parts[1].Get("text").String(); got != "second user" {
+					t.Fatalf("second user text = %q; output=%s", got, out)
+				}
+			},
+		)
 	}
 }
 
@@ -1982,7 +1987,8 @@ func TestConvertClaudeRequestToAntigravityAlignsOnlyMatchedParallelResultSlots(t
 		}
 	}
 	userParts := contents[2].Get("parts").Array()
-	if len(userParts) != 2 || userParts[0].Get("text").String() != "keep-first" || userParts[1].Get("inlineData.data").String() != "IMAGE" {
+	if len(userParts) != 2 || userParts[0].Get("text").String() != "keep-first" ||
+		userParts[1].Get("inlineData.data").String() != "IMAGE" {
 		t.Fatalf("user text and image changed: %s", contents[2].Raw)
 	}
 }
@@ -2023,7 +2029,8 @@ func TestConvertClaudeRequestToAntigravityDeduplicatesRawToolResultIDs(t *testin
 		t.Fatalf("distinct raw result ID = %q, want call_a; output=%s", got, out)
 	}
 	userParts := contents[2].Get("parts").Array()
-	if len(userParts) != 2 || userParts[0].Get("text").String() != "keep-first" || userParts[1].Get("inlineData.data").String() != "IMAGE" {
+	if len(userParts) != 2 || userParts[0].Get("text").String() != "keep-first" ||
+		userParts[1].Get("inlineData.data").String() != "IMAGE" {
 		t.Fatalf("user text and image changed: %s", contents[2].Raw)
 	}
 }

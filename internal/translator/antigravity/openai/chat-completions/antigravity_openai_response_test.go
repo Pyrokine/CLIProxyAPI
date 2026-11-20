@@ -14,31 +14,60 @@ func TestConvertAntigravityResponseToOpenAIIncludesThoughtTokensInCompletion(t *
 		chunk      string
 		completion int64
 	}{
-		{name: "thought only", chunk: `{"response":{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}}`, completion: 42},
-		{name: "thought and candidate", chunk: `{"response":{"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63}}}`, completion: 47},
+		{
+			name: "thought only",
+			chunk: `{"response":{"usageMetadata":{"promptTokenCount":16,` +
+				`"thoughtsTokenCount":42,"totalTokenCount":` +
+				`58}}}`,
+			completion: 42,
+		},
+		{
+			name: "thought and candidate",
+			chunk: `{"response":{"usageMetadata":{"promptTokenCount":16,"candidatesTokenCo` +
+				`unt":5,"thoughtsTokenCount":42,"totalTokenCount":63}}}`,
+			completion: 47,
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var param any
-			payload := []byte(tc.chunk)
-			result := convertAntigravityResponseToOpenAI(context.Background(), "model", nil, nil, payload, &param)
-			if len(result) != 1 {
-				t.Fatalf("result count = %d, want 1", len(result))
-			}
-			completion := gjson.GetBytes(result[0], "usage.completion_tokens")
-			if !completion.Exists() || completion.Int() != tc.completion {
-				t.Fatalf("completion_tokens = %s, want %d; output: %s", completion.Raw, tc.completion, result[0])
-			}
-			if reasoning := gjson.GetBytes(result[0], "usage.completion_tokens_details.reasoning_tokens").Int(); reasoning != 42 {
-				t.Fatalf("reasoning_tokens = %d, want 42", reasoning)
-			}
-			if total := gjson.GetBytes(result[0], "usage.total_tokens").Int(); total != 16+tc.completion {
-				t.Fatalf("total_tokens = %d, want %d", total, 16+tc.completion)
-			}
-			nonStream := convertAntigravityResponseToOpenAINonStream(context.Background(), "model", nil, nil, payload, nil)
-			if got := gjson.GetBytes(nonStream, "usage.completion_tokens").Int(); got != tc.completion {
-				t.Fatalf("non-stream completion_tokens = %d, want %d", got, tc.completion)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				var param any
+				payload := []byte(tc.chunk)
+				result := convertAntigravityResponseToOpenAI(
+					context.Background(),
+					"model",
+					nil,
+					nil,
+					payload,
+					&param,
+				)
+				if len(result) != 1 {
+					t.Fatalf("result count = %d, want 1", len(result))
+				}
+				completion := gjson.GetBytes(result[0], "usage.completion_tokens")
+				if !completion.Exists() || completion.Int() != tc.completion {
+					t.Fatalf(
+						"completion_tokens = %s, want %d; output: %s",
+						completion.Raw,
+						tc.completion,
+						result[0],
+					)
+				}
+				if reasoning := gjson.GetBytes(
+					result[0], "usage.completion_tokens_details.reasoning_tokens",
+				).Int(); reasoning != 42 {
+					t.Fatalf("reasoning_tokens = %d, want 42", reasoning)
+				}
+				if total := gjson.GetBytes(result[0], "usage.total_tokens").Int(); total != 16+tc.completion {
+					t.Fatalf("total_tokens = %d, want %d", total, 16+tc.completion)
+				}
+				nonStream := convertAntigravityResponseToOpenAINonStream(
+					context.Background(), "model", nil, nil, payload, nil,
+				)
+				if got := gjson.GetBytes(nonStream, "usage.completion_tokens").Int(); got != tc.completion {
+					t.Fatalf("non-stream completion_tokens = %d, want %d", got, tc.completion)
+				}
+			},
+		)
 	}
 }
 
@@ -47,7 +76,11 @@ func TestFinishReasonToolCallsNotOverwritten(t *testing.T) {
 	var param any
 
 	// Chunk 1: Contains functionCall - should set SawToolCall = true
-	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_files","args":{"path":"."}}}]}}]}}`)
+	chunk1 := []byte(
+		`{"response":{"candidates":[{"content":{"parts":[{"functionCall":` +
+			`{"name":"list_files","args":{"path":` +
+			`"."}}}]}}]}}`,
+	)
 	result1 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 
 	// Verify chunk1 has no finish_reason (null)
@@ -61,7 +94,8 @@ func TestFinishReasonToolCallsNotOverwritten(t *testing.T) {
 
 	// Chunk 2: Contains finishReason STOP + usage (final chunk, no functionCall)
 	// This simulates what the upstream sends AFTER the tool call chunk
-	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}}`)
+	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"` +
+		`promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}}`)
 	result2 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
 	// Verify chunk2 has finish_reason: "tool_calls" (not "stop")
@@ -89,7 +123,8 @@ func TestFinishReasonStopForNormalText(t *testing.T) {
 	convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 
 	// Chunk 2: Final chunk with STOP
-	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"` +
+		`promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
 	result2 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
 	// Verify finish_reason is "stop" (no tool calls were made)
@@ -108,7 +143,8 @@ func TestFinishReasonMaxTokens(t *testing.T) {
 	convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 
 	// Chunk 2: Final chunk with MAX_TOKENS
-	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
+	chunk2 := []byte((`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"` +
+		`promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`))
 	result2 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
 	// Verify finish_reason is "max_tokens"
@@ -123,11 +159,14 @@ func TestToolCallTakesPriorityOverMaxTokens(t *testing.T) {
 	var param any
 
 	// Chunk 1: Contains functionCall
-	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"test","args":{}}}]}}]}}`)
+	chunk1 := []byte(
+		`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"test","args":{}}}]}}]}}`,
+	)
 	convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 
 	// Chunk 2: Final chunk with MAX_TOKENS (but we had a tool call, so tool_calls should win)
-	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
+	chunk2 := []byte((`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"` +
+		`promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`))
 	result2 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
 	// Verify finish_reason is "tool_calls" (takes priority over max_tokens)
@@ -170,7 +209,9 @@ func TestConvertAntigravityResponseToOpenAIStreamRestoresDisambiguatedName(t *te
 		{"type":"function","function":{"name":"` + second + `"}}
 	]}`)
 	mapped := util.SanitizedFunctionNameMap(original)[second]
-	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+	responseJSON := []byte(
+		`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`,
+	)
 	var param any
 
 	output := convertAntigravityResponseToOpenAI(
@@ -197,7 +238,9 @@ func TestConvertAntigravityResponseToOpenAINonStreamRestoresDisambiguatedName(t 
 		{"type":"function","function":{"name":"` + second + `"}}
 	]}`)
 	mapped := util.SanitizedFunctionNameMap(original)[second]
-	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+	responseJSON := []byte(
+		`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`,
+	)
 
 	output := convertAntigravityResponseToOpenAINonStream(
 		context.Background(),

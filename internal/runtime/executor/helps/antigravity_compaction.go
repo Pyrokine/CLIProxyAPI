@@ -83,9 +83,12 @@ func HasResponsesCompactionItem(payload []byte) bool {
 }
 
 // PrepareAntigravityCompactionSummaryPayload prepares a payload for non-stream Antigravity summary generation.
-func PrepareAntigravityCompactionSummaryPayload(payload []byte, modelName string) []byte {
+func PrepareAntigravityCompactionSummaryPayload(payload []byte, _ string) []byte {
 	out := payload
-	summaryPrompt := `{"type":"message","role":"user","content":[{"type":"input_text","text":"Please provide a concise and comprehensive summary of the preceding conversation and task progress so far, including user goals, key findings, actions taken, and current status, so that work can continue smoothly."}]}`
+	summaryPrompt := `{"type":"message","role":"user","content":[{"type":"input_text","text":"Please provide ` +
+		`a concise and comprehensive summary of the preceding conversation and task progress so far, ` +
+		`including user goals, key findings, actions taken, and current status, so that work can continue ` +
+		`smoothly."}]}`
 
 	input := gjson.GetBytes(out, "input")
 	if input.IsArray() {
@@ -117,13 +120,13 @@ func PrepareAntigravityCompactionSummaryPayload(payload []byte, modelName string
 		"tool_choice",
 		"previous_response_id",
 		"parallel_tool_calls",
-		"additional_tools",
 		"truncation",
 		"metadata",
 	} {
 		out, _ = sjson.DeleteBytes(out, field)
 	}
 
+	out, _ = sjson.SetBytes(out, "tool_choice", "none")
 	out, _ = sjson.SetBytes(out, "stream", false)
 	return out
 }
@@ -155,10 +158,12 @@ func antigravityCompactionMasterKey(scope AntigravityCompactionScope) ([]byte, e
 	if len(scope.KeyMaterial) > 0 {
 		return bytes.Clone(scope.KeyMaterial), nil
 	}
-	antigravityCompactionProcessKey.once.Do(func() {
-		antigravityCompactionProcessKey.key = make([]byte, sha256.Size)
-		_, antigravityCompactionProcessKey.err = io.ReadFull(rand.Reader, antigravityCompactionProcessKey.key)
-	})
+	antigravityCompactionProcessKey.once.Do(
+		func() {
+			antigravityCompactionProcessKey.key = make([]byte, sha256.Size)
+			_, antigravityCompactionProcessKey.err = io.ReadFull(rand.Reader, antigravityCompactionProcessKey.key)
+		},
+	)
 	if antigravityCompactionProcessKey.err != nil {
 		return nil, fmt.Errorf("generate process compaction key: %w", antigravityCompactionProcessKey.err)
 	}
@@ -185,13 +190,15 @@ func deriveAntigravityCompactionKey(scope AntigravityCompactionScope) ([]byte, e
 }
 
 func antigravityCompactionAdditionalData(scope AntigravityCompactionScope) []byte {
-	return []byte(strings.Join([]string{
-		antigravityCompactionCapsulePrefix,
-		scope.Provider,
-		scope.Model,
-		scope.Session,
-		scope.Owner,
-	}, "\x00"))
+	return []byte(strings.Join(
+		[]string{
+			antigravityCompactionCapsulePrefix,
+			scope.Provider,
+			scope.Model,
+			scope.Session,
+			scope.Owner,
+		}, "\x00",
+	))
 }
 
 // SealAntigravityCompaction encrypts summary data into an owner-bound opaque capsule.
@@ -418,7 +425,10 @@ func ExtractAntigravitySummaryText(respPayload []byte) (string, error) {
 }
 
 // BuildAntigravityCompactionStreamChunks creates SSE frames for compaction stream response.
-func BuildAntigravityCompactionStreamChunks(modelName, capsule string, inputTokens, outputTokens, totalTokens int) [][]byte {
+func BuildAntigravityCompactionStreamChunks(
+	modelName, capsule string,
+	inputTokens, outputTokens, totalTokens int,
+) [][]byte {
 	now := time.Now().Unix()
 	responseID := fmt.Sprintf("resp_ag_compact_%d", time.Now().UnixNano())
 	itemID := fmt.Sprintf("cmp_ag_compact_%d", time.Now().UnixNano())
@@ -436,7 +446,9 @@ func BuildAntigravityCompactionStreamChunks(modelName, capsule string, inputToke
 	usageNode, _ = sjson.SetBytes(usageNode, "output_tokens", outputTokens)
 	usageNode, _ = sjson.SetBytes(usageNode, "total_tokens", totalTokens)
 
-	createdResponse := []byte(`{"object":"response","status":"in_progress","background":false,"error":null,"output":[]}`)
+	createdResponse := []byte(
+		`{"object":"response","status":"in_progress","background":false,"error":null,"output":[]}`,
+	)
 	createdResponse, _ = sjson.SetBytes(createdResponse, "id", responseID)
 	createdResponse, _ = sjson.SetBytes(createdResponse, "created_at", now)
 	createdResponse, _ = sjson.SetBytes(createdResponse, "model", modelName)

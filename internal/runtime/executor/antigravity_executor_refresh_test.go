@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -22,80 +23,99 @@ func (f antigravityRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, 
 }
 
 func TestAntigravityRefreshTokenSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
-	var calls atomic.Int32
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	roundTripper := antigravityRoundTripFunc(
-		func(req *http.Request) (*http.Response, error) {
-			if calls.Add(1) == 1 {
-				close(entered)
+	synctest.Test(
+		t, func(t *testing.T) {
+			var calls, creditsCalls atomic.Int32
+			release := make(chan struct{})
+			roundTripper := antigravityRoundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					body := `{"paidTier":{"id":"synthetic-tier","availableCredits":[]}}`
+					switch req.URL.String() {
+					case "https://oauth2.googleapis.com/token":
+						calls.Add(1)
+						<-release
+						body = `{"access_token":"access","refresh_token":"refresh-next","expires_in":` +
+							`3600,"token_type":` +
+							`"Bearer"}`
+					case "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist":
+						creditsCalls.Add(1)
+						if req.Header.Get("Authorization") != "Bearer access" {
+							t.Error("credits query did not use the refreshed token")
+						}
+					default:
+						t.Errorf("unexpected intercepted request: %s", req.URL)
+						return nil, errUnexpectedAccessToken
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(body)),
+						Header:     make(http.Header),
+						Request:    req,
+					}, nil
+				},
+			)
+			ctx := util.WithRoundTripper(context.Background(), roundTripper)
+			executor := &AntigravityExecutor{}
+			auth := &cliproxyauth.Auth{
+				ID: "antigravity-auth",
+				Metadata: map[string]any{
+					"refresh_token": "shared_antigravity_refresh_token",
+					"project_id":    "project-id",
+				},
 			}
-			<-release
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body: io.NopCloser(
-					strings.NewReader(`{"access_token":"access","refresh_token":"refresh-next","expires_in":3600,"token_type":"Bearer"}`),
-				),
-				Header:  make(http.Header),
-				Request: req,
-			}, nil
+
+			const workers = 8
+			start := make(chan struct{})
+			errs := make(chan error, workers)
+			var wg sync.WaitGroup
+			wg.Add(workers)
+			for range workers {
+				go func() {
+					defer wg.Done()
+					<-start
+					updated, err := executor.refreshToken(ctx, auth.Clone())
+					if err == nil && metaStringValue(updated.Metadata, "access_token") != "access" {
+						err = errUnexpectedAccessToken
+					}
+					errs <- err
+				}()
+			}
+			close(start)
+			synctest.Wait()
+			if got := calls.Load(); got != 1 {
+				close(release)
+				t.Fatalf("in-flight refresh calls = %d, want 1", got)
+			}
+			close(release)
+			wg.Wait()
+			synctest.Wait()
+			close(errs)
+
+			for err := range errs {
+				if err != nil {
+					t.Fatalf("refresh failed: %v", err)
+				}
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("refresh calls = %d, want 1", got)
+			}
+			if got := creditsCalls.Load(); got != 1 {
+				t.Fatalf("credits calls = %d, want 1", got)
+			}
 		},
 	)
-	ctx := util.WithRoundTripper(context.Background(), roundTripper)
-	executor := &AntigravityExecutor{}
-	auth := &cliproxyauth.Auth{
-		ID: "antigravity-auth",
-		Metadata: map[string]any{
-			"refresh_token": "shared_antigravity_refresh_token",
-			"project_id":    "project-id",
-		},
-	}
-
-	const workers = 8
-	start := make(chan struct{})
-	errs := make(chan error, workers)
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for range workers {
-		go func() {
-			defer wg.Done()
-			<-start
-			updated, err := executor.refreshToken(ctx, auth.Clone())
-			if err == nil && metaStringValue(updated.Metadata, "access_token") != "access" {
-				err = errUnexpectedAccessToken
-			}
-			errs <- err
-		}()
-	}
-	close(start)
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		close(release)
-		t.Fatal("refresh request did not start")
-	}
-	time.Sleep(50 * time.Millisecond)
-	close(release)
-	wg.Wait()
-	close(errs)
-
-	for err := range errs {
-		if err != nil {
-			t.Fatalf("refresh failed: %v", err)
-		}
-	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("refresh calls = %d, want 1", got)
-	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestFetchAntigravityProjectIDPreservesExactCancellation(t *testing.T) {
 	started := make(chan struct{})
-	roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		close(started)
-		<-req.Context().Done()
-		return nil, req.Context().Err()
-	})
+	roundTripper := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			close(started)
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		},
+	)
 	ctx, cancel := context.WithCancel(util.WithRoundTripper(context.Background(), roundTripper))
 	defer cancel()
 	result := make(chan error, 1)
@@ -136,66 +156,82 @@ func (b antigravityDeadlineBody) Read([]byte) (int, error) {
 
 func (antigravityDeadlineBody) Close() error { return nil }
 
+// noinspection GoDirectComparisonOfErrors
 func TestAntigravityCredentialAcquisitionHasDeadline(t *testing.T) {
 	previous := antigravityCredentialAcquisitionTimeout
 	antigravityCredentialAcquisitionTimeout = 40 * time.Millisecond
 	t.Cleanup(func() { antigravityCredentialAcquisitionTimeout = previous })
 	for _, operation := range []string{"oauth", "project"} {
 		for _, blocked := range []string{"headers", "body"} {
-			t.Run(operation+"/"+blocked, func(t *testing.T) {
-				roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-					deadline, ok := req.Context().Deadline()
-					if !ok || time.Until(deadline) > antigravityCredentialAcquisitionTimeout {
-						t.Fatal("credential acquisition request has no bounded deadline")
+			t.Run(
+				operation+"/"+blocked, func(t *testing.T) {
+					roundTripper := antigravityRoundTripFunc(
+						func(req *http.Request) (*http.Response, error) {
+							deadline, ok := req.Context().Deadline()
+							if !ok || time.Until(deadline) > antigravityCredentialAcquisitionTimeout {
+								t.Fatal("credential acquisition request has no bounded deadline")
+							}
+							if blocked == "headers" {
+								<-req.Context().Done()
+								return nil, req.Context().Err()
+							}
+							return &http.Response{
+								StatusCode: http.StatusOK, Header: make(http.Header),
+								Body: antigravityDeadlineBody{req.Context()}, Request: req,
+							}, nil
+						},
+					)
+					ctx := util.WithRoundTripper(context.Background(), roundTripper)
+					exec := &AntigravityExecutor{}
+					auth := &cliproxyauth.Auth{
+						ID:       t.Name(),
+						Metadata: map[string]any{"refresh_token": t.Name(), "project_id": "fixture-project"},
 					}
-					if blocked == "headers" {
-						<-req.Context().Done()
-						return nil, req.Context().Err()
+					result := make(chan error, 1)
+					go func() {
+						var err error
+						if operation == "oauth" {
+							_, err = exec.refreshToken(ctx, auth)
+						} else {
+							_, err = exec.fetchAntigravityProjectID(ctx, auth, "fixture-token")
+						}
+						result <- err
+					}()
+					select {
+					case err := <-result:
+						if err != context.DeadlineExceeded {
+							t.Fatalf("acquisition error = %v, want context.DeadlineExceeded", err)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("credential acquisition did not finish within its budget")
 					}
-					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: antigravityDeadlineBody{req.Context()}, Request: req}, nil
-				})
-				ctx := util.WithRoundTripper(context.Background(), roundTripper)
-				exec := &AntigravityExecutor{}
-				auth := &cliproxyauth.Auth{ID: t.Name(), Metadata: map[string]any{"refresh_token": t.Name(), "project_id": "fixture-project"}}
-				result := make(chan error, 1)
-				go func() {
-					var err error
-					if operation == "oauth" {
-						_, err = exec.refreshToken(ctx, auth)
-					} else {
-						_, err = exec.fetchAntigravityProjectID(ctx, auth, "fixture-token")
-					}
-					result <- err
-				}()
-				select {
-				case err := <-result:
-					if err != context.DeadlineExceeded {
-						t.Fatalf("acquisition error = %v, want context.DeadlineExceeded", err)
-					}
-				case <-time.After(time.Second):
-					t.Fatal("credential acquisition did not finish within its budget")
-				}
-			})
+				},
+			)
 		}
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestAntigravitySharedRefreshSurvivesCallerCancellationWithinDeadline(t *testing.T) {
 	previous := antigravityCredentialAcquisitionTimeout
 	antigravityCredentialAcquisitionTimeout = 150 * time.Millisecond
 	t.Cleanup(func() { antigravityCredentialAcquisitionTimeout = previous })
 	started := make(chan struct{})
 	var calls atomic.Int32
-	roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if calls.Add(1) == 1 {
-			close(started)
-		}
-		<-req.Context().Done()
-		return nil, req.Context().Err()
-	})
+	roundTripper := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			if calls.Add(1) == 1 {
+				close(started)
+			}
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		},
+	)
 	ctx, cancel := context.WithCancel(util.WithRoundTripper(context.Background(), roundTripper))
 	defer cancel()
-	auth := &cliproxyauth.Auth{ID: t.Name(), Metadata: map[string]any{"refresh_token": t.Name(), "project_id": "fixture-project"}}
+	auth := &cliproxyauth.Auth{
+		ID: t.Name(), Metadata: map[string]any{"refresh_token": t.Name(), "project_id": "fixture-project"},
+	}
 	exec := &AntigravityExecutor{}
 	results := make(chan error, 2)
 	go func() { _, err := exec.refreshToken(ctx, auth.Clone()); results <- err }()
@@ -223,28 +259,40 @@ func TestAntigravityRefreshReturnsBeforeCreditsQuery(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var creditsCalls atomic.Int32
-	roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body := `{"access_token":"fixture-access","refresh_token":"fixture-next","expires_in":3600}`
-		if req.URL.Path == antigravityLoadCodeAssistPath {
-			if creditsCalls.Add(1) == 1 {
-				close(started)
+	roundTripper := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			body := `{"access_token":"fixture-access","refresh_token":"fixture-next","expires_in":3600}`
+			if req.URL.Path == antigravityLoadCodeAssistPath {
+				if creditsCalls.Add(1) == 1 {
+					close(started)
+				}
+				if deadline, ok := req.Context().Deadline(); ok {
+					t.Errorf("post-refresh credits added a deadline: %v", deadline)
+				}
+				select {
+				case <-release:
+				case <-req.Context().Done():
+					return nil, req.Context().Err()
+				}
+				body = `{"paidTier":{"availableCredits":[{"creditType":"GOOGLE_ONE_AI","credit` +
+					`Amount":"200","minimumCreditAmountForUsage":"50"}]}}`
 			}
-			deadline, ok := req.Context().Deadline()
-			if !ok || time.Until(deadline) > antigravityCreditsHintRefreshTimeout {
-				t.Error("credits query has no bounded deadline")
-			}
-			select {
-			case <-release:
-			case <-req.Context().Done():
-				return nil, req.Context().Err()
-			}
-			body = `{"paidTier":{"availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"200","minimumCreditAmountForUsage":"50"}]}}`
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
-	})
-	auth := &cliproxyauth.Auth{ID: t.Name(), Metadata: map[string]any{"refresh_token": t.Name(), "project_id": "fixture-project"}}
-	cliproxyauth.SetAntigravityCreditsHint(auth.ID, cliproxyauth.AntigravityCreditsHint{Known: true, CreditAmount: 100})
-	exec := NewAntigravityExecutor(&config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}})
+			return &http.Response{
+				StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)),
+				Request: req,
+			}, nil
+		},
+	)
+	auth := &cliproxyauth.Auth{
+		ID: t.Name(), Metadata: map[string]any{"refresh_token": t.Name(), "project_id": "fixture-project"},
+	}
+	cliproxyauth.SetAntigravityCreditsHint(
+		auth.ID,
+		cliproxyauth.AntigravityCreditsHint{Known: true, CreditAmount: 100},
+	)
+	exec := NewAntigravityExecutor(
+		&config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}},
+	)
 	ctx := util.WithRoundTripper(context.Background(), roundTripper)
 	result := make(chan error, 1)
 	go func() {
@@ -254,15 +302,17 @@ func TestAntigravityRefreshReturnsBeforeCreditsQuery(t *testing.T) {
 		}
 		result <- err
 	}()
-	t.Cleanup(func() {
-		close(release)
-		if value, ok := antigravityCreditsHintRefreshByID.Load(auth.ID); ok {
-			state := value.(*antigravityCreditsHintRefreshState)
-			state.mu.Lock()
-			//lint:ignore SA2001 等待异步额度查询释放互斥锁，避免影响后续测试
-			state.mu.Unlock()
-		}
-	})
+	t.Cleanup(
+		func() {
+			close(release)
+			if value, ok := antigravityCreditsHintRefreshByID.Load(auth.ID); ok {
+				state := value.(*antigravityCreditsHintRefreshState)
+				state.mu.Lock()
+				//lint:ignore SA2001 等待异步额度查询释放互斥锁，避免影响后续测试
+				state.mu.Unlock()
+			}
+		},
+	)
 	select {
 	case err := <-result:
 		if err != nil {

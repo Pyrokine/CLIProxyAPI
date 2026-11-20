@@ -19,9 +19,12 @@ func init() {
 			NonStream: convertAntigravityResponseToOpenAIResponsesNonStream,
 		},
 	)
-	sdktranslator.RegisterRequestEnvelope(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity,
+	sdktranslator.RegisterRequestEnvelope(
+		sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity,
 		func(_ context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
-			req.Body, req.Err = convertOpenAIResponsesRequestToAntigravityChecked(req.Model, req.Body, req.Stream, req.ModelInfo)
+			req.Body, req.Err = convertOpenAIResponsesRequestToAntigravityChecked(
+				req.Model, req.Body, req.Stream, req.ModelInfo,
+			)
 			return req
 		},
 	)

@@ -12,7 +12,8 @@ import (
 )
 
 func TestConvertInteractionsRequestToAntigravityKeepsSchemaReferencesOpaque(t *testing.T) {
-	payload := []byte(`{"input":[{"type":"function_result","name":"lookup","call_id":"call-1","result":{"schema":{"$ref":"#/components/schemas/Item"}}}]}`)
+	payload := []byte((`{"input":[{"type":"function_result","name":"lookup","call_id":"call-1"` +
+		`,"result":{"schema":{"$ref":"#/components/schemas/Item"}}}]}`))
 	out := convertInteractionsRequestToAntigravity("gemini-3-flash", payload, false)
 	result := gjson.GetBytes(out, "request.contents.0.parts.0.functionResponse.response.result")
 	if result.Type != gjson.String || result.String() != `{"schema":{"$ref":"#/components/schemas/Item"}}` {
@@ -54,9 +55,17 @@ func TestConvertInteractionsRequestToAntigravityReasoningSummaryControlsVisibili
 				).String(); got != "high" {
 					t.Fatalf("thinkingLevel = %q, want high; output=%s", got, out)
 				}
-				includeThoughts := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
+				includeThoughts := gjson.GetBytes(
+					out,
+					"request.generationConfig.thinkingConfig.includeThoughts",
+				)
 				if !includeThoughts.Exists() || includeThoughts.Bool() != testCase.want {
-					t.Fatalf("includeThoughts = %s, want %v; output=%s", includeThoughts.Raw, testCase.want, out)
+					t.Fatalf(
+						"includeThoughts = %s, want %v; output=%s",
+						includeThoughts.Raw,
+						testCase.want,
+						out,
+					)
 				}
 			},
 		)
@@ -131,7 +140,14 @@ func TestConvertAntigravityResponseToInteractionsStreamRestoresDisambiguatedName
 	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
 	original := []byte(`{"tools":[{"name":"` + first + `"},{"name":"` + second + `"}]}`)
 	mapped := util.SanitizedFunctionNameMap(original)[second]
-	raw := []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+	raw := []byte(
+		(`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":` +
+			`{"name":` +
+			`"`) +
+			mapped +
+			(`","args":` +
+				`{}}}]}}]}}`),
+	)
 	var param any
 
 	events := convertAntigravityResponseToInteractions(
@@ -164,7 +180,9 @@ func TestConvertAntigravityResponseToInteractionsRestoresDisambiguatedName(t *te
 	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
 	original := []byte(`{"tools":[{"name":"` + first + `"},{"name":"` + second + `"}]}`)
 	mapped := util.SanitizedFunctionNameMap(original)[second]
-	raw := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+	raw := []byte(
+		`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`,
+	)
 
 	out := convertAntigravityResponseToInteractionsNonStream(
 		context.Background(),
@@ -180,7 +198,9 @@ func TestConvertAntigravityResponseToInteractionsRestoresDisambiguatedName(t *te
 }
 
 func TestRewriteInteractionsFunctionNamesReusesNormalizedPayload(t *testing.T) {
-	input := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}}}]}],"toolConfig":{"functionCallingConfig":{"allowedFunctionNames":["lookup"]}}}}`)
+	input := []byte((`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args"` +
+		`:{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}}}]}]` +
+		`,"toolConfig":{"functionCallingConfig":{"allowedFunctionNames":["lookup"]}}}}`))
 
 	output := rewriteInteractionsFunctionNames(input, nil)
 
@@ -190,7 +210,9 @@ func TestRewriteInteractionsFunctionNamesReusesNormalizedPayload(t *testing.T) {
 }
 
 func TestRewriteInteractionsFunctionNamesNormalizesNonStringNames(t *testing.T) {
-	input := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":true,"args":{}}}]}],"toolConfig":{"functionCallingConfig":{"allowedFunctionNames":[true]}}}}`)
+	input := []byte((`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"nam` +
+		`e":true,"args":{}}}]}],"toolConfig":{"functionCallingConfig":{"allowed` +
+		`FunctionNames":[true]}}}}`))
 
 	output := rewriteInteractionsFunctionNames(input, nil)
 
@@ -208,7 +230,12 @@ func TestRewriteInteractionsFunctionNamesNormalizesNonStringNames(t *testing.T) 
 
 func TestConvertInteractionsRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T) {
 	for _, choice := range []string{`"none"`, `{"type":"none"}`} {
-		input := []byte(`{"input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":` + choice + `}`)
+		input := []byte(
+			(`{"input":"hi","tools":[{"type":"function","name":"lookup",` +
+				`"parameters":{"type":"object"}}],"tool_choice":`) +
+				choice +
+				`}`,
+		)
 		out := convertInteractionsRequestToAntigravity("gemini-test", input, false)
 		if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
 			t.Fatalf("tool mode = %q, want NONE; output=%s", got, out)
@@ -230,18 +257,26 @@ func TestConvertAntigravityResponseToInteractionsValidatesSignatures(t *testing.
 		{name: "foreign", signature: antigravityClaudeSignatureForTest()},
 		{name: "invalid", signature: "gemini#invalid"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			raw := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"thoughtSignature":"` + testCase.signature + `"}]}}]}}`)
-			out := convertAntigravityResponseToInteractionsNonStream(
-				context.Background(), "antigravity-test", nil, nil, raw, nil,
-			)
-			if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
-				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
-			}
-			if testCase.want == "" && gjson.GetBytes(out, "steps.#").Int() != 0 {
-				t.Fatalf("invalid signature-only part produced a step: %s", out)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				raw := []byte(
+					(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,` +
+						`"thoughtSignature":` +
+						`"`) +
+						testCase.signature +
+						`"}]}}]}}`,
+				)
+				out := convertAntigravityResponseToInteractionsNonStream(
+					context.Background(), "antigravity-test", nil, nil, raw, nil,
+				)
+				if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
+					t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
+				}
+				if testCase.want == "" && gjson.GetBytes(out, "steps.#").Int() != 0 {
+					t.Fatalf("invalid signature-only part produced a step: %s", out)
+				}
+			},
+		)
 	}
 }
 
@@ -253,7 +288,13 @@ func TestConvertAntigravityResponseToInteractionsStreamPreservesSignatureOnlyPar
 		"antigravity-test",
 		nil,
 		nil,
-		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"thoughtSignature":"`+valid+`"}]}}]}}`),
+		[]byte(
+			(`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,`+
+				`"thoughtSignature":`+
+				`"`)+
+				valid+
+				`"}]}}]}}`,
+		),
 		&state,
 	)
 	for _, event := range events {

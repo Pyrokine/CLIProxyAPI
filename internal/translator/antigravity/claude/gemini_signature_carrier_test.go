@@ -25,7 +25,8 @@ func geminiCarrierSignatureForTest(t *testing.T, discriminator byte) string {
 
 func TestConvertClaudeRequestToAntigravityReattachesTrailingGeminiSignature(t *testing.T) {
 	nativeSignature := geminiCarrierSignatureForTest(t, 0x34)
-	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"text","text":"visible"},{"type":"thinking","thinking":"","signature":"` + nativeSignature + `"}]}]}`)
+	input := []byte((`{"messages":[{"role":"assistant","content":[{"type":"text","text":"visible"},{"type":"` +
+		`thinking","thinking":"","signature":"`) + nativeSignature + `"}]}]}`)
 
 	output := convertClaudeRequestToAntigravity("gemini-3-pro-preview", input, true)
 	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
@@ -40,7 +41,9 @@ func TestConvertClaudeRequestToAntigravityReattachesTrailingGeminiSignature(t *t
 func TestConvertClaudeRequestToAntigravityPreservesConsecutiveGeminiCarriers(t *testing.T) {
 	signature1 := geminiCarrierSignatureForTest(t, 0x34)
 	signature2 := geminiCarrierSignatureForTest(t, 0x35)
-	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"text","text":"first"},{"type":"text","text":"second"},{"type":"thinking","thinking":"","signature":"` + signature1 + `"},{"type":"thinking","thinking":"","signature":"` + signature2 + `"}]}]}`)
+	input := []byte((`{"messages":[{"role":"assistant","content":[{"type":"text","text":"fir` +
+		`st"},{"type":"text","text":"second"},{"type":"thinking","thinking":"",` +
+		`"signature":"`) + signature1 + `"},{"type":"thinking","thinking":"","signature":"` + signature2 + `"}]}]}`)
 
 	output := convertClaudeRequestToAntigravity("gemini-3-pro-preview", input, true)
 	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
@@ -63,7 +66,19 @@ func TestConvertClaudeRequestToAntigravityTargetsFollowingGeminiTool(t *testing.
 		geminiClaudeCarrierNext,
 		geminiClaudeCarrierFunction,
 	)
-	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden","signature":"` + carrier + `"},{"type":"tool_use","id":"tool-1","name":"read","input":{"path":"a"}}]}]}`)
+	input := []byte(
+		(`{"messages":[{"role":"assistant","content":[{"type":"thinking",` +
+			`"thinking":"hidden","signature":` +
+			`"`) +
+			carrier +
+			(`"},{"type":` +
+				`"tool_use",` +
+				`"id":"tool-1",` +
+				`"name":"read",` +
+				`"input":` +
+				`{"path":` +
+				`"a"}}]}]}`),
+	)
 
 	output := convertClaudeRequestToAntigravity("gemini-3-pro-preview", input, true)
 	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
@@ -85,7 +100,15 @@ func TestConvertClaudeRequestToAntigravityDropsMismatchedGeminiCarrier(t *testin
 		geminiClaudeCarrierNext,
 		geminiClaudeCarrierFunction,
 	)
-	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden","signature":"` + carrier + `"},{"type":"text","text":"visible"}]}]}`)
+	input := []byte(
+		(`{"messages":[{"role":"assistant","content":[{"type":"thinking",` +
+			`"thinking":"hidden","signature":` +
+			`"`) +
+			carrier +
+			(`"},{"type":` +
+				`"text","text":` +
+				`"visible"}]}]}`),
+	)
 
 	output := convertClaudeRequestToAntigravity("gemini-3-pro-preview", input, true)
 	if strings.Contains(string(output), nativeSignature) || strings.Contains(
@@ -102,7 +125,16 @@ func TestStripInvalidGeminiSignatureThinkingBlocksDropsUserCarrier(t *testing.T)
 		geminiClaudeCarrierNext,
 		geminiClaudeCarrierText,
 	)
-	input := []byte(`{"messages":[{"role":"user","content":[{"type":"thinking","thinking":"","signature":"` + carrier + `"},{"type":"text","text":"user text"}]}]}`)
+	input := []byte(
+		(`{"messages":[{"role":"user","content":[{"type":"thinking","thinking":` +
+			`"","signature":` +
+			`"`) +
+			carrier +
+			(`"},{"type":` +
+				`"text","text":` +
+				`"user text"}]}` +
+				`]}`),
+	)
 
 	output := StripInvalidGeminiSignatureThinkingBlocks(input)
 	if got := gjson.GetBytes(output, "messages.0.content.#").Int(); got != 1 {
@@ -116,7 +148,13 @@ func TestStripInvalidGeminiSignatureThinkingBlocksDropsUserCarrier(t *testing.T)
 func TestConvertAntigravityResponseToClaudeVisibleGeminiSignatureCarrier(t *testing.T) {
 	nativeSignature := geminiCarrierSignatureForTest(t, 0x34)
 	request := []byte(`{"model":"gemini-3-pro-preview"}`)
-	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible","thoughtSignature":"` + nativeSignature + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-pro-preview","responseId":"response-1"}}`)
+	response := []byte(
+		(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible",` +
+			`"thoughtSignature":` +
+			`"`) +
+			nativeSignature +
+			`"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-pro-preview","responseId":"response-1"}}`,
+	)
 
 	var params any
 	output := bytes.Join(
@@ -145,7 +183,20 @@ func TestConvertAntigravityResponseToClaudeVisibleGeminiSignatureCarrier(t *test
 func TestConvertAntigravityResponseToClaudeGeminiToolCarrierAndStableID(t *testing.T) {
 	nativeSignature := geminiCarrierSignatureForTest(t, 0x34)
 	request := []byte(`{"model":"gemini-3-pro-preview"}`)
-	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + nativeSignature + `","functionCall":{"id":"native-call-1","name":"read","args":{"path":"a"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-pro-preview","responseId":"response-1"}}`)
+	response := []byte(
+		(`{"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":` +
+			`"`) +
+			nativeSignature +
+			((`","functionCal` +
+				`l":{"id":` +
+				`"native-call-1` +
+				`","name":` +
+				`"read","args":` +
+				`{"path":` +
+				`"a`) +
+				`"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-pro-preview","` +
+				`responseId":"response-1"}}`),
+	)
 	wantID := util.GeminiClaudeToolUseID("native-call-1", "read", `{"path":"a"}`)
 
 	nonStream := convertAntigravityResponseToClaudeNonStream(
@@ -186,7 +237,14 @@ func TestConvertAntigravityResponseToClaudeGeminiToolCarrierAndStableID(t *testi
 func TestConvertAntigravityResponseToClaudeTrailingFunctionCarrierRoundTrip(t *testing.T) {
 	nativeSignature := geminiCarrierSignatureForTest(t, 0x34)
 	request := []byte(`{"model":"gemini-3-pro-preview"}`)
-	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-call-1","name":"read","args":{"path":"a"}}},{"text":"","thoughtSignature":"` + nativeSignature + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-pro-preview","responseId":"response-1"}}`)
+	response := []byte((`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":` +
+		`"native-call-1","name":"read","args":{"path":"a"}}},{"text":"","though` +
+		(`tSignature":` +
+			`"`)) +
+		nativeSignature +
+		(`"}]},"finishReason":"STOP"}],"modelVersion":` +
+			`"gemini-3-pro-preview","responseId":` +
+			`"response-1"}}`))
 
 	claudeResponse := convertAntigravityResponseToClaudeNonStream(
 		context.Background(),
@@ -210,7 +268,11 @@ func TestConvertAntigravityResponseToClaudeTrailingFunctionCarrierRoundTrip(t *t
 	}
 
 	replay := []byte(`{"messages":[{"role":"assistant","content":[]}]}`)
-	replay, _ = sjson.SetRawBytes(replay, "messages.0.content", []byte(gjson.GetBytes(claudeResponse, "content").Raw))
+	replay, _ = sjson.SetRawBytes(
+		replay,
+		"messages.0.content",
+		[]byte(gjson.GetBytes(claudeResponse, "content").Raw),
+	)
 	replay = StripInvalidGeminiSignatureThinkingBlocks(replay)
 	translated := convertClaudeRequestToAntigravity("gemini-3-pro-preview", replay, true)
 	parts := gjson.GetBytes(translated, "request.contents.0.parts").Array()

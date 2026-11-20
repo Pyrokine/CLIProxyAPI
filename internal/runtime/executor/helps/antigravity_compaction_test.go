@@ -30,13 +30,15 @@ func TestAntigravityCompactionDetection(t *testing.T) {
 	if !HasResponsesCompactionItem(payload) {
 		t.Fatal("compaction item was not detected")
 	}
-	if HasResponsesCompactionTrigger([]byte(`{"input":"text"}`)) || HasResponsesCompactionItem([]byte(`{"input":[]}`)) {
+	if HasResponsesCompactionTrigger([]byte(`{"input":"text"}`)) ||
+		HasResponsesCompactionItem([]byte(`{"input":[]}`)) {
 		t.Fatal("compaction detection matched payload without target item")
 	}
 }
 
 func TestAntigravityCompactionSealAndUnseal(t *testing.T) {
 	scope := testAntigravityCompactionScope()
+	//goland:noinspection SpellCheckingInspection
 	summary := "summary with control chars \x1b[31mred\x1b[0m, quotes \"hello\", and a newline\nline two"
 	first, err := SealAntigravityCompaction(summary, scope)
 	if err != nil {
@@ -109,11 +111,13 @@ func TestAntigravityCompactionRejectsWrongScopeAndLifetime(t *testing.T) {
 	tests[5].scope.Now = scope.Now.Add(2 * time.Hour)
 	tests[6].scope.Now = scope.Now.Add(-time.Hour)
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if summary, errUnseal := UnsealAntigravityCompaction(capsule, test.scope); errUnseal == nil {
-				t.Fatalf("scope accepted capsule with summary %q", summary)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				if summary, errUnseal := UnsealAntigravityCompaction(capsule, test.scope); errUnseal == nil {
+					t.Fatalf("scope accepted capsule with summary %q", summary)
+				}
+			},
+		)
 	}
 }
 
@@ -125,7 +129,7 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 		"tool_choice":"auto",
 		"previous_response_id":"resp-old",
 		"parallel_tool_calls":true,
-		"additional_tools":[{}],
+		"additional_tools":[{"type":"function","name":"calculate","parameters":{"type":"object"}}],
 		"truncation":"auto",
 		"metadata":{"key":"value"},
 		"input":[
@@ -140,9 +144,15 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 	if gjson.GetBytes(prepared, "stream").Bool() {
 		t.Fatal("summary payload stream = true, want false")
 	}
+	if gjson.GetBytes(prepared, "additional_tools").Raw != gjson.GetBytes(payload, "additional_tools").Raw {
+		t.Fatalf("summary payload lost legal additional tool definitions: %s", prepared)
+	}
+	if gjson.GetBytes(prepared, "tool_choice").String() != "none" {
+		t.Fatalf("summary payload permits tool execution: %s", prepared)
+	}
 	for _, field := range []string{
-		"tools", "tool_choice", "previous_response_id", "parallel_tool_calls",
-		"additional_tools", "truncation", "metadata",
+		"tools", "previous_response_id", "parallel_tool_calls",
+		"truncation", "metadata",
 	} {
 		if gjson.GetBytes(prepared, field).Exists() {
 			t.Fatalf("summary payload retained %q: %s", field, prepared)
@@ -157,17 +167,21 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 			t.Fatal("summary payload retained compaction_trigger")
 		}
 	}
-	if input[len(input)-1].Get("role").String() != "user" || input[len(input)-1].Get("content.0.type").String() != "input_text" {
+	if input[len(input)-1].Get("role").String() != "user" ||
+		input[len(input)-1].Get("content.0.type").String() != "input_text" {
 		t.Fatalf("summary prompt item = %s", input[len(input)-1].Raw)
 	}
 }
 
 func TestPrepareAntigravityCompactionSummaryPayloadStringInput(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	want := "before\x1b[31mafter\nnewline and \"quotes\""
-	payload, errMarshal := json.Marshal(map[string]any{
-		"model": "gemini-3.7-flash",
-		"input": want,
-	})
+	payload, errMarshal := json.Marshal(
+		map[string]any{
+			"model": "gemini-3.7-flash",
+			"input": want,
+		},
+	)
 	if errMarshal != nil {
 		t.Fatalf("marshal string payload: %v", errMarshal)
 	}
@@ -186,6 +200,7 @@ func TestPrepareAntigravityCompactionSummaryPayloadStringInput(t *testing.T) {
 
 func TestExpandAntigravityCompactionCapsules(t *testing.T) {
 	scope := testAntigravityCompactionScope()
+	//goland:noinspection SpellCheckingInspection
 	summary := "previous work with control chars \x1b[32mgreen\x1b[0m"
 	capsule, err := SealAntigravityCompaction(summary, scope)
 	if err != nil {
@@ -233,24 +248,42 @@ func TestExtractAntigravitySummaryText(t *testing.T) {
 			name: "responses skips reasoning and joins text",
 			payload: `{"output":[` +
 				`{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]},` +
-				`{"type":"message","content":[{"type":"output_text","text":"part one"},{"type":"output_text","text":"part two"}]}]}`,
+				(`{"type":"message","content":[{"type":"output_text","text":"part one"},` +
+					`{"type":"output_text","text":"part ` +
+					`two"}]}]}`),
 			want: "part one\npart two",
 		},
-		{name: "wrapped Gemini", payload: `{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"reason"},{"text":"summary"}]}}]}}`, want: "summary"},
-		{name: "bare Gemini", payload: `{"candidates":[{"content":{"parts":[{"text":"summary"}]}}]}`, want: "summary"},
-		{name: "Claude", payload: `{"content":[{"type":"thinking","thinking":"reason"},{"type":"text","text":"summary"}]}`, want: "summary"},
+		{
+			name: "wrapped Gemini",
+			payload: `{"response":{"candidates":[{"content":{"parts":[{"thought":true,` +
+				`"text":"reason"},{"text":` +
+				`"summary"}]}}]}}`,
+			want: "summary",
+		},
+		{
+			name:    "bare Gemini",
+			payload: `{"candidates":[{"content":{"parts":[{"text":"summary"}]}}]}`,
+			want:    "summary",
+		},
+		{
+			name:    "Claude",
+			payload: `{"content":[{"type":"thinking","thinking":"reason"},{"type":"text","text":"summary"}]}`,
+			want:    "summary",
+		},
 		{name: "OpenAI chat", payload: `{"choices":[{"message":{"content":"summary"}}]}`, want: "summary"},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := ExtractAntigravitySummaryText([]byte(test.payload))
-			if err != nil {
-				t.Fatalf("ExtractAntigravitySummaryText: %v", err)
-			}
-			if got != test.want {
-				t.Fatalf("summary = %q, want %q", got, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				got, err := ExtractAntigravitySummaryText([]byte(test.payload))
+				if err != nil {
+					t.Fatalf("ExtractAntigravitySummaryText: %v", err)
+				}
+				if got != test.want {
+					t.Fatalf("summary = %q, want %q", got, test.want)
+				}
+			},
+		)
 	}
 	if _, err := ExtractAntigravitySummaryText([]byte(`{"output":[{"type":"reasoning"}]}`)); err == nil {
 		t.Fatal("missing summary text returned no error")
@@ -262,10 +295,14 @@ func TestBuildAntigravityCompactionResponse(t *testing.T) {
 	if !json.Valid(response) {
 		t.Fatalf("compaction response is invalid JSON: %s", response)
 	}
-	if gjson.GetBytes(response, "object").String() != "response.compaction" || gjson.GetBytes(response, "status").String() != "completed" {
+	if gjson.GetBytes(response, "object").String() != "response.compaction" || gjson.GetBytes(
+		response, "status",
+	).String() != "completed" {
 		t.Fatalf("compaction response status = %s", response)
 	}
-	if gjson.GetBytes(response, "output.0.type").String() != "compaction" || gjson.GetBytes(response, "output.0.status").String() != "completed" {
+	if gjson.GetBytes(response, "output.0.type").String() != "compaction" || gjson.GetBytes(
+		response, "output.0.status",
+	).String() != "completed" {
 		t.Fatalf("compaction output item = %s", gjson.GetBytes(response, "output.0").Raw)
 	}
 	if gjson.GetBytes(response, "usage.input_tokens").Int() != 10 ||
@@ -296,13 +333,17 @@ func TestBuildAntigravityCompactionStreamChunks(t *testing.T) {
 		if !json.Valid(data) {
 			t.Fatalf("stream chunk %d data is invalid JSON: %s", index, data)
 		}
-		if gjson.GetBytes(data, "type").String() != wantEvents[index] || gjson.GetBytes(data, "sequence_number").Int() != int64(index) {
+		if gjson.GetBytes(data, "type").String() != wantEvents[index] || gjson.GetBytes(
+			data, "sequence_number",
+		).Int() != int64(index) {
 			t.Fatalf("stream chunk %d data = %s", index, data)
 		}
 	}
 	completedData := []byte(strings.TrimPrefix(strings.Split(string(chunks[len(chunks)-1]), "\n")[1], "data: "))
 	if gjson.GetBytes(completedData, "response.usage.total_tokens").Int() != 30 ||
-		gjson.GetBytes(completedData, "response.output.0.encrypted_content").String() != "cpa-ag-compact-v1:abc" {
+		gjson.GetBytes(completedData, "response.output.0.encrypted_content").
+			String() !=
+			"cpa-ag-compact-v1:abc" {
 		t.Fatalf("completed compaction event = %s", completedData)
 	}
 }

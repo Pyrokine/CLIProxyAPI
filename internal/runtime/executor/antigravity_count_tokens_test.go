@@ -45,22 +45,26 @@ func antigravityCountTokensAuth(baseURL, id string) *cliproxyauth.Auth {
 func TestAntigravityCountTokensCleansPayloadAndUsesSingleEndpoint(t *testing.T) {
 	var calls atomic.Int32
 	var received []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		calls.Add(1)
-		if req.URL.Path != antigravityCountTokensPath {
-			t.Errorf("request path = %q, want %q", req.URL.Path, antigravityCountTokensPath)
-		}
-		if req.URL.RawQuery != "$alt=test-alt" {
-			t.Errorf("request query = %q, want $alt=test-alt", req.URL.RawQuery)
-		}
-		if got := req.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Errorf("Authorization = %q, want bearer token", got)
-		}
-		received, _ = io.ReadAll(req.Body)
-		_ = req.Body.Close()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"totalTokens":42}`)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, req *http.Request) {
+				calls.Add(1)
+				if req.URL.Path != antigravityCountTokensPath {
+					t.Errorf("request path = %q, want %q", req.URL.Path, antigravityCountTokensPath)
+				}
+				if req.URL.RawQuery != "$alt=test-alt" {
+					t.Errorf("request query = %q, want $alt=test-alt", req.URL.RawQuery)
+				}
+				if got := req.Header.Get("Authorization"); got != "Bearer test-token" {
+					t.Errorf("Authorization = %q, want bearer token", got)
+				}
+				received, _ = io.ReadAll(req.Body)
+				_ = req.Body.Close()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"totalTokens":42}`)
+			},
+		),
+	)
 	defer server.Close()
 
 	payload := []byte(`{
@@ -108,10 +112,14 @@ func TestAntigravityCountTokensCleansPayloadAndUsesSingleEndpoint(t *testing.T) 
 }
 
 func TestAntigravityCountTokensResponseFormats(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"totalTokens":42}`)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"totalTokens":42}`)
+			},
+		),
+	)
 	defer server.Close()
 
 	tests := []struct {
@@ -155,25 +163,27 @@ func TestAntigravityCountTokensResponseFormats(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			executor := NewAntigravityExecutor(&config.Config{})
-			response, err := executor.CountTokens(
-				context.Background(),
-				antigravityCountTokensAuth(server.URL, "count-format-"+test.name),
-				cliproxyexecutor.Request{
-					Model:   "gemini-2.5-flash",
-					Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`),
-				},
-				cliproxyexecutor.Options{
-					SourceFormat:   sdktranslator.FormatAntigravity,
-					ResponseFormat: test.responseFormat,
-				},
-			)
-			if err != nil {
-				t.Fatalf("CountTokens() error = %v", err)
-			}
-			test.assert(t, response.Payload)
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				executor := NewAntigravityExecutor(&config.Config{})
+				response, err := executor.CountTokens(
+					context.Background(),
+					antigravityCountTokensAuth(server.URL, "count-format-"+test.name),
+					cliproxyexecutor.Request{
+						Model:   "gemini-2.5-flash",
+						Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`),
+					},
+					cliproxyexecutor.Options{
+						SourceFormat:   sdktranslator.FormatAntigravity,
+						ResponseFormat: test.responseFormat,
+					},
+				)
+				if err != nil {
+					t.Fatalf("CountTokens() error = %v", err)
+				}
+				test.assert(t, response.Payload)
+			},
+		)
 	}
 }
 
@@ -181,11 +191,13 @@ func TestAntigravityCountTokensDoesNotFallbackAcrossEndpoints(t *testing.T) {
 	wantErr := errors.New("transport failed")
 	var calls atomic.Int32
 	var hosts []string
-	roundTripper := antigravityCountTokensRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls.Add(1)
-		hosts = append(hosts, req.URL.Host)
-		return nil, wantErr
-	})
+	roundTripper := antigravityCountTokensRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			hosts = append(hosts, req.URL.Host)
+			return nil, wantErr
+		},
+	)
 	ctx := util.WithRoundTripper(context.Background(), roundTripper)
 	executor := NewAntigravityExecutor(&config.Config{})
 	_, err := executor.CountTokens(
@@ -219,15 +231,17 @@ func TestAntigravityCountTokens429ClosesOnlyCredentialTransports(t *testing.T) {
 	secondTransport := antigravityHTTP11Transport(secondAuth, firstBase)
 
 	var calls atomic.Int32
-	roundTripper := antigravityCountTokensRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return &http.Response{
-			StatusCode: http.StatusTooManyRequests,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited"}`)),
-			Request:    req,
-		}, nil
-	})
+	roundTripper := antigravityCountTokensRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited"}`)),
+				Request:    req,
+			}, nil
+		},
+	)
 	ctx := util.WithRoundTripper(context.Background(), roundTripper)
 	executor := NewAntigravityExecutor(&config.Config{})
 	_, err := executor.CountTokens(
@@ -256,13 +270,16 @@ func TestAntigravityCountTokens429ClosesOnlyCredentialTransports(t *testing.T) {
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestAntigravityCountTokensPreservesExactCancellation(t *testing.T) {
 	started := make(chan struct{})
-	roundTripper := antigravityCountTokensRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		close(started)
-		<-req.Context().Done()
-		return nil, req.Context().Err()
-	})
+	roundTripper := antigravityCountTokensRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			close(started)
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		},
+	)
 	ctx, cancel := context.WithCancel(util.WithRoundTripper(context.Background(), roundTripper))
 	result := make(chan error, 1)
 	go func() {
@@ -297,11 +314,15 @@ func TestAntigravityCountTokensPreservesExactCancellation(t *testing.T) {
 func TestAntigravityCountTokensTranslatesIdenticalPairTwiceWithPluginHooks(t *testing.T) {
 	hooks := &executorTranslatorHooks{}
 	var received []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		received, _ = io.ReadAll(req.Body)
-		_ = req.Body.Close()
-		_, _ = io.WriteString(w, `{"totalTokens":7}`)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, req *http.Request) {
+				received, _ = io.ReadAll(req.Body)
+				_ = req.Body.Close()
+				_, _ = io.WriteString(w, `{"totalTokens":7}`)
+			},
+		),
+	)
 	defer server.Close()
 
 	ctx := sdktranslator.WithPluginHooks(context.Background(), hooks)

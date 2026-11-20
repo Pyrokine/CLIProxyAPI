@@ -23,6 +23,65 @@ const (
 	geminiClaudeCarrierAny        = "any"
 )
 
+type signatureLengthError struct{}
+
+func (signatureLengthError) Error() string {
+	return fmt.Sprintf("signature exceeds maximum length (%d bytes)", maxBypassSignatureLen)
+}
+
+func (signatureLengthError) StatusCode() int       { return 400 }
+func (signatureLengthError) IsRequestScoped() bool { return true }
+
+func validateSignatureLength(rawSignature string) error {
+	sig := sigcompat.PayloadWithoutProviderPrefix(rawSignature)
+	if !strings.HasPrefix(sig, geminiClaudeCarrierPrefix) {
+		if len(sig) > maxBypassSignatureLen {
+			return signatureLengthError{}
+		}
+		return nil
+	}
+	if len(sig) > (maxBypassSignatureLen*4/3)+1024 {
+		return signatureLengthError{}
+	}
+	fields := strings.SplitN(strings.TrimPrefix(sig, geminiClaudeCarrierPrefix), ":", 3)
+	if len(fields) == 3 {
+		encodedLen := len(fields[2]) - strings.Count(fields[2], "\r") - strings.Count(fields[2], "\n")
+		if base64.RawStdEncoding.DecodedLen(encodedLen) > maxBypassSignatureLen {
+			return signatureLengthError{}
+		}
+	}
+	return nil
+}
+
+// ValidateSignatureLengths 在清理或解码前检查请求中会被消费的签名长度
+func ValidateSignatureLengths(payload []byte) error {
+	for _, message := range gjson.GetBytes(payload, "messages").Array() {
+		role := message.Get("role").String()
+		if role == "system" || role == "developer" {
+			continue
+		}
+		for _, block := range message.Get("content").Array() {
+			paths := []string{"signature"}
+			switch block.Get("type").String() {
+			case "thinking":
+				if role != "assistant" {
+					continue
+				}
+			case "tool_use":
+				paths = []string{"signature", "thought_signature", "extra_content.google.thought_signature"}
+			default:
+				continue
+			}
+			for _, path := range paths {
+				if err := validateSignatureLength(block.Get(path).String()); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func encodeGeminiClaudeCarrierSignature(rawSignature, direction, targetKind string) string {
 	rawSignature = strings.TrimSpace(rawSignature)
 	if rawSignature == "" {
@@ -102,7 +161,21 @@ func geminiClaudeCarrierMatchesAdjacent(
 		step = -1
 	}
 	for adjacent := index + step; adjacent >= 0 && adjacent < len(blocks); adjacent += step {
-		if kind := geminiClaudeSemanticTargetKind(blocks[adjacent]); kind != "" {
+		block := blocks[adjacent]
+		if block.Get("type").String() == "thinking" && strings.TrimSpace(block.Get("thinking").String()) != "" {
+			if raw := strings.TrimSpace(block.Get("signature").String()); raw != "" {
+				inner, direction, _, marked, valid := decodeGeminiClaudeCarrierSignature(raw)
+				if !valid || marked && direction == geminiClaudeCarrierPrevious {
+					return false
+				}
+				if _, compatible := sigcompat.CompatibleSignatureForProvider(
+					sigcompat.ProviderGemini, inner, sigcompat.BlockKindGeminiModelPart,
+				); !compatible {
+					return false
+				}
+			}
+		}
+		if kind := geminiClaudeSemanticTargetKind(block); kind != "" {
 			return targetKind == geminiClaudeCarrierAny || targetKind == kind
 		}
 		if blocks[adjacent].Get("type").String() != "thinking" ||
@@ -131,7 +204,8 @@ func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
 		kept := make([]string, 0, len(content.Array()))
 		stripped := false
 		for _, part := range content.Array() {
-			if part.Get("type").String() == "thinking" && !hasValidClaudeSignature(part.Get("signature").String()) {
+			if part.Get("type").String() == "thinking" &&
+				!hasValidClaudeSignature(part.Get("signature").String()) {
 				stripped = true
 				continue
 			}
@@ -184,7 +258,10 @@ func StripInvalidGeminiSignatureThinkingBlocks(payload []byte) []byte {
 				rawSignature := strings.TrimSpace(block.Get("signature").String())
 				thinkingText := strings.TrimSpace(block.Get("thinking").String())
 				if rawSignature == "" && thinkingText != "" &&
-					(pendingCarrierTargetKind == geminiClaudeCarrierAny || pendingCarrierTargetKind == geminiClaudeCarrierText) {
+					(pendingCarrierTargetKind ==
+						geminiClaudeCarrierAny ||
+						pendingCarrierTargetKind ==
+							geminiClaudeCarrierText) {
 					pendingCarrierTargetKind = ""
 					contentItems = append(contentItems, []byte(block.Raw))
 					continue

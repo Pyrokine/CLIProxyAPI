@@ -8,7 +8,10 @@ import (
 )
 
 func TestRepairAntigravityGeminiFunctionResponseNames(t *testing.T) {
-	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"lookup","args":{}}},{"functionCall":{"id":"call-2","name":"search","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"unknown","response":{"ok":true}}},{"functionResponse":{"id":"call-2","response":{"ok":true}}}]}]}}`)
+	payload := []byte((`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name"` +
+		`:"lookup","args":{}}},{"functionCall":{"id":"call-2","name":"search","args":{}}}]},{"role":"user","` +
+		`parts":[{"functionResponse":{"id":"call-1","name":"unknown","response":{"ok":true}}},{"` +
+		`functionResponse":{"id":"call-2","response":{"ok":true}}}]}]}}`))
 
 	got := repairAntigravityGeminiFunctionResponseNames(payload)
 	if name := gjson.GetBytes(got, "request.contents.1.parts.0.functionResponse.name").String(); name != "lookup" {
@@ -19,8 +22,58 @@ func TestRepairAntigravityGeminiFunctionResponseNames(t *testing.T) {
 	}
 }
 
+func TestRepairAntigravityGeminiFunctionResponseNamesUsesPrecedingCall(t *testing.T) {
+	for _, test := range []struct {
+		name, history, first, second string
+	}{
+		{
+			name: "reused ID",
+			history: `{"role":"model","parts":[{"functionCall":{"id":"reused","name":"read"}}]},` +
+				`{"role":"user","parts":[{"functionResponse":{"id":"reused","name":"unknown"}}]},` +
+				`{"role":"model","parts":[{"functionCall":{"id":"reused","name":"write"}}]},` +
+				`{"role":"user","parts":[{"functionResponse":{"id":"reused","name":"unknown"}}]}`,
+			first: "read", second: "write",
+		},
+		{
+			name: "unknown call replaces older name",
+			history: `{"role":"model","parts":[{"functionCall":{"id":"reused","name":"read"}}]},` +
+				`{"role":"user","parts":[{"functionResponse":{"id":"reused","name":"unknown"}}]},` +
+				`{"role":"model","parts":[{"functionCall":{"id":"reused","name":"unknown"}}]},` +
+				`{"role":"user","parts":[{"functionResponse":{"id":"reused","name":"unknown"}}]}`,
+			first: "read", second: "unknown",
+		},
+		{
+			name: "later call cannot rename earlier response",
+			history: `{"role":"model","parts":[{"functionCall":{"name":"unknown"}}]},` +
+				`{"role":"user","parts":[{"functionResponse":{"id":"reused","name":"unknown"}}]},` +
+				`{"role":"model","parts":[{"functionCall":{"id":"reused","name":"read"}}]},` +
+				`{"role":"user","parts":[{"functionResponse":{"id":"reused","name":"unknown"}}]}`,
+			first: "unknown", second: "read",
+		},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				payload := []byte(`{"request":{"contents":[` + test.history + `]}}`)
+				got := repairAntigravityGeminiFunctionResponseNames(payload)
+				if gjson.GetBytes(got, "request.contents.1.parts.0.functionResponse.name").
+					String() !=
+					test.first ||
+					gjson.GetBytes(got, "request.contents.3.parts.0.functionResponse.name").String() != test.second {
+					t.Fatalf("response names no longer match their preceding calls: %s", got)
+				}
+				if again := repairAntigravityGeminiFunctionResponseNames(got); !bytes.Equal(again, got) {
+					t.Fatal("name repair changed an already repaired history")
+				}
+			},
+		)
+	}
+}
+
 func TestNormalizeAntigravityGeminiFunctionResponseRolesAndOrder(t *testing.T) {
-	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-b","name":"second","args":{}}},{"functionCall":{"id":"call-a","name":"first","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-a","name":"first","response":{"value":"a"}}},{"functionResponse":{"id":"call-b","name":"second","response":{"value":"b"}}}]}]}}`)
+	payload := []byte((`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-b","name"` +
+		`:"second","args":{}}},{"functionCall":{"id":"call-a","name":"first","args":{}}}]},{"role":"user","` +
+		`parts":[{"functionResponse":{"id":"call-a","name":"first","response":{"value":"a"}}},{"` +
+		`functionResponse":{"id":"call-b","name":"second","response":{"value":"b"}}}]}]}}`))
 
 	got := normalizeAntigravityGeminiFunctionResponseRoles(payload)
 	responseTurn := gjson.GetBytes(got, "request.contents.1")
@@ -40,20 +93,27 @@ func TestNormalizeAntigravityGeminiFunctionResponseRolesAndOrder(t *testing.T) {
 }
 
 func TestNormalizeAntigravityGeminiFunctionResponseRolesKeepsMixedTurnRole(t *testing.T) {
-	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"lookup","args":{}}}]},{"role":"user","parts":[{"text":"context"},{"functionResponse":{"id":"call-1","name":"lookup","response":{"ok":true}}}]}]}}`)
+	payload := []byte((`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name"` +
+		`:"lookup","args":{}}}]},{"role":"user","parts":[{"text":"context"},{"functionResponse":{"id":"call-` +
+		`1","name":"lookup","response":{"ok":true}}}]}]}}`))
 
 	got := normalizeAntigravityGeminiFunctionResponseRoles(payload)
 	if role := gjson.GetBytes(got, "request.contents.1.role").String(); role != "user" {
 		t.Fatalf("mixed response role = %q, want user; payload=%s", role, got)
 	}
 	parts := gjson.GetBytes(got, "request.contents.1.parts").Array()
-	if len(parts) != 2 || parts[0].Get("functionResponse.id").String() != "call-1" || parts[1].Get("text").String() != "context" {
+	if len(parts) != 2 || parts[0].Get("functionResponse.id").String() != "call-1" ||
+		parts[1].Get("text").String() != "context" {
 		t.Fatalf("mixed response parts = %s", gjson.GetBytes(got, "request.contents.1.parts").Raw)
 	}
 }
 
 func TestEnsureAntigravityGeminiBoundaryUserContent(t *testing.T) {
-	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"text":"first"}]},{"role":"model","parts":[{"text":"last"}]}]}}`)
+	payload := []byte(
+		(`{"request":{"contents":[{"role":"model","parts":[{"text":"first"}]},` +
+			`{"role":"model","parts":[{"text":` +
+			`"last"}]}]}}`),
+	)
 	got := ensureAntigravityGeminiBoundaryUserContent("gemini-3.7-flash", payload)
 	contents := gjson.GetBytes(got, "request.contents").Array()
 	if len(contents) != 4 {
@@ -71,18 +131,25 @@ func TestEnsureAntigravityGeminiBoundaryUserContent(t *testing.T) {
 
 func TestEnsureAntigravityGeminiBoundaryUserContentBypassesClaudeAndFunctionResponse(t *testing.T) {
 	claude := []byte(`{"request":{"contents":[{"role":"model","parts":[{"text":"answer"}]}]}}`)
-	if got := ensureAntigravityGeminiBoundaryUserContent("claude-sonnet-4-6", claude); !bytes.Equal(got, claude) {
+	if got := ensureAntigravityGeminiBoundaryUserContent("claude-sonnet-4-6", claude); !bytes.Equal(
+		got,
+		claude,
+	) {
 		t.Fatalf("Claude payload changed: %s", got)
 	}
 
-	functionResponse := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"question"}]},{"role":"model","parts":[{"functionResponse":{"id":"call-1","name":"lookup","response":{}}}]}]}}`)
-	if got := ensureAntigravityGeminiTrailingUserContent("gemini-3.7-flash", functionResponse); !bytes.Equal(got, functionResponse) {
+	functionResponse := []byte((`{"request":{"contents":[{"role":"user","parts":[{"text":"question"}]},{"role"` +
+		`:"model","parts":[{"functionResponse":{"id":"call-1","name":"lookup","response":{}}}]}]}}`))
+	if got := ensureAntigravityGeminiTrailingUserContent("gemini-3.7-flash", functionResponse); !bytes.Equal(
+		got, functionResponse,
+	) {
 		t.Fatalf("functionResponse tail changed: %s", got)
 	}
 }
 
 func TestApplyAntigravityIndexedEditsUsesOffsetsAndSJSONFallback(t *testing.T) {
-	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"one"}]},{"role":"user","parts":[{"text":"two"}]}]},"preserve":"spacing"}`)
+	payload := []byte((`{"request":{"contents":[{"role":"user","parts":[{"text":"one"}]},{"rol` +
+		`e":"user","parts":[{"text":"two"}]}]},"preserve":"spacing"}`))
 	first := gjson.GetBytes(payload, "request.contents.0")
 	second := gjson.GetBytes(payload, "request.contents.1")
 	edits := []antigravityContentEdit{

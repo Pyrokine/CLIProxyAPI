@@ -11,9 +11,11 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
+//goland:noinspection SpellCheckingInspection
 const sanitizeTestPayload = `{
   "request": {
     "contents": [
@@ -50,8 +52,10 @@ func buildRequestBodyFromRawPayload(t *testing.T, modelName string, payload []by
 
 	executor := &AntigravityExecutor{}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "test-project"}}
-	payload, err := executor.prepareAntigravityRequestPayload(context.Background(), auth,
-		cliproxyexecutor.Request{Model: modelName}, cliproxyexecutor.Options{}, payload, payload)
+	payload, err := executor.prepareAntigravityRequestPayload(
+		context.Background(), auth,
+		cliproxyexecutor.Request{Model: modelName}, cliproxyexecutor.Options{}, payload, payload,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,26 +121,25 @@ func TestSanitizeAntigravityRequestSchemasPreservesHistory(t *testing.T) {
 	}
 }
 
-// TestSanitizeAntigravityRequestSchemasStillCleansSchemas verifies the schema itself is still
-// renamed and cleaned, so scoping the cleaner did not disable it.
+// TestSanitizeAntigravityRequestSchemasStillCleansSchemas 验证原生字段保留约束并清理不支持的元数据
 func TestSanitizeAntigravityRequestSchemasStillCleansSchemas(t *testing.T) {
 	got := sanitizeAntigravityRequestSchemas(sanitizeTestPayload, false)
 
 	decl := "request.tools.0.functionDeclarations.0"
-	if gjson.Get(got, decl+".parametersJsonSchema").Exists() {
-		t.Errorf("parametersJsonSchema was not renamed: %s", gjson.Get(got, decl).Raw)
+	if gjson.Get(got, decl+".parameters").Exists() {
+		t.Errorf("native schema was downgraded to parameters: %s", gjson.Get(got, decl).Raw)
 	}
-	schema := gjson.Get(got, decl+".parameters")
+	schema := gjson.Get(got, decl+".parametersJsonSchema")
 	if !schema.Exists() {
-		t.Fatalf("parameters missing after sanitization: %s", gjson.Get(got, decl).Raw)
+		t.Fatalf("parametersJsonSchema missing after sanitization: %s", gjson.Get(got, decl).Raw)
 	}
 
 	items := schema.Get("properties.todoList.items")
 	if items.Get("title").Exists() {
 		t.Errorf("schema keyword title was not removed: %s", items.Raw)
 	}
-	if items.Get("properties.title.minLength").Exists() {
-		t.Errorf("unsupported keyword minLength was not removed: %s", items.Raw)
+	if got := items.Get("properties.title.minLength").Int(); got != 3 {
+		t.Errorf("native minLength = %d, want 3: %s", got, items.Raw)
 	}
 	if !items.Get("properties.title").Exists() {
 		t.Errorf("schema property named title must be preserved: %s", items.Raw)
@@ -218,14 +221,6 @@ func TestAntigravitySchemaPathsCoverEverySchemaLocation(t *testing.T) {
 					}
 					base := "request.tools.0." + declContainer + ".0."
 					for _, k := range antigravityDeclarationSchemaKeys {
-						// Only the camelCase alias is renamed onto parameters, matching whole-payload
-						// cleaning. Every other spelling is cleaned where the client put it.
-						if k == "parametersJsonSchema" {
-							if gjson.Get(got, base+k).Exists() {
-								t.Errorf("%s should have been renamed onto parameters: %s", k, got)
-							}
-							continue
-						}
 						check(base + k)
 					}
 					for _, k := range antigravityGenerationSchemaKeys {
@@ -247,7 +242,9 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 		"emptyProps":   `{"type":"object","properties":{}}`,
 		"noProps":      `{"type":"object"}`,
 		"withRequired": `{"type":"object","required":["a"],"properties":{"a":{"type":"string","minLength":2}}}`,
-		"nestedArray":  `{"type":"object","properties":{"list":{"type":"array","items":{"type":"object","title":"X","required":["id","title"],"properties":{"id":{"type":"number"},"title":{"type":"string"}}}}}}`,
+		"nestedArray": `{"type":"object","properties":{"list":{"type":"array","items":{"type":` +
+			`"object","title":"X","required":["id","title"],"properties":{"id":{"ty` +
+			`pe":"number"},"title":{"type":"string"}}}}}}`,
 		"enumAndRemoved": `{"type":"object","$comment":"c","properties":{"m":{"type":"string","enum":["a","b"],` +
 			`"deprecated":true}}}`,
 	}
@@ -280,13 +277,12 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 }
 
 func TestSanitizeAntigravityRequestSchemasKeepsResponseSchemasPlaceholderFree(t *testing.T) {
-	payload := `{"request":{
-		"tools":[{"functionDeclarations":[{"name":"tool","parameters":{"type":"object","properties":{"value":{"type":"string"}}}}]}],
-		"generationConfig":{"responseSchema":{"type":"object","properties":{
-			"empty":{"type":"object"},
-			"optional":{"type":"object","properties":{"value":{"type":"string"}}}
-		}}}
-	}}`
+	payload := "{\"request\":{\n\t\t\"tools\":[{\"functionDeclarations\":[{\"name\":\"" +
+		`tool","parameters":{"type":"object","properties":{"value":{"type":"str` +
+		"ing\"}}}}]}],\n\t\t\"generationConfig\":{\"responseSchema\":{\"type\":" +
+		"\"object\",\"properties\":{\n\t\t\t\"empty\":{\"type\":\"object\"},\n" +
+		`			"optional":{"type":"object","properties":{"value":{"type":"string"}` +
+		"}}\n\t\t}}}\n\t}}"
 
 	got := sanitizeAntigravityRequestSchemas(payload, true)
 	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
@@ -311,7 +307,11 @@ func TestSanitizeAntigravityRequestSchemasKeepsResponseSchemasPlaceholderFree(t 
 }
 
 func TestAntigravityBuildRequestKeepsJSONObjectMimeOnly(t *testing.T) {
-	input := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`)
+	input := []byte(
+		`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":` +
+			`"hi"}],"response_format":{"type":` +
+			`"json_object"}}`,
+	)
 	translated := antigravitychat.ConvertOpenAIRequestToAntigravity("gemini-3.1-pro-low", input, false)
 	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-pro-low", translated)
 	encoded, errMarshal := json.Marshal(body)
@@ -368,33 +368,57 @@ func TestAntigravityBuildRequestSanitizesSnakeCaseGenerationResponseSchemas(t *t
 		{alias: "response_schema", canonical: "responseSchema"},
 		{alias: "response_json_schema", canonical: "responseJsonSchema"},
 	} {
-		t.Run(
-			testCase.alias, func(t *testing.T) {
-				payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generation_config":{"` + testCase.alias + `":{"type":"object","$id":"drop-me","properties":{"title":{"type":"string"}}}}}}`)
-				body := buildRequestBodyFromRawPayload(t, "gemini-3.6-flash-high", payload)
-				encoded, errMarshal := json.Marshal(body)
-				if errMarshal != nil {
-					t.Fatal(errMarshal)
-				}
+		for _, source := range []string{"openai", "antigravity"} {
+			t.Run(
+				testCase.alias+"/"+source, func(t *testing.T) {
+					payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],` +
+						`"generation_config":{"` + testCase.alias + `":{"type":"object","$id":"drop-me",` +
+						`"properties":{"title":{"type":"string"}}}}}}`)
+					base := "request.generation_config."
+					if source == "openai" {
+						input := []byte(
+							`{"model":"gemini-3.6-flash-high","messages":[{"role":"user","content":"hi"}],` +
+								`"generation_config":{"` + testCase.alias + `":{"type":"object","$id":"drop-me",` +
+								`"properties":{"title":{"type":"string"}}}}}`,
+						)
+						var err error
+						payload, err = sdktranslator.TranslateRequestChecked(
+							t.Context(),
+							sdktranslator.FormatOpenAI,
+							sdktranslator.FormatAntigravity,
+							"gemini-3.6-flash-high",
+							input,
+							false,
+						)
+						if err != nil {
+							t.Fatal(err)
+						}
+						base = "request.generationConfig."
+					}
+					body := buildRequestBodyFromRawPayload(t, "gemini-3.6-flash-high", payload)
+					encoded, errMarshal := json.Marshal(body)
+					if errMarshal != nil {
+						t.Fatal(errMarshal)
+					}
 
-				base := "request.generation_config."
-				// The upstream API accepts either spelling, so the field must stay where the client put
-				// it. Only the unsupported keywords inside it are what upstream rejects.
-				schema := gjson.GetBytes(encoded, base+testCase.alias)
-				if !schema.Exists() {
-					t.Fatalf("snake_case response schema was renamed or dropped: %s", encoded)
-				}
-				if gjson.GetBytes(encoded, base+testCase.canonical).Exists() {
-					t.Fatalf("cleaning must not add a second spelling: %s", encoded)
-				}
-				if schema.Get(`\$id`).Exists() {
-					t.Fatalf("unsupported $id survived cleaning: %s", schema.Raw)
-				}
-				if !schema.Get("properties.title").Exists() {
-					t.Fatalf("schema property named title was removed: %s", schema.Raw)
-				}
-			},
-		)
+					// The upstream API accepts either spelling, so the field must stay where the client put
+					// it. Only the unsupported keywords inside it are what upstream rejects.
+					schema := gjson.GetBytes(encoded, base+testCase.alias)
+					if !schema.Exists() {
+						t.Fatalf("snake_case response schema was renamed or dropped: %s", encoded)
+					}
+					if gjson.GetBytes(encoded, base+testCase.canonical).Exists() {
+						t.Fatalf("cleaning must not add a second spelling: %s", encoded)
+					}
+					if schema.Get(`\$id`).Exists() {
+						t.Fatalf("unsupported $id survived cleaning: %s", schema.Raw)
+					}
+					if !schema.Get("properties.title").Exists() {
+						t.Fatalf("schema property named title was removed: %s", schema.Raw)
+					}
+				},
+			)
+		}
 	}
 }
 
@@ -484,14 +508,23 @@ func TestSanitizeAntigravityRequestSchemasStripsPropertyNamesEverywhere(t *testi
 							}
 							generation.WriteString(`"` + key + `":` + schema)
 						}
-						payload := `{"request":{"tools":[{"` + declarationContainer + `":[{` + declaration.String() + `}]}],"` +
-							strings.TrimPrefix(generationContainer, "request.") + `":{` + generation.String() + `}}}`
+						payload := `{"request":{"tools":[{"` +
+							declarationContainer +
+							`":[{` +
+							declaration.String() +
+							`}]}],"` +
+							strings.TrimPrefix(
+								generationContainer,
+								"request.",
+							) + `":{` + generation.String() + `}}}`
 
 						for _, useAntigravitySchema := range []bool{false, true} {
 							got := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
 							if strings.Contains(got, `"propertyNames"`) {
 								t.Errorf(
-									"antigravity=%v: propertyNames reaches upstream: %s", useAntigravitySchema, got,
+									"antigravity=%v: propertyNames reaches upstream: %s",
+									useAntigravitySchema,
+									got,
 								)
 							}
 						}
@@ -520,14 +553,20 @@ func TestSanitizeAntigravityRequestSchemasKeepsPropertyNamesInHistory(t *testing
 		after := gjson.Get(got, "request.contents")
 		if before.Raw != after.Raw {
 			t.Errorf(
-				"antigravity=%v: history was mutated.\nbefore: %s\nafter:  %s", useAntigravitySchema, before.Raw,
+				"antigravity=%v: history was mutated.\nbefore: %s\nafter:  %s",
+				useAntigravitySchema,
+				before.Raw,
 				after.Raw,
 			)
 		}
 
 		schema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
 		if !schema.Get("properties.propertyNames").Exists() {
-			t.Errorf("antigravity=%v: property named propertyNames was removed: %s", useAntigravitySchema, schema.Raw)
+			t.Errorf(
+				"antigravity=%v: property named propertyNames was removed: %s",
+				useAntigravitySchema,
+				schema.Raw,
+			)
 		}
 		if schema.Get("properties.properties.propertyNames").Exists() {
 			t.Errorf(
@@ -543,11 +582,14 @@ func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T
 		for _, modelName := range []string{"gemini-3.1-pro", "claude-opus-4-6"} {
 			t.Run(
 				shapeName+"_"+modelName, func(t *testing.T) {
-					payload := []byte(`{"request":{
-					"contents":[{"role":"model","parts":[{"functionCall":{"name":"t","args":{"propertyNames":"keep-me"}}}]}],
-					"tools":[{"function_declarations":[{"name":"t","parametersJsonSchema":` + schema + `}]}],
+					payload := []byte(
+						("{\"request\":{\n\t\t\t\t\t\"contents\":[{\"role\":\"model\",\"parts\":[{\"" +
+							"functionCall\":{\"name\":\"t\",\"args\":{\"propertyNames\":\"keep-me\"}}}]}],\n" +
+							"\t\t\t\t\t\"tools\":[{\"function_declarations\":[{\"name\":\"t\",\"" +
+							"parametersJsonSchema\":") + schema + `}]}],
 					"generationConfig":{"responseSchema":` + schema + `}
-				}}`)
+				}}`,
+					)
 
 					body := buildRequestBodyFromRawPayload(t, modelName, payload)
 					encoded, errMarshal := json.Marshal(body)
@@ -555,7 +597,10 @@ func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T
 						t.Fatal(errMarshal)
 					}
 					for _, path := range []string{"request.tools", "request.generationConfig"} {
-						if node := gjson.GetBytes(encoded, path); strings.Contains(node.Raw, `"propertyNames"`) {
+						if node := gjson.GetBytes(encoded, path); strings.Contains(
+							node.Raw,
+							`"propertyNames"`,
+						) {
 							t.Errorf("%s still carries propertyNames: %s", path, node.Raw)
 						}
 					}
@@ -570,27 +615,58 @@ func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T
 }
 
 func TestSanitizeAntigravityRequestSchemasNormalizesTrueBooleanSubschemas(t *testing.T) {
-	payload := `{"request":{"tools":[{"functionDeclarations":[{"name":"t","parametersJsonSchema":{
-		"type":"object","properties":{
-			"flag":true,"disabled":false,
-			"nested":{"type":"object","properties":{"flag":true}},
-			"tags":{"type":"array","items":true},
-			"variants":{"anyOf":[true,{"type":"string"}]},
-			"large":9007199254740993
-		},"additionalProperties":true
-	}}]}]}}`
+	payload := `{"request":{
+		"tools":[{"functionDeclarations":[{
+			"name":"mcp__revenuecat_create_product_store_state_plan",
+			"parametersJsonSchema":{
+				"type":"object",
+				"properties":{
+					"screenshot_id":true,
+					"filename":true,
+					"file_size":true,
+					"source_file_checksum":true,
+					"disabled":false,
+					"metadata":{
+						"type":"object",
+						"properties":{
+							"nested_flag":true
+						}
+					},
+					"tags":{
+						"type":"array",
+						"items":true
+					},
+					"variants":{
+						"anyOf":[true,{"type":"string"}]
+					},
+					"large_int":9007199254740993
+				},
+				"additionalProperties":true
+			}
+		}]}]
+	}}`
 	for _, useAntigravitySchema := range []bool{false, true} {
 		output := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
-		params := gjson.Get(output, "request.tools.0.functionDeclarations.0.parameters")
-		for _, path := range []string{"properties.flag", "properties.nested.properties.flag", "properties.tags.items"} {
+		params := gjson.Get(output, "request.tools.0.functionDeclarations.0.parametersJsonSchema")
+		for _, path := range []string{
+			"properties.screenshot_id", "properties.filename", "properties.file_size",
+			"properties.source_file_checksum",
+			"properties.metadata.properties.nested_flag", "properties.tags.items", "properties.variants.anyOf.0",
+		} {
 			if got := params.Get(path); !got.IsObject() || got.Raw != "{}" {
-				t.Errorf("antigravity=%t: %s = %s, want {}; output=%s", useAntigravitySchema, path, got.Raw, output)
+				t.Errorf(
+					"antigravity=%t: %s = %s, want {}; output=%s",
+					useAntigravitySchema,
+					path,
+					got.Raw,
+					output,
+				)
 			}
 		}
 		if got := params.Get("properties.disabled"); got.Type != gjson.False {
 			t.Errorf("antigravity=%t: false schema changed: %s", useAntigravitySchema, got.Raw)
 		}
-		if got := params.Get("properties.large"); got.Raw != "9007199254740993" {
+		if got := params.Get("properties.large_int"); got.Raw != "9007199254740993" {
 			t.Errorf("antigravity=%t: large integer changed: %s", useAntigravitySchema, got.Raw)
 		}
 	}

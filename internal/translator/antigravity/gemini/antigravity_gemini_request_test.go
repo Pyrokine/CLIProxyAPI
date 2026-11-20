@@ -32,15 +32,23 @@ func TestConvertGeminiRequestToAntigravityDefaultsFunctionResponseRoleToUser(t *
 		{name: "invalid snake role", role: `"role":"function",`, partKey: "function_response"},
 	}
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{}}}]},{"role":"user","parts":[{"text":"before"}]},{` + testCase.role + `"parts":[{"` + testCase.partKey + `":{"name":"lookup","response":{"result":"ok"}}}]}]}`)
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup"` +
+					(`,"args":{}}}]},{"role":"user","parts":[{"text":"before"}]},` +
+						`{`) +
+					testCase.role +
+					`"parts":[{"` +
+					testCase.partKey +
+					`":{"name":"lookup","response":{"result":"ok"}}}]}]}`)
 
-			output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", input, false)
+				output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", input, false)
 
-			if got := gjson.GetBytes(output, "request.contents.2.role").String(); got != "user" {
-				t.Fatalf("function response role = %q, want user; output: %s", got, output)
-			}
-		})
+				if got := gjson.GetBytes(output, "request.contents.2.role").String(); got != "user" {
+					t.Fatalf("function response role = %q, want user; output: %s", got, output)
+				}
+			},
+		)
 	}
 }
 
@@ -190,7 +198,9 @@ func TestConvertGeminiRequestToAntigravity_ParallelFunctionCalls(t *testing.T) {
 }
 
 func TestRewriteGeminiFunctionNamesReusesNormalizedPayload(t *testing.T) {
-	input := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}}}]}],"toolConfig":{"functionCallingConfig":{"allowedFunctionNames":["lookup"]}}}}`)
+	input := []byte((`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args"` +
+		`:{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}}}]}]` +
+		`,"toolConfig":{"functionCallingConfig":{"allowedFunctionNames":["lookup"]}}}}`))
 
 	output := rewriteGeminiFunctionNames(input, nil)
 
@@ -220,7 +230,9 @@ func TestRemoveEmptyGeminiFunctionToolsDeletesEmptyArray(t *testing.T) {
 }
 
 func TestRewriteGeminiFunctionNamesNormalizesNonStringNames(t *testing.T) {
-	input := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":true,"args":{}}}]}],"toolConfig":{"functionCallingConfig":{"allowedFunctionNames":[true]}}}}`)
+	input := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"nam` +
+		`e":true,"args":{}}}]}],"toolConfig":{"functionCallingConfig":{"allowed` +
+		`FunctionNames":[true]}}}}`)
 
 	output := rewriteGeminiFunctionNames(input, nil)
 
@@ -266,14 +278,20 @@ func TestConvertGeminiRequestToAntigravityUsesRequestScopedFunctionNames(t *test
 	if got := gjson.GetBytes(output, "request.contents.0.parts.1.functionCall.name").String(); got != secondName {
 		t.Fatalf("second functionCall name = %q, want %q", got, secondName)
 	}
-	allowedNames := gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Array()
-	if len(allowedNames) != 2 || allowedNames[0].String() != firstName || allowedNames[1].String() != secondName {
+	allowedNames := gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames").
+		Array()
+	if len(allowedNames) != 2 || allowedNames[0].String() != firstName ||
+		allowedNames[1].String() != secondName {
 		t.Fatalf("allowed function names do not match declarations: %s", output)
 	}
 }
 
 func TestFixCLIToolResponseReusesHistoryWithoutFunctionResponses(t *testing.T) {
-	input := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"text":"world"}]}]}}`)
+	input := []byte(
+		`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]},` +
+			`{"role":"model","parts":[{"text":` +
+			`"world"}]}]}}`,
+	)
 
 	output, errFix := fixCLIToolResponse(input)
 	if errFix != nil {
@@ -338,6 +356,7 @@ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 	// translator's image embedding), fixCLIToolResponse should preserve it as-is.
 	// parseFunctionResponseRaw returns response.Raw for valid JSON objects,
 	// so extra fields like "parts" survive the pipeline.
+	//goland:noinspection SpellCheckingInspection
 	input := `{
 		"model": "claude-opus-4-6-thinking",
 		"request": {
@@ -401,13 +420,18 @@ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 	if inlineParts[0].Get("inlineData.mimeType").String() != "image/png" {
 		t.Errorf("Expected mimeType 'image/png', got '%s'", inlineParts[0].Get("inlineData.mimeType").String())
 	}
+	//goland:noinspection SpellCheckingInspection
 	if inlineParts[0].Get("inlineData.data").String() != "iVBOR" {
+		//goland:noinspection SpellCheckingInspection
 		t.Errorf("Expected data 'iVBOR', got '%s'", inlineParts[0].Get("inlineData.data").String())
 	}
 
 	// Verify response.result is also preserved
 	if funcResp.Get("response.result").String() != "Screenshot taken" {
-		t.Errorf("Expected response.result 'Screenshot taken', got '%s'", funcResp.Get("response.result").String())
+		t.Errorf(
+			"Expected response.result 'Screenshot taken', got '%s'",
+			funcResp.Get("response.result").String(),
+		)
 	}
 }
 
@@ -852,7 +876,9 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_PreservesNumberPrecisi
 	}
 }
 
-func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsFunctionCallSignatureForClaudeModel(t *testing.T) {
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsFunctionCallSignatureForClaudeModel(
+	t *testing.T,
+) {
 	inputJSON := []byte(`{
 		"project": "",
 		"model": "claude-sonnet-4-6",
@@ -879,7 +905,10 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsFunctionCallSign
 
 	sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature")
 	if sig.Exists() {
-		t.Fatalf("expected functionCall thoughtSignature to be stripped for Claude target model, got %s", sig.Raw)
+		t.Fatalf(
+			"expected functionCall thoughtSignature to be stripped for Claude target model, got %s",
+			sig.Raw,
+		)
 	}
 }
 
@@ -902,7 +931,9 @@ func TestConvertGeminiRequestToAntigravityNormalizesResponseJSONSchema(t *testin
 				}}
 			}`,
 			containerPath: "request.generationConfig",
-			wantSchema:    `{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}`,
+			wantSchema: `{"type":"object","properties":{"message":{"type":"string"}},` +
+				`"required":["message"],"additionalProperties":` +
+				`false}`,
 		},
 		{
 			name: "snake case",
@@ -934,39 +965,38 @@ func TestConvertGeminiRequestToAntigravityNormalizesResponseJSONSchema(t *testin
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			output := ConvertGeminiRequestToAntigravity("gemini-3-flash", []byte(test.input), false)
-			generationConfig := gjson.GetBytes(output, test.containerPath)
-			var gotSchema any
-			if err := json.Unmarshal([]byte(generationConfig.Get("responseSchema").Raw), &gotSchema); err != nil {
-				t.Fatalf("invalid responseSchema: %v; output: %s", err, output)
-			}
-			var wantSchema any
-			if err := json.Unmarshal([]byte(test.wantSchema), &wantSchema); err != nil {
-				t.Fatalf("invalid expected schema: %v", err)
-			}
-			if !reflect.DeepEqual(gotSchema, wantSchema) {
-				t.Fatalf("responseSchema = %#v, want %#v; output: %s", gotSchema, wantSchema, output)
-			}
-			for _, alias := range []string{"responseJsonSchema", "response_json_schema", "response_schema"} {
-				if generationConfig.Get(alias).Exists() {
-					t.Fatalf("%s should be removed; output: %s", alias, output)
+		t.Run(
+			test.name, func(t *testing.T) {
+				output := ConvertGeminiRequestToAntigravity("gemini-3-flash", []byte(test.input), false)
+				generationConfig := gjson.GetBytes(output, test.containerPath)
+				var gotSchema any
+				if err := json.Unmarshal([]byte(generationConfig.Get("responseSchema").Raw), &gotSchema); err != nil {
+					t.Fatalf("invalid responseSchema: %v; output: %s", err, output)
 				}
-			}
-		})
+				var wantSchema any
+				if err := json.Unmarshal([]byte(test.wantSchema), &wantSchema); err != nil {
+					t.Fatalf("invalid expected schema: %v", err)
+				}
+				if !reflect.DeepEqual(gotSchema, wantSchema) {
+					t.Fatalf("responseSchema = %#v, want %#v; output: %s", gotSchema, wantSchema, output)
+				}
+				for _, alias := range []string{"responseJsonSchema", "response_json_schema", "response_schema"} {
+					if generationConfig.Get(alias).Exists() {
+						t.Fatalf("%s should be removed; output: %s", alias, output)
+					}
+				}
+			},
+		)
 	}
 }
 
 func TestConvertGeminiRequestToAntigravityPreservesCanonicalResponseSchema(t *testing.T) {
-	input := []byte(`{
-		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
-		"generationConfig":{
-			"responseSchema":{"type":"object","properties":{"canonical":{"type":"string"}},"additionalProperties":false},
-			"responseJsonSchema":{"type":"object","properties":{"stale":{"type":"string"}}},
-			"response_json_schema":{"type":"object","properties":{"alsoStale":{"type":"string"}}},
-			"response_schema":{"type":"object","properties":{"snakeStale":{"type":"string"}}}
-		}
-	}`)
+	input := []byte(("{\n\t\t\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hello\"}]}],\n\t\t\"" +
+		"generationConfig\":{\n\t\t\t\"responseSchema\":{\"type\":\"object\",\"properties\":{\"canonical\":{" +
+		"\"type\":\"string\"}},\"additionalProperties\":false},\n\t\t\t\"responseJsonSchema\":{\"type\":\"" +
+		"object\",\"properties\":{\"stale\":{\"type\":\"string\"}}},\n\t\t\t\"response_json_schema\":{\"" +
+		"type\":\"object\",\"properties\":{\"alsoStale\":{\"type\":\"string\"}}},\n\t\t\t\"response_schema\":" +
+		"{\"type\":\"object\",\"properties\":{\"snakeStale\":{\"type\":\"string\"}}}\n\t\t}\n\t}"))
 
 	output := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
 	schema := gjson.GetBytes(output, "request.generationConfig.responseSchema")
@@ -977,7 +1007,8 @@ func TestConvertGeminiRequestToAntigravityPreservesCanonicalResponseSchema(t *te
 		schema.Get("properties.snakeStale").Exists() {
 		t.Fatalf("deprecated response schema alias replaced the canonical schema; output: %s", output)
 	}
-	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() || additionalProperties.Bool() {
+	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() ||
+		additionalProperties.Bool() {
 		t.Fatalf("additionalProperties = %s, want explicit false; output: %s", additionalProperties.Raw, output)
 	}
 	for _, alias := range []string{"responseJsonSchema", "response_json_schema", "response_schema"} {
@@ -1004,7 +1035,8 @@ func TestConvertGeminiRequestToAntigravityUsesResponseSchemaCleanerOnlyOnSelecte
 
 	output := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
 	schema := gjson.GetBytes(output, "request.generationConfig.responseSchema")
-	if schema.Get("properties.empty.properties.reason").Exists() || schema.Get("properties.empty.properties._").Exists() {
+	if schema.Get("properties.empty.properties.reason").Exists() ||
+		schema.Get("properties.empty.properties._").Exists() {
 		t.Fatalf("response schema received a tool placeholder: %s", schema.Raw)
 	}
 	if schema.Get("properties.values.items").Exists() {
@@ -1048,23 +1080,16 @@ func TestConvertGeminiRequestToAntigravityResponseSchemaContainerPriority(t *tes
 }
 
 func TestFixCLIToolResponseAttachesSiblingImagesToNearestResponse(t *testing.T) {
-	input := []byte(`{
-		"request":{"contents":[
-			{"role":"model","parts":[
-				{"functionCall":{"name":"read_a","id":"call_a","args":{}}},
-				{"functionCall":{"name":"read_b","id":"call_b","args":{}}}
-			]},
-			{"role":"user","parts":[
-				{"inline_data":{"data":"LEADING"}},
-				{"functionResponse":{"name":"read_a","id":"call_a","response":{"result":"A"},"parts":[{"inlineData":{"mimeType":"image/gif","data":"EXISTING"}}]}},
-				{"inlineData":{"mimeType":"image/webp","data":"AFTER_A"}},
-				{"text":"keep text"},
-				{"functionResponse":{"name":"read_b","id":"call_b","response":{"result":"B"}}},
-				{"inline_data":{"mime_type":"image/jpeg","data":"AFTER_B"}},
-				{"custom":{"value":"keep other slot"}}
-			]}
-		]}
-	}`)
+	input := []byte(("{\n\t\t\"request\":{\"contents\":[\n\t\t\t{\"role\":\"model\",\"parts\":[\n\t\t\t\t{\"" +
+		"functionCall\":{\"name\":\"read_a\",\"id\":\"call_a\",\"args\":{}}},\n\t\t\t\t{\"functionCall\":{\"" +
+		"name\":\"read_b\",\"id\":\"call_b\",\"args\":{}}}\n\t\t\t]},\n\t\t\t{\"role\":\"user\",\"parts\":[\n" +
+		"\t\t\t\t{\"inline_data\":{\"data\":\"LEADING\"}},\n\t\t\t\t{\"functionResponse\":{\"name\":\"" +
+		"read_a\",\"id\":\"call_a\",\"response\":{\"result\":\"A\"},\"parts\":[{\"inlineData\":{\"mimeType\":" +
+		"\"image/gif\",\"data\":\"EXISTING\"}}]}},\n\t\t\t\t{\"inlineData\":{\"mimeType\":\"image/webp\",\"" +
+		"data\":\"AFTER_A\"}},\n\t\t\t\t{\"text\":\"keep text\"},\n\t\t\t\t{\"functionResponse\":{\"name\":\"" +
+		"read_b\",\"id\":\"call_b\",\"response\":{\"result\":\"B\"}}},\n\t\t\t\t{\"inline_data\":{\"" +
+		"mime_type\":\"image/jpeg\",\"data\":\"AFTER_B\"}},\n\t\t\t\t{\"custom\":{\"value\":\"keep other " +
+		"slot\"}}\n\t\t\t]}\n\t\t]}\n\t}"))
 
 	output, err := fixCLIToolResponse(input)
 	if err != nil {

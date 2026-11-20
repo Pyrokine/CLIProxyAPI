@@ -79,10 +79,14 @@ func TestAntigravityTransportScopeDoesNotExposeTokens(t *testing.T) {
 		t.Fatalf("access token scope exposes raw token: %q", accessScope)
 	}
 
-	refreshScope := antigravityTransportScope(&cliproxyauth.Auth{Metadata: map[string]any{
-		"access_token":  accessToken,
-		"refresh_token": refreshToken,
-	}})
+	refreshScope := antigravityTransportScope(
+		&cliproxyauth.Auth{
+			Metadata: map[string]any{
+				"access_token":  accessToken,
+				"refresh_token": refreshToken,
+			},
+		},
+	)
 	if !strings.HasPrefix(refreshScope, "refresh:") || len(strings.TrimPrefix(refreshScope, "refresh:")) != 16 {
 		t.Fatalf("refresh token scope = %q, want truncated digest", refreshScope)
 	}
@@ -120,7 +124,10 @@ func TestAntigravityHTTP11TransportSuppressesHTTP2AndUsesShortMode(t *testing.T)
 		t.Fatalf("TLS NextProtos = %#v, want nil", clone.TLSClientConfig)
 	}
 	if clone.MaxIdleConnsPerHost != -1 || clone.DisableKeepAlives || clone.IdleConnTimeout != 0 {
-		t.Fatalf("short-mode settings = MaxIdleConnsPerHost:%d DisableKeepAlives:%t IdleConnTimeout:%s", clone.MaxIdleConnsPerHost, clone.DisableKeepAlives, clone.IdleConnTimeout)
+		t.Fatalf(
+			"short-mode settings = MaxIdleConnsPerHost:%d DisableKeepAlives:%t IdleConnTimeout:%s",
+			clone.MaxIdleConnsPerHost, clone.DisableKeepAlives, clone.IdleConnTimeout,
+		)
 	}
 	if !base.ForceAttemptHTTP2 || len(base.TLSClientConfig.NextProtos) != 2 {
 		t.Fatal("base transport was mutated")
@@ -131,10 +138,14 @@ func TestAntigravityHTTP11TransportSuppressesHTTP2AndUsesShortMode(t *testing.T)
 		remoteAddr string
 	}
 	observations := make(chan requestObservation, 2)
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		observations <- requestObservation{protocol: r.Proto, remoteAddr: r.RemoteAddr}
-		_, _ = io.WriteString(w, "ok")
-	}))
+	server := httptest.NewUnstartedServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				observations <- requestObservation{protocol: r.Proto, remoteAddr: r.RemoteAddr}
+				_, _ = io.WriteString(w, "ok")
+			},
+		),
+	)
 	server.EnableHTTP2 = true
 	server.StartTLS()
 	defer server.Close()
@@ -170,19 +181,27 @@ func TestAntigravityHTTP11TransportSuppressesHTTP2AndUsesShortMode(t *testing.T)
 
 func TestAntigravityHTTP11TransportReusesSocketWhenPoolEnabled(t *testing.T) {
 	enabled := true
-	cfg := &config.Config{Antigravity: config.AntigravityConfig{ConnectionPool: config.AntigravityConnectionPoolConfig{
-		Enabled: &enabled,
-	}}}
+	cfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabled,
+			},
+		},
+	}
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // Test server uses an ephemeral certificate.
 	transport := cloneTransportWithHTTP11(base, cfg)
 	defer transport.CloseIdleConnections()
 
 	remoteAddresses := make(chan string, 2)
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		remoteAddresses <- r.RemoteAddr
-		_, _ = io.WriteString(w, "ok")
-	}))
+	server := httptest.NewUnstartedServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				remoteAddresses <- r.RemoteAddr
+				_, _ = io.WriteString(w, "ok")
+			},
+		),
+	)
 	server.StartTLS()
 	defer server.Close()
 
@@ -217,74 +236,111 @@ func TestResolveAntigravityPoolSettings(t *testing.T) {
 	}{
 		{name: "nil config", shortMode: true, maxIdleHost: -1},
 		{
-			name:        "disabled",
-			cfg:         &config.Config{Antigravity: config.AntigravityConfig{ConnectionPool: config.AntigravityConnectionPoolConfig{Enabled: &disabled}}},
+			name: "disabled",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{Enabled: &disabled},
+				},
+			},
 			shortMode:   true,
 			maxIdleHost: -1,
 		},
 		{
-			name:        "defaults",
-			cfg:         &config.Config{Antigravity: config.AntigravityConfig{ConnectionPool: config.AntigravityConnectionPoolConfig{Enabled: &enabled}}},
+			name: "defaults",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{Enabled: &enabled},
+				},
+			},
 			timeout:     antigravityDefaultIdleConnTimeout,
 			maxIdleHost: antigravityDefaultMaxIdleConnsPerHost,
 		},
 		{
 			name: "explicit zero keeps Go default",
-			cfg: &config.Config{Antigravity: config.AntigravityConfig{ConnectionPool: config.AntigravityConnectionPoolConfig{
-				Enabled: &enabled, MaxIdleConnsPerHost: &zero,
-			}}},
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled: &enabled, MaxIdleConnsPerHost: &zero,
+					},
+				},
+			},
 			timeout: antigravityDefaultIdleConnTimeout,
 		},
 		{
 			name: "invalid timeout uses default",
-			cfg: &config.Config{Antigravity: config.AntigravityConfig{ConnectionPool: config.AntigravityConnectionPoolConfig{
-				Enabled: &enabled, IdleConnTimeout: "invalid",
-			}}},
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled: &enabled, IdleConnTimeout: "invalid",
+					},
+				},
+			},
 			timeout:     antigravityDefaultIdleConnTimeout,
 			maxIdleHost: antigravityDefaultMaxIdleConnsPerHost,
 		},
 		{
 			name: "non-positive timeout returns short mode",
-			cfg: &config.Config{Antigravity: config.AntigravityConfig{ConnectionPool: config.AntigravityConnectionPoolConfig{
-				Enabled: &enabled, IdleConnTimeout: "0s",
-			}}},
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled: &enabled, IdleConnTimeout: "0s",
+					},
+				},
+			},
 			shortMode:   true,
 			maxIdleHost: -1,
 		},
 		{
 			name: "negative idle count returns short mode",
-			cfg: &config.Config{Antigravity: config.AntigravityConfig{ConnectionPool: config.AntigravityConnectionPoolConfig{
-				Enabled: &enabled, MaxIdleConnsPerHost: &negative,
-			}}},
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled: &enabled, MaxIdleConnsPerHost: &negative,
+					},
+				},
+			},
 			shortMode:   true,
 			maxIdleHost: -1,
 		},
 		{
 			name: "limits are capped",
-			cfg: &config.Config{Antigravity: config.AntigravityConfig{ConnectionPool: config.AntigravityConnectionPoolConfig{
-				Enabled: &enabled, IdleConnTimeout: "5m", MaxIdleConnsPerHost: &overLimit,
-			}}},
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled: &enabled, IdleConnTimeout: "5m", MaxIdleConnsPerHost: &overLimit,
+					},
+				},
+			},
 			timeout:     antigravityMaxAllowedIdleConnTimeout,
 			maxIdleHost: antigravityMaxAllowedIdleConnsPerHost,
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			settings := resolveAntigravityPoolSettings(test.cfg)
-			if settings.shortMode != test.shortMode || settings.idleConnTimeout != test.timeout ||
-				settings.maxIdleConnsPerHost != test.maxIdleHost {
-				t.Fatalf("settings = %#v, want short=%t timeout=%s max=%d", settings, test.shortMode, test.timeout, test.maxIdleHost)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				settings := resolveAntigravityPoolSettings(test.cfg)
+				if settings.shortMode != test.shortMode || settings.idleConnTimeout != test.timeout ||
+					settings.maxIdleConnsPerHost != test.maxIdleHost {
+					t.Fatalf(
+						"settings = %#v, want short=%t timeout=%s max=%d", settings, test.shortMode, test.timeout,
+						test.maxIdleHost,
+					)
+				}
+			},
+		)
 	}
 }
 
 func TestApplyAntigravityPoolLimitsHonorsBaseTransport(t *testing.T) {
 	enabled := true
 	maxIdle := 8
-	cfg := &config.Config{Antigravity: config.AntigravityConfig{ConnectionPool: config.AntigravityConnectionPoolConfig{
-		Enabled: &enabled, MaxIdleConnsPerHost: &maxIdle,
-	}}}
+	cfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabled, MaxIdleConnsPerHost: &maxIdle,
+			},
+		},
+	}
 	transport := &http.Transport{MaxIdleConns: 2, IdleConnTimeout: 90 * time.Second}
 	applyAntigravityPoolLimits(transport, cfg)
 	if transport.MaxIdleConnsPerHost != maxIdle || transport.MaxIdleConns != maxIdle ||
@@ -304,7 +360,9 @@ func TestNewAntigravityHTTPClientHandlesTypedNilAndPreservesForeignTransport(t *
 
 	var typedNil *http.Transport
 	typedNilContext := util.WithRoundTripper(context.Background(), typedNil)
-	client := newAntigravityHTTPClient(typedNilContext, &config.Config{}, &cliproxyauth.Auth{ID: "typed-nil"}, time.Second)
+	client := newAntigravityHTTPClient(
+		typedNilContext, &config.Config{}, &cliproxyauth.Auth{ID: "typed-nil"}, time.Second,
+	)
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok || transport == nil {
 		t.Fatalf("typed-nil context transport resolved to %T, want non-nil *http.Transport", client.Transport)
@@ -315,7 +373,9 @@ func TestNewAntigravityHTTPClientHandlesTypedNilAndPreservesForeignTransport(t *
 
 	foreign := antigravityForeignRoundTripper{}
 	foreignContext := util.WithRoundTripper(context.Background(), foreign)
-	foreignClient := newAntigravityHTTPClient(foreignContext, &config.Config{}, &cliproxyauth.Auth{ID: "foreign"}, time.Second)
+	foreignClient := newAntigravityHTTPClient(
+		foreignContext, &config.Config{}, &cliproxyauth.Auth{ID: "foreign"}, time.Second,
+	)
 	if _, ok := foreignClient.Transport.(antigravityForeignRoundTripper); !ok {
 		t.Fatalf("foreign RoundTripper replaced with %T", foreignClient.Transport)
 	}
@@ -332,14 +392,16 @@ func TestAntigravityGeneration429ClosesOnlyCredentialTransports(t *testing.T) {
 	_ = antigravityHTTP11Transport(firstAuth, secondBase)
 	secondTransport := antigravityHTTP11Transport(secondAuth, firstBase)
 
-	roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusTooManyRequests,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited"}`)),
-			Request:    req,
-		}, nil
-	})
+	roundTripper := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited"}`)),
+				Request:    req,
+			}, nil
+		},
+	)
 	_, err := NewAntigravityExecutor(&config.Config{}).Execute(
 		util.WithRoundTripper(context.Background(), roundTripper),
 		firstAuth,

@@ -17,5 +17,7 @@ func init() {
 			NonStream: convertAntigravityResponseToOpenAINonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, convertOpenAIRequestToAntigravityChecked)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, convertOpenAIRequestToAntigravityChecked,
+	)
 }

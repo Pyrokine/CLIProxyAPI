@@ -29,14 +29,14 @@ type antigravityToInteractionsStreamState struct {
 }
 
 func convertAntigravityResponseToInteractions(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	originalRequestRawJSON, _, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	_ = ctx
+
 	_ = originalRequestRawJSON
-	_ = requestRawJSON
+
 	if param == nil {
 		var local any
 		param = &local
@@ -89,13 +89,12 @@ func convertAntigravityResponseToInteractions(
 }
 
 func convertAntigravityResponseToInteractionsNonStream(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	originalRequestRawJSON, _, rawJSON []byte,
 	_ *any,
 ) []byte {
-	_ = ctx
-	_ = requestRawJSON
+
 	root := unwrapAntigravityResponse(gjson.ParseBytes(rawJSON))
 	root = restoreInteractionsFunctionNames(root, util.DisambiguatedToolNameMap(originalRequestRawJSON))
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
@@ -196,14 +195,23 @@ func appendAntigravityInteractionsCreated(
 	st *antigravityToInteractionsStreamState,
 	modelName string,
 ) [][]byte {
-	created := []byte(`{"interaction":{"id":"","status":"in_progress","object":"interaction","model":""},"event_type":"interaction.created"}`)
+	created := []byte(
+		(`{"interaction":{"id":"","status":"in_progress","object":"interaction",` +
+			`"model":""},"event_type":` +
+			`"interaction.created"}`),
+	)
 	created, _ = sjson.SetBytes(created, "interaction.id", st.ID)
 	created, _ = sjson.SetBytes(created, "interaction.model", modelName)
 	return append(out, translatorcommon.SSEEventData("interaction.created", created))
 }
 
-func appendAntigravityInteractionsStatusUpdate(out [][]byte, st *antigravityToInteractionsStreamState) [][]byte {
-	statusUpdate := []byte(`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`)
+func appendAntigravityInteractionsStatusUpdate(
+	out [][]byte,
+	st *antigravityToInteractionsStreamState,
+) [][]byte {
+	statusUpdate := []byte(
+		`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`,
+	)
 	statusUpdate, _ = sjson.SetBytes(statusUpdate, "interaction_id", st.ID)
 	return append(out, translatorcommon.SSEEventData("interaction.status_update", statusUpdate))
 }
@@ -215,7 +223,9 @@ func appendAntigravityInteractionsCompleted(
 	root gjson.Result,
 ) [][]byte {
 	now := time.Now().UTC().Format(time.RFC3339)
-	completed := []byte(`{"interaction":{"id":"","status":"completed","usage":{},"created":"","updated":"","service_tier":"standard","object":"interaction","model":""},"event_type":"interaction.completed"}`)
+	completed := []byte((`{"interaction":{"id":"","status":"completed","usage":{},"created":"","` +
+		`updated":"","service_tier":"standard","object":"interaction","model":"` +
+		`"},"event_type":"interaction.completed"}`))
 	completed, _ = sjson.SetBytes(completed, "interaction.id", st.ID)
 	completed, _ = sjson.SetBytes(completed, "interaction.created", now)
 	completed, _ = sjson.SetBytes(completed, "interaction.updated", now)
@@ -289,6 +299,7 @@ func ensureAntigravityInteractionsStep(
 	return appendAntigravityInteractionsStepStart(out, st, stepType, part)
 }
 
+//goland:noinspection DuplicatedCode
 func appendAntigravityPartToInteractionsStream(
 	out [][]byte,
 	st *antigravityToInteractionsStreamState,
@@ -297,7 +308,11 @@ func appendAntigravityPartToInteractionsStream(
 	if text := part.Get("text"); text.Exists() && text.String() != "" {
 		if part.Get("thought").Bool() {
 			out = ensureAntigravityInteractionsStep(out, st, "thought", gjson.Result{})
-			delta := []byte(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`)
+			delta := []byte(
+				(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":` +
+					`"thought_summary"},"event_type":` +
+					`"step.delta"}`),
+			)
 			delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 			delta, _ = sjson.SetBytes(delta, "delta.content.text", text.String())
 			out = append(out, translatorcommon.SSEEventData("step.delta", delta))
@@ -313,7 +328,9 @@ func appendAntigravityPartToInteractionsStream(
 	if fc := part.Get("functionCall"); fc.Exists() {
 		out = appendAntigravityThoughtSignature(out, st, part)
 		out = ensureAntigravityInteractionsStep(out, st, "function_call", fc)
-		delta := []byte(`{"index":0,"delta":{"arguments":"","type":"arguments_delta"},"event_type":"step.delta"}`)
+		delta := []byte(
+			`{"index":0,"delta":{"arguments":"","type":"arguments_delta"},"event_type":"step.delta"}`,
+		)
 		delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 		arguments := `{}`
 		if args := fc.Get("args"); args.Exists() {
@@ -325,7 +342,9 @@ func appendAntigravityPartToInteractionsStream(
 	}
 	if fr := part.Get("functionResponse"); fr.Exists() {
 		out = ensureAntigravityInteractionsStep(out, st, "function_result", fr)
-		delta := []byte(`{"index":0,"delta":{"type":"function_result","name":"","result":{}},"event_type":"step.delta"}`)
+		delta := []byte(
+			`{"index":0,"delta":{"type":"function_result","name":"","result":{}},"event_type":"step.delta"}`,
+		)
 		delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 		delta, _ = sjson.SetBytes(delta, "delta.name", fr.Get("name").String())
 		if response := fr.Get("response"); response.Exists() {
@@ -344,7 +363,9 @@ func appendAntigravityThoughtSignature(
 ) [][]byte {
 	if signature := antigravityThoughtSignature(part); signature != "" {
 		out = ensureAntigravityInteractionsStep(out, st, "thought", gjson.Result{})
-		signatureDelta := []byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`)
+		signatureDelta := []byte(
+			`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`,
+		)
 		signatureDelta, _ = sjson.SetBytes(signatureDelta, "index", st.ActiveStepIndex)
 		signatureDelta, _ = sjson.SetBytes(signatureDelta, "delta.signature", signature)
 		return append(out, translatorcommon.SSEEventData("step.delta", signatureDelta))
@@ -471,11 +492,14 @@ func setInteractionsUsageFromAntigravity(out []byte, path string, root gjson.Res
 		out, path+".input_tokens", firstAntigravityUsageInt(usage, "promptTokenCount", "prompt_token_count"),
 	)
 	out, _ = sjson.SetBytes(
-		out, path+".output_tokens", firstAntigravityUsageInt(usage, "candidatesTokenCount", "candidates_token_count"),
+		out,
+		path+".output_tokens",
+		firstAntigravityUsageInt(usage, "candidatesTokenCount", "candidates_token_count"),
 	)
 	if antigravityUsagePathExists(usage, "thoughtsTokenCount", "thoughts_token_count") {
 		out, _ = sjson.SetBytes(
-			out, path+".reasoning_tokens", firstAntigravityUsageInt(usage, "thoughtsTokenCount", "thoughts_token_count"),
+			out, path+".reasoning_tokens",
+			firstAntigravityUsageInt(usage, "thoughtsTokenCount", "thoughts_token_count"),
 		)
 	}
 	out, _ = sjson.SetBytes(
@@ -503,7 +527,9 @@ func setInteractionsStreamUsageFromAntigravity(out []byte, path string, root gjs
 	out, _ = sjson.SetBytes(out, path+".total_tokens", totalTokens)
 	out, _ = sjson.SetBytes(out, path+".total_input_tokens", inputTokens)
 	out, _ = sjson.SetRawBytes(
-		out, path+".input_tokens_by_modality", []byte(fmt.Sprintf(`[{"modality":"text","tokens":%d}]`, inputTokens)),
+		out,
+		path+".input_tokens_by_modality",
+		[]byte(fmt.Sprintf(`[{"modality":"text","tokens":%d}]`, inputTokens)),
 	)
 	out, _ = sjson.SetBytes(out, path+".total_cached_tokens", cachedTokens)
 	out, _ = sjson.SetBytes(out, path+".total_output_tokens", outputTokens)
@@ -558,7 +584,9 @@ func antigravityThoughtSignature(part gjson.Result) string {
 	if part.Get("functionCall").Exists() {
 		blockKind = sigcompat.BlockKindGeminiFunctionCall
 	}
-	for _, path := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature", "signature"} {
+	for _, path := range []string{
+		"thoughtSignature", "thought_signature", "extra_content.google.thought_signature", "signature",
+	} {
 		rawSignature := strings.TrimSpace(part.Get(path).String())
 		if rawSignature == "" {
 			continue

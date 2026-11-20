@@ -22,9 +22,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const antigravityCompactionSummaryResponse = `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"compact summary"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,"totalTokenCount":18},"modelVersion":"gemini-3.7-flash","responseId":"summary-response"}}`
+const antigravityCompactionSummaryResponse = `{"response":{"candidates":[{"content":{"role":"model","parts":[` +
+	`{"text":"compact summary"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"` +
+	`candidatesTokenCount":7,"totalTokenCount":18},"modelVersion":"gemini-3.7-flash","responseId":"summary-` +
+	`response"}}`
 
-func antigravityCompactionTestOptions(opts cliproxyexecutor.Options, sessionID string) cliproxyexecutor.Options {
+func antigravityCompactionTestOptions(
+	opts cliproxyexecutor.Options,
+	sessionID string,
+) cliproxyexecutor.Options {
 	opts.Metadata = map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: sessionID}
 	return opts
 }
@@ -45,9 +51,11 @@ func antigravityCompactionTestScope(
 }
 
 func TestAntigravityCompactionSessionIDPriority(t *testing.T) {
-	req := cliproxyexecutor.Request{Metadata: map[string]any{
-		cliproxyexecutor.DerivedSessionIDMetadataKey: "derived-request",
-	}}
+	req := cliproxyexecutor.Request{
+		Metadata: map[string]any{
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "derived-request",
+		},
+	}
 	opts := cliproxyexecutor.Options{
 		Headers: http.Header{"Session-Id": {"header-session"}},
 		Metadata: map[string]any{
@@ -98,7 +106,9 @@ func TestAntigravityCompactionScopeTracksCredentialOwnerAcrossTokenRotation(t *t
 	rotated := auth.Clone()
 	rotated.Metadata["access_token"] = "rotated-access-token"
 	rotatedScope := antigravityCompactionTestScope(t, executor, rotated, req, opts)
-	if summary, errUnseal := helps.UnsealAntigravityCompaction(capsule, rotatedScope); errUnseal != nil || summary != "summary" {
+	if summary, errUnseal := helps.UnsealAntigravityCompaction(
+		capsule, rotatedScope,
+	); errUnseal != nil || summary != "summary" {
 		t.Fatalf("access-token rotation invalidated capsule: summary=%q err=%v", summary, errUnseal)
 	}
 
@@ -117,8 +127,10 @@ func TestAntigravityExecuteCompactionDispatchesOnce(t *testing.T) {
 		opts    cliproxyexecutor.Options
 	}{
 		{
-			name:    "direct endpoint",
-			payload: []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"long conversation"}]}`),
+			name: "direct endpoint",
+			payload: []byte(
+				`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"long conversation"}]}`,
+			),
 			opts: cliproxyexecutor.Options{
 				Alt:            "responses/compact",
 				SourceFormat:   sdktranslator.FormatOpenAIResponse,
@@ -126,8 +138,9 @@ func TestAntigravityExecuteCompactionDispatchesOnce(t *testing.T) {
 			},
 		},
 		{
-			name:    "trigger item",
-			payload: []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"long conversation"},{"type":"compaction_trigger"}]}`),
+			name: "trigger item",
+			payload: []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","` +
+				`content":"long conversation"},{"type":"compaction_trigger"}]}`),
 			opts: cliproxyexecutor.Options{
 				SourceFormat:   sdktranslator.FormatOpenAIResponse,
 				ResponseFormat: sdktranslator.FormatOpenAIResponse,
@@ -136,81 +149,94 @@ func TestAntigravityExecuteCompactionDispatchesOnce(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			var calls atomic.Int32
-			var received []byte
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				calls.Add(1)
-				if req.URL.Path != antigravityGeneratePath {
-					t.Errorf("request path = %q, want %q", req.URL.Path, antigravityGeneratePath)
-				}
-				received, _ = io.ReadAll(req.Body)
-				_ = req.Body.Close()
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("X-Summary-Test", "true")
-				_, _ = io.WriteString(w, antigravityCompactionSummaryResponse)
-			}))
-			defer server.Close()
+		t.Run(
+			test.name, func(t *testing.T) {
+				var calls atomic.Int32
+				var received []byte
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, req *http.Request) {
+							calls.Add(1)
+							if req.URL.Path != antigravityGeneratePath {
+								t.Errorf("request path = %q, want %q", req.URL.Path, antigravityGeneratePath)
+							}
+							received, _ = io.ReadAll(req.Body)
+							_ = req.Body.Close()
+							w.Header().Set("Content-Type", "application/json")
+							w.Header().Set("X-Summary-Test", "true")
+							_, _ = io.WriteString(w, antigravityCompactionSummaryResponse)
+						},
+					),
+				)
+				defer server.Close()
 
-			executor := NewAntigravityExecutor(&config.Config{})
-			auth := antigravityCountTokensAuth(server.URL, "compaction-"+test.name)
-			req := cliproxyexecutor.Request{Model: "gemini-3.7-flash", Payload: test.payload}
-			opts := antigravityCompactionTestOptions(test.opts, "session:"+test.name)
-			scope := antigravityCompactionTestScope(t, executor, auth, req, opts)
-			response, err := executor.Execute(context.Background(), auth, req, opts)
-			if err != nil {
-				t.Fatalf("Execute() error = %v", err)
-			}
-			if calls.Load() != 1 {
-				t.Fatalf("summary request count = %d, want 1", calls.Load())
-			}
-			if strings.Contains(string(received), "compaction_trigger") {
-				t.Fatalf("summary request retained compaction trigger: %s", received)
-			}
-			if response.Headers.Get("X-Summary-Test") != "true" {
-				t.Fatalf("summary response headers were not propagated: %v", response.Headers)
-			}
-			if object := gjson.GetBytes(response.Payload, "object").String(); object != "response.compaction" {
-				t.Fatalf("compaction object = %q; payload=%s", object, response.Payload)
-			}
-			capsule := gjson.GetBytes(response.Payload, "output.0.encrypted_content").String()
-			summary, errUnseal := helps.UnsealAntigravityCompaction(capsule, scope)
-			if errUnseal != nil || summary != "compact summary" {
-				t.Fatalf("unseal compaction = %q, %v", summary, errUnseal)
-			}
-			for field, want := range map[string]int64{
-				"usage.input_tokens":  11,
-				"usage.output_tokens": 7,
-				"usage.total_tokens":  18,
-			} {
-				if got := gjson.GetBytes(response.Payload, field).Int(); got != want {
-					t.Fatalf("compaction %s = %d, want %d; payload=%s", field, got, want, response.Payload)
+				executor := NewAntigravityExecutor(&config.Config{})
+				auth := antigravityCountTokensAuth(server.URL, "compaction-"+test.name)
+				req := cliproxyexecutor.Request{Model: "gemini-3.7-flash", Payload: test.payload}
+				opts := antigravityCompactionTestOptions(test.opts, "session:"+test.name)
+				scope := antigravityCompactionTestScope(t, executor, auth, req, opts)
+				response, err := executor.Execute(context.Background(), auth, req, opts)
+				if err != nil {
+					t.Fatalf("Execute() error = %v", err)
 				}
-			}
-		})
+				if calls.Load() != 1 {
+					t.Fatalf("summary request count = %d, want 1", calls.Load())
+				}
+				if strings.Contains(string(received), "compaction_trigger") {
+					t.Fatalf("summary request retained compaction trigger: %s", received)
+				}
+				if response.Headers.Get("X-Summary-Test") != "true" {
+					t.Fatalf("summary response headers were not propagated: %v", response.Headers)
+				}
+				if object := gjson.GetBytes(response.Payload, "object").String(); object != "response.compaction" {
+					t.Fatalf("compaction object = %q; payload=%s", object, response.Payload)
+				}
+				capsule := gjson.GetBytes(response.Payload, "output.0.encrypted_content").String()
+				summary, errUnseal := helps.UnsealAntigravityCompaction(capsule, scope)
+				if errUnseal != nil || summary != "compact summary" {
+					t.Fatalf("unseal compaction = %q, %v", summary, errUnseal)
+				}
+				for field, want := range map[string]int64{
+					"usage.input_tokens":  11,
+					"usage.output_tokens": 7,
+					"usage.total_tokens":  18,
+				} {
+					if got := gjson.GetBytes(response.Payload, field).Int(); got != want {
+						t.Fatalf("compaction %s = %d, want %d; payload=%s", field, got, want, response.Payload)
+					}
+				}
+			},
+		)
 	}
 }
 
 func TestAntigravityExecuteCompactionStreamEvents(t *testing.T) {
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, antigravityCompactionSummaryResponse)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, antigravityCompactionSummaryResponse)
+			},
+		),
+	)
 	defer server.Close()
 
 	executor := NewAntigravityExecutor(&config.Config{})
 	auth := antigravityCountTokensAuth(server.URL, "compaction-stream")
 	req := cliproxyexecutor.Request{
-		Model:   "gemini-3.7-flash",
-		Payload: []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"long conversation"},{"type":"compaction_trigger"}]}`),
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","` +
+			`content":"long conversation"},{"type":"compaction_trigger"}]}`),
 	}
-	opts := antigravityCompactionTestOptions(cliproxyexecutor.Options{
-		Stream:         true,
-		SourceFormat:   sdktranslator.FormatOpenAIResponse,
-		ResponseFormat: sdktranslator.FormatOpenAIResponse,
-	}, "session:compaction-stream")
+	opts := antigravityCompactionTestOptions(
+		cliproxyexecutor.Options{
+			Stream:         true,
+			SourceFormat:   sdktranslator.FormatOpenAIResponse,
+			ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		}, "session:compaction-stream",
+	)
 	scope := antigravityCompactionTestScope(t, executor, auth, req, opts)
 	result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
 	if err != nil {
@@ -253,7 +279,9 @@ func TestAntigravityExecuteCompactionStreamEvents(t *testing.T) {
 		}
 	}
 	capsule := gjson.GetBytes(completed, "response.output.0.encrypted_content").String()
-	if summary, errUnseal := helps.UnsealAntigravityCompaction(capsule, scope); errUnseal != nil || summary != "compact summary" {
+	if summary, errUnseal := helps.UnsealAntigravityCompaction(
+		capsule, scope,
+	); errUnseal != nil || summary != "compact summary" {
 		t.Fatalf("stream capsule summary = %q, %v", summary, errUnseal)
 	}
 	if calls.Load() != 1 {
@@ -280,12 +308,18 @@ func TestAntigravityExecuteStreamRejectsDirectCompaction(t *testing.T) {
 
 func TestAntigravityExecuteRejectsCorruptedCompactionCapsules(t *testing.T) {
 	var calls atomic.Int32
-	roundTripper := antigravityCountTokensRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return nil, errors.New("unexpected upstream request")
-	})
+	roundTripper := antigravityCountTokensRoundTripFunc(
+		func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return nil, errors.New("unexpected upstream request")
+		},
+	)
 	executor := NewAntigravityExecutor(&config.Config{})
-	bad := []byte(`{"model":"gemini-3.7-flash","input":[{"type":"compaction","encrypted_content":"cpa-ag-compact-v1:corrupted"}]}`)
+	bad := []byte(
+		`{"model":"gemini-3.7-flash","input":[{"type":"compaction",` +
+			`"encrypted_content":"cpa-ag-compact-v1:` +
+			`corrupted"}]}`,
+	)
 
 	tests := []struct {
 		name string
@@ -300,8 +334,10 @@ func TestAntigravityExecuteRejectsCorruptedCompactionCapsules(t *testing.T) {
 		{
 			name: "original request",
 			req: cliproxyexecutor.Request{
-				Model:   "gemini-3.7-flash",
-				Payload: []byte(`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"hello"}]}`),
+				Model: "gemini-3.7-flash",
+				Payload: []byte(
+					`{"model":"gemini-3.7-flash","input":[{"type":"message","role":"user","content":"hello"}]}`,
+				),
 			},
 			opts: cliproxyexecutor.Options{
 				SourceFormat:    sdktranslator.FormatOpenAIResponse,
@@ -310,15 +346,17 @@ func TestAntigravityExecuteRejectsCorruptedCompactionCapsules(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			ctx := util.WithRoundTripper(context.Background(), roundTripper)
-			opts := antigravityCompactionTestOptions(test.opts, "session:bad-capsule")
-			_, err := executor.Execute(ctx, antigravityCountTokensAuth("", "bad-capsule"), test.req, opts)
-			var status statusErr
-			if !errors.As(err, &status) || status.code != http.StatusBadRequest {
-				t.Fatalf("Execute() error = %#v, want status 400", err)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				ctx := util.WithRoundTripper(context.Background(), roundTripper)
+				opts := antigravityCompactionTestOptions(test.opts, "session:bad-capsule")
+				_, err := executor.Execute(ctx, antigravityCountTokensAuth("", "bad-capsule"), test.req, opts)
+				var status statusErr
+				if !errors.As(err, &status) || status.code != http.StatusBadRequest {
+					t.Fatalf("Execute() error = %#v, want status 400", err)
+				}
+			},
+		)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("corrupted capsules reached upstream %d time(s)", calls.Load())
@@ -327,10 +365,12 @@ func TestAntigravityExecuteRejectsCorruptedCompactionCapsules(t *testing.T) {
 
 func TestAntigravityExecuteRejectsCompactionCapsuleOutsideScopeBeforeUpstream(t *testing.T) {
 	var calls atomic.Int32
-	roundTripper := antigravityCountTokensRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return nil, errors.New("unexpected upstream request")
-	})
+	roundTripper := antigravityCountTokensRoundTripFunc(
+		func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return nil, errors.New("unexpected upstream request")
+		},
+	)
 	cfg := &config.Config{RemoteManagement: config.RemoteManagement{SecretKey: "test-compaction-secret"}}
 	executor := NewAntigravityExecutor(cfg)
 	auth := antigravityCountTokensAuth("", "capsule-owner")
@@ -370,33 +410,55 @@ func TestAntigravityExecuteRejectsCompactionCapsuleOutsideScopeBeforeUpstream(t 
 		capsule string
 		stream  bool
 	}{
-		{name: "owner", auth: antigravityCountTokensAuth("", "other-owner"), model: req.Model, session: "session:capsule-owner", capsule: capsules["current"]},
-		{name: "credential rebind", auth: reboundAuth, model: req.Model, session: "session:capsule-owner", capsule: capsules["current"]},
-		{name: "model", auth: auth, model: "gemini-3.7-pro", session: "session:capsule-owner", capsule: capsules["current"]},
+		{
+			name: "owner", auth: antigravityCountTokensAuth("", "other-owner"), model: req.Model,
+			session: "session:capsule-owner", capsule: capsules["current"],
+		},
+		{
+			name: "credential rebind", auth: reboundAuth, model: req.Model, session: "session:capsule-owner",
+			capsule: capsules["current"],
+		},
+		{
+			name: "model", auth: auth, model: "gemini-3.7-pro", session: "session:capsule-owner",
+			capsule: capsules["current"],
+		},
 		{name: "session", auth: auth, model: req.Model, session: "session:other", capsule: capsules["current"]},
 		{name: "missing session", auth: auth, model: req.Model, capsule: capsules["current"]},
-		{name: "expired", auth: auth, model: req.Model, session: "session:capsule-owner", capsule: capsules["expired"]},
-		{name: "stream session", auth: auth, model: req.Model, session: "session:other", capsule: capsules["current"], stream: true},
+		{
+			name:    "expired",
+			auth:    auth,
+			model:   req.Model,
+			session: "session:capsule-owner",
+			capsule: capsules["expired"],
+		},
+		{
+			name: "stream session", auth: auth, model: req.Model, session: "session:other",
+			capsule: capsules["current"], stream: true,
+		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			request := cliproxyexecutor.Request{
-				Model:   test.model,
-				Payload: []byte(`{"input":[{"type":"compaction","encrypted_content":"` + test.capsule + `"}]}`),
-			}
-			requestOpts := antigravityCompactionTestOptions(opts, test.session)
-			ctx := util.WithRoundTripper(context.Background(), roundTripper)
-			var err error
-			if test.stream {
-				_, err = executor.ExecuteStream(ctx, test.auth, request, requestOpts)
-			} else {
-				_, err = executor.Execute(ctx, test.auth, request, requestOpts)
-			}
-			var status statusErr
-			if !errors.As(err, &status) || status.code != http.StatusBadRequest {
-				t.Fatalf("execution error = %#v, want status 400", err)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				request := cliproxyexecutor.Request{
+					Model: test.model,
+					Payload: []byte(
+						`{"input":[{"type":"compaction","encrypted_content":"` + test.capsule + `"}]}`,
+					),
+				}
+				requestOpts := antigravityCompactionTestOptions(opts, test.session)
+				ctx := util.WithRoundTripper(context.Background(), roundTripper)
+				var err error
+				if test.stream {
+					_, err = executor.ExecuteStream(ctx, test.auth, request, requestOpts)
+				} else {
+					_, err = executor.Execute(ctx, test.auth, request, requestOpts)
+				}
+				var status statusErr
+				if !errors.As(err, &status) || status.code != http.StatusBadRequest {
+					t.Fatalf("execution error = %#v, want status 400", err)
+				}
+			},
+		)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("scope-invalid capsules reached upstream %d time(s)", calls.Load())
@@ -413,60 +475,68 @@ func TestAntigravityCompactionCapsuleReplayAndSequentialCompaction(t *testing.T)
 		{name: "sequential compaction", compact: true},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			var mu sync.Mutex
-			var received []byte
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				body, _ := io.ReadAll(req.Body)
-				_ = req.Body.Close()
-				mu.Lock()
-				received = append([]byte(nil), body...)
-				mu.Unlock()
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, antigravityCompactionSummaryResponse)
-			}))
-			defer server.Close()
+		t.Run(
+			test.name, func(t *testing.T) {
+				var mu sync.Mutex
+				var received []byte
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, req *http.Request) {
+							body, _ := io.ReadAll(req.Body)
+							_ = req.Body.Close()
+							mu.Lock()
+							received = append([]byte(nil), body...)
+							mu.Unlock()
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = io.WriteString(w, antigravityCompactionSummaryResponse)
+						},
+					),
+				)
+				defer server.Close()
 
-			executor := NewAntigravityExecutor(&config.Config{})
-			auth := antigravityCountTokensAuth(server.URL, "capsule-"+test.name)
-			opts := antigravityCompactionTestOptions(cliproxyexecutor.Options{
-				SourceFormat:   sdktranslator.FormatOpenAIResponse,
-				ResponseFormat: sdktranslator.FormatOpenAIResponse,
-			}, "session:capsule-"+test.name)
-			req := cliproxyexecutor.Request{Model: "gemini-3.7-flash"}
-			scope := antigravityCompactionTestScope(t, executor, auth, req, opts)
-			oldCapsule, errSeal := helps.SealAntigravityCompaction(oldSummary, scope)
-			if errSeal != nil {
-				t.Fatalf("seal old capsule: %v", errSeal)
-			}
-			payload := `{"model":"gemini-3.7-flash","input":[` +
-				`{"type":"compaction","id":"cmp-old","encrypted_content":"` + oldCapsule + `"},` +
-				`{"type":"message","role":"user","content":"continue"}`
-			if test.compact {
-				payload += `,{"type":"compaction_trigger"}`
-			}
-			req.Payload = []byte(payload + `]}`)
-
-			response, err := executor.Execute(context.Background(), auth, req, opts)
-			if err != nil {
-				t.Fatalf("Execute() error = %v", err)
-			}
-			mu.Lock()
-			upstream := append([]byte(nil), received...)
-			mu.Unlock()
-			if !strings.Contains(string(upstream), oldSummary) {
-				t.Fatalf("expanded previous summary was not sent upstream: %s", upstream)
-			}
-			if strings.Contains(string(upstream), oldCapsule) {
-				t.Fatalf("encrypted capsule leaked upstream without expansion: %s", upstream)
-			}
-			if test.compact {
-				capsule := gjson.GetBytes(response.Payload, "output.0.encrypted_content").String()
-				summary, errUnseal := helps.UnsealAntigravityCompaction(capsule, scope)
-				if errUnseal != nil || summary != "compact summary" {
-					t.Fatalf("sequential compaction capsule = %q, %v", summary, errUnseal)
+				executor := NewAntigravityExecutor(&config.Config{})
+				auth := antigravityCountTokensAuth(server.URL, "capsule-"+test.name)
+				opts := antigravityCompactionTestOptions(
+					cliproxyexecutor.Options{
+						SourceFormat:   sdktranslator.FormatOpenAIResponse,
+						ResponseFormat: sdktranslator.FormatOpenAIResponse,
+					}, "session:capsule-"+test.name,
+				)
+				req := cliproxyexecutor.Request{Model: "gemini-3.7-flash"}
+				scope := antigravityCompactionTestScope(t, executor, auth, req, opts)
+				oldCapsule, errSeal := helps.SealAntigravityCompaction(oldSummary, scope)
+				if errSeal != nil {
+					t.Fatalf("seal old capsule: %v", errSeal)
 				}
-			}
-		})
+				payload := `{"model":"gemini-3.7-flash","input":[` +
+					`{"type":"compaction","id":"cmp-old","encrypted_content":"` + oldCapsule + `"},` +
+					`{"type":"message","role":"user","content":"continue"}`
+				if test.compact {
+					payload += `,{"type":"compaction_trigger"}`
+				}
+				req.Payload = []byte(payload + `]}`)
+
+				response, err := executor.Execute(context.Background(), auth, req, opts)
+				if err != nil {
+					t.Fatalf("Execute() error = %v", err)
+				}
+				mu.Lock()
+				upstream := append([]byte(nil), received...)
+				mu.Unlock()
+				if !strings.Contains(string(upstream), oldSummary) {
+					t.Fatalf("expanded previous summary was not sent upstream: %s", upstream)
+				}
+				if strings.Contains(string(upstream), oldCapsule) {
+					t.Fatalf("encrypted capsule leaked upstream without expansion: %s", upstream)
+				}
+				if test.compact {
+					capsule := gjson.GetBytes(response.Payload, "output.0.encrypted_content").String()
+					summary, errUnseal := helps.UnsealAntigravityCompaction(capsule, scope)
+					if errUnseal != nil || summary != "compact summary" {
+						t.Fatalf("sequential compaction capsule = %q, %v", summary, errUnseal)
+					}
+				}
+			},
+		)
 	}
 }

@@ -21,27 +21,33 @@ func TestSanitizeAntigravityRequestSchemasPreservesResponseUnionAndEnumType(t *t
 		}}}
 	}}`
 
-	got := sanitizeAntigravityRequestSchemas(payload, true)
-	responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
-	union := responseSchema.Get("properties.action.anyOf")
-	if !union.IsArray() || len(union.Array()) != 2 || union.Get("1.type").String() != "null" {
-		t.Errorf("response anyOf union was flattened: %s", responseSchema.Raw)
-	}
-	conviction := responseSchema.Get("properties.conviction")
-	if gotType := conviction.Get("type").String(); gotType != "number" {
-		t.Errorf("response enum type = %q, want number: %s", gotType, responseSchema.Raw)
-	}
-	for _, enumValue := range conviction.Get("enum").Array() {
-		if enumValue.Type != gjson.String {
-			t.Errorf("response enum value is not a string: %s", conviction.Raw)
+	for _, requirePlaceholder := range []bool{false, true} {
+		got := sanitizeAntigravityRequestSchemas(payload, requirePlaceholder)
+		responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
+		action := responseSchema.Get("properties.action")
+		if action.Get("anyOf").Exists() || action.Get("type").String() != "object" || !action.Get("nullable").Bool() {
+			t.Errorf("response anyOf was not projected to nullable object: %s", responseSchema.Raw)
 		}
-	}
+		conviction := responseSchema.Get("properties.conviction")
+		if gotType := conviction.Get("type").String(); gotType != "number" {
+			t.Errorf("response enum type = %q, want number: %s", gotType, responseSchema.Raw)
+		}
+		for _, enumValue := range conviction.Get("enum").Array() {
+			if enumValue.Type != gjson.String {
+				t.Errorf("response enum value is not a string: %s", conviction.Raw)
+			}
+		}
 
-	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
-	if toolSchema.Get("properties.choice.anyOf").Exists() {
-		t.Errorf("tool anyOf union was not flattened: %s", toolSchema.Raw)
-	}
-	if gotType := toolSchema.Get("properties.level.type").String(); gotType != "string" {
-		t.Errorf("tool enum type = %q, want string: %s", gotType, toolSchema.Raw)
+		toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+		if toolSchema.Get("properties.choice.anyOf").Exists() {
+			t.Errorf("tool anyOf union was not flattened: %s", toolSchema.Raw)
+		}
+		level := toolSchema.Get("properties.level")
+		if gotType := level.Get("type").String(); gotType != "number" {
+			t.Errorf("tool enum type = %q, want number: %s", gotType, toolSchema.Raw)
+		}
+		if level.Get("enum").Raw != `["1","2"]` {
+			t.Errorf("tool enum values were changed: %s", level.Raw)
+		}
 	}
 }

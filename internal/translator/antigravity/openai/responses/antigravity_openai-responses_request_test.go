@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -38,7 +39,8 @@ func TestConvertOpenAIResponsesRequestToAntigravityPreservesTypedToolOutputs(t *
 		t.Fatalf("object result = %q; output=%s", got, out)
 	}
 	arrayResult := responses["call_array"].Get("response.result")
-	if !arrayResult.IsArray() || len(arrayResult.Array()) != 2 || arrayResult.Get("1.shape").String() != "array" {
+	if !arrayResult.IsArray() || len(arrayResult.Array()) != 2 ||
+		arrayResult.Get("1.shape").String() != "array" {
 		t.Fatalf("array result changed: %s; output=%s", arrayResult.Raw, out)
 	}
 	if numberResult := responses["call_number"].Get("response.result"); numberResult.Type != gjson.Number ||
@@ -53,8 +55,75 @@ func TestConvertOpenAIResponsesRequestToAntigravityPreservesTypedToolOutputs(t *
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToAntigravityStringifiedToolImages(t *testing.T) {
+	for _, tc := range []struct {
+		name, value, result, mime, data string
+	}{
+		{
+			name: "array",
+			value: `[{"type":"input_text","text":"done"},{"type":"input_image",` +
+				`"image_url":"data:image/jpeg;base64,/9j/` +
+				`4AAQSkZJRg=="}]`,
+			result: "done", mime: "image/jpeg", data: "/9j/4AAQSkZJRg==",
+		},
+		{
+			name:  "object",
+			value: `{"type":"image","source":{"type":"base64","media_type":"image/webp","data":"Q0M="}}`,
+			mime:  "image/webp", data: "Q0M=",
+		},
+		{name: "ordinary JSON", value: `{"shape":"string"}`, result: `{"shape":"string"}`},
+		{name: "ordinary array", value: `[{"id":1}]`, result: `[{"id":1}]`},
+		{name: "null string", value: "null", result: "null"},
+		{name: "empty string"},
+		{
+			name: "remote image", value: `{"type":"input_image","image_url":"https://example.com/image.png"}`,
+			result: `{"type":"input_image","image_url":"https://example.com/image.png"}`,
+		},
+		{
+			name: "wrong image MIME", value: `{"type":"input_image","image_url":"data:video/mp4;base64,VklERU8="}`,
+			result: `{"type":"input_image","image_url":"data:video/mp4;base64,VklERU8="}`,
+		},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				encoded, err := json.Marshal(tc.value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				input := []byte((`{"input":[{"type":"function_call","call_id":"call_1","name":"screenshot","` +
+					`arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":`) +
+					string(encoded) + `}]}`)
+				for _, stream := range []bool{false, true} {
+					out := convertOpenAIResponsesRequestToAntigravity("gemini-3.7-flash-high", input, stream)
+					responses := antigravityResponsesByCallID(out)
+					response := responses["call_1"]
+					if len(responses) != 1 || response.Get("name").String() != "screenshot" ||
+						response.Get("response.result").Type != gjson.String ||
+						response.Get("response.result").String() != tc.result {
+						t.Fatalf("string result or tool ownership changed: %s", out)
+					}
+					images := response.Get("parts").Array()
+					if tc.data == "" {
+						if len(images) != 0 {
+							t.Fatalf("non-image result became an image: %s", out)
+						}
+					} else if len(images) !=
+						1 ||
+						images[0].Get("inlineData.mimeType").String() !=
+							tc.mime ||
+						images[0].Get("inlineData.data").String() !=
+							tc.data {
+						t.Fatalf("stringified image changed: %s", out)
+					}
+				}
+			},
+		)
+	}
+}
+
 func TestReorderOpenAIResponsesToolOutputSlotsPreservesOtherSlots(t *testing.T) {
-	items := gjson.Parse(`[
+	items := gjson.Parse(
+		`[
 		{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
 		{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
 		{"type":"message","role":"user","content":"keep-first"},
@@ -62,7 +131,8 @@ func TestReorderOpenAIResponsesToolOutputSlotsPreservesOtherSlots(t *testing.T) 
 		{"type":"input_image","image_url":"data:image/png;base64,SU1BR0U="},
 		{"type":"function_call_output","call_id":"unmatched","output":"X"},
 		{"type":"function_call_output","call_id":"call_a","output":"A"}
-	]`).Array()
+	]`,
+	).Array()
 
 	ordered := reorderOpenAIResponsesToolOutputSlots(items)
 	if got := ordered[2].Get("content").String(); got != "keep-first" {
@@ -125,7 +195,7 @@ func TestConvertOpenAIResponsesRequestToAntigravityKeepsParallelToolImagesBoundA
 	out := convertOpenAIResponsesRequestToAntigravity("gemini-3-flash", input, false)
 	parts := antigravityResponsesUserParts(out)
 	responseIDs := make([]string, 0, 2)
-	var textIndex, imageAIndex, imageBIndex int = -1, -1, -1
+	var textIndex, imageAIndex, imageBIndex = -1, -1, -1
 	for index, part := range parts {
 		if got := part.Get("text").String(); got == "keep between results" {
 			textIndex = index
@@ -211,7 +281,12 @@ func TestConvertOpenAIResponsesRequestToAntigravityRejectsInvalidToolImageDataUR
 			t.Fatalf("invalid image for %s became functionResponse.parts; output=%s", callID, out)
 		}
 		if result := response.Get("response.result"); !result.IsArray() || len(result.Array()) != 2 {
-			t.Fatalf("invalid image for %s was not preserved as structured output: %s; output=%s", callID, result.Raw, out)
+			t.Fatalf(
+				"invalid image for %s was not preserved as structured output: %s; output=%s",
+				callID,
+				result.Raw,
+				out,
+			)
 		}
 	}
 }
@@ -249,7 +324,8 @@ func TestConvertOpenAIResponsesRequestToAntigravityPreservesMidSessionDeveloperA
 			responseIDs = append(responseIDs, response.Get("id").String())
 		}
 	}
-	if len(texts) < 3 || texts[len(texts)-2] != "<system-reminder>\npermission notice\n</system-reminder>" || texts[len(texts)-1] != "keep user text" {
+	if len(texts) < 3 || texts[len(texts)-2] != "<system-reminder>\npermission notice\n</system-reminder>" ||
+		texts[len(texts)-1] != "keep user text" {
 		t.Fatalf("developer/user text order changed: %v; output=%s", texts, out)
 	}
 	if len(responseIDs) != 2 || responseIDs[0] != "call_a" || responseIDs[1] != "call_b" {
@@ -297,17 +373,24 @@ func TestConvertOpenAIResponsesRequestToAntigravityPreservesExplicitSummaryInten
 		{name: "explicit enabled", reasoning: `{"summary":"auto"}`, wantExists: true, want: true},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := []byte(`{"input":"hello","reasoning":` + test.reasoning + `}`)
-			out := convertOpenAIResponsesRequestToAntigravity("gemini-3-flash", input, false)
-			summary := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
-			if summary.Exists() != test.wantExists {
-				t.Fatalf("includeThoughts exists = %v, want %v; output=%s", summary.Exists(), test.wantExists, out)
-			}
-			if test.wantExists && summary.Bool() != test.want {
-				t.Fatalf("includeThoughts = %s, want %v; output=%s", summary.Raw, test.want, out)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				input := []byte(`{"input":"hello","reasoning":` + test.reasoning + `}`)
+				out := convertOpenAIResponsesRequestToAntigravity("gemini-3-flash", input, false)
+				summary := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
+				if summary.Exists() != test.wantExists {
+					t.Fatalf(
+						"includeThoughts exists = %v, want %v; output=%s",
+						summary.Exists(),
+						test.wantExists,
+						out,
+					)
+				}
+				if test.wantExists && summary.Bool() != test.want {
+					t.Fatalf("includeThoughts = %s, want %v; output=%s", summary.Raw, test.want, out)
+				}
+			},
+		)
 	}
 }
 

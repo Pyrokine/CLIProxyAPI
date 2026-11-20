@@ -1,6 +1,8 @@
 package claude
 
 import (
+	"context"
+
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/translator"
@@ -18,5 +20,11 @@ func init() {
 			TokenCount: tokenCount,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, convertClaudeRequestToAntigravityChecked)
+	sdktranslator.RegisterRequestEnvelope(
+		sdktranslator.FormatClaude, sdktranslator.FormatAntigravity,
+		func(ctx context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
+			req.Body, req.Err = convertClaudeRequestToAntigravityChecked(ctx, req.Model, req.Body, req.Stream)
+			return req
+		},
+	)
 }

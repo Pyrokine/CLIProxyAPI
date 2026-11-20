@@ -91,9 +91,13 @@ func executeAntigravityTestStream(
 
 	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
 	if format == sdktranslator.FormatOpenAI {
-		payload = []byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+		payload = []byte(
+			`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+		)
 	} else if format == sdktranslator.FormatOpenAIResponse {
-		payload = []byte(`{"model":"claude-sonnet-4-6","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true}`)
+		payload = []byte((`{"model":"claude-sonnet-4-6","input":[{"role":"user","content":` +
+			`[{"type":"input_text","text":"hi"}]}],"stream":` +
+			`true}`))
 	}
 	auth := &cliproxyauth.Auth{
 		ID: "auth-stream-terminal",
@@ -141,6 +145,7 @@ func collectAntigravityTestStream(
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestSendAntigravityStreamReadErrorReplacesPendingChunkAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -154,13 +159,16 @@ func TestSendAntigravityStreamReadErrorReplacesPendingChunkAfterCancellation(t *
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestAntigravityExecutePreservesExactCancellation(t *testing.T) {
 	started := make(chan struct{})
-	roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		close(started)
-		<-req.Context().Done()
-		return nil, req.Context().Err()
-	})
+	roundTripper := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			close(started)
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		},
+	)
 	ctx, cancel := context.WithCancel(util.WithRoundTripper(context.Background(), roundTripper))
 	defer cancel()
 	result := make(chan error, 1)
@@ -200,6 +208,7 @@ func TestAntigravityExecutePreservesExactCancellation(t *testing.T) {
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestAntigravityExecutePreservesCancellationDuringRetryDelay(t *testing.T) {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -209,14 +218,16 @@ func TestAntigravityExecutePreservesCancellationDuringRetryDelay(t *testing.T) {
 		ctx:     baseCtx,
 		started: bodyRead,
 	}
-	roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusServiceUnavailable,
-			Header:     make(http.Header),
-			Body:       body,
-			Request:    req,
-		}, nil
-	})
+	roundTripper := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       body,
+				Request:    req,
+			}, nil
+		},
+	)
 	ctx := util.WithRoundTripper(baseCtx, roundTripper)
 	result := make(chan error, 1)
 	go func() {
@@ -255,12 +266,17 @@ func TestAntigravityExecutePreservesCancellationDuringRetryDelay(t *testing.T) {
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestAntigravityExecuteStreamPreservesContextCancellationError(t *testing.T) {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	body := &cancelAfterFirstLineBody{
-		reader: bytes.NewReader([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}}` + "\n")),
-		ctx:    baseCtx,
+		reader: bytes.NewReader(
+			[]byte(
+				`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}}` + "\n",
+			),
+		),
+		ctx: baseCtx,
 	}
 	stream := executeAntigravityTestStream(t, baseCtx, body, sdktranslator.FormatAntigravity)
 
@@ -305,9 +321,14 @@ func TestAntigravityExecuteStreamPreservesContextCancellationError(t *testing.T)
 }
 
 func TestAntigravityExecuteStreamPreservesTerminalMetadataAndEmitsDone(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5},"modelVersion":"gemini-3.7-flash","responseId":"response-123"}}` + "\n\n",
-	))
+	body := io.NopCloser(
+		strings.NewReader(
+			"data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"" +
+				"ok\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"" +
+				"candidatesTokenCount\":2,\"totalTokenCount\":5},\"modelVersion\":\"gemini-3.7-flash\",\"" +
+				"responseId\":\"response-123\"}}\n\n",
+		),
+	)
 	chunks := collectAntigravityTestStream(
 		t,
 		executeAntigravityTestStream(t, context.Background(), body, sdktranslator.FormatAntigravity),
@@ -337,55 +358,73 @@ func TestAntigravityExecuteStreamPreservesTerminalMetadataAndEmitsDone(t *testin
 }
 
 func TestAntigravityExecuteStreamCanceledAfterTerminalPreservesUsage(t *testing.T) {
-	for _, format := range []sdktranslator.Format{sdktranslator.FormatAntigravity, sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse} {
+	for _, format := range []sdktranslator.Format{
+		sdktranslator.FormatAntigravity, sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse,
+	} {
 		for _, reason := range []string{"STOP", "MAX_TOKENS"} {
-			t.Run(format.String()+"/"+reason, func(t *testing.T) {
-				plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
-				registerTestUsagePlugin(t, plugin)
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				frame := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"` + reason + `"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}}` + "\n")
-				body := &cancelAfterFirstLineBody{reader: bytes.NewReader(frame), ctx: ctx}
-				stream := executeAntigravityTestStream(t, ctx, body, format)
-				terminalReceived := false
-				var streamErr error
-				var syntheticDone bool
-				completed := make(chan struct{})
-				go func() {
-					defer close(completed)
-					for chunk := range stream.Chunks {
-						if chunk.Err != nil {
-							streamErr = chunk.Err
+			t.Run(
+				format.String()+"/"+reason, func(t *testing.T) {
+					plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+					registerTestUsagePlugin(t, plugin)
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					frame := []byte(
+						(`data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+							`[{"text":"ok"}]},"finishReason":` +
+							`"`) +
+							reason +
+							(`"}],"usageMeta` +
+								`data":{"prompt` +
+								`TokenCount":3,` +
+								`"candidatesTok` +
+								`enCount":2,` +
+								`"totalTokenCou` +
+								`nt":5}}}`) +
+							"\n",
+					)
+					body := &cancelAfterFirstLineBody{reader: bytes.NewReader(frame), ctx: ctx}
+					stream := executeAntigravityTestStream(t, ctx, body, format)
+					terminalReceived := false
+					var streamErr error
+					var syntheticDone bool
+					completed := make(chan struct{})
+					go func() {
+						defer close(completed)
+						for chunk := range stream.Chunks {
+							if chunk.Err != nil {
+								streamErr = chunk.Err
+							}
+							if isGeminiStreamTerminalChunk(chunk.Payload) {
+								terminalReceived = true
+								cancel()
+							}
+							if bytes.Equal(chunk.Payload, []byte("[DONE]")) {
+								syntheticDone = true
+							}
 						}
-						if isGeminiStreamTerminalChunk(chunk.Payload) {
-							terminalReceived = true
-							cancel()
-						}
-						if bytes.Equal(chunk.Payload, []byte("[DONE]")) {
-							syntheticDone = true
-						}
+					}()
+					select {
+					case <-completed:
+					case <-time.After(2 * time.Second):
+						t.Fatal("timed out waiting for canceled stream")
 					}
-				}()
-				select {
-				case <-completed:
-				case <-time.After(2 * time.Second):
-					t.Fatal("timed out waiting for canceled stream")
-				}
-				if streamErr != nil || syntheticDone {
-					t.Fatalf("canceled stream error=%v synthetic done=%t", streamErr, syntheticDone)
-				}
-				if !terminalReceived {
-					t.Fatal("terminal chunk was not delivered")
-				}
-				select {
-				case record := <-plugin.records:
-					if record.Failed || record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 2 || record.Detail.TotalTokens != 5 {
-						t.Fatalf("usage after terminal cancellation = %+v", record)
+					if streamErr != nil || syntheticDone {
+						t.Fatalf("canceled stream error=%v synthetic done=%t", streamErr, syntheticDone)
 					}
-				case <-time.After(2 * time.Second):
-					t.Fatal("timed out waiting for terminal usage")
-				}
-			})
+					if !terminalReceived {
+						t.Fatal("terminal chunk was not delivered")
+					}
+					select {
+					case record := <-plugin.records:
+						if record.Failed || record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 2 ||
+							record.Detail.TotalTokens != 5 {
+							t.Fatalf("usage after terminal cancellation = %+v", record)
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("timed out waiting for terminal usage")
+					}
+				},
+			)
 		}
 	}
 }
@@ -394,9 +433,13 @@ func TestAntigravityExecuteStreamCanceledBeforeTerminalDeliveryFails(t *testing.
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
 	registerTestUsagePlugin(t, plugin)
 	ctx, cancel := context.WithCancel(context.Background())
-	body := io.NopCloser(strings.NewReader(
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}}` + "\n",
-	))
+	body := io.NopCloser(
+		strings.NewReader(
+			(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+				`"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCo` +
+				`unt":3,"candidatesTokenCount":2,"totalTokenCount":5}}}`) + "\n",
+		),
+	)
 	stream := executeAntigravityTestStream(t, ctx, body, sdktranslator.FormatAntigravity)
 	cancel()
 	for _, chunk := range collectAntigravityTestStream(t, stream) {
@@ -422,10 +465,16 @@ func TestAntigravityExecuteStreamCanceledAfterTerminalCommitsReplay(t *testing.T
 	defer cancel()
 	const model = "gemini-3.6-flash-high"
 	body := &cancelAfterFirstLineBody{
-		reader: bytes.NewReader([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok","thoughtSignature":"terminal-cancel-signature-123456"}]},"finishReason":"STOP"}]}}` + "\n")),
-		ctx:    ctx,
+		reader: bytes.NewReader(
+			[]byte((`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+				`"text":"ok","thoughtSignature":"terminal-cancel-signature-123456"}]},"` +
+				`finishReason":"STOP"}]}}`) + "\n"),
+		),
+		ctx: ctx,
 	}
-	request := []byte(`{"sessionId":"terminal-cancel-replay","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+	request := []byte(
+		`{"sessionId":"terminal-cancel-replay","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
+	)
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-terminal-replay",
 		Attributes: map[string]string{"base_url": "https://antigravity.test"},
@@ -453,9 +502,15 @@ func TestAntigravityExecuteStreamCanceledAfterTerminalCommitsReplay(t *testing.T
 				if !terminalReceived {
 					t.Fatal("terminal was not delivered")
 				}
-				items, exists := internalcache.GetAntigravityReasoningReplayItems(model, "session:terminal-cancel-replay")
+				items, exists := internalcache.GetAntigravityReasoningReplayItems(
+					model, "session:terminal-cancel-replay",
+				)
 				if !exists || len(items) == 0 {
-					t.Fatalf("replay not committed after terminal cancellation: exists=%t items=%d", exists, len(items))
+					t.Fatalf(
+						"replay not committed after terminal cancellation: exists=%t items=%d",
+						exists,
+						len(items),
+					)
 				}
 				return
 			}
@@ -479,8 +534,12 @@ func TestAntigravityDeliveryAwareCancelBeforeTransportTerminalReportsFailure(t *
 	defer cancel()
 	ctx := cliproxyexecutor.WithStreamDeliveryAcknowledgement(baseCtx)
 	body := &cancelAfterFirstLineBody{
-		reader: bytes.NewReader([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}}` + "\n")),
-		ctx:    baseCtx,
+		reader: bytes.NewReader(
+			[]byte((`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+				`"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCo` +
+				`unt":3,"candidatesTokenCount":2,"totalTokenCount":5}}}`) + "\n"),
+		),
+		ctx: baseCtx,
 	}
 	stream := executeAntigravityTestStream(t, ctx, body, sdktranslator.FormatOpenAIResponse)
 	terminalReceived := false
@@ -526,56 +585,113 @@ func TestAntigravityReplayCommitsOnlyAfterTerminalDelivery(t *testing.T) {
 		name    string
 		ackErr  error
 		commits bool
+		legacy  bool
+		cancel  bool
+		dual    bool
 	}{
 		{name: "delivered", commits: true},
 		{name: "downstream failure", ackErr: errors.New("downstream write failed")},
+		{name: "chunk acknowledgement overrides old receipt", dual: true, commits: true},
+		{name: "legacy delivered", legacy: true, commits: true},
+		{name: "legacy downstream failure", legacy: true, ackErr: io.ErrClosedPipe},
+		{name: "legacy delivered after cancellation", legacy: true, cancel: true, commits: true},
+		{name: "legacy canceled", legacy: true, ackErr: context.Canceled},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			internalcache.ClearAntigravityReasoningReplayCache()
-			t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
-			const model = "gemini-3.6-flash-high"
-			const session = "session:terminal-delivery-replay"
-			request := []byte(`{"sessionId":"terminal-delivery-replay","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
-			body := io.NopCloser(strings.NewReader(
-				`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok","thoughtSignature":"terminal-delivery-signature-123456"}]},"finishReason":"STOP"}]}}` + "\n",
-			))
-			auth := &cliproxyauth.Auth{
-				ID: "auth-terminal-delivery", Attributes: map[string]string{"base_url": "https://antigravity.test"},
-				Metadata: map[string]any{
-					"access_token": "token", "project_id": "project-1",
-					"expired": time.Now().Add(time.Hour).Format(time.RFC3339),
-				},
-			}
-			ctx := cliproxyexecutor.WithStreamDeliveryAcknowledgement(context.Background())
-			ctx = util.WithRoundTripper(ctx, antigravityStreamRoundTripper{body: body})
-			stream, err := NewAntigravityExecutor(&config.Config{}).ExecuteStream(
-				ctx, auth, cliproxyexecutor.Request{Model: model, Payload: request},
-				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var terminal cliproxyexecutor.StreamChunk
-			for _, chunk := range collectAntigravityTestStream(t, stream) {
-				if chunk.Err != nil {
-					t.Fatal(chunk.Err)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				internalcache.ClearAntigravityReasoningReplayCache()
+				t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+				const model = "gemini-3.6-flash-high"
+				const session = "session:terminal-delivery-replay"
+				request := []byte(
+					(`{"sessionId":"terminal-delivery-replay","request":{"contents":` +
+						`[{"role":"user","parts":[{"text":` +
+						`"hi"}]}]}}`),
+				)
+				body := io.NopCloser(
+					strings.NewReader(
+						(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+							`"text":"ok","thoughtSignature":"terminal-delivery-signature-123456"}]}` +
+							`,"finishReason":"STOP"}]}}`) + "\n",
+					),
+				)
+				auth := &cliproxyauth.Auth{
+					ID: "auth-terminal-delivery", Attributes: map[string]string{"base_url": "https://antigravity.test"},
+					Metadata: map[string]any{
+						"access_token": "token", "project_id": "project-1",
+						"expired": time.Now().Add(time.Hour).Format(time.RFC3339),
+					},
 				}
-				if chunk.Terminal {
-					terminal = chunk
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+				registerTestUsagePlugin(t, plugin)
+				parent, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				ctx := cliproxyexecutor.WithStreamDeliveryAcknowledgement(parent)
+				var finish func(error)
+				if tc.legacy || tc.dual {
+					ctx, finish = usage.WithStreamDelivery(parent)
+					defer finish(context.Canceled)
+					if tc.dual {
+						ctx = cliproxyexecutor.WithStreamDeliveryAcknowledgement(ctx)
+					}
 				}
-			}
-			if !terminal.Terminal || terminal.Acknowledge == nil {
-				t.Fatal("delivery-aware executor did not provide a terminal acknowledgement")
-			}
-			if _, exists := internalcache.GetAntigravityReasoningReplayItems(model, session); exists {
-				t.Fatal("replay committed before downstream terminal delivery")
-			}
-			terminal.Acknowledge(tc.ackErr)
-			items, exists := internalcache.GetAntigravityReasoningReplayItems(model, session)
-			if exists != tc.commits || tc.commits && len(items) == 0 {
-				t.Fatalf("replay after acknowledgement: exists=%t items=%d, want commit=%t", exists, len(items), tc.commits)
-			}
-		})
+				ctx = util.WithRoundTripper(ctx, antigravityStreamRoundTripper{body: body})
+				stream, err := NewAntigravityExecutor(&config.Config{}).ExecuteStream(
+					ctx, auth, cliproxyexecutor.Request{Model: model, Payload: request},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var terminal cliproxyexecutor.StreamChunk
+				for _, chunk := range collectAntigravityTestStream(t, stream) {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+					if chunk.Terminal {
+						terminal = chunk
+					}
+				}
+				if tc.legacy {
+					if !usage.StreamDeliverySupported(ctx) {
+						t.Fatal("whole-stream producer support was not registered")
+					}
+				} else if !terminal.Terminal || terminal.Acknowledge == nil {
+					t.Fatal("delivery-aware executor did not provide a terminal acknowledgement")
+				}
+				if _, exists := internalcache.GetAntigravityReasoningReplayItems(model, session); exists {
+					t.Fatal("replay committed before downstream terminal delivery")
+				}
+				select {
+				case record := <-plugin.records:
+					t.Fatalf("usage published before delivery confirmation: %+v", record)
+				default:
+				}
+				if tc.cancel {
+					cancel()
+				}
+				if tc.legacy {
+					finish(tc.ackErr)
+				} else {
+					terminal.Acknowledge(tc.ackErr)
+				}
+				select {
+				case record := <-plugin.records:
+					if record.Failed != !tc.commits {
+						t.Fatalf("usage after delivery: failed=%t, want %t", record.Failed, !tc.commits)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("delivery confirmation did not release usage publication")
+				}
+				items, exists := internalcache.GetAntigravityReasoningReplayItems(model, session)
+				if exists != tc.commits || tc.commits && len(items) == 0 {
+					t.Fatalf(
+						"replay after acknowledgement: exists=%t items=%d, want commit=%t", exists, len(items),
+						tc.commits,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -588,33 +704,53 @@ func TestAntigravityExecuteStreamAccountsForFilteredUsage(t *testing.T) {
 		{name: "completed", terminal: `data: {"response":{"candidates":[{"finishReason":"STOP"}]}}` + "\n\n"},
 		{name: "incomplete", wantFailed: true},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
-			registerTestUsagePlugin(t, plugin)
-			body := io.NopCloser(strings.NewReader(
-				`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"totalTokenCount":11}}}` + "\n\n" + tt.terminal,
-			))
-			chunks := collectAntigravityTestStream(t, executeAntigravityTestStream(t, context.Background(), body, sdktranslator.FormatAntigravity))
-			if len(chunks) == 0 || gjson.GetBytes(chunks[0].Payload, "response.usageMetadata").Exists() {
-				t.Fatalf("nonterminal client chunk leaked usage: %#v", chunks)
-			}
-			select {
-			case record := <-plugin.records:
-				if record.Detail.InputTokens != 9 || record.Detail.OutputTokens != 2 || record.Detail.TotalTokens != 11 || record.Failed != tt.wantFailed {
-					t.Fatalf("usage = %+v, want input=9 output=2 total=11 failed=%t", record, tt.wantFailed)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+				registerTestUsagePlugin(t, plugin)
+				body := io.NopCloser(
+					strings.NewReader(
+						(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+							`"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":9,"candidatesToke` +
+							`nCount":2,"totalTokenCount":11}}}`) + "\n\n" + tt.terminal,
+					),
+				)
+				chunks := collectAntigravityTestStream(
+					t,
+					executeAntigravityTestStream(
+						t,
+						context.Background(),
+						body,
+						sdktranslator.FormatAntigravity,
+					),
+				)
+				if len(chunks) == 0 || gjson.GetBytes(chunks[0].Payload, "response.usageMetadata").Exists() {
+					t.Fatalf("nonterminal client chunk leaked usage: %#v", chunks)
 				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("timed out waiting for usage record")
-			}
-		})
+				select {
+				case record := <-plugin.records:
+					if record.Detail.InputTokens != 9 || record.Detail.OutputTokens != 2 ||
+						record.Detail.TotalTokens != 11 ||
+						record.Failed != tt.wantFailed {
+						t.Fatalf("usage = %+v, want input=9 output=2 total=11 failed=%t", record, tt.wantFailed)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for usage record")
+				}
+			},
+		)
 	}
 }
 
 func TestAntigravityExecuteStreamPropagatesScannerErrorWithoutDone(t *testing.T) {
 	sentinel := errors.New("stream read failed")
 	body := &errorAfterFirstLineBody{
-		reader: bytes.NewReader([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n")),
-		err:    sentinel,
+		reader: bytes.NewReader(
+			[]byte(
+				`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n",
+			),
+		),
+		err: sentinel,
 	}
 	chunks := collectAntigravityTestStream(
 		t,
@@ -647,11 +783,18 @@ func TestAntigravityExecuteStreamReadErrorAfterTerminalStillFails(t *testing.T) 
 	registerTestUsagePlugin(t, plugin)
 	readErr := errors.New("late upstream read failed")
 	body := &errorAfterFirstLineBody{
-		reader: bytes.NewReader([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}}` + "\n")),
-		err:    readErr,
+		reader: bytes.NewReader(
+			[]byte((`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+				`"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCo` +
+				`unt":3,"candidatesTokenCount":2,"totalTokenCount":5}}}`) + "\n"),
+		),
+		err: readErr,
 	}
-	chunks := collectAntigravityTestStream(t, executeAntigravityTestStream(t, context.Background(), body, sdktranslator.FormatAntigravity))
-	if len(chunks) != 2 || !isGeminiStreamTerminalChunk(chunks[0].Payload) || !errors.Is(chunks[1].Err, readErr) {
+	chunks := collectAntigravityTestStream(
+		t, executeAntigravityTestStream(t, context.Background(), body, sdktranslator.FormatAntigravity),
+	)
+	if len(chunks) != 2 || !isGeminiStreamTerminalChunk(chunks[0].Payload) ||
+		!errors.Is(chunks[1].Err, readErr) {
 		t.Fatalf("terminal followed by transport read error = %#v", chunks)
 	}
 	for _, chunk := range chunks {
@@ -670,9 +813,11 @@ func TestAntigravityExecuteStreamReadErrorAfterTerminalStillFails(t *testing.T) 
 }
 
 func TestAntigravityExecuteStreamRejectsEOFWithoutTerminalEvent(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n\n",
-	))
+	body := io.NopCloser(
+		strings.NewReader(
+			`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n\n",
+		),
+	)
 	chunks := collectAntigravityTestStream(
 		t,
 		executeAntigravityTestStream(t, context.Background(), body, sdktranslator.FormatAntigravity),
@@ -692,13 +837,17 @@ func TestAntigravityExecuteStreamRejectsEOFWithoutTerminalEvent(t *testing.T) {
 }
 
 func TestAntigravityExecuteStreamReportsTrailingBackendError(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n\n" +
-			`data: {"error":{"code":503,"message":"backend capacity exhausted"}}` + "\n\n",
-	))
-	chunks := collectAntigravityTestStream(t, executeAntigravityTestStream(
-		t, context.Background(), body, sdktranslator.FormatOpenAI,
-	))
+	body := io.NopCloser(
+		strings.NewReader(
+			`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n\n" +
+				`data: {"error":{"code":503,"message":"backend capacity exhausted"}}` + "\n\n",
+		),
+	)
+	chunks := collectAntigravityTestStream(
+		t, executeAntigravityTestStream(
+			t, context.Background(), body, sdktranslator.FormatOpenAI,
+		),
+	)
 	if len(chunks) != 2 || chunks[0].Err != nil || chunks[1].Err == nil {
 		t.Fatalf("trailing backend error chunks = %#v", chunks)
 	}
@@ -715,12 +864,21 @@ func TestAntigravityExecuteStreamReportsTrailingBackendError(t *testing.T) {
 }
 
 func TestAntigravityExecuteStreamAssemblesMultilineJSON(t *testing.T) {
-	body := io.NopCloser(strings.NewReader("data: {\n" +
-		"data: \"response\": {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"ok\"}]}, \"finishReason\": \"STOP\"}], \"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2, \"totalTokenCount\": 5}}\n" +
-		"data: }\n\n"))
-	chunks := collectAntigravityTestStream(t, executeAntigravityTestStream(
-		t, context.Background(), body, sdktranslator.FormatAntigravity,
-	))
+	body := io.NopCloser(
+		strings.NewReader(
+			"data: {\n" +
+				("data: \"response\": {\"candidates\": [{\"content\": {\"role\": \"model" +
+					"\", \"parts\": [{\"text\": \"ok\"}]}, \"finishReason\": \"STOP\"}], \"" +
+					"usageMetadata\": {\"promptTokenCount\": 3, \"candidatesTokenCount\": 2" +
+					", \"totalTokenCount\": 5}}\n") +
+				"data: }\n\n",
+		),
+	)
+	chunks := collectAntigravityTestStream(
+		t, executeAntigravityTestStream(
+			t, context.Background(), body, sdktranslator.FormatAntigravity,
+		),
+	)
 	if len(chunks) != 2 || chunks[0].Err != nil || chunks[1].Err != nil ||
 		!bytes.Equal(chunks[1].Payload, []byte("[DONE]")) {
 		t.Fatalf("multiline stream chunks = %#v, want response and done", chunks)
@@ -738,40 +896,59 @@ func TestAntigravityExecuteStreamReportsMultilineBackendError(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "raw JSON", body: "{\n  \"error\": {\n    \"code\": 503,\n    \"message\": \"backend capacity exhausted\"\n  }\n}\n"},
-		{name: "multiple SSE data lines", body: "data: {\n" +
-			"data: \"error\": {\"code\": 503, \"message\": \"backend capacity exhausted\"}\n" +
-			"data: }\n\n"},
+		{
+			name: "raw JSON",
+			body: "{\n  \"error\": {\n    \"code\": 503,\n    \"message\": \"backend capacity exhausted\"\n  }\n}\n",
+		},
+		{
+			name: "multiple SSE data lines", body: "data: {\n" +
+				"data: \"error\": {\"code\": 503, \"message\": \"backend capacity exhausted\"}\n" +
+				"data: }\n\n",
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			body := io.NopCloser(strings.NewReader(
-				`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n\n" + tc.body,
-			))
-			chunks := collectAntigravityTestStream(t, executeAntigravityTestStream(
-				t, context.Background(), body, sdktranslator.FormatOpenAI,
-			))
-			if len(chunks) != 2 || chunks[0].Err != nil {
-				t.Fatalf("multiline backend error stream chunks = %#v, want partial response and error", chunks)
-			}
-			var status statusErr
-			if !errors.As(chunks[1].Err, &status) || status.code != http.StatusServiceUnavailable ||
-				!strings.Contains(status.Error(), "backend capacity exhausted") {
-				t.Fatalf("multiline backend error = %v, want HTTP 503 and original reason", chunks[1].Err)
-			}
-			for _, chunk := range chunks {
-				if bytes.Contains(chunk.Payload, []byte("[DONE]")) {
-					t.Fatalf("failed stream emitted done: %s", chunk.Payload)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				body := io.NopCloser(
+					strings.NewReader(
+						(`data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+							`[{"text":"partial"}]}}]}}`) +
+							"\n\n" +
+							tc.body,
+					),
+				)
+				chunks := collectAntigravityTestStream(
+					t, executeAntigravityTestStream(
+						t, context.Background(), body, sdktranslator.FormatOpenAI,
+					),
+				)
+				if len(chunks) != 2 || chunks[0].Err != nil {
+					t.Fatalf(
+						"multiline backend error stream chunks = %#v, want partial response and error",
+						chunks,
+					)
 				}
-			}
-		})
+				var status statusErr
+				if !errors.As(chunks[1].Err, &status) || status.code != http.StatusServiceUnavailable ||
+					!strings.Contains(status.Error(), "backend capacity exhausted") {
+					t.Fatalf("multiline backend error = %v, want HTTP 503 and original reason", chunks[1].Err)
+				}
+				for _, chunk := range chunks {
+					if bytes.Contains(chunk.Payload, []byte("[DONE]")) {
+						t.Fatalf("failed stream emitted done: %s", chunk.Payload)
+					}
+				}
+			},
+		)
 	}
 }
 
 func TestAntigravityExecuteReportsTrailingBackendError(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n\n" +
-			`data: {"error":{"code":503,"message":"backend capacity exhausted"}}` + "\n\n",
-	))
+	body := io.NopCloser(
+		strings.NewReader(
+			`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n\n" +
+				`data: {"error":{"code":503,"message":"backend capacity exhausted"}}` + "\n\n",
+		),
+	)
 	ctx := util.WithRoundTripper(context.Background(), antigravityStreamRoundTripper{body: body})
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-nonstream-trailing-error",
@@ -781,8 +958,12 @@ func TestAntigravityExecuteReportsTrailingBackendError(t *testing.T) {
 			"expired": time.Now().Add(time.Hour).Format(time.RFC3339),
 		},
 	}
-	_, err := NewAntigravityExecutor(&config.Config{}).Execute(ctx, auth,
-		cliproxyexecutor.Request{Model: "claude-sonnet-4-6", Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)},
+	_, err := NewAntigravityExecutor(&config.Config{}).Execute(
+		ctx, auth,
+		cliproxyexecutor.Request{
+			Model:   "claude-sonnet-4-6",
+			Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+		},
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity},
 	)
 	var status statusErr
@@ -793,10 +974,12 @@ func TestAntigravityExecuteReportsTrailingBackendError(t *testing.T) {
 }
 
 func TestAntigravityExecuteReportsMultilineBackendError(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n\n" +
-			"{\n  \"error\": {\n    \"code\": 503,\n    \"message\": \"backend capacity exhausted\"\n  }\n}\n",
-	))
+	body := io.NopCloser(
+		strings.NewReader(
+			`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}}` + "\n\n" +
+				"{\n  \"error\": {\n    \"code\": 503,\n    \"message\": \"backend capacity exhausted\"\n  }\n}\n",
+		),
+	)
 	ctx := util.WithRoundTripper(context.Background(), antigravityStreamRoundTripper{body: body})
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-nonstream-multiline-error",
@@ -806,8 +989,12 @@ func TestAntigravityExecuteReportsMultilineBackendError(t *testing.T) {
 			"expired": time.Now().Add(time.Hour).Format(time.RFC3339),
 		},
 	}
-	_, err := NewAntigravityExecutor(&config.Config{}).Execute(ctx, auth,
-		cliproxyexecutor.Request{Model: "claude-sonnet-4-6", Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)},
+	_, err := NewAntigravityExecutor(&config.Config{}).Execute(
+		ctx, auth,
+		cliproxyexecutor.Request{
+			Model:   "claude-sonnet-4-6",
+			Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+		},
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity},
 	)
 	var status statusErr
@@ -818,13 +1005,17 @@ func TestAntigravityExecuteReportsMultilineBackendError(t *testing.T) {
 }
 
 func TestAntigravityExecuteStreamRejectsTruncatedTrailingJSON(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(
-		`data: {"response":{"candidates":[{"finishReason":"STOP"}]}}` + "\n\n" +
-			"data: {\"error\": {\"code\": 503\n",
-	))
-	chunks := collectAntigravityTestStream(t, executeAntigravityTestStream(
-		t, context.Background(), body, sdktranslator.FormatAntigravity,
-	))
+	body := io.NopCloser(
+		strings.NewReader(
+			`data: {"response":{"candidates":[{"finishReason":"STOP"}]}}` + "\n\n" +
+				"data: {\"error\": {\"code\": 503\n",
+		),
+	)
+	chunks := collectAntigravityTestStream(
+		t, executeAntigravityTestStream(
+			t, context.Background(), body, sdktranslator.FormatAntigravity,
+		),
+	)
 	if len(chunks) != 2 || chunks[0].Err != nil || chunks[1].Err == nil {
 		t.Fatalf("truncated trailing JSON chunks = %#v, want terminal payload and error", chunks)
 	}
@@ -840,10 +1031,15 @@ func TestAntigravityExecuteStreamRejectsTruncatedTrailingJSON(t *testing.T) {
 }
 
 func TestAntigravityExecuteStreamUsesToolCallFinishReason(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"query":"hello"}}}]}}]}}` + "\n" +
-			`data: {"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5},"modelVersion":"gemini-3.7-flash","responseId":"response-tool"}}` + "\n\n",
-	))
+	body := io.NopCloser(
+		strings.NewReader(
+			"data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"" +
+				"functionCall\":{\"name\":\"lookup\",\"args\":{\"query\":\"hello\"}}}]}}]}}\ndata: {\"" +
+				"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"" +
+				"promptTokenCount\":3,\"candidatesTokenCount\":2,\"totalTokenCount\":5},\"modelVersion\":\"" +
+				"gemini-3.7-flash\",\"responseId\":\"response-tool\"}}\n\n",
+		),
+	)
 	chunks := collectAntigravityTestStream(
 		t,
 		executeAntigravityTestStream(t, context.Background(), body, sdktranslator.FormatOpenAI),
@@ -856,7 +1052,9 @@ func TestAntigravityExecuteStreamUsesToolCallFinishReason(t *testing.T) {
 			t.Fatalf("stream chunk error = %v", chunk.Err)
 		}
 	}
-	if got := gjson.GetBytes(chunks[0].Payload, "choices.0.delta.tool_calls.0.function.name").String(); got != "lookup" {
+	if got := gjson.GetBytes(
+		chunks[0].Payload, "choices.0.delta.tool_calls.0.function.name",
+	).String(); got != "lookup" {
 		t.Fatalf("tool call name = %q; payload=%s", got, chunks[0].Payload)
 	}
 	terminal := chunks[1].Payload
@@ -870,37 +1068,44 @@ func TestAntigravityExecuteStreamUsesToolCallFinishReason(t *testing.T) {
 
 func TestAntigravityStreamUsagePreservesDeliveryFailureCause(t *testing.T) {
 	for _, failure := range []error{io.ErrClosedPipe, io.ErrShortWrite, context.Canceled} {
-		t.Run(failure.Error(), func(t *testing.T) {
-			plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
-			registerTestUsagePlugin(t, plugin)
-			ctx, cancel := context.WithCancelCause(context.Background())
-			defer cancel(nil)
-			body := &cancelAfterFirstLineBody{
-				reader: bytes.NewReader([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}}` + "\n")),
-				ctx:    ctx,
-			}
-			stream := executeAntigravityTestStream(t, ctx, body, sdktranslator.FormatAntigravity)
-			select {
-			case chunk, ok := <-stream.Chunks:
-				if !ok || chunk.Err != nil || len(chunk.Payload) == 0 {
-					t.Fatalf("initial payload = %#v, open = %v", chunk, ok)
+		t.Run(
+			failure.Error(), func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+				registerTestUsagePlugin(t, plugin)
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				body := &cancelAfterFirstLineBody{
+					reader: bytes.NewReader(
+						[]byte(("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"" +
+							"parts\":[{\"text\":\"hello\"}]}}],\"usageMetadata\":{\"promptTokenCount\":3,\"" +
+							"candidatesTokenCount\":2,\"totalTokenCount\":5}}}\n")),
+					),
+					ctx: ctx,
 				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("missing initial payload")
-			}
-			cancel(failure)
-			collectAntigravityTestStream(t, stream)
-			select {
-			case record := <-plugin.records:
-				if !record.Failed || record.Fail.Body != failure.Error() {
-					t.Fatalf("delivery failure = %#v, want %v", record.Fail, failure)
+				stream := executeAntigravityTestStream(t, ctx, body, sdktranslator.FormatAntigravity)
+				select {
+				case chunk, ok := <-stream.Chunks:
+					if !ok || chunk.Err != nil || len(chunk.Payload) == 0 {
+						t.Fatalf("initial payload = %#v, open = %v", chunk, ok)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("missing initial payload")
 				}
-				if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 2 || record.Detail.TotalTokens != 5 {
-					t.Fatalf("partial usage = %#v", record.Detail)
+				cancel(failure)
+				collectAntigravityTestStream(t, stream)
+				select {
+				case record := <-plugin.records:
+					if !record.Failed || record.Fail.Body != failure.Error() {
+						t.Fatalf("delivery failure = %#v, want %v", record.Fail, failure)
+					}
+					if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 2 ||
+						record.Detail.TotalTokens != 5 {
+						t.Fatalf("partial usage = %#v", record.Detail)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("missing failed usage record")
 				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("missing failed usage record")
-			}
-		})
+			},
+		)
 	}
 }

@@ -3,6 +3,8 @@
 // extracting model information, system instructions, message contents, and tool declarations.
 // The package performs JSON data transformation to ensure compatibility
 // between Gemini CLI API format and Gemini API's expected format.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (
@@ -469,12 +471,10 @@ func SanitizeAntigravityClaudeGeminiRequestSignatures(modelName string, rawJSON 
 			parts.ForEach(
 				func(_, part gjson.Result) bool {
 					partJSON := []byte(part.Raw)
-					rawSignature, hasSignature := antigravityGeminiSignatureField(part)
+					rawSignature, _ := antigravityGeminiSignatureField(part)
 					if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() || !isModelTurn {
-						if hasSignature {
-							partJSON = deleteAntigravityGeminiSignatureFields(partJSON)
-							partsChanged = true
-						}
+						partJSON = deleteAntigravityGeminiSignatureFields(partJSON)
+						partsChanged = partsChanged || string(partJSON) != part.Raw
 						partItems = append(partItems, partJSON)
 						return true
 					}
@@ -494,10 +494,8 @@ func SanitizeAntigravityClaudeGeminiRequestSignatures(modelName string, rawJSON 
 						return true
 					}
 
-					if hasSignature {
-						partJSON = deleteAntigravityGeminiSignatureFields(partJSON)
-						partsChanged = true
-					}
+					partJSON = deleteAntigravityGeminiSignatureFields(partJSON)
+					partsChanged = partsChanged || string(partJSON) != part.Raw
 					if hasAntigravityGeminiContentPart(gjson.ParseBytes(partJSON)) {
 						partItems = append(partItems, partJSON)
 						return true
@@ -586,16 +584,50 @@ func hasAntigravityGeminiContentPart(part gjson.Result) bool {
 }
 
 func deleteAntigravityGeminiSignatureFields(part []byte) []byte {
-	for _, path := range antigravityGeminiSignaturePaths {
-		for gjson.GetBytes(part, path).Exists() {
-			updated, errDelete := sjson.DeleteBytes(part, path)
-			if errDelete != nil || len(updated) >= len(part) {
-				break
-			}
-			part = updated
+	var strip func(gjson.Result, []string) []byte
+	strip = func(object gjson.Result, paths []string) []byte {
+		if !object.IsObject() {
+			return []byte(object.Raw)
 		}
+		var fields [][]byte
+		changed := false
+		object.ForEach(
+			func(key, value gjson.Result) bool {
+				var nested []string
+				for _, path := range paths {
+					head, rest, hasRest := strings.Cut(path, ".")
+					if key.String() != head {
+						continue
+					}
+					if !hasRest {
+						changed = true
+						return true
+					}
+					nested = append(nested, rest)
+				}
+				raw := []byte(value.Raw)
+				if len(nested) > 0 {
+					raw = strip(value, nested)
+					changed = changed || string(raw) != value.Raw
+				}
+				field := append([]byte(key.Raw), ':')
+				fields = append(fields, append(field, raw...))
+				return true
+			},
+		)
+		if !changed {
+			return []byte(object.Raw)
+		}
+		out := []byte{'{'}
+		for index, field := range fields {
+			if index > 0 {
+				out = append(out, ',')
+			}
+			out = append(out, field...)
+		}
+		return append(out, '}')
 	}
-	return part
+	return strip(gjson.ParseBytes(part), antigravityGeminiSignaturePaths)
 }
 
 // functionCallGroup represents a group of function calls and their responses

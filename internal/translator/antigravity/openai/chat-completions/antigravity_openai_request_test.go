@@ -51,13 +51,41 @@ func TestConvertOpenAIRequestToAntigravityDeduplicatesAndDisambiguatesTools(t *t
 	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
 	inputJSON := `{
 		"messages":[
-			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"` + second + `","arguments":"{}"}}]},
-			{"role":"tool","tool_call_id":"call_1","content":"{}"}
-		],
-		"tools":[
-			{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}},
-			{"type":"function","function":{"name":"lookup","description":"duplicate","parameters":{"type":"object"}}},
-			{"type":"function","function":{"name":"` + first + `","parameters":{"type":"object"}}},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"` +
+		second +
+		(`","arguments":` +
+			`"{}"}}]},` +
+			"\n\t\t\t{\"rol" +
+			`e":"tool",` +
+			`"tool_call_id"` +
+			`:"call_1",` +
+			`"content":` +
+			"\"{}\"}\n\t\t" +
+			"],\n\t\t\"tool" +
+			"s\":[\n\t\t\t" +
+			`{"type":` +
+			`"function",` +
+			`"function":` +
+			`{"name":` +
+			`"lookup",` +
+			`"parameters":` +
+			`{"type":` +
+			`"object"}}},` +
+			"\n\t\t\t{\"typ" +
+			`e":"function",` +
+			`"function":` +
+			`{"name":` +
+			`"lookup",` +
+			`"description":` +
+			`"duplicate",` +
+			`"parameters":` +
+			`{"type":` +
+			`"object"}}},` +
+			"\n\t\t\t{\"typ" +
+			`e":"function",` +
+			`"function":` +
+			`{"name":` +
+			`"`) + first + `","parameters":{"type":"object"}}},
 			{"type":"function","function":{"name":"` + second + `","parameters":{"type":"object"}}}
 		],
 		"tool_choice":{"type":"function","function":{"name":"` + second + `"}}
@@ -87,13 +115,12 @@ func TestConvertOpenAIRequestToAntigravityDeduplicatesAndDisambiguatesTools(t *t
 }
 
 func TestConvertOpenAIRequestToAntigravityScopesRepeatedToolIDs(t *testing.T) {
-	inputJSON := `{"messages":[
-		{"role":"assistant","tool_calls":[{"id":"call_reused","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
-		{"role":"tool","tool_call_id":"call_reused","content":"first result"},
-		{"role":"user","content":"continue"},
-		{"role":"assistant","tool_calls":[{"id":"call_reused","type":"function","function":{"name":"calculate","arguments":"{}"}}]},
-		{"role":"tool","tool_call_id":"call_reused","content":"second result"}
-	]}`
+	inputJSON := "{\"messages\":[\n\t\t{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_reused\",\"" +
+		"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\n\t\t{\"role\":\"" +
+		"tool\",\"tool_call_id\":\"call_reused\",\"content\":\"first result\"},\n\t\t{\"role\":\"user\",\"" +
+		"content\":\"continue\"},\n\t\t{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_reused\",\"" +
+		"type\":\"function\",\"function\":{\"name\":\"calculate\",\"arguments\":\"{}\"}}]},\n\t\t{\"role\":\"" +
+		"tool\",\"tool_call_id\":\"call_reused\",\"content\":\"second result\"}\n\t]}"
 	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
 	var calls, results []gjson.Result
 	for _, turn := range gjson.GetBytes(out, "request.contents").Array() {
@@ -115,13 +142,21 @@ func TestConvertOpenAIRequestToAntigravityScopesRepeatedToolIDs(t *testing.T) {
 	} {
 		if calls[index].Get("name").String() != want.name || results[index].Get("name").String() != want.name ||
 			results[index].Get("response.result").String() != want.result {
-			t.Fatalf("turn %d call = %s, result = %s; want %s / %s", index, calls[index].Raw, results[index].Raw, want.name, want.result)
+			t.Fatalf(
+				"turn %d call = %s, result = %s; want %s / %s",
+				index,
+				calls[index].Raw,
+				results[index].Raw,
+				want.name,
+				want.result,
+			)
 		}
 	}
 }
 
 func TestNormalizeAntigravityOpenAIThinkingConfigReusesCanonicalConfig(t *testing.T) {
-	input := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high","thinkingBudget":8192}}}}`)
+	input := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"includeThoughts":tr` +
+		`ue,"thinkingLevel":"high","thinkingBudget":8192}}}}`)
 
 	output := normalizeAntigravityOpenAIThinkingConfig(input)
 
@@ -161,15 +196,13 @@ func TestConvertOpenAIRequestToAntigravityPreservesReasoningContent(t *testing.T
 }
 
 func TestConvertOpenAIRequestToAntigravityPreservesReasoningBeforeVisibleContentAndToolCall(t *testing.T) {
-	inputJSON := `{
-		"model": "gemini-3-flash",
-		"messages": [
-			{"role": "user", "content": "hi"},
-			{"role": "assistant", "content": "visible answer", "reasoning_content": "thinking only", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
-			{"role": "tool", "tool_call_id": "call_1", "content": "{\"output\":\"ok\"}"},
-			{"role": "user", "content": "say ok"}
-		]
-	}`
+	inputJSON := "{\n\t\t\"model\": \"gemini-3-flash\",\n\t\t\"messages\": [\n\t\t\t{\"r" +
+		"ole\": \"user\", \"content\": \"hi\"},\n\t\t\t{\"role\": \"assistant\"" +
+		`, "content": "visible answer", "reasoning_content": "thinking only", "` +
+		`tool_calls": [{"id": "call_1", "type": "function", "function": {"name"` +
+		": \"read_file\", \"arguments\": \"{}\"}}]},\n\t\t\t{\"role\": \"tool\"" +
+		`, "tool_call_id": "call_1", "content": "{\"output\":\"ok\"}"},` +
+		"\n\t\t\t{\"role\": \"user\", \"content\": \"say ok\"}\n\t\t]\n\t}"
 
 	result := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), true)
 	contents := gjson.GetBytes(result, "request.contents").Array()
@@ -198,14 +231,11 @@ func TestConvertOpenAIRequestToAntigravityPreservesReasoningBeforeVisibleContent
 }
 
 func TestConvertOpenAIRequestToAntigravitySkipsEmptyAssistantMessages(t *testing.T) {
-	inputJSON := `{
-		"model": "gemini-3-flash",
-		"messages": [
-			{"role": "user", "content": "hi"},
-			{"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": "", "arguments": "{}"}}, {"type": "custom"}]},
-			{"role": "user", "content": "say ok"}
-		]
-	}`
+	inputJSON := "{\n\t\t\"model\": \"gemini-3-flash\",\n\t\t\"messages\": [\n\t\t\t{\"r" +
+		"ole\": \"user\", \"content\": \"hi\"},\n\t\t\t{\"role\": \"assistant\"" +
+		`, "content": "", "tool_calls": [{"type": "function", "function": {"nam` +
+		"e\": \"\", \"arguments\": \"{}\"}}, {\"type\": \"custom\"}]},\n\t\t\t{" +
+		"\"role\": \"user\", \"content\": \"say ok\"}\n\t\t]\n\t}"
 
 	result := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), true)
 	contents := gjson.GetBytes(result, "request.contents").Array()
@@ -241,7 +271,9 @@ func TestConvertOpenAIRequestToAntigravity_ClaudeModelSanitizesUnsignedReasoning
 	}
 }
 
-func TestConvertOpenAIRequestToAntigravity_ClaudeModelDropsEmptyAssistantTurnAfterSanitizingReasoningContent(t *testing.T) {
+func TestConvertOpenAIRequestToAntigravity_ClaudeModelDropsEmptyAssistantTurnAfterSanitizingReasoningContent(
+	t *testing.T,
+) {
 	inputJSON := `{
 		"model": "claude-sonnet-4-6",
 		"messages": [
@@ -356,18 +388,24 @@ func TestConvertOpenAIRequestToAntigravityTokenFallbackAndToolChoiceNone(t *test
 		want int64
 	}{
 		{"completion only", `{"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":200}`, 200},
-		{"max tokens wins", `{"messages":[{"role":"user","content":"hi"}],"max_tokens":100,"max_completion_tokens":200}`, 100},
+		{
+			"max tokens wins",
+			`{"messages":[{"role":"user","content":"hi"}],"max_tokens":100,"max_completion_tokens":200}`, 100,
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			out := ConvertOpenAIRequestToAntigravity("gemini-test", []byte(test.body), false)
-			if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != test.want {
-				t.Fatalf("maxOutputTokens = %d, want %d; output=%s", got, test.want, out)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				out := ConvertOpenAIRequestToAntigravity("gemini-test", []byte(test.body), false)
+				if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != test.want {
+					t.Fatalf("maxOutputTokens = %d, want %d; output=%s", got, test.want, out)
+				}
+			},
+		)
 	}
 
 	for _, choice := range []string{`"none"`, `{"type":"none"}`} {
-		body := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":` + choice + `}`)
+		body := []byte((`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{` +
+			`"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":`) + choice + `}`)
 		out := ConvertOpenAIRequestToAntigravity("gemini-test", body, false)
 		if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
 			t.Fatalf("tool mode = %q, want NONE; output=%s", got, out)
@@ -393,6 +431,7 @@ func TestConvertOpenAIRequestToAntigravityTranslatesOnlyInlineBase64VideoURLs(t 
 	if got := parts[1].Get("inlineData.mimeType").String(); got != "video/mp4" {
 		t.Fatalf("video MIME = %q, want video/mp4; output=%s", got, out)
 	}
+	//goland:noinspection SpellCheckingInspection
 	if got := parts[1].Get("inlineData.data").String(); got != "AAAAIGZ0eXBtcDQy" {
 		t.Fatalf("video data = %q; output=%s", got, out)
 	}
@@ -405,7 +444,13 @@ func TestConvertOpenAIRequestToAntigravityTranslatesOnlyInlineBase64VideoURLs(t 
 		"",
 	}
 	for _, videoURL := range invalidURLs {
-		input := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"keep"},{"type":"video_url","video_url":{"url":"` + videoURL + `"}}]}]}`)
+		input := []byte(
+			`{"messages":[{"role":"user","content":[{"type":"text","text":"keep"},` +
+				`{"type":"video_url","video_url":{"url":` +
+				`"` +
+				videoURL +
+				`"}}]}]}`,
+		)
 		output := ConvertOpenAIRequestToAntigravity("gemini-3-flash", input, false)
 		invalidParts := gjson.GetBytes(output, "request.contents.0.parts").Array()
 		if len(invalidParts) != 1 || invalidParts[0].Get("text").String() != "keep" {
@@ -437,7 +482,9 @@ func TestConvertOpenAIRequestToAntigravityKeepsMidSessionDeveloperInUserBoundary
 		t.Fatalf("contents count = %d, want 4; output=%s", len(contents), out)
 	}
 	parts := contents[2].Get("parts").Array()
-	if len(parts) != 1 || parts[0].Get("text").String() != "<system-reminder>\nmid-session notice\n</system-reminder>" || contents[3].Get("parts.0.text").String() != "second user" {
+	if len(parts) != 1 ||
+		parts[0].Get("text").String() != "<system-reminder>\nmid-session notice\n</system-reminder>" ||
+		contents[3].Get("parts.0.text").String() != "second user" {
 		t.Fatalf("mid-session developer/user order changed; output=%s", out)
 	}
 }
@@ -471,7 +518,8 @@ func TestConvertOpenAIRequestToAntigravityPreservesTypedToolResponses(t *testing
 		t.Fatalf("object result = %q; output=%s", got, out)
 	}
 	arrayResult := parts[2].Get("functionResponse.response.result")
-	if !arrayResult.IsArray() || len(arrayResult.Array()) != 2 || arrayResult.Get("1.shape").String() != "array" {
+	if !arrayResult.IsArray() || len(arrayResult.Array()) != 2 ||
+		arrayResult.Get("1.shape").String() != "array" {
 		t.Fatalf("array result changed: %s; output=%s", arrayResult.Raw, out)
 	}
 	if got := parts[3].Get("functionResponse.response.result"); got.Raw != "null" {
@@ -480,25 +528,18 @@ func TestConvertOpenAIRequestToAntigravityPreservesTypedToolResponses(t *testing
 }
 
 func TestConvertOpenAIRequestToAntigravityCleansOnlyResponseFormatSchema(t *testing.T) {
-	input := []byte(`{
-		"messages":[{"role":"assistant","tool_calls":[{
-			"id":"call_1","type":"function","function":{
-				"name":"inspect","arguments":"{\"default\":\"keep\",\"title\":\"keep\",\"format\":\"keep\",\"const\":\"keep\"}"
-			}
-		}]}],
-		"response_format":{"type":"json_schema","json_schema":{"schema":{
-			"type":"object","properties":{
-				"empty":{"type":"object","properties":{}},
-				"values":{"type":"array"},
-				"choice":{"oneOf":[{"type":"string"},{"type":"number"}]},
-				"code":{"enum":[1,2]}
-			}
-		}}}
-	}`)
+	input := []byte(("{\n\t\t\"messages\":[{\"role\":\"assistant\",\"tool_calls\":[{\n\t\t\t\"id\":\"call_1\"," +
+		"\"type\":\"function\",\"function\":{\n\t\t\t\t\"name\":\"inspect\",\"arguments\":\"{\\\"default\\\":" +
+		"\\\"keep\\\",\\\"title\\\":\\\"keep\\\",\\\"format\\\":\\\"keep\\\",\\\"const\\\":\\\"keep\\\"}\"\n" +
+		"\t\t\t}\n\t\t}]}],\n\t\t\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"schema\":{" +
+		"\n\t\t\t\"type\":\"object\",\"properties\":{\n\t\t\t\t\"empty\":{\"type\":\"object\",\"properties\":" +
+		"{}},\n\t\t\t\t\"values\":{\"type\":\"array\"},\n\t\t\t\t\"choice\":{\"oneOf\":[{\"type\":\"string\"}" +
+		",{\"type\":\"number\"}]},\n\t\t\t\t\"code\":{\"enum\":[1,2]}\n\t\t\t}\n\t\t}}}\n\t}"))
 
 	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", input, false)
 	schema := gjson.GetBytes(out, "request.generationConfig.responseSchema")
-	if schema.Get("properties.empty.properties.reason").Exists() || schema.Get("properties.values.items").Exists() {
+	if schema.Get("properties.empty.properties.reason").Exists() ||
+		schema.Get("properties.values.items").Exists() {
 		t.Fatalf("response schema received tool-only defaults: %s", schema.Raw)
 	}
 	if !schema.Get("properties.choice.oneOf").IsArray() || schema.Get("properties.code.type").Exists() {

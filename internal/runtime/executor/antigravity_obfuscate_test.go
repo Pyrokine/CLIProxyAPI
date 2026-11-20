@@ -21,14 +21,18 @@ func TestAntigravitySensitiveWordsObfuscatesSystemInstructionOnly(t *testing.T) 
 			Antigravity: config.AntigravityConfig{SensitiveWords: []string{"proxy"}},
 		},
 	)
-	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"Use proxy safely"}]},"system_instruction":"proxy fallback","contents":[{"role":"user","parts":[{"text":"proxy remains unchanged"}]}]}}`)
+	payload := []byte((`{"request":{"systemInstruction":{"parts":[{"text":"Use proxy safely"}]` +
+		`},"system_instruction":"proxy fallback","contents":[{"role":"user","pa` +
+		`rts":[{"text":"proxy remains unchanged"}]}]}}`))
 
 	got := executor.obfuscateSensitiveWords(payload)
+	//goland:noinspection SpellCheckingInspection
 	if text := gjson.GetBytes(
 		got, "request.systemInstruction.parts.0.text",
 	).String(); text != "Use p"+zeroWidthSpace+"roxy safely" {
 		t.Fatalf("system instruction = %q, want zero-width obfuscation", text)
 	}
+	//goland:noinspection SpellCheckingInspection
 	if text := gjson.GetBytes(got, "request.system_instruction").String(); text != "p"+zeroWidthSpace+"roxy fallback" {
 		t.Fatalf("snake-case system instruction = %q, want zero-width obfuscation", text)
 	}
@@ -49,7 +53,10 @@ func TestAntigravityStreamObfuscatesSensitiveSystemInstruction(t *testing.T) {
 				}
 				captured <- body
 				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n"))
+				_, _ = w.Write(
+					[]byte(("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\"," +
+						"\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n")),
+				)
 			},
 		),
 	)
@@ -72,8 +79,11 @@ func TestAntigravityStreamObfuscatesSensitiveSystemInstruction(t *testing.T) {
 			Attributes: map[string]string{"base_url": server.URL},
 		},
 		cliproxyexecutor.Request{
-			Model:   "gemini-3.6-flash-high",
-			Payload: []byte(`{"model":"gemini-3.6-flash-high","instructions":"You are Hermes Agent, an intelligent AI assistant created by Nous Research.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`),
+			Model: "gemini-3.6-flash-high",
+			Payload: []byte((`{"model":"gemini-3.6-flash-high","instructions":"You are Hermes Agent,` +
+				` an intelligent AI assistant created by Nous Research.","input":[{"typ` +
+				`e":"message","role":"user","content":[{"type":"input_text","text":"hel` +
+				`lo"}]}]}`)),
 		},
 		cliproxyexecutor.Options{
 			SourceFormat:   sdktranslator.FormatOpenAIResponse,
@@ -92,7 +102,13 @@ func TestAntigravityStreamObfuscatesSensitiveSystemInstruction(t *testing.T) {
 
 	body := <-captured
 	got := gjson.GetBytes(body, "request.systemInstruction.parts.0.text").String()
-	want := "You are H" + zeroWidthSpace + "ermes Agent, an intelligent AI assistant created by N" + zeroWidthSpace + "ous Research."
+	//goland:noinspection SpellCheckingInspection
+	want := ("You are " +
+		"H") +
+		zeroWidthSpace +
+		"ermes Agent, an intelligent AI assistant created by N" +
+		zeroWidthSpace +
+		"ous Research."
 	if got != want {
 		t.Fatalf("system instruction = %q, want %q; body=%s", got, want, body)
 	}

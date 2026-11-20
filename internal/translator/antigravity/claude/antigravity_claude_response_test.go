@@ -85,7 +85,14 @@ func TestConvertAntigravityResponseToClaude_ThinkingTextAccumulated(t *testing.T
 	ctx := context.Background()
 
 	// Process first chunk - starts new thinking block
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
+	convertAntigravityResponseToClaude(
+		ctx,
+		"claude-sonnet-4-5-thinking",
+		requestJSON,
+		requestJSON,
+		chunk1,
+		&param,
+	)
 	params := param.(*params)
 
 	if params.CurrentThinkingText.Len() == 0 {
@@ -93,7 +100,14 @@ func TestConvertAntigravityResponseToClaude_ThinkingTextAccumulated(t *testing.T
 	}
 
 	// Process second chunk - continues thinking block
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
+	convertAntigravityResponseToClaude(
+		ctx,
+		"claude-sonnet-4-5-thinking",
+		requestJSON,
+		requestJSON,
+		chunk2,
+		&param,
+	)
 
 	text := params.CurrentThinkingText.String()
 	if !strings.Contains(text, "First part") || !strings.Contains(text, "Second part") {
@@ -235,7 +249,14 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	params := param.(*params)
 	firstThinkingText := params.CurrentThinkingText.String()
 
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Sig, &param)
+	convertAntigravityResponseToClaude(
+		ctx,
+		"claude-sonnet-4-5-thinking",
+		requestJSON,
+		requestJSON,
+		block1Sig,
+		&param,
+	)
 
 	// Verify first signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", firstThinkingText) != validSig1 {
@@ -243,7 +264,14 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	}
 
 	// Process text (transitions out of thinking)
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, textBlock, &param)
+	convertAntigravityResponseToClaude(
+		ctx,
+		"claude-sonnet-4-5-thinking",
+		requestJSON,
+		requestJSON,
+		textBlock,
+		&param,
+	)
 
 	// Process second thinking block
 	convertAntigravityResponseToClaude(
@@ -251,7 +279,14 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	)
 	secondThinkingText := params.CurrentThinkingText.String()
 
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Sig, &param)
+	convertAntigravityResponseToClaude(
+		ctx,
+		"claude-sonnet-4-5-thinking",
+		requestJSON,
+		requestJSON,
+		block2Sig,
+		&param,
+	)
 
 	// Verify second signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", secondThinkingText) != validSig2 {
@@ -316,7 +351,9 @@ func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGrounding(t *testi
 		"model": "gemini-3.1-flash-lite",
 		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
 	}`)
-	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+	translatedRequestJSON := []byte(
+		`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`,
+	)
 	responseJSON := testAntigravityGroundingResponse()
 
 	output := convertAntigravityResponseToClaudeNonStream(
@@ -340,7 +377,9 @@ func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGrounding(t *testi
 	}
 }
 
-func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGroundingRequiresNativeGoogleSearch(t *testing.T) {
+func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGroundingRequiresNativeGoogleSearch(
+	t *testing.T,
+) {
 	requestJSON := []byte(`{
 		"model": "gemini-3-flash-agent",
 		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
@@ -365,7 +404,9 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchGrounding(t *testing.
 		"model": "gemini-3.1-flash-lite",
 		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
 	}`)
-	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+	translatedRequestJSON := []byte(
+		`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`,
+	)
 
 	var param any
 	output := bytes.Join(
@@ -379,7 +420,11 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchGrounding(t *testing.
 		output,
 		bytes.Join(
 			convertAntigravityResponseToClaude(
-				context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"),
+				context.Background(),
+				"gemini-3.1-flash-lite",
+				requestJSON,
+				translatedRequestJSON,
+				[]byte("[DONE]"),
 				&param,
 			),
 			nil,
@@ -405,7 +450,9 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchBuffersTextUntilGroun
 		"model": "gemini-3.1-flash-lite",
 		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
 	}`)
-	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+	translatedRequestJSON := []byte(
+		`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`,
+	)
 
 	var param any
 	firstChunk := []byte(`{
@@ -438,20 +485,34 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchBuffersTextUntilGroun
 
 	output := bytes.Join(
 		convertAntigravityResponseToClaude(
-			context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, firstChunk, &param,
+			context.Background(),
+			"gemini-3.1-flash-lite",
+			requestJSON,
+			translatedRequestJSON,
+			firstChunk,
+			&param,
 		), nil,
 	)
 	output = append(
 		output, bytes.Join(
 			convertAntigravityResponseToClaude(
-				context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, finalChunk, &param,
+				context.Background(),
+				"gemini-3.1-flash-lite",
+				requestJSON,
+				translatedRequestJSON,
+				finalChunk,
+				&param,
 			), nil,
 		)...,
 	)
 	output = append(
 		output, bytes.Join(
 			convertAntigravityResponseToClaude(
-				context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"),
+				context.Background(),
+				"gemini-3.1-flash-lite",
+				requestJSON,
+				translatedRequestJSON,
+				[]byte("[DONE]"),
 				&param,
 			), nil,
 		)...,
@@ -485,7 +546,9 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchMessageStartOutputTok
 		"model": "gemini-3.1-flash-lite",
 		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
 	}`)
-	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+	translatedRequestJSON := []byte(
+		`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`,
+	)
 	responseJSON := []byte(`{
 		"response": {
 			"modelVersion": "gemini-3.1-flash-lite",
@@ -498,7 +561,12 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchMessageStartOutputTok
 	var param any
 	output := bytes.Join(
 		convertAntigravityResponseToClaude(
-			context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, responseJSON, &param,
+			context.Background(),
+			"gemini-3.1-flash-lite",
+			requestJSON,
+			translatedRequestJSON,
+			responseJSON,
+			&param,
 		),
 		nil,
 	)
@@ -537,27 +605,65 @@ func TestConvertAntigravityResponseToClaudeUsageSeparatesCachedInput(t *testing.
 		cached    int64
 		hasCached bool
 	}{
-		{"cached", `{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"cachedContentTokenCount":4,"totalTokenCount":15}`, 6, 4, true},
-		{"zero-cache", `{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"cachedContentTokenCount":0,"totalTokenCount":15}`, 10, 0, true},
-		{"cache-exceeds-prompt", `{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"cachedContentTokenCount":14,"totalTokenCount":15}`, 0, 14, true},
-		{"invalid-cache", `{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"cachedContentTokenCount":-1,"totalTokenCount":15}`, 10, 0, false},
+		{
+			"cached",
+			`{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3` +
+				`,"cachedContentTokenCount":4,"totalTokenCount":15}`,
+			6, 4, true,
+		},
+		{
+			"zero-cache",
+			`{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3` +
+				`,"cachedContentTokenCount":0,"totalTokenCount":15}`,
+			10, 0, true,
+		},
+		{
+			"cache-exceeds-prompt",
+			`{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3` +
+				`,"cachedContentTokenCount":14,"totalTokenCount":15}`,
+			0, 14, true,
+		},
+		{
+			"invalid-cache",
+			`{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3` +
+				`,"cachedContentTokenCount":-1,"totalTokenCount":15}`,
+			10, 0, false,
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			request := []byte(`{"model":"claude-sonnet-4-6"}`)
-			raw := []byte(`{"response":{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"answer"}]}}],"usageMetadata":` + tc.metadata + `}}`)
-			var param any
-			nonStream := convertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", request, request, raw, &param)
-			stream := bytes.Join(convertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", request, request, raw, &param), nil)
-			for _, rawUsage := range []string{gjson.GetBytes(nonStream, "usage").Raw,
-				gjson.Get(sseDataForEvent(t, string(stream), "message_start"), "message.usage").Raw,
-				gjson.Get(sseDataForEvent(t, string(stream), "message_delta"), "usage").Raw} {
-				tokenUsage := gjson.Parse(rawUsage)
-				if tokenUsage.Get("input_tokens").Int() != tc.input || tokenUsage.Get("output_tokens").Int() != 5 ||
-					tokenUsage.Get("cache_read_input_tokens").Exists() != tc.hasCached || tokenUsage.Get("cache_read_input_tokens").Int() != tc.cached {
-					t.Errorf("usage=%s", rawUsage)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				request := []byte(`{"model":"claude-sonnet-4-6"}`)
+				raw := []byte(
+					`{"response":{"candidates":[{"finishReason":"STOP","content":{"parts":` +
+						`[{"text":"answer"}]}}],"usageMetadata":` +
+						tc.metadata +
+						`}}`,
+				)
+				var param any
+				nonStream := convertAntigravityResponseToClaudeNonStream(
+					context.Background(), "claude-sonnet-4-6", request, request, raw, &param,
+				)
+				stream := bytes.Join(
+					convertAntigravityResponseToClaude(
+						context.Background(), "claude-sonnet-4-6", request, request, raw, &param,
+					), nil,
+				)
+				for _, rawUsage := range []string{
+					gjson.GetBytes(nonStream, "usage").Raw,
+					gjson.Get(sseDataForEvent(t, string(stream), "message_start"), "message.usage").Raw,
+					gjson.Get(sseDataForEvent(t, string(stream), "message_delta"), "usage").Raw,
+				} {
+					tokenUsage := gjson.Parse(rawUsage)
+					if tokenUsage.Get("input_tokens").Int() != tc.input || tokenUsage.Get("output_tokens").Int() != 5 ||
+						tokenUsage.Get("cache_read_input_tokens").
+							Exists() !=
+							tc.hasCached ||
+						tokenUsage.Get("cache_read_input_tokens").Int() != tc.cached {
+						t.Errorf("usage=%s", rawUsage)
+					}
 				}
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -576,7 +682,12 @@ func TestConvertAntigravityResponseToClaudeStreamEmptyCandidateClosesMessage(t *
 		output,
 		bytes.Join(
 			convertAntigravityResponseToClaude(
-				context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param,
+				context.Background(),
+				"gemini-3-flash-agent",
+				requestJSON,
+				requestJSON,
+				[]byte("[DONE]"),
+				&param,
 			),
 			nil,
 		)...,
@@ -629,7 +740,9 @@ func TestConvertAntigravityResponseToClaudeStreamRestoresDisambiguatedName(t *te
 		{"name":"` + second + `","input_schema":{"type":"object"}}
 	]}`)
 	mapped := util.SanitizedFunctionNameMap(original)[second]
-	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+	responseJSON := []byte(
+		`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`,
+	)
 	var param any
 
 	output := bytes.Join(
@@ -870,7 +983,9 @@ func TestConvertAntigravityResponseToClaudeStreamEmptyTextKeepsThinkingBlockOpen
 		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":""}]}}]}}`),
 		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":" thinking two","thought":true}]}}]}}`),
 		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible"}]}}]}}`),
-		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"thoughtsTokenCount":2,"totalTokenCount":13}}}`),
+		[]byte((`{"response":{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"` +
+			`usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"thoughtsTokenCount":2,"` +
+			`totalTokenCount":13}}}`)),
 		[]byte("[DONE]"),
 	}
 
@@ -938,7 +1053,12 @@ func TestConvertAntigravityResponseToClaudeStreamEmitsTerminalEventsExactlyOnce(
 		output,
 		bytes.Join(
 			convertAntigravityResponseToClaude(
-				context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param,
+				context.Background(),
+				"gemini-3-flash-agent",
+				requestJSON,
+				requestJSON,
+				[]byte("[DONE]"),
+				&param,
 			),
 			nil,
 		)...,

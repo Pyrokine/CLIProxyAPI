@@ -121,116 +121,126 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 	edits := make([]antigravityContentEdit, 0)
 	var pending []functionRef
 	validOffsets := true
-	contents.ForEach(func(contentIndex, content gjson.Result) bool {
-		parts := content.Get("parts")
-		if !parts.IsArray() {
-			pending = nil
-			return true
-		}
-
-		var calls, responses []functionRef
-		var responseParts, otherParts []json.RawMessage
-		partCount := 0
-		hasOtherPart := false
-		parts.ForEach(func(_, part gjson.Result) bool {
-			partCount++
-			switch {
-			case part.Get("functionCall").Exists():
-				calls = append(calls, functionRef{
-					id:   part.Get("functionCall.id").String(),
-					name: part.Get("functionCall.name").String(),
-				})
-			case part.Get("functionResponse").Exists():
-				responses = append(responses, functionRef{
-					id:   part.Get("functionResponse.id").String(),
-					name: part.Get("functionResponse.name").String(),
-				})
-				responseParts = append(responseParts, json.RawMessage(part.Raw))
-			default:
-				hasOtherPart = true
-				otherParts = append(otherParts, json.RawMessage(part.Raw))
-			}
-			return true
-		})
-		if partCount == 0 {
-			pending = nil
-			return true
-		}
-		if len(calls) > 0 && len(responses) == 0 {
-			pending = calls
-			return true
-		}
-		if len(responses) == 0 {
-			if hasOtherPart {
+	contents.ForEach(
+		func(contentIndex, content gjson.Result) bool {
+			parts := content.Get("parts")
+			if !parts.IsArray() {
 				pending = nil
+				return true
 			}
-			return true
-		}
-		if len(calls) > 0 {
-			pending = nil
-			return true
-		}
 
-		var contentJSON []byte
-		contentChanged := false
-		if len(pending) > 0 {
-			ordered := make([]json.RawMessage, 0, partCount)
-			used := make([]bool, len(responses))
-			for _, call := range pending {
-				for responseIndex, response := range responses {
-					if used[responseIndex] {
-						continue
+			var calls, responses []functionRef
+			var responseParts, otherParts []json.RawMessage
+			partCount := 0
+			hasOtherPart := false
+			parts.ForEach(
+				func(_, part gjson.Result) bool {
+					partCount++
+					switch {
+					case part.Get("functionCall").Exists():
+						calls = append(
+							calls, functionRef{
+								id:   part.Get("functionCall.id").String(),
+								name: part.Get("functionCall.name").String(),
+							},
+						)
+					case part.Get("functionResponse").Exists():
+						responses = append(
+							responses, functionRef{
+								id:   part.Get("functionResponse.id").String(),
+								name: part.Get("functionResponse.name").String(),
+							},
+						)
+						responseParts = append(responseParts, json.RawMessage(part.Raw))
+					default:
+						hasOtherPart = true
+						otherParts = append(otherParts, json.RawMessage(part.Raw))
 					}
-					if (call.id != "" && response.id == call.id) ||
-						(call.id == "" && call.name != "" && response.name == call.name) {
-						used[responseIndex] = true
+					return true
+				},
+			)
+			if partCount == 0 {
+				pending = nil
+				return true
+			}
+			if len(calls) > 0 && len(responses) == 0 {
+				pending = calls
+				return true
+			}
+			if len(responses) == 0 {
+				if hasOtherPart {
+					pending = nil
+				}
+				return true
+			}
+			if len(calls) > 0 {
+				pending = nil
+				return true
+			}
+
+			var contentJSON []byte
+			contentChanged := false
+			if len(pending) > 0 {
+				ordered := make([]json.RawMessage, 0, partCount)
+				used := make([]bool, len(responses))
+				for _, call := range pending {
+					for responseIndex, response := range responses {
+						if used[responseIndex] {
+							continue
+						}
+						if (call.id != "" && response.id == call.id) ||
+							(call.id == "" && call.name != "" && response.name == call.name) {
+							used[responseIndex] = true
+							ordered = append(ordered, responseParts[responseIndex])
+							break
+						}
+					}
+				}
+				for responseIndex := range responses {
+					if !used[responseIndex] {
 						ordered = append(ordered, responseParts[responseIndex])
-						break
+					}
+				}
+				ordered = append(ordered, otherParts...)
+				encoded, errMarshal := json.Marshal(ordered)
+				if errMarshal == nil && !bytes.Equal(encoded, []byte(parts.Raw)) {
+					contentJSON = []byte(content.Raw)
+					if updated, errSet := sjson.SetRawBytes(contentJSON, "parts", encoded); errSet == nil {
+						contentJSON = updated
+						contentChanged = true
 					}
 				}
 			}
-			for responseIndex := range responses {
-				if !used[responseIndex] {
-					ordered = append(ordered, responseParts[responseIndex])
+			pending = nil
+			if !hasOtherPart && content.Get("role").String() != "model" {
+				if contentJSON == nil {
+					contentJSON = []byte(content.Raw)
 				}
-			}
-			ordered = append(ordered, otherParts...)
-			encoded, errMarshal := json.Marshal(ordered)
-			if errMarshal == nil && !bytes.Equal(encoded, []byte(parts.Raw)) {
-				contentJSON = []byte(content.Raw)
-				if updated, errSet := sjson.SetRawBytes(contentJSON, "parts", encoded); errSet == nil {
+				if updated, errSet := sjson.SetBytes(contentJSON, "role", "model"); errSet == nil {
 					contentJSON = updated
 					contentChanged = true
 				}
 			}
-		}
-		pending = nil
-		if !hasOtherPart && content.Get("role").String() != "model" {
-			if contentJSON == nil {
-				contentJSON = []byte(content.Raw)
+			if !contentChanged {
+				return true
 			}
-			if updated, errSet := sjson.SetBytes(contentJSON, "role", "model"); errSet == nil {
-				contentJSON = updated
-				contentChanged = true
-			}
-		}
-		if !contentChanged {
-			return true
-		}
 
-		start := content.Index
-		end := start + len(content.Raw)
-		if start < 0 || end < start || end > len(rawJSON) || !bytes.Equal(rawJSON[start:end], []byte(content.Raw)) {
-			validOffsets = false
-		}
-		edits = append(edits, antigravityContentEdit{
-			index:       contentIndex.Int(),
-			start:       start,
-			end:         end,
-			replacement: contentJSON,
-		})
-		return true
-	})
+			start := content.Index
+			end := start + len(content.Raw)
+			if start < 0 || end < start || end > len(rawJSON) || !bytes.Equal(rawJSON[start:end], []byte(content.Raw)) {
+				validOffsets = false
+			}
+			edits = append(
+				edits, antigravityContentEdit{
+					index:       contentIndex.Int(),
+					start:       start,
+					end:         end,
+					replacement: contentJSON,
+				},
+			)
+			return true
+		},
+	)
 	return applyAntigravityIndexedEdits(rawJSON, edits, validOffsets)
 }
 
@@ -290,68 +300,66 @@ func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 		return rawJSON
 	}
 	callIDToName := make(map[string]string)
-	contents.ForEach(func(_, content gjson.Result) bool {
-		parts := content.Get("parts")
-		if !parts.IsArray() {
-			return true
-		}
-		parts.ForEach(func(_, part gjson.Result) bool {
-			call := part.Get("functionCall")
-			if call.Exists() {
-				id := strings.TrimSpace(call.Get("id").String())
-				name := strings.TrimSpace(call.Get("name").String())
-				if id != "" && name != "" && name != "unknown" {
-					callIDToName[id] = name
-				}
-			}
-			return true
-		})
-		return true
-	})
-	if len(callIDToName) == 0 {
-		return rawJSON
-	}
-
 	edits := make([]antigravityContentEdit, 0)
 	validOffsets := true
-	contents.ForEach(func(contentIndex, content gjson.Result) bool {
-		parts := content.Get("parts")
-		if !parts.IsArray() {
+	contents.ForEach(
+		func(contentIndex, content gjson.Result) bool {
+			parts := content.Get("parts")
+			if !parts.IsArray() {
+				return true
+			}
+			parts.ForEach(
+				func(partIndex, part gjson.Result) bool {
+					if call := part.Get("functionCall"); call.Exists() {
+						id := strings.TrimSpace(call.Get("id").String())
+						name := strings.TrimSpace(call.Get("name").String())
+						if id != "" {
+							delete(callIDToName, id)
+							if name != "" && name != "unknown" {
+								callIDToName[id] = name
+							}
+						}
+					}
+					response := part.Get("functionResponse")
+					if !response.Exists() {
+						return true
+					}
+					id := strings.TrimSpace(response.Get("id").String())
+					name := strings.TrimSpace(response.Get("name").String())
+					if id == "" || (name != "" && name != "unknown") {
+						return true
+					}
+					realName, ok := callIDToName[id]
+					if !ok {
+						return true
+					}
+					updatedPart, errSet := sjson.SetBytes([]byte(part.Raw), "functionResponse.name", realName)
+					if errSet != nil {
+						return true
+					}
+					start := part.Index
+					end := start + len(part.Raw)
+					if start < 0 || end < start || end > len(rawJSON) || !bytes.Equal(
+						rawJSON[start:end], []byte(part.Raw),
+					) {
+						validOffsets = false
+					}
+					edits = append(
+						edits, antigravityContentEdit{
+							index: contentIndex.Int(),
+							path: fmt.Sprintf(
+								"request.contents.%d.parts.%d", contentIndex.Int(), partIndex.Int(),
+							),
+							start:       start,
+							end:         end,
+							replacement: updatedPart,
+						},
+					)
+					return true
+				},
+			)
 			return true
-		}
-		parts.ForEach(func(partIndex, part gjson.Result) bool {
-			response := part.Get("functionResponse")
-			if !response.Exists() {
-				return true
-			}
-			id := strings.TrimSpace(response.Get("id").String())
-			name := strings.TrimSpace(response.Get("name").String())
-			if id == "" || (name != "" && name != "unknown") {
-				return true
-			}
-			realName, ok := callIDToName[id]
-			if !ok {
-				return true
-			}
-			updatedPart, errSet := sjson.SetBytes([]byte(part.Raw), "functionResponse.name", realName)
-			if errSet != nil {
-				return true
-			}
-			start := part.Index
-			end := start + len(part.Raw)
-			if start < 0 || end < start || end > len(rawJSON) || !bytes.Equal(rawJSON[start:end], []byte(part.Raw)) {
-				validOffsets = false
-			}
-			edits = append(edits, antigravityContentEdit{
-				index:       contentIndex.Int(),
-				path:        fmt.Sprintf("request.contents.%d.parts.%d", contentIndex.Int(), partIndex.Int()),
-				start:       start,
-				end:         end,
-				replacement: updatedPart,
-			})
-			return true
-		})
-		return true
-	})
+		},
+	)
 	return applyAntigravityIndexedEdits(rawJSON, edits, validOffsets)
 }

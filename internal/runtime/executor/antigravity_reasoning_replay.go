@@ -64,7 +64,10 @@ func (s antigravityReasoningReplayScope) valid() bool {
 	return strings.TrimSpace(s.modelName) != "" && strings.TrimSpace(s.sessionKey) != ""
 }
 
-func antigravityReasoningReplayScopeFromPayload(modelName string, payload []byte) antigravityReasoningReplayScope {
+func antigravityReasoningReplayScopeFromPayload(
+	modelName string,
+	payload []byte,
+) antigravityReasoningReplayScope {
 	sessionID := antigravityReplaySessionIDFromPayload(payload)
 	if sessionID == "" {
 		if stable := strings.TrimSpace(generateStableSessionID(payload)); stable != "" {
@@ -224,18 +227,16 @@ func logAntigravityReasoningReplayDegraded(scope antigravityReasoningReplayScope
 	}
 	if errors.Is(err, homekv.ErrCompareAndSwapUnsupported) {
 		log.Debugf(
-			"antigravity executor: reasoning replay %s unavailable on this Home (session=%s): %v",
+			"antigravity executor: reasoning replay %s unavailable on this Home (session=%s)",
 			stage,
 			antigravityReplayLogKey(scope.sessionKey),
-			err,
 		)
 		return
 	}
 	log.Warnf(
-		"antigravity executor: reasoning replay %s failed; continuing without replay (session=%s): %v",
+		"antigravity executor: reasoning replay %s failed; continuing without replay (session=%s)",
 		stage,
 		antigravityReplayLogKey(scope.sessionKey),
-		err,
 	)
 }
 
@@ -249,7 +250,13 @@ func prepareAntigravityGeminiReasoningReplayPayload(
 	if !antigravityUsesReasoningReplayCache(modelName) {
 		return payload, antigravityReasoningReplayScope{}, nil
 	}
-	updated, scope, replayApplied, errReplay := applyAntigravityReasoningReplayCache(ctx, modelName, req, opts, payload)
+	updated, scope, replayApplied, errReplay := applyAntigravityReasoningReplayCache(
+		ctx,
+		modelName,
+		req,
+		opts,
+		payload,
+	)
 	if errReplay != nil {
 		// Replay state is an optimization. Returning this untyped error would make
 		// MarkResult treat a Home KV failure as a credential failure.
@@ -261,7 +268,8 @@ func prepareAntigravityGeminiReasoningReplayPayload(
 	if antigravityPayloadHasClaudeToolProvenanceID(updated) {
 		degradedPayload, degradedCount := degradeAntigravityClaudeToolProvenanceIDs(updated)
 		log.Warnf(
-			"antigravity executor: replay state missing for %d tool ID(s); rewriting them to synthetic IDs and continuing without reasoning replay for those calls",
+			"antigravity executor: replay state missing for %d tool ID(s); rewriting them to synthetic IDs "+
+				"and continuing without reasoning replay for those calls",
 			degradedCount,
 		)
 		updated = degradedPayload
@@ -276,7 +284,9 @@ func prepareAntigravityGeminiReasoningReplayPayload(
 				logAntigravityReasoningReplayDegraded(scope, "invalidate", errDelete)
 			}
 			log.Warnf(
-				"antigravity executor: reasoning replay broke Gemini function call pairing (%v); degrading to original payload",
+				"antigravity executor: reasoning replay broke Gemini function call "+
+					"pairing (%v); degrading to original "+
+					"payload",
 				errPairing,
 			)
 			return payload, scope, nil
@@ -398,7 +408,9 @@ func applyAntigravityReasoningReplayItems(
 		if handled > 0 {
 			next, ok := batch.build(updated)
 			if !ok {
-				next, sequentialChanged := applyAntigravityReasoningReplayItemsSequential(index, updated, items, toolSchemas)
+				next, sequentialChanged := applyAntigravityReasoningReplayItemsSequential(
+					index, updated, items, toolSchemas,
+				)
 				return next, changed || sequentialChanged
 			}
 			updated = next
@@ -411,7 +423,12 @@ func applyAntigravityReasoningReplayItems(
 			continue
 		}
 
-		next, itemChanged := applyAntigravityReasoningReplayItemsSequential(index, updated, items[:1], toolSchemas)
+		next, itemChanged := applyAntigravityReasoningReplayItemsSequential(
+			index,
+			updated,
+			items[:1],
+			toolSchemas,
+		)
 		updated = next
 		changed = itemChanged || changed
 		items = items[1:]
@@ -468,6 +485,13 @@ func newAntigravityReplayBatch(index *antigravityReplayRequestIndex) *antigravit
 		functionResponsePartsByID: make(map[string][]antigravityReplayPartKey),
 	}
 	if index != nil {
+		// 批次使用暂存身份计算上下文，原索引保留给顺序处理
+		contextIndex := *index
+		contextIndex.contextFingerprints = newAntigravityReplayContextFingerprints(
+			index.payload, index.contents, index.validContents,
+		)
+		contextIndex.contextFingerprints.replacements = batch.replacements
+		batch.index = &contextIndex
 		for callID, keys := range index.functionResponsePartsByID {
 			batch.functionResponsePartsByID[callID] = append([]antigravityReplayPartKey(nil), keys...)
 		}
@@ -514,7 +538,8 @@ func (b *antigravityReplayBatch) removeThoughtSignatureFromOtherParts(
 	keep antigravityReplayPartKey,
 ) bool {
 	signature = strings.TrimSpace(signature)
-	if signature == "" || b == nil || b.index == nil || contentIndex < 0 || contentIndex >= len(b.index.contents) {
+	if signature == "" || b == nil || b.index == nil || contentIndex < 0 ||
+		contentIndex >= len(b.index.contents) {
 		return false
 	}
 	changed := false
@@ -604,8 +629,12 @@ func (b *antigravityReplayBatch) applyFunctionCallSignature(
 	if restoreStableID && b.index.functionCallCountsByID[currentID] != 1 {
 		return false
 	}
-	signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
-	if sameNativeCall && (signature == "" || antigravityHasNativeThoughtSignature(part.Get("thoughtSignature").String())) {
+	signature := ""
+	if b.index.contextMatches(itemResult, location.contentIndex) {
+		signature = strings.TrimSpace(itemResult.Get("thoughtSignature").String())
+	}
+	if sameNativeCall &&
+		(signature == "" || antigravityHasNativeThoughtSignature(part.Get("thoughtSignature").String())) {
 		return true
 	}
 	if b.identityChanged && currentID == nativeID {
@@ -652,6 +681,13 @@ func (b *antigravityReplayBatch) applyFunctionCallSignature(
 	}
 	if restoreStableID && !b.stageFunctionResponseIDRestores(pending, currentID, nativeID, name) {
 		return false
+	}
+	if restoreStableID {
+		for pendingKey := range pending {
+			if pendingKey.contentIndex < len(b.index.contextFingerprints.sums)-1 {
+				return false
+			}
+		}
 	}
 	itemChanged := false
 	for pendingKey, pendingPart := range pending {
@@ -794,14 +830,19 @@ func filterAntigravityReasoningReplayItemsForRequestWithIndex(
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "function_call_part":
 			signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
-			if location, foundCall := index.functionCallPartLocationForReplayWithSchemas(itemResult, toolSchemas); foundCall {
+			if location, foundCall := index.functionCallPartLocationForReplayWithSchemas(
+				itemResult, toolSchemas,
+			); foundCall {
 				currentID := strings.TrimSpace(location.functionCall.Get("id").String())
 				nativeID := strings.TrimSpace(itemResult.Get("call_id").String())
 				needsNativeRestore := currentID != nativeID || !bytes.Equal(
 					antigravityCanonicalReplayJSON([]byte(location.functionCall.Get("args").Raw)),
 					antigravityCanonicalReplayJSON([]byte(itemResult.Get("args").Raw)),
 				)
-				if !needsNativeRestore && (signature == "" || antigravityHasNativeThoughtSignature(location.part.Get("thoughtSignature").String())) {
+				if !needsNativeRestore &&
+					(signature ==
+						"" ||
+						antigravityHasNativeThoughtSignature(location.part.Get("thoughtSignature").String())) {
 					continue
 				}
 				break
@@ -880,7 +921,10 @@ func antigravityRequestHasMatchingFunctionResponse(payload []byte, itemResult gj
 	return ok
 }
 
-func antigravityFunctionResponseContentIndexForReplay(payload []byte, itemResult gjson.Result) (int, string, bool) {
+func antigravityFunctionResponseContentIndexForReplay(
+	payload []byte,
+	itemResult gjson.Result,
+) (int, string, bool) {
 	callID := strings.TrimSpace(itemResult.Get("call_id").String())
 	name := strings.TrimSpace(itemResult.Get("name").String())
 	args := itemResult.Get("args")
@@ -920,7 +964,10 @@ func antigravityFunctionResponseContentIndex(payload []byte, callID string) (int
 	return -1, false
 }
 
-func restoreAntigravityFunctionResponseReplayIdentity(payload []byte, currentID, nativeID, nativeName string) []byte {
+func restoreAntigravityFunctionResponseReplayIdentity(
+	payload []byte,
+	currentID, nativeID, nativeName string,
+) []byte {
 	currentID = strings.TrimSpace(currentID)
 	nativeID = strings.TrimSpace(nativeID)
 	nativeName = strings.TrimSpace(nativeName)
@@ -956,7 +1003,10 @@ func antigravityPayloadHasFunctionCallID(payload []byte, callID string) bool {
 	return ok
 }
 
-func antigravityFunctionCallPartLocation(payload []byte, callID string) (contentIndex int, partIndex int, ok bool) {
+func antigravityFunctionCallPartLocation(
+	payload []byte,
+	callID string,
+) (contentIndex int, partIndex int, ok bool) {
 	callID = strings.TrimSpace(callID)
 	if callID == "" {
 		return -1, -1, false
@@ -985,85 +1035,13 @@ func antigravityFunctionCallPartLocationForReplayWithSchemas(
 	itemResult gjson.Result,
 	toolSchemas map[string]any,
 ) (contentIndex int, partIndex int, ok bool) {
-	name := strings.TrimSpace(itemResult.Get("name").String())
-	args := itemResult.Get("args")
-	if name == "" || !args.Exists() {
+	location, found := newAntigravityReplayRequestIndex(payload).functionCallPartLocationForReplayWithSchemas(
+		itemResult, toolSchemas,
+	)
+	if !found {
 		return -1, -1, false
 	}
-	callID := strings.TrimSpace(itemResult.Get("call_id").String())
-	if callID == "" {
-		callID = strings.TrimSpace(itemResult.Get("id").String())
-	}
-	candidateIDs := []string{callID}
-	if stableID := util.GeminiClaudeToolUseID(callID, name, args.Raw); stableID != "" && stableID != callID {
-		candidateIDs = append(candidateIDs, stableID)
-	}
-	for _, candidateID := range candidateIDs {
-		if candidateID == "" {
-			continue
-		}
-		ci, pi, found := antigravityFunctionCallPartLocation(payload, candidateID)
-		if !found {
-			continue
-		}
-		if antigravityReplayItemContextMatches(payload, itemResult, ci) {
-			fc := gjson.GetBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d.functionCall", ci, pi))
-			if antigravityFunctionCallMatchesReplayItem(fc, itemResult, toolSchemas) {
-				return ci, pi, true
-			}
-		}
-		return -1, -1, false
-	}
-	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
-	if !contents.IsArray() {
-		return -1, -1, false
-	}
-	contentArr := contents.Array()
-	cachedCI := int(itemResult.Get("contentIndex").Int())
-	if targetOccurrence := itemResult.Get("targetOccurrence"); targetOccurrence.Exists() {
-		if cachedCI < 0 || cachedCI >= len(contentArr) || !antigravityReplayItemContextMatches(
-			payload, itemResult, cachedCI,
-		) {
-			return -1, -1, false
-		}
-		wantedOccurrence := int(targetOccurrence.Int())
-		occurrence := 0
-		for pi, part := range contentArr[cachedCI].Get("parts").Array() {
-			fc := part.Get("functionCall")
-			if !fc.Exists() || (util.IsGeminiClaudeToolUseID(fc.Get("id").String()) && fc.Get("id").String() != util.GeminiClaudeToolUseID(
-				callID, name, args.Raw,
-			)) || !antigravityFunctionCallMatchesReplayItem(fc, itemResult, toolSchemas) {
-				continue
-			}
-			if occurrence == wantedOccurrence {
-				return cachedCI, pi, true
-			}
-			occurrence++
-		}
-		return -1, -1, false
-	}
-
-	matches := make([][2]int, 0, 1)
-	for ci, content := range contentArr {
-		if !antigravityReplayItemContextMatches(payload, itemResult, ci) {
-			continue
-		}
-		for pi, part := range content.Get("parts").Array() {
-			fc := part.Get("functionCall")
-			if !fc.Exists() || (util.IsGeminiClaudeToolUseID(fc.Get("id").String()) && fc.Get("id").String() != util.GeminiClaudeToolUseID(
-				callID, name, args.Raw,
-			)) {
-				continue
-			}
-			if antigravityFunctionCallMatchesReplayItem(fc, itemResult, toolSchemas) {
-				matches = append(matches, [2]int{ci, pi})
-			}
-		}
-	}
-	if len(matches) == 1 {
-		return matches[0][0], matches[0][1], true
-	}
-	return -1, -1, false
+	return location.contentIndex, location.partIndex, true
 }
 
 func antigravityFunctionCallProvenanceLocation(
@@ -1226,7 +1204,11 @@ func antigravityReplayPartFingerprint(part gjson.Result) (kind, fingerprint stri
 	return kind, fmt.Sprintf("%x", sum[:])
 }
 
-func antigravityReplayPartOccurrence(parts []gjson.Result, targetPartIndex int, targetKind, targetHash string) int {
+func antigravityReplayPartOccurrence(
+	parts []gjson.Result,
+	targetPartIndex int,
+	targetKind, targetHash string,
+) int {
 	occurrence := 0
 	for partIndex := 0; partIndex < targetPartIndex && partIndex < len(parts); partIndex++ {
 		kind, fingerprint := antigravityReplayPartFingerprint(parts[partIndex])
@@ -1253,6 +1235,7 @@ type antigravityReplayIndexedContent struct {
 // exact payload revision. Its no-copy GJSON values alias payload and must be
 // discarded after any mutation.
 type antigravityReplayRequestIndex struct {
+	payload                     []byte
 	validContents               bool
 	contents                    []antigravityReplayIndexedContent
 	functionCallsByID           map[string]antigravityReplayIndexedPart
@@ -1264,6 +1247,7 @@ type antigravityReplayRequestIndex struct {
 
 func newAntigravityReplayRequestIndex(payload []byte) *antigravityReplayRequestIndex {
 	index := &antigravityReplayRequestIndex{
+		payload:                     payload,
 		functionCallsByID:           make(map[string]antigravityReplayIndexedPart),
 		functionCallCountsByID:      make(map[string]int),
 		functionResponseContentByID: make(map[string]int),
@@ -1303,17 +1287,26 @@ func newAntigravityReplayRequestIndex(payload []byte) *antigravityReplayRequestI
 					}
 					if callID != "" {
 						key := antigravityReplayPartKey{contentIndex: contentIndex, partIndex: partIndex}
-						index.functionResponsePartsByID[callID] = append(index.functionResponsePartsByID[callID], key)
+						index.functionResponsePartsByID[callID] = append(
+							index.functionResponsePartsByID[callID],
+							key,
+						)
 					}
 				}
 			}
 		}
 	}
-	index.contextFingerprints = newAntigravityReplayContextFingerprints(payload, index.contents, index.validContents)
+	index.contextFingerprints = newAntigravityReplayContextFingerprints(
+		payload,
+		index.contents,
+		index.validContents,
+	)
 	return index
 }
 
-func (i *antigravityReplayRequestIndex) functionCallPartLocation(callID string) (antigravityReplayIndexedPart, bool) {
+func (i *antigravityReplayRequestIndex) functionCallPartLocation(
+	callID string,
+) (antigravityReplayIndexedPart, bool) {
 	if i == nil {
 		return antigravityReplayIndexedPart{}, false
 	}
@@ -1387,6 +1380,9 @@ func (i *antigravityReplayRequestIndex) thoughtSignaturePartIndex(
 	if !strings.EqualFold(strings.TrimSpace(content.content.Get("role").String()), "model") {
 		return -1, -1, false
 	}
+	if !i.contextMatches(itemResult, contentIndex) {
+		return -1, -1, false
+	}
 	parts := content.parts
 	targetKind := strings.TrimSpace(itemResult.Get("targetKind").String())
 	targetHash := strings.TrimSpace(itemResult.Get("targetHash").String())
@@ -1425,9 +1421,6 @@ func (i *antigravityReplayRequestIndex) thoughtSignaturePartIndex(
 			}
 		}
 	} else {
-		if !i.contextMatches(itemResult, contentIndex) {
-			return -1, -1, false
-		}
 		candidateIndex := int(itemResult.Get("partIndex").Int())
 		if candidateIndex >= 0 && candidateIndex < len(parts) && parts[candidateIndex].Type != gjson.Null {
 			if kind, _ := antigravityReplayPartFingerprint(parts[candidateIndex]); kind != "" {
@@ -1435,8 +1428,8 @@ func (i *antigravityReplayRequestIndex) thoughtSignaturePartIndex(
 			}
 		}
 		if partIndex < 0 {
-			for candidateIndex := len(parts) - 1; candidateIndex >= 0; candidateIndex-- {
-				if kind, _ := antigravityReplayPartFingerprint(parts[candidateIndex]); kind != "" {
+			for candidateIndex, part := range slices.Backward(parts) {
+				if kind, _ := antigravityReplayPartFingerprint(part); kind != "" {
 					partIndex = candidateIndex
 					break
 				}
@@ -1484,6 +1477,30 @@ func (i *antigravityReplayRequestIndex) functionCallPartLocationForReplayWithSch
 		location, found := i.functionCallPartLocation(candidateID)
 		if !found {
 			continue
+		}
+		if i.functionCallCountsByID[candidateID] > 1 {
+			ci := int(itemResult.Get("contentIndex").Int())
+			if ci < 0 || ci >= len(i.contents) ||
+				strings.TrimSpace(itemResult.Get("contextHash").String()) == "" {
+				return antigravityReplayIndexedPart{}, false
+			}
+			found = false
+			for pi, part := range i.contents[ci].parts {
+				functionCall := part.Get("functionCall")
+				if strings.TrimSpace(functionCall.Get("id").String()) != candidateID {
+					continue
+				}
+				if found {
+					return antigravityReplayIndexedPart{}, false
+				}
+				location = antigravityReplayIndexedPart{
+					contentIndex: ci, partIndex: pi, part: part, functionCall: functionCall,
+				}
+				found = true
+			}
+			if !found {
+				return antigravityReplayIndexedPart{}, false
+			}
 		}
 		if i.contextMatches(itemResult, location.contentIndex) &&
 			antigravityFunctionCallMatchesReplayItem(location.functionCall, itemResult, toolSchemas) {
@@ -1534,12 +1551,14 @@ func (i *antigravityReplayRequestIndex) functionCallPartLocationForReplayWithSch
 				continue
 			}
 			if antigravityFunctionCallMatchesReplayItem(functionCall, itemResult, toolSchemas) {
-				matches = append(matches, antigravityReplayIndexedPart{
-					contentIndex: contentIndex,
-					partIndex:    partIndex,
-					part:         part,
-					functionCall: functionCall,
-				})
+				matches = append(
+					matches, antigravityReplayIndexedPart{
+						contentIndex: contentIndex,
+						partIndex:    partIndex,
+						part:         part,
+						functionCall: functionCall,
+					},
+				)
 			}
 		}
 	}
@@ -1571,11 +1590,12 @@ func (i *antigravityReplayRequestIndex) functionCallProvenanceLocation(
 }
 
 type antigravityReplayContextFingerprints struct {
-	valid      bool
-	contents   []antigravityReplayIndexedContent
-	hasher     hash.Hash
-	sums       []string
-	wroteBytes bool
+	valid        bool
+	contents     []antigravityReplayIndexedContent
+	replacements map[antigravityReplayPartKey][]byte
+	hasher       hash.Hash
+	sums         []string
+	wroteBytes   bool
 }
 
 func newAntigravityReplayContextFingerprints(
@@ -1640,8 +1660,13 @@ func (f *antigravityReplayContextFingerprints) at(beforeContentIndex int) string
 		content := f.contents[contentIndex]
 		f.writeString(strings.ToLower(strings.TrimSpace(content.content.Get("role").String())))
 		f.writeByte(0)
-		for _, part := range content.parts {
+		for partIndex, part := range content.parts {
 			normalized := []byte(part.Raw)
+			if replacement, ok := f.replacements[antigravityReplayPartKey{
+				contentIndex: contentIndex, partIndex: partIndex,
+			}]; ok {
+				normalized = replacement
+			}
 			for _, signaturePath := range []string{
 				"thoughtSignature", "thought_signature", "extra_content.google.thought_signature",
 			} {
@@ -1794,7 +1819,10 @@ func antigravityNormalizeReplayToolValue(value, schema any) any {
 	}
 }
 
-func antigravityFunctionCallMatchesReplayItem(functionCall, itemResult gjson.Result, toolSchemas map[string]any) bool {
+func antigravityFunctionCallMatchesReplayItem(
+	functionCall, itemResult gjson.Result,
+	toolSchemas map[string]any,
+) bool {
 	name := strings.TrimSpace(itemResult.Get("name").String())
 	if name == "" || strings.TrimSpace(functionCall.Get("name").String()) != name {
 		return false
@@ -1805,7 +1833,10 @@ func antigravityFunctionCallMatchesReplayItem(functionCall, itemResult gjson.Res
 		return false
 	}
 	if bytes.Equal(
-		antigravityCanonicalReplayJSON([]byte(currentArgs.Raw)), antigravityCanonicalReplayJSON([]byte(nativeArgs.Raw)),
+		antigravityCanonicalReplayJSON(
+			[]byte(currentArgs.Raw),
+		),
+		antigravityCanonicalReplayJSON([]byte(nativeArgs.Raw)),
 	) {
 		return true
 	}
@@ -1887,12 +1918,14 @@ func degradeAntigravityClaudeToolProvenanceIDs(payload []byte) ([]byte, int) {
 						}
 					}
 				}
-				replacements = append(replacements, partReplacement{
-					start:    part.Index,
-					end:      part.Index + len(part.Raw),
-					original: []byte(part.Raw),
-					data:     updatedPart,
-				})
+				replacements = append(
+					replacements, partReplacement{
+						start:    part.Index,
+						end:      part.Index + len(part.Raw),
+						original: []byte(part.Raw),
+						data:     updatedPart,
+					},
+				)
 				continue
 			}
 			if functionResponse := part.Get("functionResponse"); functionResponse.Exists() {
@@ -1906,12 +1939,14 @@ func degradeAntigravityClaudeToolProvenanceIDs(payload []byte) ([]byte, int) {
 				if errSet != nil {
 					return payload, 0
 				}
-				replacements = append(replacements, partReplacement{
-					start:    part.Index,
-					end:      part.Index + len(part.Raw),
-					original: []byte(part.Raw),
-					data:     updatedPart,
-				})
+				replacements = append(
+					replacements, partReplacement{
+						start:    part.Index,
+						end:      part.Index + len(part.Raw),
+						original: []byte(part.Raw),
+						data:     updatedPart,
+					},
+				)
 			}
 		}
 	}
@@ -2009,6 +2044,7 @@ func antigravitySetReplayItemContextHashValue(item []byte, contextHash string) [
 	return item
 }
 
+//goland:noinspection DuplicatedCode
 func antigravityThoughtSignatureReplayPartPath(payload []byte, itemResult gjson.Result) (string, bool) {
 	ci := int(itemResult.Get("contentIndex").Int())
 	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
@@ -2025,11 +2061,12 @@ func antigravityThoughtSignatureReplayPartPath(payload []byte, itemResult gjson.
 	if !parts.IsArray() {
 		return "", false
 	}
+	if !antigravityReplayItemContextMatches(payload, itemResult, ci) {
+		return "", false
+	}
 	partArr := parts.Array()
 	targetKind := strings.TrimSpace(itemResult.Get("targetKind").String())
 	targetHash := strings.TrimSpace(itemResult.Get("targetHash").String())
-	// The target hash pins the signature to unchanged part bytes. Context drift
-	// elsewhere in the conversation does not invalidate the signature.
 	if targetHash != "" {
 		if targetOccurrence := itemResult.Get("targetOccurrence"); targetOccurrence.Exists() {
 			wanted := int(targetOccurrence.Int())
@@ -2062,11 +2099,6 @@ func antigravityThoughtSignatureReplayPartPath(payload []byte, itemResult gjson.
 		return "", false
 	}
 
-	// Legacy items lack a target hash, so a matching context fingerprint is the
-	// only evidence that the positional fallback still names the original part.
-	if !antigravityReplayItemContextMatches(payload, itemResult, ci) {
-		return "", false
-	}
 	pi := int(itemResult.Get("partIndex").Int())
 	if pi >= 0 && pi < len(partArr) && partArr[pi].Type != gjson.Null {
 		if kind, _ := antigravityReplayPartFingerprint(partArr[pi]); kind != "" {
@@ -2230,8 +2262,34 @@ func restoreAntigravityNativeFunctionCallReplay(
 	nativeName := strings.TrimSpace(itemResult.Get("name").String())
 	stableID := util.GeminiClaudeToolUseID(nativeID, nativeName, itemResult.Get("args").Raw)
 	restoreStableID := currentID != nativeID && currentID == stableID
-	if restoreStableID && newAntigravityReplayRequestIndex(payload).functionCallCountsByID[currentID] != 1 {
-		return payload, false
+	responseStart, responseEnd := 0, -1
+	if restoreStableID {
+		index := newAntigravityReplayRequestIndex(payload)
+		if index.functionCallCountsByID[currentID] != 1 {
+			if strings.TrimSpace(itemResult.Get("contextHash").String()) == "" ||
+				int(itemResult.Get("contentIndex").Int()) != contentIndex ||
+				!index.contextMatches(itemResult, contentIndex) {
+				return payload, false
+			}
+			callsInContent := 0
+			for _, part := range index.contents[contentIndex].parts {
+				if strings.TrimSpace(part.Get("functionCall.id").String()) == currentID {
+					callsInContent++
+				}
+			}
+			if callsInContent != 1 {
+				return payload, false
+			}
+			responseStart = contentIndex
+			for ci := contentIndex + 1; ci < len(index.contents) && responseEnd < 0; ci++ {
+				for _, part := range index.contents[ci].parts {
+					if strings.TrimSpace(part.Get("functionCall.id").String()) == currentID {
+						responseEnd = ci
+						break
+					}
+				}
+			}
+		}
 	}
 	restoreIdentity := currentID == nativeID || util.IsGeminiClaudeToolUseID(currentID) || allowLegacyIDRestore
 	if !restoreIdentity {
@@ -2261,7 +2319,8 @@ func restoreAntigravityNativeFunctionCallReplay(
 	for _, field := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
 		out, _ = sjson.DeleteBytes(out, partPath+"."+field)
 	}
-	if signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String()); allowSignature && signature != "" {
+	if signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String()); allowSignature &&
+		signature != "" {
 		out = antigravityRemoveThoughtSignatureFromOtherParts(out, contentIndex, signature, partPath)
 		out, _ = sjson.SetBytes(out, partPath+".thoughtSignature", signature)
 	}
@@ -2269,6 +2328,11 @@ func restoreAntigravityNativeFunctionCallReplay(
 		contents := util.GetGJSONBytesNoCopy(out, "request.contents")
 		contents.ForEach(
 			func(contentKey, content gjson.Result) bool {
+				if ci := int(contentKey.Int()); ci < responseStart {
+					return true
+				} else if responseEnd >= 0 && ci >= responseEnd {
+					return false
+				}
 				content.Get("parts").ForEach(
 					func(partKey, part gjson.Result) bool {
 						response := part.Get("functionResponse")
@@ -2290,6 +2354,7 @@ func restoreAntigravityNativeFunctionCallReplay(
 	return out, !bytes.Equal(out, payload)
 }
 
+//goland:noinspection DuplicatedCode
 func mergeAntigravityFunctionCallPartReplayWithSchemas(
 	payload []byte,
 	itemResult gjson.Result,
@@ -2316,7 +2381,9 @@ func mergeAntigravityFunctionCallPartReplayWithSchemas(
 		)
 	}
 	if ci, pi, exists := antigravityFunctionCallProvenanceLocation(payload, itemResult, toolSchemas); exists {
-		return restoreAntigravityNativeFunctionCallReplay(payload, ci, pi, itemResult, false, true)
+		return restoreAntigravityNativeFunctionCallReplay(
+			payload, ci, pi, itemResult, false, antigravityReplayItemContextMatches(payload, itemResult, ci),
+		)
 	}
 	if callID != "" {
 		stableID := util.GeminiClaudeToolUseID(callID, name, args.Raw)
@@ -2493,7 +2560,8 @@ func newAntigravityReasoningReplayAccumulator(
 		visiblePartIndex:        -1,
 		thoughtPartIndex:        -1,
 		itemBytes:               itemBytes,
-		overflow:                len(items) > internalcache.AntigravityReasoningReplayCacheMaxItemsPerEntry || itemBytes > internalcache.AntigravityReasoningReplayCacheMaxBytesPerEntry,
+		overflow: len(items) > internalcache.AntigravityReasoningReplayCacheMaxItemsPerEntry ||
+			itemBytes > internalcache.AntigravityReasoningReplayCacheMaxBytesPerEntry,
 	}
 }
 
@@ -2528,9 +2596,11 @@ func (i *antigravityReplayRequestIndex) reasoningReplayItemsFromRequest() [][]by
 				if item := buildAntigravityFunctionCallPartItem(
 					contentIndex, partIndex, occurrence, functionCall, signature,
 				); len(item) > 0 {
-					items = append(items, antigravitySetReplayItemContextHashValue(
-						item, i.contextFingerprint(contentIndex),
-					))
+					items = append(
+						items, antigravitySetReplayItemContextHashValue(
+							item, i.contextFingerprint(contentIndex),
+						),
+					)
 				}
 				continue
 			}
@@ -2554,9 +2624,11 @@ func (i *antigravityReplayRequestIndex) reasoningReplayItemsFromRequest() [][]by
 				"targetOccurrence",
 				antigravityReplayPartOccurrence(content.parts, targetPartIndex, kind, fingerprint),
 			)
-			items = append(items, antigravitySetReplayItemContextHashValue(
-				item, i.contextFingerprint(contentIndex),
-			))
+			items = append(
+				items, antigravitySetReplayItemContextHashValue(
+					item, i.contextFingerprint(contentIndex),
+				),
+			)
 		}
 	}
 	return items
@@ -2566,7 +2638,8 @@ func (a *antigravityReasoningReplayAccumulator) appendItem(item []byte) {
 	if a == nil || len(item) == 0 || a.overflow {
 		return
 	}
-	if len(a.items)+1 > internalcache.AntigravityReasoningReplayCacheMaxItemsPerEntry || a.itemBytes+len(item) > internalcache.AntigravityReasoningReplayCacheMaxBytesPerEntry {
+	if len(a.items)+1 > internalcache.AntigravityReasoningReplayCacheMaxItemsPerEntry ||
+		a.itemBytes+len(item) > internalcache.AntigravityReasoningReplayCacheMaxBytesPerEntry {
 		a.overflow = true
 		return
 	}
@@ -2706,7 +2779,8 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 					for _, pending := range a.pendingSignatures {
 						unboundPrefix := pending.targetKind == ""
 						if pending.targetKind == targetKind {
-							unboundPrefix = (targetKind == "text" && a.visibleText.Len() == 0) || (targetKind == "thought" && a.thoughtText.Len() == 0)
+							unboundPrefix = (targetKind == "text" && a.visibleText.Len() == 0) ||
+								(targetKind == "thought" && a.thoughtText.Len() == 0)
 						}
 						if unboundPrefix {
 							if pending.signature == signature {
@@ -2724,7 +2798,8 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 						}
 					}
 				}
-				if a.lastResponseKind != "" && a.lastResponseKind != targetKind && (a.lastResponseKind == "text" || a.lastResponseKind == "thought") {
+				if a.lastResponseKind != "" && a.lastResponseKind != targetKind &&
+					(a.lastResponseKind == "text" || a.lastResponseKind == "thought") {
 					a.flushPendingThoughtSignaturesForKind(a.lastResponseKind)
 				}
 				if targetKind == "thought" {
@@ -2745,10 +2820,24 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 				if targetKind == "" {
 					targetKind = a.lastResponseKind
 				}
-				unmatchedDetachedCarrier := signatureOnly && a.lastResponseKind == targetKind && ((targetKind == "text" && a.visibleText.Len() == 0) || (targetKind == "thought" && a.thoughtText.Len() == 0))
+				unmatchedDetachedCarrier := signatureOnly && a.lastResponseKind == targetKind &&
+					((targetKind ==
+						"text" &&
+						a.visibleText.Len() ==
+							0) ||
+						(targetKind ==
+							"thought" &&
+							a.thoughtText.Len() ==
+								0))
 				if unmatchedDetachedCarrier {
 					a.seenSignatures[signature] = true
-				} else if len(a.pendingSignatures)+len(a.items)+1 > internalcache.AntigravityReasoningReplayCacheMaxItemsPerEntry || a.itemBytes+len(signature) > internalcache.AntigravityReasoningReplayCacheMaxBytesPerEntry {
+				} else if len(a.pendingSignatures)+
+					len(a.items)+
+					1 >
+					internalcache.AntigravityReasoningReplayCacheMaxItemsPerEntry ||
+					a.itemBytes+
+						len(signature) >
+						internalcache.AntigravityReasoningReplayCacheMaxBytesPerEntry {
 					a.overflow = true
 					a.seenSignatures[signature] = true
 				} else {
@@ -2895,31 +2984,24 @@ func (a *antigravityReasoningReplayAccumulator) commit(ctx context.Context) {
 	if a == nil || !a.scope.valid() || !a.terminal {
 		return
 	}
-	if a.overflow {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(
-			ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot,
-		)
-		return
+	if !a.overflow {
+		a.appendPendingThoughtSignatures()
 	}
-	a.appendPendingThoughtSignatures()
-	if a.overflow {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(
+	if a.overflow || len(a.items) == 0 {
+		_, errDelete := internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(
 			ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot,
 		)
-		return
-	}
-	if len(a.items) == 0 {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(
-			ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot,
-		)
+		logAntigravityReasoningReplayDegraded(a.scope, "clear", errDelete)
 		return
 	}
 	if _, errReplace := internalcache.ReplaceAntigravityReasoningReplayItemsIfUnchanged(
 		ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot, a.items,
 	); errReplace != nil {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(
+		logAntigravityReasoningReplayDegraded(a.scope, "write", errReplace)
+		_, errDelete := internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(
 			ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot,
 		)
+		logAntigravityReasoningReplayDegraded(a.scope, "clear", errDelete)
 	}
 }
 
