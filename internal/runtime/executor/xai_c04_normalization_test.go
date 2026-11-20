@@ -33,8 +33,10 @@ func TestNormalizeXAIObjectFunctionSchemaRootUnions(t *testing.T) {
 			wantBranch: "query",
 		},
 		{
-			name:       "oneOf narrows an object nullable type",
-			schema:     `{"oneOf":[{"type":["object","null"],"properties":{"path":{"type":"string"}}},{"type":"string"}]}`,
+			name: "oneOf narrows an object nullable type",
+			schema: `{"oneOf":[{"type":["object","null"],"properties":{"path":{"type":` +
+				`"string"}}},{"type":` +
+				`"string"}]}`,
 			union:      "oneOf",
 			wantBranch: "path",
 		},
@@ -68,25 +70,39 @@ func TestNormalizeXAIObjectFunctionSchemaRootUnions(t *testing.T) {
 }
 
 func TestNormalizeXAIToolResolvesDeepObjectUnionReferences(t *testing.T) {
-	tool := gjson.Parse(`{"type":"function","name":"lookup","parameters":{"anyOf":[{"$ref":"#/$defs/wrapper"},{"type":"string"}],"$defs":{"wrapper":{"oneOf":[{"$ref":"#/$defs/query"},{"type":"null"}]},"query":{"type":"object","properties":{"term":{"type":"string"}},"required":["term"]}}}}`)
-	updated, changed, err := normalizeXAITool(tool, "")
-	if err != nil || !changed {
-		t.Fatalf("normalizeXAITool() = (%s, %v, %v)", updated, changed, err)
-	}
-	for path, want := range map[string]string{
-		"parameters.type":                                 "object",
-		"parameters.anyOf.0.type":                         "object",
-		"parameters.anyOf.0.oneOf.0.type":                 "object",
-		"parameters.anyOf.0.oneOf.0.properties.term.type": "string",
-	} {
-		if got := gjson.GetBytes(updated, path).String(); got != want {
-			t.Fatalf("%s = %q, want %q; tool=%s", path, got, want, updated)
+	for _, mixed := range []bool{false, true} {
+		parameters := `{"anyOf":[{"$ref":"#/$defs/wrapper"}],"$defs":{` +
+			`"wrapper":{"type":"object","oneOf":[{"$ref":"#/$defs/query"}]},` +
+			`"query":{"type":"object","properties":{"term":{"type":"string"}},"required":["term"]}}}`
+		if mixed {
+			parameters = `{"anyOf":[{"$ref":"#/$defs/wrapper"},{"type":"string"}],"$defs":{` +
+				`"wrapper":{"oneOf":[{"$ref":"#/$defs/query"},{"type":"null"}]},` +
+				`"query":{"type":"object","properties":{"term":{"type":"string"}},"required":["term"]}}}`
 		}
-	}
-	if gjson.GetBytes(updated, "parameters.$defs").Exists() ||
-		gjson.GetBytes(updated, "parameters.anyOf.1").Exists() ||
-		gjson.GetBytes(updated, "parameters.anyOf.0.oneOf.1").Exists() {
-		t.Fatalf("references or non-object union branches remain: %s", updated)
+		tool := gjson.Parse(`{"type":"function","name":"lookup","parameters":` + parameters + `}`)
+		updated, changed, err := normalizeXAITool(tool, "")
+		if err != nil || !changed {
+			t.Fatalf("mixed=%t normalizeXAITool() = (%s, %v, %v)", mixed, updated, changed, err)
+		}
+		if mixed {
+			if got := gjson.GetBytes(updated, "parameters").Raw; got != xaiSafeFunctionParameters {
+				t.Fatalf("mixed root schema = %s, want permissive object", got)
+			}
+			continue
+		}
+		for path, want := range map[string]string{
+			"parameters.type":                                 "object",
+			"parameters.anyOf.0.type":                         "object",
+			"parameters.anyOf.0.oneOf.0.type":                 "object",
+			"parameters.anyOf.0.oneOf.0.properties.term.type": "string",
+		} {
+			if got := gjson.GetBytes(updated, path).String(); got != want {
+				t.Fatalf("%s = %q, want %q; tool=%s", path, got, want, updated)
+			}
+		}
+		if gjson.GetBytes(updated, "parameters.$defs").Exists() || strings.Contains(string(updated), `"$ref"`) {
+			t.Fatalf("resolved references remain: %s", updated)
+		}
 	}
 }
 
@@ -106,7 +122,8 @@ func TestNormalizeXAIToolRejectsCyclicRootsWithoutObjectShape(t *testing.T) {
 func TestNormalizeXAIToolPreservesRecursiveObjectShape(t *testing.T) {
 	for _, parameters := range []string{
 		`{"$ref":"#/$defs/Node","$defs":{"Node":{"type":"object","properties":{"child":{"$ref":"#/$defs/Node"}}}}}`,
-		`{"$ref":"#/$defs/Alias","$defs":{"Alias":{"$ref":"#/$defs/Node"},"Node":{"properties":{"child":{"$ref":"#/$defs/Alias"}}}}}`,
+		`{"$ref":"#/$defs/Alias","$defs":{"Alias":{"$ref":"#/$defs/Node"},"Node` +
+			`":{"properties":{"child":{"$ref":"#/$defs/Alias"}}}}}`,
 	} {
 		tool := gjson.Parse(`{"type":"function","name":"recursive","parameters":` + parameters + `}`)
 		normalized, changed, err := normalizeXAITool(tool, "")
@@ -157,19 +174,13 @@ func TestNormalizeXAIObjectFunctionSchemaRejectsInvalidRoots(t *testing.T) {
 func TestXAIRequestPreparationPreservesControlsAndPathParity(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"model":"grok-4.3",
-		"messages":[{"role":"user","content":"hello"}],
-		"max_completion_tokens":64,
-		"max_tokens":128,
-		"temperature":0,
-		"top_p":0.25,
-		"top_k":7,
-		"stop":["END"],
-		"response_format":{"type":"json_schema","json_schema":{"name":"result","strict":true,"schema":{"type":"object","properties":{"answer":{"type":"string"}}}}},
-		"text":{"verbosity":"low"},
-		"tools":[{"type":"function","function":{"name":"lookup","parameters":{"oneOf":[{"properties":{"query":{"type":"string"}}},{"type":"null"}]}}}]
-	}`)
+	payload := []byte(("{\n\t\t\"model\":\"grok-4.3\",\n\t\t\"messages\":[{\"role\":\"user\",\"content\":\"" +
+		"hello\"}],\n\t\t\"max_completion_tokens\":64,\n\t\t\"max_tokens\":128,\n\t\t\"temperature\":0,\n\t\t" +
+		"\"top_p\":0.25,\n\t\t\"top_k\":7,\n\t\t\"stop\":[\"END\"],\n\t\t\"response_format\":{\"type\":\"" +
+		"json_schema\",\"json_schema\":{\"name\":\"result\",\"strict\":true,\"schema\":{\"type\":\"object\"," +
+		"\"properties\":{\"answer\":{\"type\":\"string\"}}}}},\n\t\t\"text\":{\"verbosity\":\"low\"},\n\t\t\"" +
+		"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"oneOf\":[{\"" +
+		"properties\":{\"query\":{\"type\":\"string\"}}},{\"type\":\"null\"}]}}}]\n\t}"))
 	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
 	opts := cliproxyexecutor.Options{
 		SourceFormat:   sdktranslator.FormatOpenAI,
@@ -191,14 +202,14 @@ func TestXAIRequestPreparationPreservesControlsAndPathParity(t *testing.T) {
 	}
 
 	for path, want := range map[string]string{
-		"max_output_tokens":               "64",
-		"temperature":                     "0",
-		"top_p":                           "0.25",
-		"top_k":                           "7",
-		"text.verbosity":                  "low",
-		"text.format.type":                "json_schema",
-		"tools.0.parameters.type":         "object",
-		"tools.0.parameters.oneOf.0.type": "object",
+		"max_output_tokens":       "64",
+		"temperature":             "0",
+		"top_p":                   "0.25",
+		"top_k":                   "7",
+		"text.verbosity":          "low",
+		"text.format.type":        "json_schema",
+		"tools.0.parameters.type": "object",
+		"tools.0.parameters.additionalProperties": "true",
 	} {
 		if got := gjson.GetBytes(httpPrepared.body, path).Raw; got != want && gjson.GetBytes(
 			httpPrepared.body, path,
@@ -239,7 +250,8 @@ func TestXAIResponsesPreparationNormalizesDeepSpecialKeyImages(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	input := body["input"].([]any)[0].(map[string]any)
-	image := input["metadata.with.dot"].(map[string]any)["back\\slash"].(map[string]any)[""].(map[string]any)["image"].(map[string]any)
+	metadata := input["metadata.with.dot"].(map[string]any)["back\\slash"].(map[string]any)
+	image := metadata[""].(map[string]any)["image"].(map[string]any)
 	if got := image["url"]; got != "https://example.com/deep.png" {
 		t.Fatalf("deep image url = %#v", got)
 	}
@@ -248,14 +260,103 @@ func TestXAIResponsesPreparationNormalizesDeepSpecialKeyImages(t *testing.T) {
 	}
 }
 
+func TestXAIRequestPreparationAcceptsLegacyRootSchemasAcrossHTTPAndWebSocket(t *testing.T) {
+	for _, parameters := range []string{
+		`{"anyOf":[{"type":"string"},{"type":"null"}]}`,
+		`{"oneOf":[{"type":"object"},{"type":"null"}]}`,
+		`{"oneOf":[{"type":"object"},{"const":null}]}`,
+		`{"anyOf":[{"properties":{"query":{"type":"string"}}},{"type":"null"}]}`,
+	} {
+		payload := []byte(`{"model":"grok-4.3","input":"hello","tools":[` +
+			`{"type":"function","name":"lookup","strict":true,"parameters":` + parameters + `}]}`)
+		req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+		httpPrepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequest(req, opts, true)
+		if err != nil {
+			t.Fatalf("HTTP error = %v for %s", err, parameters)
+		}
+		wsPrepared, err := newXAIWebsocketsExecutor(&config.Config{}).prepareResponsesWebsocketRequest(
+			t.Context(), nil, req, opts,
+		)
+		if err != nil {
+			t.Fatalf("WebSocket error = %v for %s", err, parameters)
+		}
+		for path, body := range map[string][]byte{"HTTP": httpPrepared.body, "WebSocket": wsPrepared.body} {
+			tool := gjson.GetBytes(body, "tools.0")
+			if tool.Get("parameters").Raw != xaiSafeFunctionParameters ||
+				tool.Get("strict").Type != gjson.False {
+				t.Errorf("%s schema = %s", path, tool.Raw)
+			}
+		}
+		if !bytes.Equal(buildXAIWebsocketRequestBody(httpPrepared.body), wsPrepared.body) {
+			t.Errorf("HTTP and WebSocket bodies differ for %s", parameters)
+		}
+	}
+}
+
+func TestXAIRequestPreparationDefaultsMissingToolParameters(t *testing.T) {
+	for _, toolType := range []string{"function", "custom"} {
+		for _, test := range []struct {
+			name, field string
+			wantError   bool
+		}{
+			{"missing", "", false},
+			{"null", `,"parameters":null`, true},
+			{"array", `,"parameters":[]`, true},
+		} {
+			t.Run(
+				toolType+"/"+test.name, func(t *testing.T) {
+					payload := []byte(`{"model":"grok-4.3","input":"hello","tools":[` +
+						`{"type":"` + toolType + `","name":"lookup","strict":true` + test.field + `}]}`)
+					req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
+					opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+					httpPrepared, httpErr := newXAIExecutor(
+						&config.Config{},
+					).prepareResponsesRequest(req, opts, true)
+					wsPrepared, wsErr := newXAIWebsocketsExecutor(
+						&config.Config{},
+					).prepareResponsesWebsocketRequest(
+						t.Context(), nil, req, opts,
+					)
+					for path, err := range map[string]error{"HTTP": httpErr, "WebSocket": wsErr} {
+						if test.wantError {
+							status, ok := err.(interface{ StatusCode() int })
+							if !ok || status.StatusCode() != http.StatusBadRequest {
+								t.Errorf("%s invalid parameters error = %v, want 400", path, err)
+							}
+						} else if err != nil {
+							t.Errorf("%s missing parameters error = %v", path, err)
+						}
+					}
+					if test.wantError || httpErr != nil || wsErr != nil {
+						return
+					}
+					for path, body := range map[string][]byte{"HTTP": httpPrepared.body, "WebSocket": wsPrepared.body} {
+						tool := gjson.GetBytes(body, "tools.0")
+						if tool.Get("type").String() != "function" || tool.Get("strict").Type != gjson.True ||
+							tool.Get("parameters").Raw != `{"type":"object","properties":{}}` {
+							t.Errorf("%s default parameters = %s", path, tool.Raw)
+						}
+					}
+				},
+			)
+		}
+	}
+}
+
 func TestXAIRequestPreparationRejectsInvalidSchemaAcrossHTTPAndWebSocket(t *testing.T) {
 	t.Parallel()
 
 	for _, parameters := range []string{
-		`{"anyOf":[{"type":"string"},{"type":"null"}]}`,
+		`{"type":"string"}`,
 		`{"$ref":"#/$defs/Loop","$defs":{"Loop":{"$ref":"#/$defs/Loop"}}}`,
 	} {
-		payload := []byte(`{"model":"grok-4.3","input":"hello","tools":[{"type":"function","name":"bad","parameters":` + parameters + `}]}`)
+		payload := []byte(
+			`{"model":"grok-4.3","input":"hello","tools":[{"type":"function",` +
+				`"name":"bad","parameters":` +
+				parameters +
+				`}]}`,
+		)
 		req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
 		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
 
@@ -271,7 +372,7 @@ func TestXAIRequestPreparationRejectsInvalidSchemaAcrossHTTPAndWebSocket(t *test
 			if !ok || status.StatusCode() != http.StatusBadRequest {
 				t.Fatalf("%s prepare error = %T %v, want status 400", path, err, err)
 			}
-			if !strings.Contains(err.Error(), "no valid object branch") {
+			if !strings.Contains(err.Error(), "no valid object") {
 				t.Fatalf("%s prepare error = %q", path, err)
 			}
 		}
@@ -291,7 +392,9 @@ func TestNormalizeXAIImageRefsDeepSpecialKeys(t *testing.T) {
 	if err := json.Unmarshal(normalized, &payload); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	deep := payload["metadata.with.dot"].(map[string]any)["back\\slash"].(map[string]any)[""].(map[string]any)["items"].([]any)[0].(map[string]any)["image"].(map[string]any)
+	metadata := payload["metadata.with.dot"].(map[string]any)["back\\slash"].(map[string]any)
+	items := metadata[""].(map[string]any)["items"].([]any)
+	deep := items[0].(map[string]any)["image"].(map[string]any)
 	if got := deep["url"]; got != "https://example.com/a.png" {
 		t.Fatalf("deep image url = %#v", got)
 	}

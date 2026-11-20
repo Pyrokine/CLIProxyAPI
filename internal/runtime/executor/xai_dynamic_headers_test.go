@@ -16,18 +16,29 @@ import (
 
 func TestXAICompactUsesExplicitDownstreamHeaderBoundary(t *testing.T) {
 	var received string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		received = r.Header.Get("X-Tenant")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque"}]}`)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				received = r.Header.Get("X-Tenant")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(
+					w,
+					`{"id":"resp_1","object":"response.compaction","output":[{"type":`+
+						`"compaction","encrypted_content":`+
+						`"opaque"}]}`,
+				)
+			},
+		),
+	)
 	defer server.Close()
 
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"base_url":        server.URL,
-		"api_key":         "fixture",
-		"header:X-Tenant": "$X-Downstream-Tenant",
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"base_url":        server.URL,
+			"api_key":         "fixture",
+			"header:X-Tenant": "$X-Downstream-Tenant",
+		},
+	}
 	_, err := newXAIExecutor(&config.Config{}).Execute(
 		context.Background(),
 		auth,
@@ -47,12 +58,18 @@ func TestXAICompactUsesExplicitDownstreamHeaderBoundary(t *testing.T) {
 }
 
 func TestXAIImageAndWebsocketHeadersUseExplicitDownstreamBoundary(t *testing.T) {
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"header:X-Tenant": "$X-Downstream-Tenant",
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"header:X-Tenant": "$X-Downstream-Tenant",
+		},
+	}
 	incoming := http.Header{"X-Downstream-Tenant": []string{"tenant-b"}}
 
-	imageRequest := httptest.NewRequest(http.MethodPost, "https://api.x.ai/v1/images/generations", bytes.NewReader(nil))
+	imageRequest := httptest.NewRequest(
+		http.MethodPost,
+		"https://api.x.ai/v1/images/generations",
+		bytes.NewReader(nil),
+	)
 	applyXAIHeaders(imageRequest, auth, "fixture", false, "", incoming)
 	if got := imageRequest.Header.Get("X-Tenant"); got != "tenant-b" {
 		t.Fatalf("image X-Tenant = %q, want tenant-b", got)

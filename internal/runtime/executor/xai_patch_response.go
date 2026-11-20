@@ -2,12 +2,11 @@ package executor
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -27,7 +26,10 @@ type xaiPatchDispatcherCall struct {
 	ordinary   bool
 }
 
-func (n *xaiPreparedResponseNormalizer) patchDispatcherRecord(root, item gjson.Result) (*xaiPatchDispatcherCall, error) {
+func (n *xaiPreparedResponseNormalizer) patchDispatcherRecord(root, item gjson.Result) (
+	*xaiPatchDispatcherCall,
+	error,
+) {
 	var call *xaiPatchDispatcherCall
 	var keys []string
 	for _, field := range []struct {
@@ -134,11 +136,8 @@ func (call *xaiPatchDispatcherCall) snapshot(text string) error {
 			return err
 		}
 	}
-	if call.arguments != nil {
-		var previous, current any
-		if json.Unmarshal(call.arguments, &previous) != nil || json.Unmarshal(arguments, &current) != nil || !reflect.DeepEqual(previous, current) {
-			return fmt.Errorf("conflicting dispatcher argument snapshots")
-		}
+	if call.arguments != nil && !util.JSONEqual(call.arguments, arguments) {
+		return fmt.Errorf("conflicting dispatcher argument snapshots")
 	}
 	call.child, call.arguments = name, bytes.Clone(arguments)
 	return nil
@@ -149,10 +148,17 @@ func (call *xaiPatchDispatcherCall) restore(event []byte) ([]byte, error) {
 	item := root.Get("item")
 	if item.Exists() {
 		name := item.Get("name").String()
-		if item.Get("type").String() != "function_call" || name != "" && name != call.dispatcher.namespace && name != call.child {
+		if item.Get("type").String() != "function_call" ||
+			name != "" && name != call.dispatcher.namespace && name != call.child {
 			return nil, fmt.Errorf("changed dispatcher source tool")
 		}
-		if namespace := item.Get("namespace"); namespace.Exists() && (namespace.Type != gjson.String || namespace.String() != "" && namespace.String() != call.dispatcher.namespace) {
+		if namespace := item.Get("namespace"); namespace.Exists() &&
+			(namespace.Type !=
+				gjson.String ||
+				namespace.String() !=
+					"" &&
+					namespace.String() !=
+						call.dispatcher.namespace) {
 			return nil, fmt.Errorf("changed dispatcher source namespace")
 		}
 		event, _ = sjson.SetBytes(event, "item.name", call.child)
@@ -194,7 +200,9 @@ func (call *xaiPatchDispatcherCall) release() ([][]byte, error) {
 		if item := root.Get("item"); item.Exists() {
 			arguments = item.Get("arguments")
 		}
-		if !arguments.Exists() || arguments.Type == gjson.String && arguments.String() == "" && root.Get("type").String() == "response.output_item.added" {
+		if !arguments.Exists() ||
+			arguments.Type == gjson.String && arguments.String() == "" &&
+				root.Get("type").String() == "response.output_item.added" {
 			continue
 		}
 		if arguments.Type != gjson.String {
@@ -270,7 +278,8 @@ func (n *xaiPreparedResponseNormalizer) normalizePatchDispatcher(event []byte) [
 		var events [][]byte
 		for index, item := range root.Get("response.output").Array() {
 			indexed := []byte(`{}`)
-			if n.patchDispatcherCall["item:"+item.Get("id").String()] == nil && n.patchDispatcherCall["call:"+item.Get("call_id").String()] == nil {
+			if n.patchDispatcherCall["item:"+item.Get("id").String()] == nil &&
+				n.patchDispatcherCall["call:"+item.Get("call_id").String()] == nil {
 				indexed, _ = sjson.SetBytes(indexed, "output_index", index)
 			}
 			call, err := n.patchDispatcherRecord(gjson.ParseBytes(indexed), item)
@@ -304,7 +313,9 @@ func (n *xaiPreparedResponseNormalizer) normalizePatchDispatcher(event []byte) [
 			if err != nil {
 				return fail()
 			}
-			event, _ = sjson.SetRawBytes(event, fmt.Sprintf("response.output.%d", index), []byte(gjson.GetBytes(converted, "item").Raw))
+			event, _ = sjson.SetRawBytes(
+				event, fmt.Sprintf("response.output.%d", index), []byte(gjson.GetBytes(converted, "item").Raw),
+			)
 		}
 		for _, call := range n.patchDispatcherCall {
 			if !call.ordinary && (!call.finished || call.dispatcher.namespace == "") {

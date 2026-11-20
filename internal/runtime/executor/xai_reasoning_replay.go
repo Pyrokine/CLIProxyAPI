@@ -187,14 +187,25 @@ func xaiReasoningReplayScopeFromRequest(
 	if strings.TrimSpace(baseURL) == "" {
 		return xaiReasoningReplayScope{}
 	}
-	credential := sha256.Sum256([]byte(token + "\x00" + plane + "\x00" + transport + "\x00" + xaiNormalizeBaseURL(baseURL)))
+	credential := sha256.Sum256(
+		[]byte(token + "\x00" + plane + "\x00" + transport + "\x00" + xaiNormalizeBaseURL(baseURL)),
+	)
+	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if model == "" {
+		model = req.Model
+	}
 	return xaiReasoningReplayScope{
-		modelName:  thinking.ParseSuffix(req.Model).ModelName,
+		modelName:  thinking.ParseSuffix(model).ModelName,
 		sessionKey: "credential:" + hex.EncodeToString(credential[:16]) + ":" + sessionKey,
 	}
 }
 
-func xaiChatHasExplicitReplaySession(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) bool {
+func xaiChatHasExplicitReplaySession(
+	ctx context.Context,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	body []byte,
+) bool {
 	if metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey) != "" ||
 		metadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey) != "" ||
 		codexReasoningReplaySessionKeyFromPayload(body) != "" ||

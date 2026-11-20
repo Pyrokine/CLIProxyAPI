@@ -162,7 +162,8 @@ func (n *xaiToolIdentityNormalizer) aliasClientWebSearch(body []byte) ([]byte, e
 		if name != "" {
 			used[name] = struct{}{}
 		}
-		if name == xaiWebSearchToolType && (tool.Get("type").String() == xaiFunctionToolType || tool.Get("type").String() == xaiCustomToolType) {
+		if name == xaiWebSearchToolType &&
+			(tool.Get("type").String() == xaiFunctionToolType || tool.Get("type").String() == xaiCustomToolType) {
 			if clientIndex >= 0 {
 				return nil, fmt.Errorf("xai: duplicate client web_search tools")
 			}
@@ -192,7 +193,8 @@ func (n *xaiToolIdentityNormalizer) aliasClientWebSearch(body []byte) ([]byte, e
 	choice := gjson.GetBytes(body, "tool_choice")
 	if choice.IsObject() && strings.TrimSpace(choice.Get("namespace").String()) == "" {
 		choiceType := choice.Get("type").String()
-		if (choiceType == xaiFunctionToolType || choiceType == xaiCustomToolType) && choice.Get("name").String() == xaiWebSearchToolType {
+		if (choiceType == xaiFunctionToolType || choiceType == xaiCustomToolType) &&
+			choice.Get("name").String() == xaiWebSearchToolType {
 			body, err = sjson.SetBytes(body, "tool_choice.name", alias)
 			if err != nil {
 				return nil, fmt.Errorf("xai: alias client web_search choice: %w", err)
@@ -205,7 +207,8 @@ func (n *xaiToolIdentityNormalizer) aliasClientWebSearch(body []byte) ([]byte, e
 			}
 		}
 		for index, tool := range choice.Get("tools").Array() {
-			if strings.TrimSpace(tool.Get("namespace").String()) != "" || tool.Get("name").String() != xaiWebSearchToolType {
+			if strings.TrimSpace(tool.Get("namespace").String()) != "" ||
+				tool.Get("name").String() != xaiWebSearchToolType {
 				continue
 			}
 			toolType := tool.Get("type").String()
@@ -295,7 +298,8 @@ func (n *xaiToolIdentityNormalizer) aliasClientWebSearchInput(body []byte) ([]by
 		return body, nil
 	}
 	for index, item := range gjson.GetBytes(body, "input").Array() {
-		if item.Get("name").String() != xaiWebSearchToolType || strings.TrimSpace(item.Get("namespace").String()) != "" {
+		if item.Get("name").String() != xaiWebSearchToolType ||
+			strings.TrimSpace(item.Get("namespace").String()) != "" {
 			continue
 		}
 		switch item.Get("type").String() {
@@ -614,7 +618,9 @@ func ensureXAINativeXSearchAllowedTools(body []byte) []byte {
 	return body
 }
 
-func (n *xaiToolIdentityNormalizer) newResponseNormalizer(filterInternalXSearch bool) *xaiToolIdentityResponseNormalizer {
+func (n *xaiToolIdentityNormalizer) newResponseNormalizer(
+	filterInternalXSearch bool,
+) *xaiToolIdentityResponseNormalizer {
 	var namespaceTools map[string]xaiNamespaceToolRef
 	var clientDeclaredTools map[xaiClientToolKey]struct{}
 	var clientWebSearchAlias string
@@ -657,7 +663,8 @@ func (n *xaiToolIdentityResponseNormalizer) normalize(event []byte) []byte {
 	}
 	for _, item := range items {
 		ref, exists := n.namespaceTools[item.Get("name").String()]
-		if namespace := item.Get("namespace"); exists && namespace.Exists() && (namespace.Type != gjson.String || (namespace.String() != "" && namespace.String() != ref.namespace)) {
+		if namespace := item.Get("namespace"); exists && namespace.Exists() &&
+			(namespace.Type != gjson.String || (namespace.String() != "" && namespace.String() != ref.namespace)) {
 			n.terminal = true
 			return invalidXAIToolCallEvent("xAI returned contradictory namespace source identity")
 		}
@@ -711,7 +718,8 @@ func (n *xaiToolIdentityResponseNormalizer) validateResponseToolCall(item gjson.
 		return nil
 	}
 	name := item.Get("name").String()
-	if name == "" && n.allowDeferredNames && itemType == "function_call" && (!item.Get("name").Exists() || item.Get("name").Type == gjson.String) {
+	if name == "" && n.allowDeferredNames && itemType == "function_call" &&
+		(!item.Get("name").Exists() || item.Get("name").Type == gjson.String) {
 		return nil
 	}
 	if !validateProviderToolName(name) {
@@ -845,7 +853,7 @@ func restoreXAIClientWebSearchName(data []byte, alias string) ([]byte, error) {
 			return nil
 		}
 		for _, suffix := range []string{"name", "function.name"} {
-			if item.Get(suffix).String() != alias {
+			if strings.TrimSpace(item.Get(suffix).String()) != alias {
 				continue
 			}
 			updated, err := sjson.SetBytes(data, path+"."+suffix, xaiWebSearchToolType)
@@ -865,6 +873,10 @@ func restoreXAIClientWebSearchName(data []byte, alias string) ([]byte, error) {
 				return nil, err
 			}
 		}
+	}
+	if strings.TrimSpace(gjson.GetBytes(data, "namespace").String()) == "" &&
+		strings.TrimSpace(gjson.GetBytes(data, "name").String()) == alias {
+		return sjson.SetBytes(data, "name", xaiWebSearchToolType)
 	}
 	return data, nil
 }

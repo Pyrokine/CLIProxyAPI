@@ -17,54 +17,82 @@ import (
 func TestXAIReasoningProofPrecedesMultipleToolCallsAcrossClientFormats(t *testing.T) {
 	internalcache.ClearXAIReasoningReplayCache()
 	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
-	completed := []byte(fmt.Sprintf(`{"response":{"output":[{"type":"reasoning","summary":[],"encrypted_content":%q},{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"function_call","call_id":"call_2","name":"lookup","arguments":"{}"}]}}`, validGrokEncryptedContentForExecutorTest()))
+	completed := []byte(fmt.Sprintf(
+		`{"response":{"output":[{"type":"reasoning","summary":[],"encrypted_content":%q},{"type":"`+
+			`function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"function_call","`+
+			`call_id":"call_2","name":"lookup","arguments":"{}"}]}}`,
+		validGrokEncryptedContentForExecutorTest(),
+	))
 	for _, tt := range []struct {
 		name   string
 		format sdktranslator.Format
 		body   []byte
 	}{
-		{"Chat", sdktranslator.FormatOpenAI, []byte(`{"prompt_cache_key":"multi-tool-chat","messages":[{"role":"user","content":"earlier"},{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a"},{"role":"tool","tool_call_id":"call_2","content":"b"},{"role":"user","content":"continue"}]}`)},
-		{"Messages", sdktranslator.FormatClaude, []byte(`{"prompt_cache_key":"multi-tool-messages","messages":[{"role":"user","content":"earlier"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"a"},{"type":"tool_result","tool_use_id":"call_2","content":"b"},{"type":"text","text":"continue"}]}]}`)},
-		{"Responses", sdktranslator.FormatOpenAIResponse, []byte(`{"prompt_cache_key":"multi-tool-responses","input":[{"role":"user","content":"earlier"},{"type":"function_call_output","call_id":"call_1","output":"a"},{"type":"function_call_output","call_id":"call_2","output":"b"},{"role":"user","content":"continue"}]}`)},
+		{
+			"Chat", sdktranslator.FormatOpenAI,
+			[]byte((`{"prompt_cache_key":"multi-tool-chat","messages":[{"role":"user","content":"earlier"},{"` +
+				`role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"` +
+				`name":"lookup","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"` +
+				`lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a"},{"role":"` +
+				`tool","tool_call_id":"call_2","content":"b"},{"role":"user","content":"continue"}]}`)),
+		},
+		{
+			"Messages", sdktranslator.FormatClaude,
+			[]byte(`{"prompt_cache_key":"multi-tool-messages","messages":[{"role":"user","` +
+				`content":"earlier"},{"role":"user","content":[{"type":"tool_result","t` +
+				`ool_use_id":"call_1","content":"a"},{"type":"tool_result","tool_use_id` +
+				`":"call_2","content":"b"},{"type":"text","text":"continue"}]}]}`),
+		},
+		{
+			"Responses", sdktranslator.FormatOpenAIResponse,
+			[]byte((`{"prompt_cache_key":"multi-tool-responses","input":[{"role":"user","content":"earlier"},{` +
+				`"type":"function_call_output","call_id":"call_1","output":"a"},{"type":"` +
+				`function_call_output","call_id":"call_2","output":"b"},{"role":"user","content":"continue"}]` +
+				`}`)),
+		},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := xaiC03ContextWithAPIKey("multi-tool-caller")
-			req := cliproxyexecutor.Request{Model: "grok-4.6", Payload: tt.body}
-			opts := cliproxyexecutor.Options{SourceFormat: tt.format}
-			scope := xaiReasoningReplayScopeFromRequest(ctx, xaiReplayTestAuth, tt.format, req, opts, tt.body)
-			if !scope.valid() {
-				t.Fatalf("invalid replay scope for %s", tt.name)
-			}
-			cacheXAIReasoningReplayFromCompleted(ctx, scope, completed)
-			prepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequestWithContext(ctx, xaiReplayTestAuth, req, opts, false, sdktranslator.FormatCodex)
-			if err != nil {
-				t.Fatal(err)
-			}
-			input := gjson.GetBytes(prepared.body, "input").Array()
-			reasoningIndex, firstCallIndex, outputCount := -1, -1, 0
-			calls := map[string]int{}
-			for index, item := range input {
-				switch item.Get("type").String() {
-				case "reasoning":
-					if reasoningIndex >= 0 {
-						t.Fatalf("duplicate reasoning proof: %s", prepared.body)
-					}
-					reasoningIndex = index
-				case "function_call":
-					calls[item.Get("call_id").String()]++
-					if firstCallIndex < 0 {
-						firstCallIndex = index
-					}
-				case "function_call_output":
-					outputCount++
+		t.Run(
+			tt.name, func(t *testing.T) {
+				ctx := xaiC03ContextWithAPIKey("multi-tool-caller")
+				req := cliproxyexecutor.Request{Model: "grok-4.6", Payload: tt.body}
+				opts := cliproxyexecutor.Options{SourceFormat: tt.format}
+				scope := xaiReasoningReplayScopeFromRequest(ctx, xaiReplayTestAuth, tt.format, req, opts, tt.body)
+				if !scope.valid() {
+					t.Fatalf("invalid replay scope for %s", tt.name)
 				}
-			}
-			if len(input) == 0 || input[0].Get("role").String() != "user" ||
-				reasoningIndex <= 0 || firstCallIndex != reasoningIndex+1 ||
-				calls["call_1"] != 1 || calls["call_2"] != 1 || outputCount != 2 {
-				t.Fatalf("multi-tool proof/calls/order not preserved: %s", prepared.body)
-			}
-		})
+				cacheXAIReasoningReplayFromCompleted(ctx, scope, completed)
+				prepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequestWithContext(
+					ctx, xaiReplayTestAuth, req, opts, false, sdktranslator.FormatCodex,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				input := gjson.GetBytes(prepared.body, "input").Array()
+				reasoningIndex, firstCallIndex, outputCount := -1, -1, 0
+				calls := map[string]int{}
+				for index, item := range input {
+					switch item.Get("type").String() {
+					case "reasoning":
+						if reasoningIndex >= 0 {
+							t.Fatalf("duplicate reasoning proof: %s", prepared.body)
+						}
+						reasoningIndex = index
+					case "function_call":
+						calls[item.Get("call_id").String()]++
+						if firstCallIndex < 0 {
+							firstCallIndex = index
+						}
+					case "function_call_output":
+						outputCount++
+					}
+				}
+				if len(input) == 0 || input[0].Get("role").String() != "user" ||
+					reasoningIndex <= 0 || firstCallIndex != reasoningIndex+1 ||
+					calls["call_1"] != 1 || calls["call_2"] != 1 || outputCount != 2 {
+					t.Fatalf("multi-tool proof/calls/order not preserved: %s", prepared.body)
+				}
+			},
+		)
 	}
 }
 
@@ -73,13 +101,31 @@ func TestXAIChatReplayKeepsDistinctProofsBesideTheirToolCalls(t *testing.T) {
 	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
 	first := validGrokEncryptedContentForExecutorTest()
 	second := "A" + first[1:]
-	completed := []byte(fmt.Sprintf(`{"response":{"output":[{"type":"reasoning","summary":[],"encrypted_content":%q},{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"reasoning","summary":[],"encrypted_content":%q},{"type":"function_call","call_id":"call_2","name":"lookup","arguments":"{}"}]}}`, first, second))
+	completed := []byte(fmt.Sprintf(
+		`{"response":{"output":[{"type":"reasoning","summary":[],"encrypted_con`+
+			`tent":%q},{"type":"function_call","call_id":"call_1","name":"lookup","`+
+			`arguments":"{}"},{"type":"reasoning","summary":[],"encrypted_content":`+
+			`%q},{"type":"function_call","call_id":"call_2","name":"lookup","argume`+
+			`nts":"{}"}]}}`,
+		first, second,
+	))
 	ctx := xaiC03ContextWithAPIKey("two-proofs-caller")
-	request := cliproxyexecutor.Request{Model: "grok-4.6", Payload: []byte(`{"prompt_cache_key":"two-proofs-session","messages":[{"role":"user","content":"earlier"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a"},{"role":"tool","tool_call_id":"call_2","content":"b"},{"role":"user","content":"continue"}]}`)}
+	request := cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte((`{"prompt_cache_key":"two-proofs-session","messages":[{"role":"user","content":"` +
+			`earlier"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":` +
+			`"lookup","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"lookup","` +
+			`arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a"},{"role":"tool","` +
+			`tool_call_id":"call_2","content":"b"},{"role":"user","content":"continue"}]}`)),
+	}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}
-	scope := xaiReasoningReplayScopeFromRequest(ctx, xaiReplayTestAuth, opts.SourceFormat, request, opts, request.Payload)
+	scope := xaiReasoningReplayScopeFromRequest(
+		ctx, xaiReplayTestAuth, opts.SourceFormat, request, opts, request.Payload,
+	)
 	cacheXAIReasoningReplayFromCompleted(ctx, scope, completed)
-	prepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequestWithContext(ctx, xaiReplayTestAuth, request, opts, false, sdktranslator.FormatCodex)
+	prepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequestWithContext(
+		ctx, xaiReplayTestAuth, request, opts, false, sdktranslator.FormatCodex,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

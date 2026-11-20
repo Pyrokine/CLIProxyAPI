@@ -44,8 +44,11 @@ func TestXAIClientWebSearchAliasSurvivesChoicesHistoryAndResponse(t *testing.T) 
 
 	response := normalizer.newResponseNormalizer(false)
 	for _, event := range []string{
-		`{"type":"response.output_item.done","item":{"type":"function_call","name":"clientfn_web_search_1","call_id":"call-2"}}`,
-		`{"type":"response.completed","response":{"output":[{"type":"function_call","name":"clientfn_web_search_1","call_id":"call-2"}]}}`,
+		`{"type":"response.output_item.done","item":{"type":"function_call",` +
+			`"name":"clientfn_web_search_1","call_id":` +
+			`"call-2"}}`,
+		`{"type":"response.completed","response":{"output":[{"type":"function_c` +
+			`all","name":"clientfn_web_search_1","call_id":"call-2"}]}}`,
 	} {
 		got := response.normalize([]byte(event))
 		if strings.Contains(string(got), alias) || !strings.Contains(string(got), `"name":"web_search"`) {
@@ -57,7 +60,8 @@ func TestXAIClientWebSearchAliasSurvivesChoicesHistoryAndResponse(t *testing.T) 
 func TestXAIHostedAndNamespacedWebSearchToolsRemainUnchanged(t *testing.T) {
 	for _, body := range []string{
 		`{"tools":[{"type":"web_search"}],"tool_choice":{"type":"web_search"}}`,
-		`{"tools":[{"type":"namespace","name":"ops","tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}]}]}`,
+		`{"tools":[{"type":"namespace","name":"ops","tools":[{"type":"function"` +
+			`,"name":"web_search","parameters":{"type":"object"}}]}]}`,
 	} {
 		normalizer := newXAIToolIdentityNormalizer([]byte(body))
 		prepared, err := normalizer.normalizeDeclarations([]byte(body))
@@ -92,10 +96,12 @@ func TestXAIPreparationAliasesClientWebSearchAcrossRequestAndResponse(t *testing
 			t.Fatalf("%s = %q, want %q; body=%s", path, got, alias, prepared.body)
 		}
 	}
-	got := prepared.newResponseNormalizer().normalize([]byte(`{
+	got := prepared.newResponseNormalizer().normalize(
+		[]byte(`{
 		"type":"response.completed",
 		"response":{"output":[{"type":"function_call","name":"clientfn_web_search","call_id":"call-2"}]}
-	}`))
+	}`),
+	)
 	if len(got) != 1 {
 		t.Fatalf("expected one restored response, got %q", got)
 	}

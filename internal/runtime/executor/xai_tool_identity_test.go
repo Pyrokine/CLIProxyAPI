@@ -46,7 +46,11 @@ func TestXAIToolIdentityNestedNamespaceAndBoundarySafety(t *testing.T) {
 		t.Fatalf("allowed tool namespace should be removed: %s", out)
 	}
 
-	event := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"outer__inner__lookup","call_id":"call-1"}}`)
+	event := []byte(
+		(`{"type":"response.output_item.done","item":{"type":"function_call",` +
+			`"name":"outer__inner__lookup","call_id":` +
+			`"call-1"}}`),
+	)
 	restored := normalizer.newResponseNormalizer(false).normalize(event)
 	if got := gjson.GetBytes(restored, "item.name").String(); got != "lookup" {
 		t.Fatalf("restored name = %q, want lookup; event=%s", got, restored)
@@ -102,16 +106,12 @@ func TestXAIToolIdentityCollisionDoesNotRestoreAmbiguousRoute(t *testing.T) {
 }
 
 func TestXAIToolIdentityPromotesAdditionalToolsAndNormalizesChoices(t *testing.T) {
-	body := []byte(`{
-		"tools":[{"type":"x_search"},{"type":"web_search"}],
-		"tool_choice":{"type":"allowed_tools","mode":"required","tools":[
-			{"type":"function","namespace":"extra","name":"run"}
-		]},
-		"input":[
-			{"type":"additional_tools","tools":[{"type":"namespace","name":"extra","tools":[{"type":"function","name":"run","parameters":{"type":"object"}}]}]},
-			{"type":"message","role":"user","content":"hello"}
-		]
-	}`)
+	body := []byte(("{\n\t\t\"tools\":[{\"type\":\"x_search\"},{\"type\":\"web_search\"}],\n\t\t\"" +
+		"tool_choice\":{\"type\":\"allowed_tools\",\"mode\":\"required\",\"tools\":[\n\t\t\t{\"type\":\"" +
+		"function\",\"namespace\":\"extra\",\"name\":\"run\"}\n\t\t]},\n\t\t\"input\":[\n\t\t\t{\"type\":\"" +
+		"additional_tools\",\"tools\":[{\"type\":\"namespace\",\"name\":\"extra\",\"tools\":[{\"type\":\"" +
+		"function\",\"name\":\"run\",\"parameters\":{\"type\":\"object\"}}]}]},\n\t\t\t{\"type\":\"message\"," +
+		"\"role\":\"user\",\"content\":\"hello\"}\n\t\t]\n\t}"))
 	normalizer := newXAIToolIdentityNormalizer(body)
 	out, err := normalizer.normalizeDeclarations(body)
 	if err != nil {
@@ -187,15 +187,22 @@ func TestXAIToolIdentityFiltersOnlyInternalXSearchTrace(t *testing.T) {
 	normalizer := newXAIToolIdentityNormalizer(body)
 	response := normalizer.newResponseNormalizer(true)
 
-	internal := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","name":"x_keyword_search","call_id":"xs_call-1"}}`)
+	internal := []byte((`{"type":"response.output_item.added","output_index":0,"item":{"type":"` +
+		`custom_tool_call","name":"x_keyword_search","call_id":"xs_call-1"}}`))
 	if got := response.normalize(internal); got != nil {
 		t.Fatalf("internal X Search trace was preserved: %s", got)
 	}
-	if got := response.normalize([]byte(`{"type":"response.custom_tool_call_input.delta","output_index":0,"call_id":"xs_call-1","delta":"x"}`)); got != nil {
+	if got := response.normalize(
+		[]byte((`{"type":"response.custom_tool_call_input.delta","output_index":0,` +
+			`"call_id":"xs_call-1","delta":` +
+			`"x"}`)),
+	); got !=
+		nil {
 		t.Fatalf("internal X Search child event was preserved: %s", got)
 	}
 
-	clientFunction := []byte(`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","name":"x_keyword_search","call_id":"call-user"}}`)
+	clientFunction := []byte((`{"type":"response.output_item.added","output_index":1,"item":{"type":"` +
+		`function_call","name":"x_keyword_search","call_id":"call-user"}}`))
 	kept := response.normalize(clientFunction)
 	if len(kept) == 0 {
 		t.Fatal("client-declared same-name function call was filtered")
@@ -204,7 +211,9 @@ func TestXAIToolIdentityFiltersOnlyInternalXSearchTrace(t *testing.T) {
 		t.Fatalf("compacted output_index = %d, want 0; event=%s", got, kept)
 	}
 
-	namespaced := []byte(`{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","name":"social__x_user_search","call_id":"call-social"}}`)
+	namespaced := []byte((`{"type":"response.output_item.added","output_index":2,"item":{"type":"` +
+		`function_call","name":"social__x_user_search","call_id":"call-social"}` +
+		`}`))
 	kept = response.normalize(namespaced)
 	if got := gjson.GetBytes(kept, "item.namespace").String(); got != "social" {
 		t.Fatalf("namespaced client tool namespace = %q, want social; event=%s", got, kept)
@@ -234,17 +243,28 @@ func TestXAIToolIdentityResponseStateIsolatedAcrossConcurrentRequests(t *testing
 	var wg sync.WaitGroup
 	errs := make(chan error, requests)
 	for range requests {
-		wg.Go(func() {
-			response := normalizer.newResponseNormalizer(true)
-			if got := response.normalize([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","name":"x_keyword_search","call_id":"xs_call-internal"}}`)); got != nil {
-				errs <- fmt.Errorf("internal X Search trace was preserved: %s", got)
-				return
-			}
-			kept := response.normalize([]byte(`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","name":"client_tool","call_id":"call-client"}}`))
-			if got := gjson.GetBytes(kept, "output_index").Int(); got != 0 {
-				errs <- fmt.Errorf("compacted output_index = %d, want 0; event=%s", got, kept)
-			}
-		})
+		wg.Go(
+			func() {
+				response := normalizer.newResponseNormalizer(true)
+				if got := response.normalize(
+					[]byte(((`{"type":"response.output_item.added","output_index":0,` +
+						`"item":{"type":` +
+						`"`) +
+						`custom_tool_call","name":"x_keyword_search","call_id":"xs_call-interna` +
+						`l"}}`)),
+				); got != nil {
+					errs <- fmt.Errorf("internal X Search trace was preserved: %s", got)
+					return
+				}
+				kept := response.normalize(
+					[]byte((`{"type":"response.output_item.added","output_index":1,"item":{"type":"` +
+						`function_call","name":"client_tool","call_id":"call-client"}}`)),
+				)
+				if got := gjson.GetBytes(kept, "output_index").Int(); got != 0 {
+					errs <- fmt.Errorf("compacted output_index = %d, want 0; event=%s", got, kept)
+				}
+			},
+		)
 	}
 	wg.Wait()
 	close(errs)
@@ -273,18 +293,13 @@ func TestXAIToolIdentityPreservesMalformedInput(t *testing.T) {
 }
 
 func TestXAIToolIdentityHTTPWebSocketParity(t *testing.T) {
-	payload := []byte(`{
-		"model":"grok-4.3",
-		"tools":[
-			{"type":"x_search"},
-			{"type":"namespace","name":"ops","tools":[{"type":"custom","name":"run","parameters":{"type":"object"}}]}
-		],
-		"tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"function","namespace":"ops","name":"run"}]},
-		"input":[
-			{"type":"custom_tool_call","call_id":"call-1","name":"ops__run","input":{"cmd":"pwd"}},
-			{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"model\":\"grok-4.3\",\n\t\t\"tools\":[\n\t\t\t{\"type\":\"x_search\"},\n\t\t" +
+		"\t{\"type\":\"namespace\",\"name\":\"ops\",\"tools\":[{\"type\":\"custom\",\"name\":\"run\",\"" +
+		"parameters\":{\"type\":\"object\"}}]}\n\t\t],\n\t\t\"tool_choice\":{\"type\":\"allowed_tools\",\"" +
+		"mode\":\"required\",\"tools\":[{\"type\":\"function\",\"namespace\":\"ops\",\"name\":\"run\"}]},\n\t" +
+		"\t\"input\":[\n\t\t\t{\"type\":\"custom_tool_call\",\"call_id\":\"call-1\",\"name\":\"ops__run\",\"" +
+		"input\":{\"cmd\":\"pwd\"}},\n\t\t\t{\"type\":\"custom_tool_call_output\",\"call_id\":\"call-1\",\"" +
+		"output\":\"ok\"}\n\t\t]\n\t}"))
 	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
 	opts := cliproxyexecutor.Options{
 		SourceFormat:   sdktranslator.FormatOpenAIResponse,
@@ -305,8 +320,10 @@ func TestXAIToolIdentityHTTPWebSocketParity(t *testing.T) {
 	}
 
 	events := [][]byte{
-		[]byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","name":"x_user_search","call_id":"xs_call-1"}}`),
-		[]byte(`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","name":"ops__run","call_id":"call-1"}}`),
+		[]byte((`{"type":"response.output_item.added","output_index":0,"item":{"type":"` +
+			`custom_tool_call","name":"x_user_search","call_id":"xs_call-1"}}`)),
+		[]byte((`{"type":"response.output_item.added","output_index":1,"item":{"type":"` +
+			`function_call","name":"ops__run","call_id":"call-1"}}`)),
 	}
 	httpResponse := httpPrepared.toolIdentity.newResponseNormalizer(httpPrepared.filterInternalXSearch)
 	wsResponse := wsPrepared.toolIdentity.newResponseNormalizer(wsPrepared.filterInternalXSearch)

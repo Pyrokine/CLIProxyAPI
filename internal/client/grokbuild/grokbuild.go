@@ -38,7 +38,9 @@ type modelEntry struct {
 	ReasoningEfforts []reasoningEffort `json:"reasoning_efforts,omitempty"`
 }
 
-// Response is the Grok Shell model list envelope.
+// Response is the `Grok Shell` model list envelope.
+//
+//goland:noinspection GrazieInspection
 type Response struct {
 	Object string       `json:"object"`
 	Data   []modelEntry `json:"data"`
@@ -46,19 +48,19 @@ type Response struct {
 
 // IsGrokShellUserAgent reports whether userAgent belongs to a Grok CLI client.
 func IsGrokShellUserAgent(userAgent string) bool {
-	return IsGrokClientUserAgent(userAgent)
+	return isGrokClientUserAgent(userAgent)
 }
 
-// IsGrokClientUserAgent reports whether userAgent belongs to Grok Shell or Grok Pager.
-func IsGrokClientUserAgent(userAgent string) bool {
+// isGrokClientUserAgent reports whether userAgent belongs to Grok Shell or Grok Pager.
+func isGrokClientUserAgent(userAgent string) bool {
 	normalized := strings.ToLower(userAgent)
 	return strings.Contains(normalized, "grok-shell") || strings.Contains(normalized, "grok-pager")
 }
 
-// IsGrokClientHeaders reports whether headers identify a Grok CLI client.
-func IsGrokClientHeaders(headers http.Header) bool {
+// isGrokClientHeaders reports whether headers identify a Grok CLI client.
+func isGrokClientHeaders(headers http.Header) bool {
 	for name, values := range headers {
-		if strings.EqualFold(name, "User-Agent") && slices.ContainsFunc(values, IsGrokClientUserAgent) {
+		if strings.EqualFold(name, "User-Agent") && slices.ContainsFunc(values, isGrokClientUserAgent) {
 			return true
 		}
 	}
@@ -69,12 +71,12 @@ func IsGrokClientHeaders(headers http.Header) bool {
 func IsGrokClientContext(ctx context.Context, headers http.Header) bool {
 	if ctx != nil {
 		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-			if IsGrokClientHeaders(ginCtx.Request.Header) {
+			if isGrokClientHeaders(ginCtx.Request.Header) {
 				return true
 			}
 		}
 	}
-	return IsGrokClientHeaders(headers)
+	return isGrokClientHeaders(headers)
 }
 
 // TransformKeepaliveSSEFrame converts a Grok keepalive event to an SSE comment.
@@ -87,7 +89,7 @@ func TransformKeepaliveSSEFrame(frame []byte, isGrokClient bool) ([]byte, bool) 
 
 // IsKeepaliveSSEFrame reports whether an SSE frame carries a keepalive event.
 func IsKeepaliveSSEFrame(frame []byte) bool {
-	for _, line := range bytes.Split(frame, []byte{'\n'}) {
+	for line := range bytes.SplitSeq(frame, []byte{'\n'}) {
 		line = bytes.TrimSpace(line)
 		switch {
 		case bytes.HasPrefix(line, []byte("event:")):
