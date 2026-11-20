@@ -20,26 +20,53 @@ func TestInteractionsResponsesPreservesProviderSignaturesNonStream(t *testing.T)
 		{name: "gpt", model: "gpt-5", signature: responsesGPTSignatureForTest()},
 		{name: "detected provider", model: "custom-route", signature: responsesGPTSignatureForTest()},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			interaction := []byte(`{"id":"interaction-1","model":"` + testCase.model + `","steps":[{"type":"thought","content":[],"signature":"` + testCase.signature + `"}]}`)
-			response := convertInteractionsResponseToOpenAIResponsesNonStream(
-				context.Background(), testCase.model, nil, nil, interaction, nil,
-			)
-			if got := gjson.GetBytes(response, "output.0.encrypted_content").String(); got != testCase.signature {
-				t.Fatalf("Interactions -> Responses signature = %q, want %q; output=%s", got, testCase.signature, response)
-			}
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				interaction := []byte(
+					(`{"id":"interaction-1","model":` +
+						`"`) +
+						testCase.model +
+						(`","steps":[{"type":"thought",` +
+							`"content":[],"signature":` +
+							`"`) +
+						testCase.signature +
+						`"}]}`,
+				)
+				response := convertInteractionsResponseToOpenAIResponsesNonStream(
+					context.Background(), testCase.model, nil, nil, interaction, nil,
+				)
+				if got := gjson.GetBytes(response, "output.0.encrypted_content").String(); got != testCase.signature {
+					t.Fatalf(
+						"Interactions -> Responses signature = %q, want %q; output=%s", got, testCase.signature,
+						response,
+					)
+				}
 
-			responsesPayload := []byte(`{"id":"response-1","model":"` + testCase.model + `","output":[{"type":"reasoning","encrypted_content":"` + testCase.signature + `","summary":[]}]}`)
-			roundTrip := convertOpenAIResponsesResponseToInteractionsNonStream(
-				context.Background(), testCase.model, nil, nil, responsesPayload, nil,
-			)
-			if got := gjson.GetBytes(roundTrip, "steps.0.signature").String(); got != testCase.signature {
-				t.Fatalf("Responses -> Interactions signature = %q, want %q; output=%s", got, testCase.signature, roundTrip)
-			}
-			if got := gjson.GetBytes(roundTrip, "steps.#").Int(); got != 1 {
-				t.Fatalf("signature-only reasoning step count = %d, want 1; output=%s", got, roundTrip)
-			}
-		})
+				responsesPayload := []byte(
+					(`{"id":"response-1","model":` +
+						`"`) +
+						testCase.model +
+						(`","output":[{"type":"reasoning",` +
+							`"encrypted_content":` +
+							`"`) +
+						testCase.signature +
+						(`","summary":` +
+							`[]}]}`),
+				)
+				roundTrip := convertOpenAIResponsesResponseToInteractionsNonStream(
+					context.Background(), testCase.model, nil, nil, responsesPayload, nil,
+				)
+				if got := gjson.GetBytes(roundTrip, "steps.0.signature").String(); got != testCase.signature {
+					t.Fatalf(
+						"Responses -> Interactions signature = %q, want %q; output=%s", got, testCase.signature,
+						roundTrip,
+					)
+				}
+				if got := gjson.GetBytes(roundTrip, "steps.#").Int(); got != 1 {
+					t.Fatalf("signature-only reasoning step count = %d, want 1; output=%s", got, roundTrip)
+				}
+			},
+		)
 	}
 }
 
@@ -54,29 +81,52 @@ func TestInteractionsResponsesRejectsInvalidSignaturesNonStream(t *testing.T) {
 		{name: "invalid known prefix", model: "gpt-5", signature: "gpt#invalid"},
 		{name: "unknown opaque", model: "custom-route", signature: "opaque-signature"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			interaction := []byte(`{"id":"interaction-1","model":"` + testCase.model + `","steps":[{"type":"thought","content":[{"type":"text","text":"kept"}],"signature":"` + testCase.signature + `"}]}`)
-			response := convertInteractionsResponseToOpenAIResponsesNonStream(
-				context.Background(), testCase.model, nil, nil, interaction, nil,
-			)
-			if got := gjson.GetBytes(response, "output.0.encrypted_content"); got.Exists() {
-				t.Fatalf("invalid signature survived Interactions -> Responses: %s", response)
-			}
-			if got := gjson.GetBytes(response, "output.0.summary.0.text").String(); got != "kept" {
-				t.Fatalf("reasoning text = %q, want kept; output=%s", got, response)
-			}
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				interaction := []byte(
+					(`{"id":"interaction-1","model":` +
+						`"`) +
+						testCase.model +
+						(`","steps":[{"type":"thought",` +
+							`"content":[{"type":"text","text":` +
+							`"kept"}],"signature":` +
+							`"`) +
+						testCase.signature +
+						`"}]}`,
+				)
+				response := convertInteractionsResponseToOpenAIResponsesNonStream(
+					context.Background(), testCase.model, nil, nil, interaction, nil,
+				)
+				if got := gjson.GetBytes(response, "output.0.encrypted_content"); got.Exists() {
+					t.Fatalf("invalid signature survived Interactions -> Responses: %s", response)
+				}
+				if got := gjson.GetBytes(response, "output.0.summary.0.text").String(); got != "kept" {
+					t.Fatalf("reasoning text = %q, want kept; output=%s", got, response)
+				}
 
-			responsesPayload := []byte(`{"id":"response-1","model":"` + testCase.model + `","output":[{"type":"reasoning","encrypted_content":"` + testCase.signature + `","summary":[]}]}`)
-			roundTrip := convertOpenAIResponsesResponseToInteractionsNonStream(
-				context.Background(), testCase.model, nil, nil, responsesPayload, nil,
-			)
-			if got := gjson.GetBytes(roundTrip, "steps.#").Int(); got != 0 {
-				t.Fatalf("invalid signature-only reasoning produced %d steps; output=%s", got, roundTrip)
-			}
-		})
+				responsesPayload := []byte(
+					(`{"id":"response-1","model":` +
+						`"`) +
+						testCase.model +
+						(`","output":[{"type":"reasoning",` +
+							`"encrypted_content":` +
+							`"`) +
+						testCase.signature +
+						(`","summary":` +
+							`[]}]}`),
+				)
+				roundTrip := convertOpenAIResponsesResponseToInteractionsNonStream(
+					context.Background(), testCase.model, nil, nil, responsesPayload, nil,
+				)
+				if got := gjson.GetBytes(roundTrip, "steps.#").Int(); got != 0 {
+					t.Fatalf("invalid signature-only reasoning produced %d steps; output=%s", got, roundTrip)
+				}
+			},
+		)
 	}
 
-	interaction := []byte(`{"id":"interaction-1","model":"gpt-5","steps":[{"type":"thought","content":[],"encrypted_content":"gpt#invalid","signature":"` + validGPT + `"}]}`)
+	interaction := []byte((`{"id":"interaction-1","model":"gpt-5","steps":[{"type":"thought","cont` +
+		`ent":[],"encrypted_content":"gpt#invalid","signature":"`) + validGPT + `"}]}`)
 	response := convertInteractionsResponseToOpenAIResponsesNonStream(
 		context.Background(), "gpt-5", nil, nil, interaction, nil,
 	)
@@ -93,7 +143,9 @@ func TestInteractionsResponsesStreamValidatesLateSignature(t *testing.T) {
 		"custom-route",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"interaction.created","interaction":{"id":"interaction-1","model":"gpt-5"}}`),
+		[]byte(
+			`data: {"event_type":"interaction.created","interaction":{"id":"interaction-1","model":"gpt-5"}}`,
+		),
 		&state,
 	)
 	start := convertInteractionsResponseToOpenAIResponses(
@@ -101,7 +153,9 @@ func TestInteractionsResponsesStreamValidatesLateSignature(t *testing.T) {
 		"custom-route",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"thought","signature":"gpt#invalid"}}`),
+		[]byte(
+			`data: {"event_type":"step.start","index":0,"step":{"type":"thought","signature":"gpt#invalid"}}`,
+		),
 		&state,
 	)
 	if got := responseEventPayload(start[0]).Get("item.encrypted_content").String(); got != "" {
@@ -112,7 +166,13 @@ func TestInteractionsResponsesStreamValidatesLateSignature(t *testing.T) {
 		"custom-route",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":"`+responsesClaudeSignatureForTest()+`"}}`),
+		[]byte(
+			(`data: {"event_type":"step.delta","index":0,"delta":{"type":`+
+				`"thought_signature","signature":`+
+				`"`)+
+				responsesClaudeSignatureForTest()+
+				`"}}`,
+		),
 		&state,
 	)
 	convertInteractionsResponseToOpenAIResponses(
@@ -120,7 +180,13 @@ func TestInteractionsResponsesStreamValidatesLateSignature(t *testing.T) {
 		"custom-route",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":"`+validGPT+`"}}`),
+		[]byte(
+			(`data: {"event_type":"step.delta","index":0,"delta":{"type":`+
+				`"thought_signature","signature":`+
+				`"`)+
+				validGPT+
+				`"}}`,
+		),
 		&state,
 	)
 	stop := convertInteractionsResponseToOpenAIResponses(
@@ -146,7 +212,9 @@ func TestInteractionsResponsesStreamValidatesLateSignature(t *testing.T) {
 		"custom-route",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"interaction-1","model":"gpt-5","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`),
+		[]byte((`data: {"event_type":"interaction.completed","interaction":{"id":"inter` +
+			`action-1","model":"gpt-5","status":"incomplete","incomplete_details":{` +
+			`"reason":"max_output_tokens"}}}`)),
 		&state,
 	)
 	payload := responseEventPayload(terminal[0])
@@ -166,7 +234,11 @@ func TestResponsesInteractionsStreamEmitsLateSignatureDelta(t *testing.T) {
 		"custom-route",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.created","response":{"id":"response-1","model":"gpt-5","status":"in_progress","output":[]}}`),
+		[]byte(
+			(`data: {"type":"response.created","response":{"id":"response-1",` +
+				`"model":"gpt-5","status":"in_progress","output":` +
+				`[]}}`),
+		),
 		&state,
 	)
 	convertOpenAIResponsesResponseToInteractions(
@@ -182,7 +254,14 @@ func TestResponsesInteractionsStreamEmitsLateSignatureDelta(t *testing.T) {
 		"custom-route",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","encrypted_content":"`+validGPT+`","summary":[]}}`),
+		[]byte(
+			(`data: {"type":"response.output_item.done","output_index":0,"item":`+
+				`{"type":"reasoning","encrypted_content":`+
+				`"`)+
+				validGPT+
+				(`","summary":`+
+					`[]}}`),
+		),
 		&state,
 	)
 	var signature string

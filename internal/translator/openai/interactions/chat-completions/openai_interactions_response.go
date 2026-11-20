@@ -30,14 +30,11 @@ type interactionsToOpenAIChatStreamState struct {
 }
 
 func convertInteractionsResponseToOpenAI(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_, _, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	_ = ctx
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
 	if param == nil {
 		var local any
 		param = &local
@@ -52,20 +49,22 @@ func convertInteractionsResponseToOpenAI(
 }
 
 func convertInteractionsResponseToOpenAINonStream(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_, _, rawJSON []byte,
 	_ *any,
 ) []byte {
-	_ = ctx
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
 	interaction := root
 	if nested := root.Get("interaction"); nested.Exists() {
 		interaction = nested
 	}
-	out := []byte(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`)
+	if interaction.Get("status").String() == "failed" {
+		return interactionsFailedToOpenAIChat(root)[0]
+	}
+	out := []byte((`{"id":"","object":"chat.completion","created":0,"model":"","choices":[` +
+		`{"index":0,"message":{"role":"assistant","content":""},"finish_reason"` +
+		`:"stop"}]}`))
 	out, _ = sjson.SetBytes(
 		out, "id", firstNonEmpty(
 			interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano()),
@@ -95,7 +94,8 @@ func convertInteractionsResponseToOpenAINonStream(
 				sawToolCall = true
 				out, _ = sjson.SetRawBytes(
 					out, "choices.0.message.tool_calls.-1", openAIChatToolCallFromInteractions(
-						step, gjson.Result{}, isAntigravityModel(firstNonEmpty(interaction.Get("model").String(), modelName)),
+						step, gjson.Result{},
+						isAntigravityModel(firstNonEmpty(interaction.Get("model").String(), modelName)),
 					),
 				)
 			}
@@ -189,11 +189,10 @@ func interactionsStepStartToOpenAIChat(
 }
 
 func interactionsStepDeltaToOpenAIChat(
-	modelName string,
+	_ string,
 	root gjson.Result,
 	st *interactionsToOpenAIChatStreamState,
 ) [][]byte {
-	_ = modelName
 	index := int(root.Get("index").Int())
 	delta := root.Get("delta")
 	out := ensureOpenAIChatStarted(nil, st)
@@ -292,7 +291,8 @@ func interactionsFailedToOpenAIChat(root gjson.Result) [][]byte {
 }
 
 func openAIChatBaseChunk(st *interactionsToOpenAIChatStreamState) []byte {
-	chunk := []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}`)
+	chunk := []byte((`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"` +
+		`delta":{},"finish_reason":null}]}`))
 	chunk, _ = sjson.SetBytes(chunk, "id", firstNonEmpty(st.ID, fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())))
 	chunk, _ = sjson.SetBytes(chunk, "created", openAIChatCreated(st))
 	chunk, _ = sjson.SetBytes(chunk, "model", st.Model)

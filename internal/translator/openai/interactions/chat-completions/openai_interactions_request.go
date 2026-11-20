@@ -27,7 +27,9 @@ func convertOpenAIRequestToInteractionsChecked(modelName string, inputRawJSON []
 	); previousResponseID != "" {
 		out, _ = sjson.SetBytes(out, "previous_interaction_id", previousResponseID)
 	}
-	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
+	if environmentID := firstNonEmpty(
+		root.Get("environment_id").String(), root.Get("environment.id").String(),
+	); environmentID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
 	}
 	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
@@ -53,7 +55,12 @@ func openAIRequestStreamValue(root gjson.Result, stream bool) (bool, bool) {
 	return false, false
 }
 
-func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result, forAntigravity bool, drops *translatorcommon.UserTurnDrops) []byte {
+func appendOpenAIMessagesToInteractions(
+	out []byte,
+	messages gjson.Result,
+	forAntigravity bool,
+	drops *translatorcommon.UserTurnDrops,
+) []byte {
 	if !messages.Exists() || !messages.IsArray() {
 		return out
 	}
@@ -82,7 +89,13 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result, forAn
 	return out
 }
 
-func appendOpenAIMessageToInteractions(out []byte, message gjson.Result, forAntigravity bool, toolNamesByID map[string]string, drops *translatorcommon.UserTurnDrops) []byte {
+func appendOpenAIMessageToInteractions(
+	out []byte,
+	message gjson.Result,
+	forAntigravity bool,
+	toolNamesByID map[string]string,
+	drops *translatorcommon.UserTurnDrops,
+) []byte {
 	role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 	switch role {
 	case "assistant":
@@ -108,7 +121,9 @@ func appendOpenAIMessageToInteractions(out []byte, message gjson.Result, forAnti
 			)
 		}
 	case "tool", "function":
-		out, _ = sjson.SetRawBytes(out, "input.-1", openAIToolResultToInteractions(message, forAntigravity, toolNamesByID))
+		out, _ = sjson.SetRawBytes(
+			out, "input.-1", openAIToolResultToInteractions(message, forAntigravity, toolNamesByID),
+		)
 	default:
 		if step, ok := openAIChatContentStep("user_input", message.Get("content"), drops); ok {
 			out, _ = sjson.SetRawBytes(out, "input.-1", step)
@@ -117,7 +132,10 @@ func appendOpenAIMessageToInteractions(out []byte, message gjson.Result, forAnti
 	return out
 }
 
-func openAIChatContentStep(stepType string, content gjson.Result, drops *translatorcommon.UserTurnDrops) ([]byte, bool) {
+func openAIChatContentStep(stepType string, content gjson.Result, drops *translatorcommon.UserTurnDrops) (
+	[]byte,
+	bool,
+) {
 	step := []byte(`{"type":"","content":[]}`)
 	step, _ = sjson.SetBytes(step, "type", stepType)
 	if content.Type == gjson.String {
@@ -135,8 +153,17 @@ func openAIChatContentStep(stepType string, content gjson.Result, drops *transla
 			return
 		}
 		if drops != nil {
-			switch part.Get("type").String() {
-			case "image_url", "input_image", "image", "input_audio", "audio", "file", "input_file", "document", "video", "video_url":
+			switch strings.ToLower(strings.TrimSpace(part.Get("type").String())) {
+			case "image_url",
+				"input_image",
+				"image",
+				"input_audio",
+				"audio",
+				"file",
+				"input_file",
+				"document",
+				"video",
+				"video_url":
 				drops.Drop(part.Get("type").String())
 			}
 		}

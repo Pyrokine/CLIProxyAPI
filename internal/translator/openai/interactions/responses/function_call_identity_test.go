@@ -9,7 +9,8 @@ import (
 )
 
 func TestInteractionsFunctionCallPreservesItemAndCallIDs(t *testing.T) {
-	raw := []byte(`{"id":"response-1","model":"test","steps":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":{}}]}`)
+	raw := []byte((`{"id":"response-1","model":"test","steps":[{"type":"function_call","id` +
+		`":"item-1","call_id":"call-1","name":"tool","arguments":{}}]}`))
 	out := convertInteractionsResponseToOpenAIResponsesNonStream(
 		context.Background(), "test", nil, nil, raw, nil,
 	)
@@ -25,7 +26,9 @@ func TestInteractionsFunctionCallPreservesItemAndCallIDs(t *testing.T) {
 }
 
 func TestResponsesFunctionCallPreservesItemAndCallIDs(t *testing.T) {
-	item := gjson.Parse(`{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":"{}"}`)
+	item := gjson.Parse(
+		`{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":"{}"}`,
+	)
 	out := responsesFunctionCallToInteractions(item, false)
 	if got := gjson.GetBytes(out, "id").String(); got != "item-1" {
 		t.Fatalf("interaction item id = %q, want item-1", got)
@@ -37,14 +40,26 @@ func TestResponsesFunctionCallPreservesItemAndCallIDs(t *testing.T) {
 
 func TestInteractionsToolArgumentsPreserveHTMLInResponses(t *testing.T) {
 	arguments := `{"command":"2>&1 <work>"}`
-	interaction := []byte(`{"id":"response-1","model":"test","steps":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":` + arguments + `}]}`)
-	response := convertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "test", nil, nil, interaction, nil)
+	interaction := []byte((`{"id":"response-1","model":"test","steps":[{"type":"function_call","id` +
+		`":"item-1","call_id":"call-1","name":"tool","arguments":`) + arguments + `}]}`)
+	response := convertInteractionsResponseToOpenAIResponsesNonStream(
+		context.Background(), "test", nil, nil, interaction, nil,
+	)
 	if got := gjson.GetBytes(response, "output.0.arguments").String(); got != arguments ||
 		!bytes.Contains(response, []byte(`2>&1 <work>`)) {
 		t.Fatalf("non-stream arguments = %q in %s", got, response)
 	}
 
-	request := convertInteractionsRequestToOpenAIResponses("test", []byte(`{"input":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":`+arguments+`}]}`), false)
+	request := convertInteractionsRequestToOpenAIResponses(
+		"test",
+		[]byte(
+			(`{"input":[{"type":"function_call","id":"item-1","call_id":"call-1",`+
+				`"name":"tool","arguments":`)+
+				arguments+
+				`}]}`,
+		),
+		false,
+	)
 	if got := gjson.GetBytes(request, "input.0.arguments").String(); got != arguments ||
 		!bytes.Contains(request, []byte(`2>&1 <work>`)) {
 		t.Fatalf("request arguments = %q in %s", got, request)
@@ -53,16 +68,25 @@ func TestInteractionsToolArgumentsPreserveHTMLInResponses(t *testing.T) {
 	var stream any
 	streamEvents := make(map[string]int)
 	for _, event := range [][]byte{
-		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool"}}`),
-		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"command\":\"2>&1 <work>\"}"}}`),
+		[]byte((`data: {"event_type":"step.start","index":0,"step":{"type":"function_ca` +
+			`ll","id":"item-1","call_id":"call-1","name":"tool"}}`)),
+		[]byte((`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_` +
+			`delta","arguments":"{\"command\":\"2>&1 <work>\"}"}}`)),
 		[]byte(`data: {"event_type":"step.stop","index":0}`),
-		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"response-1","model":"test","status":"completed"}}`),
+		[]byte((`data: {"event_type":"interaction.completed","interaction":{"id":` +
+			`"response-1","model":"test","status":` +
+			`"completed"}}`)),
 	} {
-		for _, output := range convertInteractionsResponseToOpenAIResponses(context.Background(), "test", nil, nil, event, &stream) {
+		for _, output := range convertInteractionsResponseToOpenAIResponses(
+			context.Background(), "test", nil, nil, event, &stream,
+		) {
 			payload := responseEventPayload(output)
 			eventType := payload.Get("type").String()
 			switch eventType {
-			case "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed":
+			case "response.function_call_arguments.delta",
+				"response.function_call_arguments.done",
+				"response.output_item.done",
+				"response.completed":
 				streamEvents[eventType]++
 				if !bytes.Contains(output, []byte(`2>&1 <work>`)) {
 					t.Fatalf("%s escaped stream tool arguments: %s", eventType, output)
@@ -70,15 +94,22 @@ func TestInteractionsToolArgumentsPreserveHTMLInResponses(t *testing.T) {
 			}
 		}
 	}
-	for _, eventType := range []string{"response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"} {
+	for _, eventType := range []string{
+		"response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done",
+		"response.completed",
+	} {
 		if streamEvents[eventType] != 1 {
 			t.Fatalf("%s count=%d, want one", eventType, streamEvents[eventType])
 		}
 	}
 
 	var reverse any
-	chunks := convertOpenAIResponsesResponseToInteractions(context.Background(), "test", nil, nil,
-		[]byte(`data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"item-1","delta":"{\"command\":\"2>&1 <work>\"}"}`), &reverse)
+	chunks := convertOpenAIResponsesResponseToInteractions(
+		context.Background(), "test", nil, nil,
+		[]byte((`data: {"type":"response.function_call_arguments.delta","output_index":` +
+			`0,"item_id":"item-1","delta":"{\"command\":\"2>&1 <work>\"}"}`)),
+		&reverse,
+	)
 	var found bool
 	for _, chunk := range chunks {
 		if responseEventPayload(chunk).Get("delta.type").String() == "arguments_delta" {
@@ -100,7 +131,8 @@ func TestInteractionsFunctionCallStreamEmitsArgumentsDoneAndCompletedItem(t *tes
 		"test",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool"}}`),
+		[]byte((`data: {"event_type":"step.start","index":0,"step":{"type":"function_ca` +
+			`ll","id":"item-1","call_id":"call-1","name":"tool"}}`)),
 		&state,
 	)
 	if len(start) != 1 {
@@ -125,7 +157,11 @@ func TestInteractionsFunctionCallStreamEmitsArgumentsDoneAndCompletedItem(t *tes
 		"test",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"value\":1}"}}`),
+		[]byte(
+			(`data: {"event_type":"step.delta","index":0,"delta":{"type":` +
+				`"arguments_delta","arguments":"{\"value\":` +
+				`1}"}}`),
+		),
 		&state,
 	)
 	stop := convertInteractionsResponseToOpenAIResponses(
@@ -202,9 +238,12 @@ func TestInteractionsFunctionCallStreamInitialAndEmptyArguments(t *testing.T) {
 				var state any
 				var events [][]byte
 				for _, input := range [][]byte{
-					[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":` + test.arguments + `}}`),
+					[]byte((`data: {"event_type":"step.start","index":0,"step":{"type":"function_ca` +
+						`ll","id":"item-1","call_id":"call-1","name":"tool","arguments":`) + test.arguments + `}}`),
 					[]byte(`data: {"event_type":"step.stop","index":0}`),
-					[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"response-1","model":"test"}}`),
+					[]byte((`data: {"event_type":"interaction.completed","interaction":{"id":` +
+						`"response-1","model":` +
+						`"test"}}`)),
 				} {
 					events = append(
 						events, convertInteractionsResponseToOpenAIResponses(
@@ -265,10 +304,16 @@ func TestInteractionsFunctionCallStreamEventsAreIdempotent(t *testing.T) {
 
 	var events [][]byte
 	for _, input := range [][]byte{
-		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":{"value":1}}}`),
-		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":{"value":1}}}`),
+		[]byte((`data: {"event_type":"step.start","index":0,"step":{"type":"function_ca` +
+			`ll","id":"item-1","call_id":"call-1","name":"tool","arguments":{"value` +
+			`":1}}}`)),
+		[]byte((`data: {"event_type":"step.start","index":0,"step":{"type":"function_ca` +
+			`ll","id":"item-1","call_id":"call-1","name":"tool","arguments":{"value` +
+			`":1}}}`)),
 		[]byte(`data: {"event_type":"step.stop","index":0}`),
-		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":",\"late\":true"}}`),
+		[]byte((`data: {"event_type":"step.delta","index":0,"delta":{"type":` +
+			`"arguments_delta","arguments":",\"late\":` +
+			`true"}}`)),
 		[]byte(`data: {"event_type":"step.stop","index":0}`),
 	} {
 		events = append(
@@ -312,7 +357,9 @@ func TestInteractionsCreatedUsesOriginalRequestModel(t *testing.T) {
 		"fallback-model",
 		[]byte(`{"request":{"model":"original-interactions-model"}}`),
 		[]byte(`{"model":"translated-interactions-model"}`),
-		[]byte(`data: {"interaction":{"id":"interaction_1","model":"source-model"},"event_type":"interaction.created"}`),
+		[]byte(
+			`data: {"interaction":{"id":"interaction_1","model":"source-model"},"event_type":"interaction.created"}`,
+		),
 		&state,
 	)
 	if len(outputs) != 1 {
@@ -328,16 +375,11 @@ func TestInteractionsCreatedUsesOriginalRequestModel(t *testing.T) {
 }
 
 func TestIncompleteResponseMetadataRoundTripsNonStream(t *testing.T) {
-	interactionsRaw := []byte(`{
-		"interaction":{
-			"id":"interaction-1",
-			"model":"antigravity-model",
-			"status":"incomplete",
-			"incomplete_details":{"reason":"max_output_tokens","limit":128},
-			"environment":{"id":"environment-1"},
-			"steps":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"external_external_read_file","arguments":{}}]
-		}
-	}`)
+	interactionsRaw := []byte(("{\n\t\t\"interaction\":{\n\t\t\t\"id\":\"interaction-1\",\n\t\t\t\"model\":\"" +
+		"antigravity-model\",\n\t\t\t\"status\":\"incomplete\",\n\t\t\t\"incomplete_details\":{\"reason\":\"" +
+		"max_output_tokens\",\"limit\":128},\n\t\t\t\"environment\":{\"id\":\"environment-1\"},\n\t\t\t\"" +
+		"steps\":[{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"" +
+		"external_external_read_file\",\"arguments\":{}}]\n\t\t}\n\t}"))
 	response := convertInteractionsResponseToOpenAIResponsesNonStream(
 		context.Background(), "", nil, nil, interactionsRaw, nil,
 	)
@@ -362,13 +404,10 @@ func TestIncompleteResponseMetadataRoundTripsNonStream(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`{
-			"id":"response-1",
-			"status":"incomplete",
-			"incomplete_details":{"reason":"max_output_tokens","limit":256},
-			"environment":{"id":"environment-2"},
-			"output":[{"type":"function_call","id":"item-2","call_id":"call-2","name":"external_read_file","arguments":"{}"}]
-		}`),
+		[]byte(("{\n\t\t\t\"id\":\"response-1\",\n\t\t\t\"status\":\"incomplete\",\n\t\t\t\"" +
+			"incomplete_details\":{\"reason\":\"max_output_tokens\",\"limit\":256},\n\t\t\t\"environment\":{" +
+			"\"id\":\"environment-2\"},\n\t\t\t\"output\":[{\"type\":\"function_call\",\"id\":\"item-2\",\"" +
+			"call_id\":\"call-2\",\"name\":\"external_read_file\",\"arguments\":\"{}\"}]\n\t\t}")),
 		nil,
 	)
 	if got := gjson.GetBytes(interactions, "status").String(); got != "incomplete" {
@@ -384,7 +423,11 @@ func TestIncompleteResponseMetadataRoundTripsNonStream(t *testing.T) {
 		t.Fatalf("interaction environment = %q; interaction=%s", got, interactions)
 	}
 	if got := gjson.GetBytes(interactions, "steps.0.name").String(); got != "external_external_read_file" {
-		t.Fatalf("interaction tool name = %q, want external_external_read_file; interaction=%s", got, interactions)
+		t.Fatalf(
+			"interaction tool name = %q, want external_external_read_file; interaction=%s",
+			got,
+			interactions,
+		)
 	}
 }
 
@@ -395,7 +438,8 @@ func TestInteractionsIncompleteStreamPreservesDetailsAndEnvironment(t *testing.T
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"interaction.created","interaction":{"id":"interaction-1","model":"antigravity-model","environment":{"id":"environment-stream"}}}`),
+		[]byte((`data: {"event_type":"interaction.created","interaction":{"id":"interaction-1","model":"` +
+			`antigravity-model","environment":{"id":"environment-stream"}}}`)),
 		&state,
 	)
 	if len(created) != 1 {
@@ -406,7 +450,9 @@ func TestInteractionsIncompleteStreamPreservesDetailsAndEnvironment(t *testing.T
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"external_external_read_file","arguments":{}}}`),
+		[]byte((`data: {"event_type":"step.start","index":0,"step":{"type":"function_ca` +
+			`ll","id":"item-1","call_id":"call-1","name":"external_external_read_fi` +
+			`le","arguments":{}}}`)),
 		&state,
 	)
 	if len(start) != 1 {
@@ -428,7 +474,9 @@ func TestInteractionsIncompleteStreamPreservesDetailsAndEnvironment(t *testing.T
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"interaction-1","model":"antigravity-model","status":"incomplete","incomplete_details":{"reason":"max_output_tokens","limit":512}}}`),
+		[]byte((`data: {"event_type":"interaction.completed","interaction":{"id":"interaction-1","model":"` +
+			`antigravity-model","status":"incomplete","incomplete_details":{"reason":"max_output_tokens","` +
+			`limit":512}}}`)),
 		&state,
 	)
 	if len(terminal) != 1 {
@@ -455,7 +503,9 @@ func TestInteractionsIncompleteStreamPreservesDetailsAndEnvironment(t *testing.T
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"interaction-1","status":"incomplete"}}`),
+		[]byte(
+			`data: {"event_type":"interaction.completed","interaction":{"id":"interaction-1","status":"incomplete"}}`,
+		),
 		&state,
 	)
 	if len(duplicate) != 0 {
@@ -470,7 +520,8 @@ func TestResponsesIncompleteStreamPreservesDetailsAndEnvironment(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.created","response":{"id":"response-1","model":"antigravity-model","status":"in_progress","environment":{"id":"environment-stream"},"output":[]}}`),
+		[]byte((`data: {"type":"response.created","response":{"id":"response-1","model":"antigravity-model","` +
+			`status":"in_progress","environment":{"id":"environment-stream"},"output":[]}}`)),
 		&state,
 	)
 	if len(created) != 2 {
@@ -481,7 +532,9 @@ func TestResponsesIncompleteStreamPreservesDetailsAndEnvironment(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"item-1","call_id":"call-1","name":"external_read_file","arguments":""}}`),
+		[]byte((`data: {"type":"response.output_item.added","output_index":0,"item":{"t` +
+			`ype":"function_call","id":"item-1","call_id":"call-1","name":"external` +
+			`_read_file","arguments":""}}`)),
 		&state,
 	)
 	if len(start) != 1 {
@@ -495,7 +548,9 @@ func TestResponsesIncompleteStreamPreservesDetailsAndEnvironment(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.incomplete","response":{"id":"response-1","model":"antigravity-model","status":"incomplete","incomplete_details":{"reason":"max_output_tokens","limit":1024},"output":[],"usage":{}}}`),
+		[]byte((`data: {"type":"response.incomplete","response":{"id":"response-1","model":"antigravity-model"` +
+			`,"status":"incomplete","incomplete_details":{"reason":"max_output_tokens","limit":1024},"output"` +
+			`:[],"usage":{}}}`)),
 		&state,
 	)
 	var completed gjson.Result
@@ -525,7 +580,9 @@ func TestResponsesIncompleteStreamPreservesDetailsAndEnvironment(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.incomplete","response":{"id":"response-1","status":"incomplete","output":[]}}`),
+		[]byte(
+			`data: {"type":"response.incomplete","response":{"id":"response-1","status":"incomplete","output":[]}}`,
+		),
 		&state,
 	)
 	if len(duplicate) != 0 {

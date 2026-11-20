@@ -46,20 +46,14 @@ func TestConvertGeminiRequestToOpenAIToolCallIDsAreDeterministicAndExplicit(t *t
 }
 
 func TestConvertGeminiRequestToOpenAIMatchesToolResultsByExplicitIDNameAndFIFO(t *testing.T) {
-	request := []byte(`{
-		"contents":[
-			{"role":"model","parts":[
-				{"functionCall":{"id":"alpha-one","name":"alpha","args":{}}},
-				{"functionCall":{"id":"beta-one","name":"beta","args":{}}},
-				{"functionCall":{"id":"alpha-two","name":"alpha","args":{}}}
-			]},
-			{"role":"user","parts":[
-				{"functionResponse":{"id":"alpha-two","name":"alpha","response":{"result":"explicit"}}},
-				{"functionResponse":{"name":"beta","response":{"result":"named"}}},
-				{"functionResponse":{"response":{"result":"fifo"}}}
-			]}
-		]
-	}`)
+	//goland:noinspection SpellCheckingInspection
+	request := []byte(("{\n\t\t\"contents\":[\n\t\t\t{\"role\":\"model\",\"parts\":[\n\t\t\t\t{\"" +
+		"functionCall\":{\"id\":\"alpha-one\",\"name\":\"alpha\",\"args\":{}}},\n\t\t\t\t{\"functionCall\":{" +
+		"\"id\":\"beta-one\",\"name\":\"beta\",\"args\":{}}},\n\t\t\t\t{\"functionCall\":{\"id\":\"alpha-" +
+		"two\",\"name\":\"alpha\",\"args\":{}}}\n\t\t\t]},\n\t\t\t{\"role\":\"user\",\"parts\":[\n\t\t\t\t{\"" +
+		"functionResponse\":{\"id\":\"alpha-two\",\"name\":\"alpha\",\"response\":{\"result\":\"explicit\"}}}" +
+		",\n\t\t\t\t{\"functionResponse\":{\"name\":\"beta\",\"response\":{\"result\":\"named\"}}},\n\t\t\t\t" +
+		"{\"functionResponse\":{\"response\":{\"result\":\"fifo\"}}}\n\t\t\t]}\n\t\t]\n\t}"))
 
 	out := ConvertGeminiRequestToOpenAI("gpt-test", request, false)
 	want := []string{"alpha-two", "beta-one", "alpha-one"}
@@ -69,10 +63,12 @@ func TestConvertGeminiRequestToOpenAIMatchesToolResultsByExplicitIDNameAndFIFO(t
 }
 
 func TestConvertGeminiRequestToOpenAIUsesDeterministicOrphanResponseID(t *testing.T) {
-	request := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"orphan","response":{"result":"value"}}}]}]}`)
+	request := []byte(
+		`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"orphan","response":{"result":"value"}}}]}]}`,
+	)
 	want := []string{"call_gemini_0000000000000001"}
 
-	for run := 0; run < 2; run++ {
+	for run := range 2 {
 		out := ConvertGeminiRequestToOpenAI("gpt-test", request, false)
 		if got := openAIGeminiToolResultIDs(out); !reflect.DeepEqual(got, want) {
 			t.Fatalf("run %d orphan result IDs = %#v, want %#v; output: %s", run, got, want, out)

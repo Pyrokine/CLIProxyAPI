@@ -10,7 +10,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
+// convertResponsesRequestToChatCompletions converts OpenAI responses format to OpenAI chat completions format.
 // It transforms the OpenAI responses API format (with instructions and input array) into the standard
 // OpenAI chat completions format (with messages array and system content).
 //
@@ -29,7 +29,11 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in OpenAI chat completions format
-func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertResponsesRequestToChatCompletions(
+	modelName string,
+	inputRawJSON []byte,
+	stream bool,
+) []byte {
 	body, err := convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, inputRawJSON, stream)
 	if err != nil {
 		return nil
@@ -37,7 +41,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	return body
 }
 
-func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) (
+	[]byte,
+	error,
+) {
 	var drops translatorcommon.UserTurnDrops
 	droppedPartTypes := make(map[string]int)
 	rawJSON := inputRawJSON
@@ -72,7 +79,9 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	if textFormat := root.Get("text.format"); textFormat.Exists() {
-		if responseFormat := convertResponsesTextFormatToChatResponseFormat(textFormat); len(responseFormat) > 0 {
+		if responseFormat := convertResponsesTextFormatToChatResponseFormat(textFormat); len(
+			responseFormat,
+		) > 0 {
 			out, _ = sjson.SetRawBytes(out, "response_format", responseFormat)
 		}
 	}
@@ -125,7 +134,8 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			mergedIntoAssistant := false
 			if mergeableAssistantIndex >= 0 && mergeableAssistantIndex == len(messages)-1 {
 				assistantMessage := gjson.ParseBytes(messages[mergeableAssistantIndex])
-				if assistantMessage.Get("role").String() == "assistant" && !assistantMessage.Get("tool_calls").Exists() {
+				if assistantMessage.Get("role").String() == "assistant" &&
+					!assistantMessage.Get("tool_calls").Exists() {
 					updatedMessage := translatorcommon.SetRawArrayItems(
 						messages[mergeableAssistantIndex],
 						"tool_calls",
@@ -136,7 +146,11 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 						reasoningContent,
 					)
 					if combinedReasoning != "" {
-						updatedMessage, _ = sjson.SetBytes(updatedMessage, "reasoning_content", combinedReasoning)
+						updatedMessage, _ = sjson.SetBytes(
+							updatedMessage,
+							"reasoning_content",
+							combinedReasoning,
+						)
 						if isUsableResponsesReasoning(combinedReasoning) {
 							latestReasoningContent = combinedReasoning
 						}
@@ -149,9 +163,17 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			if !mergedIntoAssistant {
 				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-				assistantMessage = translatorcommon.SetRawArrayItems(assistantMessage, "tool_calls", pendingToolCalls)
+				assistantMessage = translatorcommon.SetRawArrayItems(
+					assistantMessage,
+					"tool_calls",
+					pendingToolCalls,
+				)
 				if reasoningContent != "" {
-					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+					assistantMessage, _ = sjson.SetBytes(
+						assistantMessage,
+						"reasoning_content",
+						reasoningContent,
+					)
 					if isUsableResponsesReasoning(reasoningContent) {
 						latestReasoningContent = reasoningContent
 					}
@@ -186,7 +208,8 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		explicitOutputCounts := make(map[string]int)
 		missingOutputIDs := 0
 		for _, item := range rawInput {
-			if itemType := item.Get("type").String(); itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+			if itemType := item.Get("type").String(); itemType == "function_call_output" ||
+				itemType == "custom_tool_call_output" {
 				if id := translatorcommon.ExtractResponsesCallID(item); id != "" {
 					explicitOutputCounts[id]++
 				} else {
@@ -196,8 +219,10 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 		unclaimedCalls := make(map[string]struct{})
 		for _, item := range rawInput {
-			if itemType := item.Get("type").String(); itemType == "function_call" || itemType == "custom_tool_call" {
-				if id := translatorcommon.ExtractResponsesCallID(item); id != "" && explicitOutputCounts[id] == 0 {
+			if itemType := item.Get("type").String(); itemType == "function_call" ||
+				itemType == "custom_tool_call" {
+				if id := translatorcommon.ExtractResponsesCallID(item); id != "" &&
+					explicitOutputCounts[id] == 0 {
 					unclaimedCalls[id] = struct{}{}
 				}
 			}
@@ -210,7 +235,16 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			hasReasoningInSession = value != "" && value != "none" && value != "0" && value != "false"
 		} else if reasoning := root.Get("reasoning"); reasoning.Exists() {
 			value := strings.ToLower(strings.TrimSpace(reasoning.Raw))
-			hasReasoningInSession = value != "" && value != "none" && value != "false" && value != "{}" && value != "null"
+			hasReasoningInSession = value !=
+				"" &&
+				value !=
+					"none" &&
+				value !=
+					"false" &&
+				value !=
+					"{}" &&
+				value !=
+					"null"
 		}
 		if !hasReasoningInSession {
 			for _, item := range rawInput {
@@ -301,14 +335,20 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 								sendable++
 							case "input_file":
 								fileID, fileData := contentItem.Get("file_id"), contentItem.Get("file_data")
-								if (fileID.Type != gjson.String || strings.TrimSpace(fileID.String()) == "") && (fileData.Type != gjson.String || strings.TrimSpace(fileData.String()) == "") {
+								if (fileID.Type != gjson.String || strings.TrimSpace(fileID.String()) == "") &&
+									(fileData.Type != gjson.String || strings.TrimSpace(fileData.String()) == "") {
 									dropPart(contentType)
 									break
 								}
 								contentPart := []byte(`{"type":"file","file":{}}`)
 								for _, field := range []string{"file_id", "file_data", "filename"} {
-									if value := contentItem.Get(field); value.Type == gjson.String && value.String() != "" {
-										contentPart, _ = sjson.SetBytes(contentPart, "file."+field, value.String())
+									if value := contentItem.Get(field); value.Type == gjson.String &&
+										value.String() != "" {
+										contentPart, _ = sjson.SetBytes(
+											contentPart,
+											"file."+field,
+											value.String(),
+										)
 									}
 								}
 								message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
@@ -324,28 +364,43 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 									break
 								}
 								format := audio.Get("format")
-								if !format.Exists() || (format.Type == gjson.String && strings.TrimSpace(format.String()) == "") {
+								if !format.Exists() ||
+									(format.Type == gjson.String && strings.TrimSpace(format.String()) == "") {
 									format = contentItem.Get("format")
 								}
 								contentPart := []byte(`{"type":"input_audio","input_audio":{}}`)
 								if audio.IsObject() {
-									contentPart, _ = sjson.SetRawBytes(contentPart, "input_audio", []byte(audio.Raw))
+									contentPart, _ = sjson.SetRawBytes(
+										contentPart,
+										"input_audio",
+										[]byte(audio.Raw),
+									)
 								}
 								contentPart, _ = sjson.SetBytes(contentPart, "input_audio.data", data.String())
 								if format.Exists() {
-									contentPart, _ = sjson.SetRawBytes(contentPart, "input_audio.format", []byte(format.Raw))
+									contentPart, _ = sjson.SetRawBytes(
+										contentPart, "input_audio.format", []byte(format.Raw),
+									)
 								}
 								message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 								sendable++
 							case "input_video", "video_url":
 								contentPart := []byte(`{"type":"video_url","video_url":{}}`)
 								if videoURL := contentItem.Get("video_url"); videoURL.IsObject() {
-									contentPart, _ = sjson.SetRawBytes(contentPart, "video_url", []byte(videoURL.Raw))
+									contentPart, _ = sjson.SetRawBytes(
+										contentPart,
+										"video_url",
+										[]byte(videoURL.Raw),
+									)
 								} else if videoURL.Exists() {
-									contentPart, _ = sjson.SetRawBytes(contentPart, "video_url.url", []byte(videoURL.Raw))
+									contentPart, _ = sjson.SetRawBytes(
+										contentPart, "video_url.url", []byte(videoURL.Raw),
+									)
 								}
 								if processing := contentItem.Get("processing"); processing.Exists() {
-									contentPart, _ = sjson.SetRawBytes(contentPart, "video_url.processing", []byte(processing.Raw))
+									contentPart, _ = sjson.SetRawBytes(
+										contentPart, "video_url.processing", []byte(processing.Raw),
+									)
 								}
 								message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 								sendable++
@@ -385,14 +440,20 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			case "reasoning":
 				reasoningContent := collectOpenAIResponsesReasoningContent(item)
-				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, reasoningContent)
+				pendingReasoningContent = combineOpenAIResponsesReasoning(
+					pendingReasoningContent,
+					reasoningContent,
+				)
 				if isUsableResponsesReasoning(reasoningContent) {
 					latestReasoningContent = reasoningContent
 				}
 
 			case "function_call", "custom_tool_call":
 				reasoningContent := item.Get("reasoning_content").String()
-				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, reasoningContent)
+				pendingReasoningContent = combineOpenAIResponsesReasoning(
+					pendingReasoningContent,
+					reasoningContent,
+				)
 				if isUsableResponsesReasoning(reasoningContent) {
 					latestReasoningContent = reasoningContent
 				}
@@ -405,7 +466,8 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				toolCall, _ = sjson.SetBytes(toolCall, "function.name", name)
 				if itemType == "custom_tool_call" {
 					toolCall, _ = sjson.SetBytes(
-						toolCall, "function.arguments", translatorcommon.WrapResponsesCustomToolInput(item.Get("input")),
+						toolCall, "function.arguments",
+						translatorcommon.WrapResponsesCustomToolInput(item.Get("input")),
 					)
 				} else if arguments := item.Get("arguments"); arguments.Exists() {
 					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
@@ -433,7 +495,13 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				} else if output.Exists() {
 					userMessage := setResponsesToolOutputContent([]byte(`{"role":"user","content":""}`), output)
 					content := gjson.GetBytes(userMessage, "content")
-					if (content.Type == gjson.String && strings.TrimSpace(content.String()) != "") || (content.IsArray() && len(content.Array()) > 0) {
+					if (content.Type ==
+						gjson.String &&
+						strings.TrimSpace(content.String()) !=
+							"") ||
+						(content.IsArray() &&
+							len(content.Array()) >
+								0) {
 						appendRegularMessage(userMessage)
 					}
 				}
@@ -512,7 +580,11 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	if len(droppedPartTypes) > 0 {
-		log.Warnf("responses->chat: dropped unsupported user content types %q (model=%q)", fmt.Sprint(droppedPartTypes), modelName)
+		log.Warnf(
+			"responses->chat: dropped unsupported user content types %q (model=%q)",
+			fmt.Sprint(droppedPartTypes),
+			modelName,
+		)
 	}
 	if err := drops.Err(); err != nil {
 		return nil, err
@@ -554,7 +626,11 @@ func setResponsesToolOutputContent(toolMessage []byte, output gjson.Result) []by
 	}
 
 	if !responsesToolOutputHasImage(structured) {
-		toolMessage, _ = sjson.SetBytes(toolMessage, "content", translatorcommon.ResponsesToolOutputText(output))
+		toolMessage, _ = sjson.SetBytes(
+			toolMessage,
+			"content",
+			translatorcommon.ResponsesToolOutputText(output),
+		)
 		return toolMessage
 	}
 

@@ -28,14 +28,17 @@ func TestOpenAIChatToolIDsAndNamesInInteractions(t *testing.T) {
 	}
 	for index, want := range []struct{ id, name string }{{"call_2", "weather"}, {"call_1", "lookup"}} {
 		item := items[index+2]
-		if item.Get("call_id").String() != want.id || item.Get("id").Exists() || item.Get("name").String() != want.name {
+		if item.Get("call_id").String() != want.id || item.Get("id").Exists() ||
+			item.Get("name").String() != want.name {
 			t.Fatalf("function result %d = %s, output = %s", index, item.Raw, out)
 		}
 	}
 }
 
 func TestOpenAIChatResponseToolCallsOmitInteractionsCallID(t *testing.T) {
-	step, ok := openAIToolCallToInteractionsStep(gjson.Parse(`{"id":"call_1","function":{"name":"lookup","arguments":"{}"}}`), false)
+	step, ok := openAIToolCallToInteractionsStep(
+		gjson.Parse(`{"id":"call_1","function":{"name":"lookup","arguments":"{}"}}`), false,
+	)
 	if !ok || gjson.GetBytes(step, "id").String() != "call_1" || gjson.GetBytes(step, "call_id").Exists() {
 		t.Fatalf("function call step = %s, valid = %t", step, ok)
 	}

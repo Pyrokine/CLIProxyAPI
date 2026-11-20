@@ -11,11 +11,14 @@ func init() {
 	translator.Register(
 		constant.OpenaiResponse,
 		constant.OpenAI,
-		ConvertOpenAIResponsesRequestToOpenAIChatCompletions,
+		convertResponsesRequestToChatCompletions,
 		interfaces.TranslateResponse{
 			Stream:    convertOpenAIChatCompletionsResponseToOpenAIResponses,
 			NonStream: convertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, convertOpenAIResponsesRequestToOpenAIChatCompletions)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI,
+		convertOpenAIResponsesRequestToOpenAIChatCompletions,
+	)
 }

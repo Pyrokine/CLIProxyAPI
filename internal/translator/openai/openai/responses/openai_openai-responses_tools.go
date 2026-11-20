@@ -19,7 +19,9 @@ func responsesChatToolNameMap(identity *translatorcommon.ResponsesToolIdentity, 
 	var historyNames []string
 	for _, item := range root.Get("input").Array() {
 		if kind := item.Get("type").String(); kind == "function_call" || kind == "custom_tool_call" {
-			historyNames = append(historyNames, identity.ResolveName(item.Get("name").String(), item.Get("namespace").String()))
+			historyNames = append(
+				historyNames, identity.ResolveName(item.Get("name").String(), item.Get("namespace").String()),
+			)
 		}
 	}
 	name, namespace := responsesToolChoiceName(root.Get("tool_choice"))
@@ -46,7 +48,9 @@ func convertResponsesDeclarationToOpenAIChat(declaration translatorcommon.Respon
 		return nil, false
 	}
 	if declaration.Kind == translatorcommon.ResponsesCustomTool {
-		chatTool := []byte(`{"type":"function","function":{"name":"","description":"","parameters":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}}`)
+		chatTool := []byte((`{"type":"function","function":{"name":"","description":"","parameters"` +
+			`:{"type":"object","properties":{"input":{"type":"string"}},"required":` +
+			`["input"]}}}`))
 		chatTool, _ = sjson.SetBytes(chatTool, "function.name", declaration.QualifiedName)
 		if description := responsesToolDescription(tool); description != "" {
 			chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)

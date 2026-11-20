@@ -13,15 +13,23 @@ import (
 func TestInteractionsFailedEventToOpenAIResponses(t *testing.T) {
 	var state any
 	created := convertInteractionsResponseToOpenAIResponses(
-		context.Background(), "test-model", nil, nil,
-		[]byte(`{"event_type":"interaction.created","interaction":{"id":"interaction_1","model":"test-model"}}`), &state,
+		context.Background(),
+		"test-model",
+		nil,
+		nil,
+		[]byte(
+			`{"event_type":"interaction.created","interaction":{"id":"interaction_1","model":"test-model"}}`,
+		),
+		&state,
 	)
 	if len(created) != 1 {
 		t.Fatalf("created events = %d, want 1", len(created))
 	}
 	failed := convertInteractionsResponseToOpenAIResponses(
 		context.Background(), "test-model", nil, nil,
-		[]byte(`{"event_type":"response.failed","error":{"type":"api_error","code":"resource_exhausted","message":"model capacity exhausted"}}`), &state,
+		[]byte(`{"event_type":"response.failed","error":{"type":"api_error","code":"re`+
+			`source_exhausted","message":"model capacity exhausted"}}`),
+		&state,
 	)
 	if len(failed) != 1 {
 		t.Fatalf("failed events = %d, want 1", len(failed))
@@ -34,12 +42,16 @@ func TestInteractionsFailedEventToOpenAIResponses(t *testing.T) {
 		response.Get("response.error.message").String() != "model capacity exhausted" {
 		t.Fatalf("failed response = %s", response.Raw)
 	}
-	completed := convertInteractionsResponseToOpenAIResponses(context.Background(), "test-model", nil, nil,
-		[]byte(`{"event_type":"interaction.completed"}`), &state)
+	completed := convertInteractionsResponseToOpenAIResponses(
+		context.Background(), "test-model", nil, nil,
+		[]byte(`{"event_type":"interaction.completed"}`), &state,
+	)
 	if len(completed) != 0 {
 		t.Fatalf("completed after failure = %q", completed)
 	}
-	done := convertInteractionsResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, []byte("[DONE]"), &state)
+	done := convertInteractionsResponseToOpenAIResponses(
+		context.Background(), "test-model", nil, nil, []byte("[DONE]"), &state,
+	)
 	if len(done) != 1 || string(done[0]) != "data: [DONE]\n\n" {
 		t.Fatalf("terminal marker after failure = %q", done)
 	}
@@ -47,8 +59,12 @@ func TestInteractionsFailedEventToOpenAIResponses(t *testing.T) {
 
 func TestInteractionFailedEventToOpenAIResponsesUsesNestedError(t *testing.T) {
 	var state any
-	failed := convertInteractionsResponseToOpenAIResponses(context.Background(), "test-model", nil, nil,
-		[]byte(`{"event_type":"interaction.failed","response":{"id":"response-1","error":{"code":"unavailable","message":"upstream offline"}}}`), &state)
+	failed := convertInteractionsResponseToOpenAIResponses(
+		context.Background(), "test-model", nil, nil,
+		[]byte((`{"event_type":"interaction.failed","response":{"id":"response-1","error":{"code":"` +
+			`unavailable","message":"upstream offline"}}}`)),
+		&state,
+	)
 	if len(failed) != 1 {
 		t.Fatalf("failed events = %q", failed)
 	}
@@ -162,26 +178,27 @@ func TestResponsesRequestPreservesContextAndAntigravityToolIdentity(t *testing.T
 }
 
 func TestResponsesRequestFlattensDevinNamespaceChildrenAndFiltersAutomation(t *testing.T) {
-	body := []byte(`{
-		"model":"devin/swe-2",
-		"tool_choice":{"type":"function","name":"automation_update","namespace":"mcp__codex_app"},
-		"tools":[
-			{"type":"namespace","name":"mcp__codex_app","children":[{"type":"function","name":"automation_update","description":"modify automations"}]},
-			{"type":"namespace","name":"mcp__terminal","children":[{"type":"function","name":"exec_command","description":"returning output or a session ID for ongoing interaction","parameters":{"type":"object"}}]},
-			{"type":"function","name":"write_stdin","description":"Writes characters to an existing unified exec session and returns recent output."}
-		],
-		"input":[
-			{"type":"function_call","call_id":"call-1","namespace":"mcp__terminal","name":"exec_command","arguments":"{}"},
-			{"type":"function_call_output","call_id":"call-1","output":"done"}
-		]
-	}`)
+	body := []byte(("{\n\t\t\"model\":\"devin/swe-2\",\n\t\t\"tool_choice\":{\"type\":\"function\",\"name\":\"" +
+		"automation_update\",\"namespace\":\"mcp__codex_app\"},\n\t\t\"tools\":[\n\t\t\t{\"type\":\"" +
+		"namespace\",\"name\":\"mcp__codex_app\",\"children\":[{\"type\":\"function\",\"name\":\"" +
+		"automation_update\",\"description\":\"modify automations\"}]},\n\t\t\t{\"type\":\"namespace\",\"" +
+		"name\":\"mcp__terminal\",\"children\":[{\"type\":\"function\",\"name\":\"exec_command\",\"" +
+		"description\":\"returning output or a session ID for ongoing interaction\",\"parameters\":{\"type\":" +
+		"\"object\"}}]},\n\t\t\t{\"type\":\"function\",\"name\":\"write_stdin\",\"description\":\"Writes " +
+		"characters to an existing unified exec session and returns recent output.\"}\n\t\t],\n\t\t\"input\":" +
+		"[\n\t\t\t{\"type\":\"function_call\",\"call_id\":\"call-1\",\"namespace\":\"mcp__terminal\",\"name\"" +
+		":\"exec_command\",\"arguments\":\"{}\"},\n\t\t\t{\"type\":\"function_call_output\",\"call_id\":\"" +
+		"call-1\",\"output\":\"done\"}\n\t\t]\n\t}"))
 	out := convertOpenAIResponsesRequestToInteractions("", body, false)
 	tools := gjson.GetBytes(out, "tools").Array()
-	if len(tools) != 2 || tools[0].Get("name").String() != "mcp__terminal__exec_command" || tools[1].Get("name").String() != "write_stdin" {
+	if len(tools) != 2 || tools[0].Get("name").String() != "mcp__terminal__exec_command" ||
+		tools[1].Get("name").String() != "write_stdin" {
 		t.Fatalf("Devin namespace tools = %s, output = %s", tools, out)
 	}
 	if tools[0].Get("description").String() != "returning output or an session ID for ongoing interaction" ||
-		tools[1].Get("description").String() != "Writes characters to a existing unified exec session and returns recent output." ||
+		tools[1].Get("description").
+			String() !=
+			"Writes characters to a existing unified exec session and returns recent output." ||
 		tools[0].Get("parameters.type").String() != "object" {
 		t.Fatalf("Devin tool descriptions/parameters = %s", out)
 	}
@@ -200,46 +217,69 @@ func TestResponsesToInteractionsRejectsOnlyUnsendableUserTurns(t *testing.T) {
 		input     string
 		wantError bool
 	}{
-		{"file-only user message", `[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-1"}]}]`, true},
-		{"file-only earlier turn", `[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-1"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"later"}]}]`, true},
+		{
+			"file-only user message",
+			`[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-1"}]}]`, true,
+		},
+		{
+			"file-only earlier turn",
+			`[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-1"}]},{"type":"` +
+				`message","role":"user","content":[{"type":"input_text","text":"later"}]}]`,
+			true,
+		},
 		{"file-only standalone part", `[{"type":"input_file","file_id":"file-1"}]`, true},
-		{"file with sendable text", `[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-1"},{"type":"input_text","text":"keep"}]}]`, false},
-		{"image with data", `[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]}]`, false},
+		{
+			"file with sendable text",
+			`[{"type":"message","role":"user","content":[{"type":"input_file","file` +
+				`_id":"file-1"},{"type":"input_text","text":"keep"}]}]`,
+			false,
+		},
+		{
+			"image with data",
+			`[{"type":"message","role":"user","content":[{"type":"input_image",` +
+				`"image_url":"data:image/png;base64,` +
+				`aGVsbG8="}]}]`,
+			false,
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			body, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatOpenAIResponse, sdktranslator.FormatInteractions, "model", []byte(`{"input":`+tc.input+`}`), false)
-			var unsupported *translatorcommon.UnsupportedPartError
-			if tc.wantError {
-				if !errors.As(err, &unsupported) || unsupported.StatusCode() != 400 || !unsupported.IsRequestScoped() || body != nil {
-					t.Fatalf("body=%s err=%v, want request-scoped 400 without body", body, err)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				body, err := sdktranslator.TranslateRequestChecked(
+					context.Background(),
+					sdktranslator.FormatOpenAIResponse,
+					sdktranslator.FormatInteractions,
+					"model",
+					[]byte(`{"input":`+tc.input+`}`),
+					false,
+				)
+				var unsupported *translatorcommon.UnsupportedPartError
+				if tc.wantError {
+					if !errors.As(
+						err, &unsupported,
+					) || unsupported.StatusCode() != 400 || !unsupported.IsRequestScoped() || body != nil {
+						t.Fatalf("body=%s err=%v, want request-scoped 400 without body", body, err)
+					}
+					return
 				}
-				return
-			}
-			if err != nil || len(body) == 0 || !gjson.GetBytes(body, "input.0.content.0").Exists() {
-				t.Fatalf("body=%s err=%v, want sendable content", body, err)
-			}
-		})
+				if err != nil || len(body) == 0 || !gjson.GetBytes(body, "input.0.content.0").Exists() {
+					t.Fatalf("body=%s err=%v, want sendable content", body, err)
+				}
+			},
+		)
 	}
 }
 
 func TestInteractionsRequestRestoresResponsesContextAndAntigravityToolIdentity(t *testing.T) {
-	body := []byte(`{
-		"model":"antigravity-model",
-		"previous_interaction_id":"interaction-prev",
-		"environment":{"id":"environment-2"},
-		"agent_config":{"max_total_tokens":654,"mode":"careful"},
-		"generation_config":{"tool_choice":{"type":"function","function":{"name":"external_external_read_file"}}},
-		"tools":[
-			{"type":"function","name":"external_read_file"},
-			{"type":"function","name":"external_external_read_file"},
-			{"type":"function","name":"external_lookup"},
-			{"function_declarations":[{"name":"external_external_external_read_file"}]}
-		],
-		"input":[
-			{"type":"function_call","id":"item-1","call_id":"call-1","name":"external_external_read_file","arguments":{}},
-			{"type":"function_result","call_id":"call-1","name":"external_external_read_file","result":"ok"}
-		]
-	}`)
+	body := []byte(("{\n\t\t\"model\":\"antigravity-model\",\n\t\t\"previous_interaction_id\":\"interaction-" +
+		"prev\",\n\t\t\"environment\":{\"id\":\"environment-2\"},\n\t\t\"agent_config\":{\"max_total_tokens\"" +
+		":654,\"mode\":\"careful\"},\n\t\t\"generation_config\":{\"tool_choice\":{\"type\":\"function\",\"" +
+		"function\":{\"name\":\"external_external_read_file\"}}},\n\t\t\"tools\":[\n\t\t\t{\"type\":\"" +
+		"function\",\"name\":\"external_read_file\"},\n\t\t\t{\"type\":\"function\",\"name\":\"" +
+		"external_external_read_file\"},\n\t\t\t{\"type\":\"function\",\"name\":\"external_lookup\"},\n\t\t\t" +
+		"{\"function_declarations\":[{\"name\":\"external_external_external_read_file\"}]}\n\t\t],\n\t\t\"" +
+		"input\":[\n\t\t\t{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"" +
+		"external_external_read_file\",\"arguments\":{}},\n\t\t\t{\"type\":\"function_result\",\"call_id\":\"" +
+		"call-1\",\"name\":\"external_external_read_file\",\"result\":\"ok\"}\n\t\t]\n\t}"))
 	out := convertInteractionsRequestToOpenAIResponses("", body, false)
 	checks := map[string]string{
 		"previous_response_id":      "interaction-prev",

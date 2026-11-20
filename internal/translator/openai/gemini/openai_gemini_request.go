@@ -3,6 +3,8 @@
 // extracting model information, generation config, message contents, and tool declarations.
 // The package performs JSON data transformation to ensure compatibility
 // between Gemini API format and OpenAI API's expected format.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (
@@ -237,7 +239,9 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 									toolMsg, _ = sjson.SetBytes(toolMsg, "content", responseRaw)
 								}
 
-								toolCallID := toolCalls.Match(functionName, translatorcommon.GeminiToolCallID(functionResponse))
+								toolCallID := toolCalls.Match(
+									functionName, translatorcommon.GeminiToolCallID(functionResponse),
+								)
 								if toolCallID == "" {
 									toolCallID = newToolCallID()
 								}
@@ -278,7 +282,8 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(
 			func(_, tool gjson.Result) bool {
-				if functionDeclarations := tool.Get("functionDeclarations"); functionDeclarations.Exists() && functionDeclarations.IsArray() {
+				if functionDeclarations := tool.Get("functionDeclarations"); functionDeclarations.Exists() &&
+					functionDeclarations.IsArray() {
 					functionDeclarations.ForEach(
 						func(_, funcDecl gjson.Result) bool {
 							openAITool := []byte(`{"type":"function","function":{"name":"","description":""}}`)
@@ -319,6 +324,12 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				out, _ = sjson.SetBytes(out, "tool_choice", "auto")
 			case "ANY":
 				out, _ = sjson.SetBytes(out, "tool_choice", "required")
+				if names := functionCallingConfig.Get("allowedFunctionNames").Array(); len(names) == 1 {
+					out, _ = sjson.SetBytes(
+						out, "tool_choice",
+						map[string]any{"type": "function", "function": map[string]string{"name": names[0].String()}},
+					)
+				}
 			}
 		}
 	}
@@ -332,6 +343,22 @@ func geminiInlineDataContentPart(part gjson.Result) []byte {
 		inline = part.Get("inline_data")
 	}
 	if !inline.Exists() {
+		file := part.Get("fileData")
+		if !file.Exists() {
+			file = part.Get("file_data")
+		}
+		mimeType := file.Get("mimeType").String()
+		if mimeType == "" {
+			mimeType = file.Get("mime_type").String()
+		}
+		uri := file.Get("fileUri").String()
+		if uri == "" {
+			uri = file.Get("file_uri").String()
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mimeType)), "image/") && strings.TrimSpace(uri) != "" {
+			out, _ := sjson.SetBytes([]byte(`{"type":"image_url","image_url":{"url":""}}`), "image_url.url", uri)
+			return out
+		}
 		return nil
 	}
 	mimeType := inline.Get("mimeType").String()

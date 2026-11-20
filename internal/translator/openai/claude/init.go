@@ -18,7 +18,10 @@ func init() {
 			TokenCount: tokenCount,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, func(model string, body []byte, stream bool) ([]byte, error) {
-		return convertClaudeRequestToOpenAIChecked(model, body, stream, false)
-	})
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatClaude, sdktranslator.FormatOpenAI,
+		func(model string, body []byte, stream bool) ([]byte, error) {
+			return convertClaudeRequestToOpenAIChecked(model, body, stream, false)
+		},
+	)
 }

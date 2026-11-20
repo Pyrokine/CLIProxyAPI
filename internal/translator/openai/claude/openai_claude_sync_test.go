@@ -48,15 +48,17 @@ func TestClaudeToOpenAIToolChoiceDoesNotEnableUnknownTools(t *testing.T) {
 		{"missing named tool", `{"type":"tool"}`, "none", ""},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			input := []byte(`{"messages":[{"role":"user","content":"hello"}],"tool_choice":` + test.choice + `}`)
-			result := convertClaudeRequestToOpenAIDefault("test-model", input, false)
-			if got := gjson.GetBytes(result, "tool_choice").String(); got != test.want {
-				t.Fatalf("tool_choice = %q, want %q in %s", got, test.want, result)
-			}
-			if got := gjson.GetBytes(result, "parallel_tool_calls").Raw; got != test.parallel {
-				t.Fatalf("parallel_tool_calls = %q, want %q", got, test.parallel)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				input := []byte(`{"messages":[{"role":"user","content":"hello"}],"tool_choice":` + test.choice + `}`)
+				result := convertClaudeRequestToOpenAIDefault("test-model", input, false)
+				if got := gjson.GetBytes(result, "tool_choice").String(); got != test.want {
+					t.Fatalf("tool_choice = %q, want %q in %s", got, test.want, result)
+				}
+				if got := gjson.GetBytes(result, "parallel_tool_calls").Raw; got != test.parallel {
+					t.Fatalf("parallel_tool_calls = %q, want %q", got, test.parallel)
+				}
+			},
+		)
 	}
 }

@@ -39,67 +39,84 @@ func TestGeminiInlineMediaAcrossRegisteredOpenAIEntries(t *testing.T) {
 				for _, mimeKey := range []string{"mimeType", "mime_type"} {
 					for _, stream := range []bool{false, true} {
 						for _, item := range media {
-							name := fmt.Sprintf("%s/%s/%s/%s/stream_%t/%s", source, placement, inlineKey, mimeKey, stream, item.name)
-							t.Run(name, func(t *testing.T) {
-								inline := map[string]any{"data": data}
-								if item.mime != "" {
-									inline[mimeKey] = item.mime
-								}
-								parts := []any{map[string]any{"text": "before"}, map[string]any{inlineKey: inline}, map[string]any{"text": "after"}}
-								request := map[string]any{}
-								role := placement
-								if placement == "user" || placement == "model" {
-									request["contents"] = []any{map[string]any{"role": placement, "parts": parts}}
-									if placement == "model" {
-										role = "assistant"
+							name := fmt.Sprintf(
+								"%s/%s/%s/%s/stream_%t/%s", source, placement, inlineKey, mimeKey, stream, item.name,
+							)
+							t.Run(
+								name, func(t *testing.T) {
+									inline := map[string]any{"data": data}
+									if item.mime != "" {
+										inline[mimeKey] = item.mime
 									}
-								} else {
-									request[placement] = map[string]any{"parts": parts}
-									role = "system"
-								}
-								if source == sdktranslator.FormatGeminiCLI {
-									request = map[string]any{"request": request}
-								}
-								input, err := json.Marshal(request)
-								if err != nil {
-									t.Fatal(err)
-								}
-								body, err := sdktranslator.TranslateRequestChecked(context.Background(), source, sdktranslator.FormatOpenAI, "gpt-test", input, stream)
-								if err != nil {
-									t.Fatal(err)
-								}
-								out := gjson.ParseBytes(body)
-								if out.Get("model").String() != "gpt-test" || out.Get("stream").Bool() != stream || out.Get("messages.#").Int() != 1 || out.Get("messages.0.role").String() != role {
-									t.Fatalf("unexpected request envelope: %s", body)
-								}
-								content := out.Get("messages.0.content").Array()
-								if len(content) != 3 || content[0].Get("text").String() != "before" || content[2].Get("text").String() != "after" {
-									t.Fatalf("media or adjacent text changed: %s", body)
-								}
-								part := content[1]
-								if part.Get("type").String() != item.kind {
-									t.Fatalf("media type = %q, want %q: %s", part.Get("type").String(), item.kind, body)
-								}
-								mimeType := item.mime
-								if mimeType == "" {
-									mimeType = "application/octet-stream"
-								}
-								dataURL := "data:" + mimeType + ";base64," + data
-								switch item.kind {
-								case "image_url", "video_url":
-									if part.Get(item.kind+".url").String() != dataURL {
-										t.Fatalf("media URL changed: %s", body)
+									parts := []any{
+										map[string]any{"text": "before"}, map[string]any{inlineKey: inline},
+										map[string]any{"text": "after"},
 									}
-								case "input_audio":
-									if part.Get("input_audio.data").String() != data || part.Get("input_audio.format").String() != item.format {
-										t.Fatalf("audio data or format changed: %s", body)
+									request := map[string]any{}
+									role := placement
+									if placement == "user" || placement == "model" {
+										request["contents"] = []any{map[string]any{"role": placement, "parts": parts}}
+										if placement == "model" {
+											role = "assistant"
+										}
+									} else {
+										request[placement] = map[string]any{"parts": parts}
+										role = "system"
 									}
-								case "file":
-									if part.Get("file.file_data").String() != dataURL || part.Get("file.filename").String() != item.filename {
-										t.Fatalf("file data or filename changed: %s", body)
+									if source == sdktranslator.FormatGeminiCLI {
+										request = map[string]any{"request": request}
 									}
-								}
-							})
+									input, err := json.Marshal(request)
+									if err != nil {
+										t.Fatal(err)
+									}
+									body, err := sdktranslator.TranslateRequestChecked(
+										context.Background(), source, sdktranslator.FormatOpenAI, "gpt-test", input,
+										stream,
+									)
+									if err != nil {
+										t.Fatal(err)
+									}
+									out := gjson.ParseBytes(body)
+									if out.Get("model").String() != "gpt-test" || out.Get("stream").Bool() != stream ||
+										out.Get("messages.#").Int() != 1 ||
+										out.Get("messages.0.role").String() != role {
+										t.Fatalf("unexpected request envelope: %s", body)
+									}
+									content := out.Get("messages.0.content").Array()
+									if len(content) != 3 || content[0].Get("text").String() != "before" ||
+										content[2].Get("text").String() != "after" {
+										t.Fatalf("media or adjacent text changed: %s", body)
+									}
+									part := content[1]
+									if part.Get("type").String() != item.kind {
+										t.Fatalf(
+											"media type = %q, want %q: %s", part.Get("type").String(), item.kind, body,
+										)
+									}
+									mimeType := item.mime
+									if mimeType == "" {
+										mimeType = "application/octet-stream"
+									}
+									dataURL := "data:" + mimeType + ";base64," + data
+									switch item.kind {
+									case "image_url", "video_url":
+										if part.Get(item.kind+".url").String() != dataURL {
+											t.Fatalf("media URL changed: %s", body)
+										}
+									case "input_audio":
+										if part.Get("input_audio.data").String() != data ||
+											part.Get("input_audio.format").String() != item.format {
+											t.Fatalf("audio data or format changed: %s", body)
+										}
+									case "file":
+										if part.Get("file.file_data").String() != dataURL ||
+											part.Get("file.filename").String() != item.filename {
+											t.Fatalf("file data or filename changed: %s", body)
+										}
+									}
+								},
+							)
 						}
 					}
 				}

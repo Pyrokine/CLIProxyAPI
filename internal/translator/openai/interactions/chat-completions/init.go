@@ -17,7 +17,9 @@ func init() {
 			NonStream: convertInteractionsResponseToOpenAINonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatOpenAI, sdktranslator.FormatInteractions, convertOpenAIRequestToInteractionsChecked)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatOpenAI, sdktranslator.FormatInteractions, convertOpenAIRequestToInteractionsChecked,
+	)
 	translator.Register(
 		constant.Interactions,
 		constant.OpenAI,

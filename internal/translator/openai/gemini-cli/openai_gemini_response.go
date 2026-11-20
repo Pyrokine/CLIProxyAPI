@@ -40,7 +40,8 @@ func convertOpenAIResponseToGeminiCLI(
 	return newOutputs
 }
 
-// convertOpenAIResponseToGeminiCLINonStream converts a non-streaming OpenAI response to a non-streaming Gemini CLI response.
+// convertOpenAIResponseToGeminiCLINonStream converts a non-streaming OpenAI response to a non-streaming Gemini CLI
+// response.
 //
 // Parameters:
 //   - ctx: The context for the request.

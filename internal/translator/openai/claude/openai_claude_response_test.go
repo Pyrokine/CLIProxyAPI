@@ -93,42 +93,52 @@ func TestConvertOpenAIResponseToClaudeWaitsForFinalCachedUsage(t *testing.T) {
 		stop   string
 	}{
 		{
-			name:   "text",
-			first:  `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"answer"}}]}`,
-			finish: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":140025,"completion_tokens":741}}`,
-			stop:   "end_turn",
+			name:  "text",
+			first: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"answer"}}]}`,
+			finish: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason` +
+				`":"stop"}],"usage":{"prompt_tokens":140025,"completion_tokens":741}}`,
+			stop: "end_turn",
 		},
 		{
-			name:   "tool",
-			first:  `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}}]}`,
-			finish: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":140025,"completion_tokens":741}}`,
-			stop:   "tool_use",
+			name: "tool",
+			first: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"` +
+				`index":0,"id":"call_1","type":"function","function":{"name":"read_file` +
+				`","arguments":"{}"}}]}}]}`,
+			finish: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason` +
+				`":"tool_calls"}],"usage":{"prompt_tokens":140025,"completion_tokens":7` +
+				`41}}`,
+			stop: "tool_use",
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			events := runOpenAIClaudeStream(t, tc.first, tc.finish,
-				`{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":140025,"completion_tokens":741,"prompt_tokens_details":{"cached_tokens":139136}}}`)
-			if got := countSSEEvents(events, "message_delta"); got != 1 {
-				t.Fatalf("message_delta count = %d, want 1", got)
-			}
-			if got := countSSEEvents(events, "message_stop"); got != 1 {
-				t.Fatalf("message_stop count = %d, want 1", got)
-			}
-			for _, event := range events {
-				if event.Type != "message_delta" {
-					continue
+		t.Run(
+			tc.name, func(t *testing.T) {
+				events := runOpenAIClaudeStream(
+					t, tc.first, tc.finish,
+					`{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":140025,"completion_tokens":`+
+						`741,"prompt_tokens_details":{"cached_tokens":139136}}}`,
+				)
+				if got := countSSEEvents(events, "message_delta"); got != 1 {
+					t.Fatalf("message_delta count = %d, want 1", got)
 				}
-				if stop := gjson.Get(event.Payload, "delta.stop_reason").String(); stop != tc.stop {
-					t.Errorf("stop_reason = %q, want %q", stop, tc.stop)
+				if got := countSSEEvents(events, "message_stop"); got != 1 {
+					t.Fatalf("message_stop count = %d, want 1", got)
 				}
-				if cached := gjson.Get(event.Payload, "usage.cache_read_input_tokens").Int(); cached != 139136 {
-					t.Errorf("cache_read_input_tokens = %d, want 139136", cached)
+				for _, event := range events {
+					if event.Type != "message_delta" {
+						continue
+					}
+					if stop := gjson.Get(event.Payload, "delta.stop_reason").String(); stop != tc.stop {
+						t.Errorf("stop_reason = %q, want %q", stop, tc.stop)
+					}
+					if cached := gjson.Get(event.Payload, "usage.cache_read_input_tokens").Int(); cached != 139136 {
+						t.Errorf("cache_read_input_tokens = %d, want 139136", cached)
+					}
+					if input := gjson.Get(event.Payload, "usage.input_tokens").Int(); input != 889 {
+						t.Errorf("input_tokens = %d, want 889", input)
+					}
 				}
-				if input := gjson.Get(event.Payload, "usage.input_tokens").Int(); input != 889 {
-					t.Errorf("input_tokens = %d, want 889", input)
-				}
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -141,7 +151,10 @@ func TestConvertOpenAIResponseToClaudeStreamIgnoresNullToolNameDelta(t *testing.
 		"test-model",
 		originalRequest,
 		nil,
-		[]byte(`data: {"id":"chatcmpl_1","model":"test-model","created":1,"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}`),
+		[]byte(`data: {"id":"chatcmpl_1","model":"test-model","created":1,"choices":[{`+
+			`"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c`+
+			`all_1","type":"function","function":{"name":"read_file","arguments":""`+
+			`}}]},"finish_reason":null}]}`),
 		&param,
 	)
 	firstOutput := bytes.Join(firstChunks, nil)
@@ -154,7 +167,9 @@ func TestConvertOpenAIResponseToClaudeStreamIgnoresNullToolNameDelta(t *testing.
 		"test-model",
 		originalRequest,
 		nil,
-		[]byte(`data: {"id":"chatcmpl_1","model":"test-model","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":null,"arguments":"{\"path\":\"/tmp/a\"}"}}]},"finish_reason":null}]}`),
+		[]byte((`data: {"id":"chatcmpl_1","model":"test-model","created":1,"choices":[{"index":0,"delta":{"` +
+			`tool_calls":[{"index":0,"function":{"name":null,"arguments":"{\"path\":\"/tmp/a\"}"}}]},"` +
+			`finish_reason":null}]}`)),
 		&param,
 	)
 	secondOutput := bytes.Join(secondChunks, nil)
@@ -169,8 +184,10 @@ func TestConvertOpenAIResponseToClaudeStreamIgnoresNullToolNameDelta(t *testing.
 func TestConvertOpenAIResponseToClaudeStreamSuppressesEmptyToolNameStopReason(t *testing.T) {
 	events := runOpenAIClaudeStream(
 		t,
-		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"","arguments":""}}]}}]}`,
-		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":"{\"x\":1}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"`+
+			`id":"call_a","function":{"name":"","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"`+
+			`index":0,"function":{"name":"","arguments":"{\"x\":1}"}}]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 
@@ -192,9 +209,11 @@ func TestConvertOpenAIResponseToClaudeStreamSuppressesEmptyToolNameStopReason(t 
 func TestConvertOpenAIResponseToClaudeStreamStartsToolWhenIDArrivesAfterName(t *testing.T) {
 	events := runOpenAIClaudeStream(
 		t,
-		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"read_file","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"`+
+			`function":{"name":"read_file","arguments":""}}]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_real"}]}}]}`,
-		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"/tmp/a\"}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"`+
+			`index":0,"function":{"arguments":"{\"path\":\"/tmp/a\"}"}}]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 

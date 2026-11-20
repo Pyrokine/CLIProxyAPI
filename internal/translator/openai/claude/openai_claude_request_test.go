@@ -219,7 +219,9 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 
 				if gotHasReasoningContent != tt.wantHasReasoningContent {
 					t.Errorf(
-						"reasoning_content existence = %v, want %v", gotHasReasoningContent, tt.wantHasReasoningContent,
+						"reasoning_content existence = %v, want %v",
+						gotHasReasoningContent,
+						tt.wantHasReasoningContent,
 					)
 				}
 
@@ -271,11 +273,16 @@ func TestConvertClaudeRequestToOpenAI_DropsClaudeSignedThinkingForGPTReasoning(t
 		"messages": [{
 			"role": "assistant",
 			"content": [
-				{"type": "thinking", "thinking": "cross provider", "signature": "` + validClaudeThinkingSignatureForOpenAITest() + `"},
-				{"type": "text", "text": "visible"}
-			]
-		}]
-	}`
+				{"type": "thinking", "thinking": "cross provider", "signature": "` +
+		validClaudeThinkingSignatureForOpenAITest() +
+		("\"},\n\t\t\t\t" +
+			`{"type": ` +
+			`"text", ` +
+			`"text": ` +
+			"\"visible\"}\n" +
+			"\t\t\t]\n\t\t" +
+			"}]\n\t" +
+			`}`)
 
 	output := convertClaudeRequestToOpenAIDefault("gpt-5.1", []byte(inputJSON), false)
 	assistantMsg := gjson.GetBytes(output, "messages.0")
@@ -512,7 +519,10 @@ func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 
 	// tool message MUST immediately follow assistant(tool_calls) per OpenAI spec
 	if messages[1].Get("role").String() != "tool" {
-		t.Fatalf("Expected messages[1] to be tool (must follow tool_calls), got %s", messages[1].Get("role").String())
+		t.Fatalf(
+			"Expected messages[1] to be tool (must follow tool_calls), got %s",
+			messages[1].Get("role").String(),
+		)
 	}
 	if got := messages[1].Get("tool_call_id").String(); got != "call_1" {
 		t.Fatalf("Expected tool_call_id %q, got %q", "call_1", got)

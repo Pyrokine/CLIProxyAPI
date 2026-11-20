@@ -33,11 +33,13 @@ func TestOpenAICompatEffectiveTokenFrames(t *testing.T) {
 		{"error", `data: {"error":{"message":"denied"}}`, true},
 		{"done", "data: [DONE]", true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isOpenAICompatTokenEvent([]byte(tc.payload)); got != tc.want {
-				t.Fatalf("isOpenAICompatTokenEvent(%s) = %t, want %t", tc.payload, got, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				if got := isOpenAICompatTokenEvent([]byte(tc.payload)); got != tc.want {
+					t.Fatalf("isOpenAICompatTokenEvent(%s) = %t, want %t", tc.payload, got, tc.want)
+				}
+			},
+		)
 	}
 }
 
@@ -45,23 +47,32 @@ func TestOpenAICompatStreamRecordsEffectiveTokenAfterRole(t *testing.T) {
 	roleSent := make(chan struct{})
 	releaseToken := make(chan struct{})
 	release := sync.OnceFunc(func() { close(releaseToken) })
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"))
-		w.(http.Flusher).Flush()
-		close(roleSent)
-		select {
-		case <-releaseToken:
-		case <-r.Context().Done():
-			return
-		}
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n"))
-	}))
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write(
+					[]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"),
+				)
+				w.(http.Flusher).Flush()
+				close(roleSent)
+				select {
+				case <-releaseToken:
+				case <-r.Context().Done():
+					return
+				}
+				_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n"))
+			},
+		),
+	)
 	defer func() { release(); upstream.Close() }()
 
 	ctx := logging.WithResponseTimingHolder(context.Background())
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": upstream.URL + "/v1", "api_key": "synthetic"}}
-	req := cliproxyexecutor.Request{Model: "upstream-model", Payload: []byte(`{"model":"upstream-model","messages":[{"role":"user","content":"hi"}]}`)}
+	req := cliproxyexecutor.Request{
+		Model:   "upstream-model",
+		Payload: []byte(`{"model":"upstream-model","messages":[{"role":"user","content":"hi"}]}`),
+	}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Stream: true}
 	result, err := NewOpenAICompatExecutor("compat", &config.Config{}).ExecuteStream(ctx, auth, req, opts)
 	if err != nil {

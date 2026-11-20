@@ -32,25 +32,39 @@ func TestClaudeOpenAIEnabledEffortFinalPayload(t *testing.T) {
 		{"adaptive default", `{"type":"adaptive"}`, `null`, "custom-effort-test", "xhigh"},
 		{"suffix wins", `{"type":"enabled"}`, `"high"`, "custom-effort-test(low)", "low"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			source := []byte(`{"messages":[{"role":"user","content":"hi"}],"thinking":` + testCase.thinking + `,"output_config":{"effort":` + testCase.effort + `}}`)
-			for _, bound := range []bool{false, true} {
-				body, err := convertClaudeRequestToOpenAIChecked(testCase.model, source, false, false)
-				if err != nil {
-					t.Fatal(err)
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				source := []byte(
+					`{"messages":[{"role":"user","content":"hi"}],"thinking":` +
+						testCase.thinking +
+						`,"output_config":{"effort":` +
+						testCase.effort +
+						`}}`,
+				)
+				for _, bound := range []bool{false, true} {
+					body, err := convertClaudeRequestToOpenAIChecked(testCase.model, source, false, false)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var modelInfo *registry.ModelInfo
+					if bound {
+						modelInfo = &registry.ModelInfo{ID: "custom-effort-test", UserDefined: true}
+					}
+					final, err := thinking.ApplyThinkingWithModelInfoAndSummary(
+						body, source, testCase.model, "claude", "openai", "offline-compat", modelInfo,
+						thinking.SummaryConfig{},
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := gjson.GetBytes(final, "reasoning_effort").String(); got != testCase.want {
+						t.Fatalf(
+							"bound=%t final reasoning_effort=%q, want %q; translated=%s final=%s", bound, got,
+							testCase.want, body, final,
+						)
+					}
 				}
-				var modelInfo *registry.ModelInfo
-				if bound {
-					modelInfo = &registry.ModelInfo{ID: "custom-effort-test", UserDefined: true}
-				}
-				final, err := thinking.ApplyThinkingWithModelInfoAndSummary(body, source, testCase.model, "claude", "openai", "offline-compat", modelInfo, thinking.SummaryConfig{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got := gjson.GetBytes(final, "reasoning_effort").String(); got != testCase.want {
-					t.Fatalf("bound=%t final reasoning_effort=%q, want %q; translated=%s final=%s", bound, got, testCase.want, body, final)
-				}
-			}
-		})
+			},
+		)
 	}
 }

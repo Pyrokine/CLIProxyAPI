@@ -27,7 +27,9 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write(
 					[]byte(
-						`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`,
+						(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":` +
+							`1,"output_tokens":2,"total_tokens":` +
+							`3}}`),
 					),
 				)
 			},
@@ -35,11 +37,18 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	)
 	defer server.Close()
 
-	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	executor := NewOpenAICompatExecutor(
+		"openai-compatibility", &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{Name: "compat", SupportPromptCacheKey: true}},
+		},
+	)
 	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
 		Attributes: map[string]string{
-			"base_url": server.URL + "/v1",
-			"api_key":  "test",
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "compat",
+			"provider_key": "compat",
 		},
 	}
 	payload := []byte(`{"model":"gpt-5.1-codex-max","input":[{"role":"user","content":"hi"}]}`)
@@ -65,9 +74,15 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	if gjson.GetBytes(gotBody, "messages").Exists() {
 		t.Fatalf("unexpected messages in body")
 	}
+	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+		t.Fatalf("unexpected prompt_cache_key in responses compact body: %s", gotBody)
+	}
 	if string(
 		resp.Payload,
-	) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
+	) !=
+		(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":` +
+			`1,"output_tokens":2,"total_tokens":` +
+			`3}}`) {
 		t.Fatalf("payload = %s", string(resp.Payload))
 	}
 }
@@ -92,7 +107,8 @@ func TestOpenAICompatExecutorCompactDropsInvalidReasoningEncryptedContent(t *tes
 			"api_key":  "test",
 		},
 	}
-	payload := []byte(`{"model":"gpt-5.1-codex-max","input":[{"type":"reasoning","id":"rs_1","encrypted_content":"not-valid"},{"role":"user","content":"hi"}]}`)
+	payload := []byte((`{"model":"gpt-5.1-codex-max","input":[{"type":"reasoning","id":"rs_1",` +
+		`"encrypted_content":"not-valid"},{"role":"user","content":"hi"}]}`))
 	_, err := executor.Execute(
 		context.Background(), auth, cliproxyexecutor.Request{
 			Model:   "gpt-5.1-codex-max",
@@ -124,6 +140,7 @@ func TestOpenAICompatPromptCacheKeyUsesConfigIndexAndSession(t *testing.T) {
 			"compat_name":  "duplicate",
 			"provider_key": "duplicate",
 			"config_index": "1",
+			"source":       cliproxyauth.AuthSourceConfig,
 		},
 	}
 	req := cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","messages":[]}`)}
@@ -160,7 +177,11 @@ func TestOpenAICompatPromptCacheKeyPreservesExplicitValue(t *testing.T) {
 		},
 	}
 	executor := NewOpenAICompatExecutor("compat", cfg)
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"config_index": "0"}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"config_index": "0", "source": cliproxyauth.AuthSourceConfig,
+		},
+	}
 	req := cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"prompt_cache_key":"client-key"}`)}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")}
 
@@ -199,8 +220,10 @@ func TestOpenAICompatExecutorStreamRejectsPlainJSONAfterBlankLines(t *testing.T)
 	}
 	result, err := executor.ExecuteStream(
 		context.Background(), auth, cliproxyexecutor.Request{
-			Model:   "openrouter-model",
-			Payload: []byte(`{"model":"openrouter-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+			Model: "openrouter-model",
+			Payload: []byte(
+				`{"model":"openrouter-model","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			),
 		}, cliproxyexecutor.Options{
 			SourceFormat: sdktranslator.FromString("openai"),
 			Stream:       true,
@@ -220,7 +243,8 @@ func TestOpenAICompatExecutorStreamRejectsPlainJSONAfterBlankLines(t *testing.T)
 	if gotErr == nil {
 		t.Fatalf("expected plain JSON stream error")
 	}
-	if status, ok := gotErr.(interface{ StatusCode() int }); !ok || status.StatusCode() != http.StatusBadGateway {
+	if status, ok := gotErr.(interface{ StatusCode() int }); !ok ||
+		status.StatusCode() != http.StatusBadGateway {
 		t.Fatalf("stream error status = %v, want %d", gotErr, http.StatusBadGateway)
 	}
 	if !strings.Contains(gotErr.Error(), "upstream failed") {
@@ -234,7 +258,10 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 			func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = w.Write([]byte("\n\n: openrouter processing\n\nevent: ping\nid: 1\nretry: 1000\n"))
-				_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}` + "\n"))
+				_, _ = w.Write(
+					[]byte((`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{` +
+						`"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`) + "\n"),
+				)
 			},
 		),
 	)
@@ -249,8 +276,10 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 	}
 	result, err := executor.ExecuteStream(
 		context.Background(), auth, cliproxyexecutor.Request{
-			Model:   "openrouter-model",
-			Payload: []byte(`{"model":"openrouter-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+			Model: "openrouter-model",
+			Payload: []byte(
+				`{"model":"openrouter-model","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			),
 		}, cliproxyexecutor.Options{
 			SourceFormat: sdktranslator.FromString("openai"),
 			Stream:       true,

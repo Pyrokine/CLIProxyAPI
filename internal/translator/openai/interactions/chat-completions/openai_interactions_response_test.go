@@ -9,18 +9,30 @@ import (
 
 func TestInteractionsFailedEventToOpenAIChatError(t *testing.T) {
 	for _, event := range []string{
-		`{"event_type":"response.failed","error":{"type":"api_error","code":"resource_exhausted","message":"model capacity exhausted"}}`,
-		`{"event_type":"interaction.failed","response":{"error":{"type":"api_error","code":"resource_exhausted","message":"model capacity exhausted"}}}`,
+		`{"event_type":"response.failed","error":{"type":"api_error","code":"re` +
+			`source_exhausted","message":"model capacity exhausted"}}`,
+		`{"event_type":"interaction.failed","response":{"error":{"type":"api_er` +
+			`ror","code":"resource_exhausted","message":"model capacity exhausted"}` +
+			`}}`,
 	} {
 		var state any
-		out := convertInteractionsResponseToOpenAI(context.Background(), "test-model", nil, nil, []byte(event), &state)
+		out := convertInteractionsResponseToOpenAI(
+			context.Background(),
+			"test-model",
+			nil,
+			nil,
+			[]byte(event),
+			&state,
+		)
 		if len(out) != 1 || gjson.GetBytes(out[0], "error.type").String() != "api_error" ||
 			gjson.GetBytes(out[0], "error.message").String() != "model capacity exhausted" ||
 			gjson.GetBytes(out[0], "error.code").String() != "resource_exhausted" {
 			t.Fatalf("failed event = %q, want OpenAI error", out)
 		}
-		completed := convertInteractionsResponseToOpenAI(context.Background(), "test-model", nil, nil,
-			[]byte(`{"event_type":"interaction.completed"}`), &state)
+		completed := convertInteractionsResponseToOpenAI(
+			context.Background(), "test-model", nil, nil,
+			[]byte(`{"event_type":"interaction.completed"}`), &state,
+		)
 		if len(completed) != 0 {
 			t.Fatalf("completed after failure = %q", completed)
 		}
@@ -42,7 +54,11 @@ func TestInteractionsToolCallUsesDenseOpenAIStreamIndex(t *testing.T) {
 		"test-model",
 		nil,
 		nil,
-		[]byte(`{"event_type":"step.start","index":1,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool"}}`),
+		[]byte(
+			`{"event_type":"step.start","index":1,"step":{"type":"function_call",`+
+				`"id":"item-1","call_id":"call-1","name":`+
+				`"tool"}}`,
+		),
 		&state,
 	)
 	if len(start) != 1 {
@@ -69,23 +85,15 @@ func TestInteractionsToolCallUsesDenseOpenAIStreamIndex(t *testing.T) {
 }
 
 func TestOpenAIChatRequestPreservesContextAndAntigravityToolIdentity(t *testing.T) {
-	body := []byte(`{
-		"model":"antigravity-model",
-		"previous_response_id":"response-prev",
-		"environment":{"id":"environment-1"},
-		"agent_config":{"max_total_tokens":321,"mode":"careful"},
-		"max_completion_tokens":999,
-		"tool_choice":{"type":"function","function":{"name":"read_file"}},
-		"tools":[
-			{"type":"function","function":{"name":"read_file"}},
-			{"type":"function","function":{"name":"external_read_file"}},
-			{"type":"function","function":{"name":"external_lookup"}}
-		],
-		"messages":[
-			{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},
-			{"role":"tool","tool_call_id":"call-1","name":"external_read_file","content":"ok"}
-		]
-	}`)
+	body := []byte(("{\n\t\t\"model\":\"antigravity-model\",\n\t\t\"previous_response_id\":\"response-prev\"," +
+		"\n\t\t\"environment\":{\"id\":\"environment-1\"},\n\t\t\"agent_config\":{\"max_total_tokens\":321,\"" +
+		"mode\":\"careful\"},\n\t\t\"max_completion_tokens\":999,\n\t\t\"tool_choice\":{\"type\":\"function\"" +
+		",\"function\":{\"name\":\"read_file\"}},\n\t\t\"tools\":[\n\t\t\t{\"type\":\"function\",\"function\"" +
+		":{\"name\":\"read_file\"}},\n\t\t\t{\"type\":\"function\",\"function\":{\"name\":\"" +
+		"external_read_file\"}},\n\t\t\t{\"type\":\"function\",\"function\":{\"name\":\"external_lookup\"}}\n" +
+		"\t\t],\n\t\t\"messages\":[\n\t\t\t{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call-1\",\"" +
+		"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]},\n\t\t\t{\"role\":" +
+		"\"tool\",\"tool_call_id\":\"call-1\",\"name\":\"external_read_file\",\"content\":\"ok\"}\n\t\t]\n\t}"))
 	out := convertOpenAIRequestToInteractions("", body, false)
 	checks := map[string]string{
 		"previous_interaction_id":                     "response-prev",
@@ -118,7 +126,9 @@ func TestOpenAIChatRequestPreservesContextAndAntigravityToolIdentity(t *testing.
 
 	standard := convertOpenAIRequestToInteractions(
 		"standard-model",
-		[]byte(`{"max_completion_tokens":777,"temperature":0.4,"messages":[{"role":"user","content":"hello"}]}`),
+		[]byte(
+			`{"max_completion_tokens":777,"temperature":0.4,"messages":[{"role":"user","content":"hello"}]}`,
+		),
 		false,
 	)
 	if got := gjson.GetBytes(standard, "generation_config.max_output_tokens").Int(); got != 777 {
@@ -133,22 +143,15 @@ func TestOpenAIChatRequestPreservesContextAndAntigravityToolIdentity(t *testing.
 }
 
 func TestInteractionsRequestRestoresChatContextAndAntigravityToolIdentity(t *testing.T) {
-	body := []byte(`{
-		"model":"antigravity-model",
-		"previous_interaction_id":"interaction-prev",
-		"environment":{"id":"environment-2"},
-		"agent_config":{"max_total_tokens":654,"mode":"careful"},
-		"generation_config":{"tool_choice":{"type":"function","name":"external_external_read_file"}},
-		"tools":[
-			{"type":"function","name":"external_read_file"},
-			{"type":"function","name":"external_external_read_file"},
-			{"type":"function","name":"external_lookup"}
-		],
-		"input":[
-			{"type":"function_call","id":"item-1","call_id":"call-1","name":"external_external_read_file","arguments":{}},
-			{"type":"function_result","call_id":"call-1","name":"external_external_read_file","result":"ok"}
-		]
-	}`)
+	body := []byte(("{\n\t\t\"model\":\"antigravity-model\",\n\t\t\"previous_interaction_id\":\"interaction-" +
+		"prev\",\n\t\t\"environment\":{\"id\":\"environment-2\"},\n\t\t\"agent_config\":{\"max_total_tokens\"" +
+		":654,\"mode\":\"careful\"},\n\t\t\"generation_config\":{\"tool_choice\":{\"type\":\"function\",\"" +
+		"name\":\"external_external_read_file\"}},\n\t\t\"tools\":[\n\t\t\t{\"type\":\"function\",\"name\":\"" +
+		"external_read_file\"},\n\t\t\t{\"type\":\"function\",\"name\":\"external_external_read_file\"},\n\t" +
+		"\t\t{\"type\":\"function\",\"name\":\"external_lookup\"}\n\t\t],\n\t\t\"input\":[\n\t\t\t{\"type\":" +
+		"\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"external_external_read_file\"," +
+		"\"arguments\":{}},\n\t\t\t{\"type\":\"function_result\",\"call_id\":\"call-1\",\"name\":\"" +
+		"external_external_read_file\",\"result\":\"ok\"}\n\t\t]\n\t}"))
 	out := convertInteractionsRequestToOpenAI("", body, false)
 	checks := map[string]string{
 		"previous_response_id":                  "interaction-prev",
@@ -177,7 +180,9 @@ func TestChatResponseRestoresAntigravityToolIdentity(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`{"id":"chat-1","choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"external_read_file","arguments":"{}"}}]}}]}`),
+		[]byte(`{"id":"chat-1","choices":[{"message":{"role":"assistant","tool_calls":`+
+			`[{"id":"call-1","type":"function","function":{"name":"external_read_fi`+
+			`le","arguments":"{}"}}]}}]}`),
 		nil,
 	)
 	if got := gjson.GetBytes(interactions, "steps.0.name").String(); got != "external_external_read_file" {
@@ -189,10 +194,14 @@ func TestChatResponseRestoresAntigravityToolIdentity(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`{"interaction":{"id":"interaction-1","model":"antigravity-model","environment":{"id":"environment-response"},"steps":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"external_external_read_file","arguments":{}}]}}`),
+		[]byte((`{"interaction":{"id":"interaction-1","model":"antigravity-model","environment":{"id":"` +
+			`environment-response"},"steps":[{"type":"function_call","id":"item-1","call_id":"call-1","name":` +
+			`"external_external_read_file","arguments":{}}]}}`)),
 		nil,
 	)
-	if got := gjson.GetBytes(chat, "choices.0.message.tool_calls.0.function.name").String(); got != "external_read_file" {
+	if got := gjson.GetBytes(
+		chat, "choices.0.message.tool_calls.0.function.name",
+	).String(); got != "external_read_file" {
 		t.Fatalf("non-stream chat tool name = %q; chat=%s", got, chat)
 	}
 	if got := gjson.GetBytes(chat, "environment_id").String(); got != "environment-response" {
@@ -207,7 +216,9 @@ func TestChatStreamRestoresAntigravityToolIdentityAndEnvironment(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`{"id":"chat-1","model":"antigravity-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"external_read_file","arguments":""}}]}}]}`),
+		[]byte((`{"id":"chat-1","model":"antigravity-model","choices":[{"index":0,"delta":{"tool_calls":[{"` +
+			`index":0,"id":"call-1","type":"function","function":{"name":"external_read_file","arguments":""}` +
+			`}]}}]}`)),
 		&openAIState,
 	)
 	var functionStart gjson.Result
@@ -227,7 +238,9 @@ func TestChatStreamRestoresAntigravityToolIdentityAndEnvironment(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`{"event_type":"interaction.created","interaction":{"id":"interaction-1","model":"antigravity-model","environment":{"id":"environment-stream"}}}`),
+		[]byte(`{"event_type":"interaction.created","interaction":{"id":"interaction-1`+
+			`","model":"antigravity-model","environment":{"id":"environment-stream"`+
+			`}}}`),
 		&interactionsState,
 	)
 	chatChunks := convertInteractionsResponseToOpenAI(
@@ -235,13 +248,16 @@ func TestChatStreamRestoresAntigravityToolIdentityAndEnvironment(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"external_external_read_file"}}`),
+		[]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","i`+
+			`d":"item-1","call_id":"call-1","name":"external_external_read_file"}}`),
 		&interactionsState,
 	)
 	if len(chatChunks) != 1 {
 		t.Fatalf("stream chat chunks = %d, want 1", len(chatChunks))
 	}
-	if got := gjson.GetBytes(chatChunks[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "external_read_file" {
+	if got := gjson.GetBytes(
+		chatChunks[0], "choices.0.delta.tool_calls.0.function.name",
+	).String(); got != "external_read_file" {
 		t.Fatalf("stream chat tool name = %q; chunk=%s", got, chatChunks[0])
 	}
 	if got := gjson.GetBytes(chatChunks[0], "environment_id").String(); got != "environment-stream" {
@@ -253,7 +269,9 @@ func TestChatStreamRestoresAntigravityToolIdentityAndEnvironment(t *testing.T) {
 		"antigravity-model",
 		nil,
 		nil,
-		[]byte(`{"event_type":"interaction.completed","interaction":{"id":"interaction-1","model":"antigravity-model"}}`),
+		[]byte(
+			`{"event_type":"interaction.completed","interaction":{"id":"interaction-1","model":"antigravity-model"}}`,
+		),
 		&interactionsState,
 	)
 	if len(terminal) != 1 {

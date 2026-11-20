@@ -42,7 +42,9 @@ func TestCPA09ClaudeRequestKeepsToolAdjacencyAcrossSystemReminder(t *testing.T) 
 	if got := messages[2].Get("tool_call_id").String(); got != "call_2" {
 		t.Fatalf("second tool result id = %q, want call_2", got)
 	}
-	if got := messages[3].Get("content.0.text").String(); got != "<system-reminder>\ncontext update\n</system-reminder>" {
+	if got := messages[3].Get("content.0.text").String(); got !=
+		("<system-reminder>\ncontext update\n</" +
+			"system-reminder>") {
 		t.Fatalf("system reminder = %q", got)
 	}
 	if got := messages[4].Get("content.1.type").String(); got != "image_url" {
@@ -76,10 +78,11 @@ func TestCPA09ClaudeRequestUsesArrayStopAndNormalizesMissingSchema(t *testing.T)
 func TestCPA09ClaudeRequestRemovesUnsupportedUnicodePatterns(t *testing.T) {
 	out := convertClaudeRequestToOpenAIDefault(
 		"openai-test",
-		[]byte(`{
-			"messages":[{"role":"user","content":"hello"}],
-			"tools":[{"name":"work","input_schema":{"type":"object","properties":{"bad":{"type":"string","pattern":"\\p{L}+"},"good":{"type":"string","pattern":"^[a-z]+$"}},"patternProperties":{"^\\p{N}+$":{"type":"string"},"^[a-z]+$":{"type":"string"}}}}]
-		}`),
+		[]byte(("{\n\t\t\t\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\n\t\t\t\"tools\":[{\"" +
+			"name\":\"work\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"bad\":{\"type\":\"" +
+			"string\",\"pattern\":\"\\\\p{L}+\"},\"good\":{\"type\":\"string\",\"pattern\":\"^[a-z]+$\"}},\"" +
+			"patternProperties\":{\"^\\\\p{N}+$\":{\"type\":\"string\"},\"^[a-z]+$\":{\"type\":\"string\"}}}}" +
+			"]\n\t\t}")),
 		false,
 	)
 	schema := gjson.GetBytes(out, "tools.0.function.parameters")

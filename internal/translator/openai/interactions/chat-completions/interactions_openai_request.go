@@ -258,7 +258,9 @@ func copyInteractionsOpenAITopLevel(out []byte, root gjson.Result) []byte {
 	); previousInteractionID != "" {
 		out, _ = sjson.SetBytes(out, "previous_response_id", previousInteractionID)
 	}
-	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
+	if environmentID := firstNonEmpty(
+		root.Get("environment_id").String(), root.Get("environment.id").String(),
+	); environmentID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
 	}
 	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
@@ -272,7 +274,7 @@ func copyInteractionsOpenAITopLevel(out []byte, root gjson.Result) []byte {
 	return out
 }
 
-func interactionsContentPartToOpenAI(part gjson.Result, role string) ([]byte, bool) {
+func interactionsContentPartToOpenAI(part gjson.Result, _ string) ([]byte, bool) {
 	partType := part.Get("type").String()
 	if partType == "" && part.Get("text").Exists() {
 		partType = "text"
@@ -310,7 +312,7 @@ func interactionsContentPartToOpenAI(part gjson.Result, role string) ([]byte, bo
 		}
 		return out, true
 	default:
-		_ = role
+
 	}
 	return nil, false
 }

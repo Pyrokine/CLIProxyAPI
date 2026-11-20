@@ -108,6 +108,7 @@ func (e *OpenAICompatExecutor) Execute(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -150,12 +151,12 @@ func (e *OpenAICompatExecutor) Execute(
 	}
 	if opts.Alt != "responses/compact" {
 		translated, err = helps.NormalizeOpenAIMaxTokens(
-			translated, helps.ShouldUseMaxCompletionTokensForModel(e.resolveCompatConfig(auth, req), baseModel, requestedModel),
+			translated,
+			helps.ShouldUseMaxCompletionTokensForModel(e.resolveCompatConfig(auth, req), baseModel, requestedModel),
 		)
 		if err != nil {
 			return resp, err
 		}
-		translated = e.applyPromptCacheKey(auth, from, baseModel, req, opts, translated, ctx)
 	}
 
 	translated, err = helps.ApplyThinkingWithSourcePayload(
@@ -168,10 +169,19 @@ func (e *OpenAICompatExecutor) Execute(
 		translated = helps.SetBoolIfDifferent(translated, "stream", true)
 		translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
 	}
-	translated = applyPayloadConfigWithRequest(
+	translated, cacheFields := applyPayloadConfigWithRequestTracked(
 		e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated,
-		requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier(),
+		requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier(), "prompt_cache_key",
 	)
+
+	if err := bindFinalModelContext(&req, auth, opts, gjson.GetBytes(translated, "model").String()); err != nil {
+		return resp, err
+	}
+	if opts.Alt != "responses/compact" && !cacheFields["prompt_cache_key"] {
+		translated = e.applyPromptCacheKey(
+			auth, from, gjson.GetBytes(translated, "model").String(), req, opts, translated, ctx,
+		)
+	}
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -214,7 +224,7 @@ func (e *OpenAICompatExecutor) Execute(
 	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return resp, err
 	}
 	defer func() {
@@ -222,7 +232,7 @@ func (e *OpenAICompatExecutor) Execute(
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -230,7 +240,7 @@ func (e *OpenAICompatExecutor) Execute(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
 			summarizeErrorBody(httpResp.Header.Get("Content-Type"), b),
 		)
-		err = newUpstreamStatusErr(httpResp.StatusCode, b, httpResp.Header)
+		err = openAICompatStatusError(httpResp.StatusCode, b, httpResp.Header)
 		return resp, err
 	}
 	var body []byte
@@ -255,10 +265,17 @@ func (e *OpenAICompatExecutor) Execute(
 	reporter.observeResponseModel(body)
 	// 将响应转换为调用方指定的格式
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), req.Model, opts.OriginalRequest, translated, body, &param)
+	out := sdktranslator.TranslateNonStream(
+		ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), req.Model, opts.OriginalRequest, translated, body,
+		&param,
+	)
 	if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil || len(out) == 0 {
 		if errTranslate == nil {
-			errTranslate = markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload"})
+			errTranslate = markResponseStarted(
+				statusErr{
+					code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload",
+				},
+			)
 		}
 		recordAPIResponseError(ctx, e.cfg, errTranslate)
 		reporter.publishFailureWithDetail(ctx, parseOpenAIUsage(body), errTranslate)
@@ -290,6 +307,7 @@ func (e *OpenAICompatExecutor) executeImages(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -305,12 +323,17 @@ func (e *OpenAICompatExecutor) executeImages(
 			if !json.Valid(original) {
 				original = payload
 			}
-			return applyPayloadConfigWithRequest(
+			payload = applyPayloadConfigWithRequest(
 				e.cfg, baseModel, "openai", opts.SourceFormat.String(), "", payload, original,
 				payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
 			)
+			err = bindFinalModelContext(&req, auth, opts, gjson.GetBytes(payload, "model").String())
+			return payload
 		},
 	)
+	if err != nil {
+		return resp, err
+	}
 	if errPrepare != nil {
 		err = errPrepare
 		return resp, err
@@ -342,7 +365,7 @@ func (e *OpenAICompatExecutor) executeImages(
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return resp, err
 	}
 	defer func() {
@@ -350,7 +373,7 @@ func (e *OpenAICompatExecutor) executeImages(
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 
 	body, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if errRead != nil {
@@ -365,7 +388,7 @@ func (e *OpenAICompatExecutor) executeImages(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
 			summarizeErrorBody(httpResp.Header.Get("Content-Type"), body),
 		)
-		err = newUpstreamStatusErr(httpResp.StatusCode, body, httpResp.Header)
+		err = openAICompatStatusError(httpResp.StatusCode, body, httpResp.Header)
 		return resp, err
 	}
 
@@ -391,6 +414,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -429,12 +453,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
 	translated, err = helps.NormalizeOpenAIMaxTokens(
-		translated, helps.ShouldUseMaxCompletionTokensForModel(e.resolveCompatConfig(auth, req), baseModel, requestedModel),
+		translated,
+		helps.ShouldUseMaxCompletionTokensForModel(e.resolveCompatConfig(auth, req), baseModel, requestedModel),
 	)
 	if err != nil {
 		return nil, err
 	}
-	translated = e.applyPromptCacheKey(auth, from, baseModel, req, opts, translated, ctx)
 
 	translated, err = helps.ApplyThinkingWithSourcePayload(
 		translated, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
@@ -442,10 +466,19 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	if err != nil {
 		return nil, err
 	}
-	translated = applyPayloadConfigWithRequest(
+	translated, cacheFields := applyPayloadConfigWithRequestTracked(
 		e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated,
-		requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier(),
+		requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier(), "prompt_cache_key",
 	)
+
+	if err := bindFinalModelContext(&req, auth, opts, gjson.GetBytes(translated, "model").String()); err != nil {
+		return nil, err
+	}
+	if opts.Alt != "responses/compact" && !cacheFields["prompt_cache_key"] {
+		translated = e.applyPromptCacheKey(
+			auth, from, gjson.GetBytes(translated, "model").String(), req, opts, translated, ctx,
+		)
+	}
 
 	reporter.setTranslatedReasoningEffort(translated, to.String())
 
@@ -473,10 +506,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	httpClient := reporter.trackHTTPClient(newProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return nil, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -487,7 +520,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-		err = newUpstreamStatusErr(httpResp.StatusCode, b, httpResp.Header)
+		err = openAICompatStatusError(httpResp.StatusCode, b, httpResp.Header)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -510,6 +543,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		scanner.Split(scanSSEFrame)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		inputTokensHandled := from != sdktranslator.FormatClaude || responseFormat != sdktranslator.FormatClaude
 		sourceDone := false
 		publishStreamError := func(streamErr error) {
 			recordAPIResponseError(ctx, e.cfg, streamErr)
@@ -523,6 +557,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 			chunks := sdktranslator.TranslateStream(
 				ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, data, &param,
 			)
+			chunks = estimateClaudeStreamInputTokens(ctx, chunks, opts.OriginalRequest, &inputTokensHandled)
 			if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil {
 				publishStreamError(errTranslate)
 				return false
@@ -537,7 +572,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 					return false
 				}
 				if responseFormat == sdktranslator.FormatOpenAIResponse {
-					for _, line := range bytes.Split(chunk, []byte("\n")) {
+					for line := range bytes.SplitSeq(chunk, []byte("\n")) {
 						switch gjson.GetBytes(jsonPayload(line), "type").String() {
 						case "response.completed", "response.incomplete":
 							terminalDelivered = true
@@ -550,9 +585,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		for scanner.Scan() {
 			frame := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, frame)
-			data, hasData, _ := sseDataPayload(frame)
+			data, hasData, valid := sseDataPayload(frame)
 			if !hasData {
-				for _, line := range bytes.Split(frame, []byte("\n")) {
+				for line := range bytes.SplitSeq(frame, []byte("\n")) {
 					trimmed := bytes.TrimSpace(line)
 					if bytes.HasPrefix(trimmed, []byte("{")) || bytes.HasPrefix(trimmed, []byte("[")) {
 						publishStreamError(statusErr{code: http.StatusBadGateway, msg: string(trimmed)})
@@ -564,6 +599,47 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 			if len(data) == 0 {
 				continue
 			}
+			if !valid {
+				message := "invalid upstream SSE JSON payload"
+				if bytes.HasSuffix(bytes.TrimSpace(data), []byte("[DONE]")) {
+					message = "incomplete data before [DONE]"
+				} else {
+					var incomplete json.RawMessage
+					if decodeErr := json.NewDecoder(bytes.NewReader(data)).Decode(&incomplete); errors.Is(
+						decodeErr, io.ErrUnexpectedEOF,
+					) {
+						message = "incomplete SSE data frame"
+					}
+				}
+				publishStreamError(statusErr{code: http.StatusBadGateway, msg: message})
+				return
+			}
+			errorEvent := false
+			for line := range bytes.SplitSeq(frame, []byte("\n")) {
+				line = bytes.TrimSpace(line)
+				if bytes.HasPrefix(line, []byte("event:")) && bytes.Equal(
+					bytes.TrimSpace(line[len("event:"):]), []byte("error"),
+				) {
+					errorEvent = true
+				}
+			}
+			root := gjson.ParseBytes(data)
+			switch root.Get("type").String() {
+			case "error", "response.error", "response.failed":
+				errorEvent = true
+			}
+			if errorEvent && bytes.Equal(data, []byte("[DONE]")) {
+				publishStreamError(
+					statusErr{
+						code: http.StatusBadGateway, msg: "upstream error event ended before [DONE]",
+					},
+				)
+				return
+			}
+			if node := root.Get("error"); errorEvent || (node.Exists() && node.Type != gjson.Null) {
+				publishStreamError(openAICompatStatusError(http.StatusBadGateway, data, httpResp.Header))
+				return
+			}
 			observeResponseTokenEvent(ctx, data)
 			reporter.observeResponseModel(data)
 			streamUsage.observeOpenAIStream(data)
@@ -572,6 +648,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 			}
 			if !sendTranslated(encodeSSEDataFrame(data)) {
 				return
+			}
+			if sourceDone {
+				if responseFormat != sdktranslator.FormatOpenAIResponse {
+					terminalDelivered = true
+				}
+				break
 			}
 		}
 		if errScan := markResponseStarted(scanner.Err()); errScan != nil && !terminalDelivered {
@@ -586,14 +668,19 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 			return
 		}
 		if !sourceDone && ctx.Err() == nil {
-			if state, ok := param.(interface{ CanFinalizeResponseStream() bool }); ok && state.CanFinalizeResponseStream() {
+			if state, ok := param.(interface{ CanFinalizeResponseStream() bool }); ok &&
+				state.CanFinalizeResponseStream() {
 				if !sendTranslated([]byte("data: [DONE]")) {
 					return
 				}
 			}
 		}
 		if !terminalDelivered {
-			publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before a completed response"})
+			publishStreamError(
+				statusErr{
+					code: http.StatusBadGateway, msg: "upstream stream closed before a completed response",
+				},
+			)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -643,6 +730,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -658,12 +746,17 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 			if !json.Valid(original) {
 				original = payload
 			}
-			return applyPayloadConfigWithRequest(
+			payload = applyPayloadConfigWithRequest(
 				e.cfg, baseModel, "openai", opts.SourceFormat.String(), "", payload, original,
 				payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
 			)
+			err = bindFinalModelContext(&req, auth, opts, gjson.GetBytes(payload, "model").String())
+			return payload
 		},
 	)
+	if err != nil {
+		return nil, err
+	}
 	if errPrepare != nil {
 		err = errPrepare
 		return nil, err
@@ -697,10 +790,10 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return nil, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		body, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
@@ -717,7 +810,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
 			summarizeErrorBody(httpResp.Header.Get("Content-Type"), body),
 		)
-		return nil, newUpstreamStatusErr(httpResp.StatusCode, body, httpResp.Header)
+		return nil, openAICompatStatusError(httpResp.StatusCode, body, httpResp.Header)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -735,11 +828,6 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 		buffer := make([]byte, 32*1024)
 		for {
 			n, errRead := httpResp.Body.Read(buffer)
-			if errRead != nil && errRead != io.EOF {
-				errRead = markResponseStarted(errRead)
-				recordAPIResponseError(ctx, e.cfg, errRead)
-				reporter.publishFailure(ctx, errRead)
-			}
 			if n > 0 {
 				chunk := bytes.Clone(buffer[:n])
 				appendAPIResponseChunk(ctx, e.cfg, chunk)
@@ -750,6 +838,10 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 			}
 			if errRead != nil {
 				if errRead != io.EOF {
+					errRead = markResponseStarted(errRead)
+					streamUsage.flushOpenAIStream()
+					recordAPIResponseError(ctx, e.cfg, errRead)
+					reporter.publishFailureWithDetail(ctx, streamUsage.detail, errRead)
 					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errRead})
 				}
 				return
@@ -761,7 +853,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 
 func (e *OpenAICompatExecutor) CountTokens(
 	ctx context.Context,
-	_ *cliproxyauth.Auth,
+	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
@@ -771,7 +863,8 @@ func (e *OpenAICompatExecutor) CountTokens(
 	to := sdktranslator.FromString("openai")
 	originalPayloadSource := originalRequestPayload(req, opts)
 	originalTranslated, translated, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
-		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayloadSource, req.Payload, false, helps.APIKeyModelIsCompat(req), &req,
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayloadSource, req.Payload, false,
+		helps.APIKeyModelIsCompat(req), &req,
 	)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -791,6 +884,10 @@ func (e *OpenAICompatExecutor) CountTokens(
 		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
 	)
 
+	if err := bindFinalModelContext(&req, auth, opts, gjson.GetBytes(translated, "model").String()); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+
 	enc, err := tokenizerForModel(modelForCounting)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("openai compat executor: tokenizer init failed: %w", err)
@@ -802,7 +899,9 @@ func (e *OpenAICompatExecutor) CountTokens(
 	}
 
 	usageJSON := buildOpenAIUsageJSON(count)
-	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, usageJSON)
+	translatedUsage := sdktranslator.TranslateTokenCount(
+		ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, usageJSON,
+	)
 	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
 }
 
@@ -850,7 +949,13 @@ func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {
 	return openAICompatDefaultImageEndpoint
 }
 
-func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType string, stream bool, configure ...func([]byte) []byte) (
+func prepareOpenAICompatImagesPayload(
+	payload []byte,
+	model string,
+	contentType string,
+	stream bool,
+	configure ...func([]byte) []byte,
+) (
 	[]byte,
 	string,
 	error,
@@ -891,7 +996,13 @@ func cloneOpenAICompatMIMEHeader(src textproto.MIMEHeader) textproto.MIMEHeader 
 	return dst
 }
 
-func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, boundary string, stream bool, configure ...func([]byte) []byte) (
+func rewriteOpenAICompatImagesMultipartPayload(
+	payload []byte,
+	model string,
+	boundary string,
+	stream bool,
+	configure ...func([]byte) []byte,
+) (
 	out []byte,
 	contentType string,
 	err error,
@@ -940,16 +1051,18 @@ func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, bou
 			return nil, "", fmt.Errorf("configured multipart fields must be a JSON object")
 		}
 		form.Value = make(map[string][]string)
-		gjson.ParseBytes(configured).ForEach(func(key, value gjson.Result) bool {
-			if value.IsArray() {
-				for _, item := range value.Array() {
-					form.Value[key.String()] = append(form.Value[key.String()], item.String())
+		gjson.ParseBytes(configured).ForEach(
+			func(key, value gjson.Result) bool {
+				if value.IsArray() {
+					for _, item := range value.Array() {
+						form.Value[key.String()] = append(form.Value[key.String()], item.String())
+					}
+				} else {
+					form.Value[key.String()] = []string{value.String()}
 				}
-			} else {
-				form.Value[key.String()] = []string{value.String()}
-			}
-			return true
-		})
+				return true
+			},
+		)
 	}
 	for key, values := range form.Value {
 		for _, value := range values {
@@ -1116,7 +1229,7 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(
 			Models:                options.Models,
 		}
 	}
-	if auth.Attributes != nil {
+	if auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig && auth.Attributes != nil {
 		if rawIndex := strings.TrimSpace(auth.Attributes["config_index"]); rawIndex != "" {
 			configIndex, errIndex := strconv.Atoi(rawIndex)
 			if errIndex == nil && configIndex >= 0 && configIndex < len(e.cfg.OpenAICompatibility) {
@@ -1154,6 +1267,23 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(
 	return nil
 }
 
+func openAICompatStatusError(status int, body []byte, headers http.Header) statusErr {
+	err := newUpstreamStatusErr(status, body, headers)
+	if status != http.StatusTooManyRequests || err.retryAfter != nil {
+		return err
+	}
+	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	if strings.Contains(code, "tpmratelimitexceeded") ||
+		strings.Contains(message, "tokens per minute") && strings.Contains(
+			message, "limit",
+		) && strings.Contains(message, "exceeded") {
+		delay := time.Minute
+		err.retryAfter = &delay
+	}
+	return err
+}
+
 type statusErr struct {
 	code           int
 	msg            string
@@ -1164,7 +1294,10 @@ type statusErr struct {
 	dispatchPhase  cliproxyexecutor.DispatchPhase
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e statusErr) DirectResponse() bool { return e.directResponse }
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e statusErr) ResponseBody() []byte {
 	if !e.directResponse {
 		return nil
@@ -1178,6 +1311,8 @@ func (e statusErr) Error() string {
 	}
 	return fmt.Sprintf("status %d", e.code)
 }
-func (e statusErr) StatusCode() int            { return e.code }
+func (e statusErr) StatusCode() int { return e.code }
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 func (e statusErr) IsRequestScoped() bool      { return e.requestScoped }

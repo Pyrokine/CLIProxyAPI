@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +22,8 @@ type openAIToInteractionsStreamState struct {
 	CurrentStepID   string
 	ToolCallIDs     map[int]string
 	ToolCallNames   map[int]string
+	ToolStepIndexes map[int]int
+	ToolStepsOpen   map[int]bool
 	ID              string
 	StepIndex       int
 	ActiveStepIndex int
@@ -29,14 +32,11 @@ type openAIToInteractionsStreamState struct {
 }
 
 func convertOpenAIResponseToInteractions(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_, _, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	_ = ctx
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
 	if param == nil {
 		var local any
 		param = &local
@@ -55,14 +55,11 @@ func convertOpenAIResponseToInteractions(
 }
 
 func convertOpenAIResponseToInteractionsNonStream(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_, _, rawJSON []byte,
 	_ *any,
 ) []byte {
-	_ = ctx
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
 	out := []byte(`{"id":"","status":"completed","object":"interaction","model":"","steps":[]}`)
 	out, _ = sjson.SetBytes(
@@ -79,7 +76,11 @@ func convertOpenAIResponseToInteractionsNonStream(
 				}
 			}
 			if content := message.Get("content"); content.Exists() && content.String() != "" {
-				out, _ = sjson.SetRawBytes(out, "steps.-1", interactionsTextStep("model_output", content.String()))
+				out, _ = sjson.SetRawBytes(
+					out,
+					"steps.-1",
+					interactionsTextStep("model_output", content.String()),
+				)
 			}
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 				toolCalls.ForEach(
@@ -106,6 +107,9 @@ func convertOpenAIChatStreamToInteractions(
 	rawJSON []byte,
 	st *openAIToInteractionsStreamState,
 ) [][]byte {
+	if st.Done {
+		return nil
+	}
 	payload := openAIChatSSEPayload(rawJSON)
 	if len(payload) == 0 {
 		return nil
@@ -117,6 +121,9 @@ func convertOpenAIChatStreamToInteractions(
 			out = appendInteractionsCompleted(out, st, modelName, gjson.Result{})
 		}
 		return appendInteractionsDone(out, st)
+	}
+	if st.Completed {
+		return nil
 	}
 	root := gjson.ParseBytes(payload)
 	if !root.Exists() {
@@ -155,8 +162,10 @@ func convertOpenAIChatStreamToInteractions(
 						},
 					)
 				}
-				if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+				if finishReason := choice.Get("finish_reason"); finishReason.Type == gjson.String &&
+					finishReason.String() != "" {
 					out = appendInteractionsStepStop(out, st)
+					out = appendInteractionsToolStops(out, st)
 				}
 				return true
 			},
@@ -184,16 +193,46 @@ func appendOpenAIToolCallDelta(
 	}
 	stepID := firstNonEmpty(st.ToolCallIDs[index], fmt.Sprintf("call_%d", index))
 	stepName := st.ToolCallNames[index]
-	if st.CurrentStepType != "function_call" || st.CurrentStepID != stepID {
+	if st.ToolStepIndexes == nil {
+		st.ToolStepIndexes = make(map[int]int)
+		st.ToolStepsOpen = make(map[int]bool)
+	}
+	stepIndex, exists := st.ToolStepIndexes[index]
+	if !exists {
 		out = appendInteractionsStepStop(out, st)
 		step := []byte(`{"type":"function_call","id":"","name":"","arguments":{}}`)
 		step, _ = sjson.SetBytes(step, "id", stepID)
 		step, _ = sjson.SetBytes(step, "name", stepName)
 		out = appendInteractionsCreated(out, st, modelName, root)
 		out = appendInteractionsStepStart(out, st, "function_call", gjson.ParseBytes(step))
+		stepIndex = st.ActiveStepIndex
+		st.ToolStepIndexes[index] = stepIndex
+		st.ToolStepsOpen[stepIndex] = true
+		st.ActiveStepOpen = false
+		st.CurrentStepType = ""
+		st.CurrentStepID = ""
 	}
 	if args := function.Get("arguments"); args.Exists() && args.String() != "" {
+		previous := st.ActiveStepIndex
+		st.ActiveStepIndex = stepIndex
 		out = appendInteractionsArgumentsDelta(out, st, args.String())
+		st.ActiveStepIndex = previous
+	}
+	return out
+}
+
+func appendInteractionsToolStops(out [][]byte, st *openAIToInteractionsStreamState) [][]byte {
+	indexes := make([]int, 0, len(st.ToolStepsOpen))
+	for index, open := range st.ToolStepsOpen {
+		if open {
+			indexes = append(indexes, index)
+		}
+	}
+	slices.Sort(indexes)
+	for _, index := range indexes {
+		payload, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop"}`), "index", index)
+		out = append(out, translatorcommon.SSEEventData("step.stop", payload))
+		st.ToolStepsOpen[index] = false
 	}
 	return out
 }
@@ -208,9 +247,17 @@ func appendInteractionsCreated(
 		return out
 	}
 	st.ID = firstNonEmpty(root.Get("id").String(), st.ID, fmt.Sprintf("interaction_%d", time.Now().UnixNano()))
-	created := []byte(`{"interaction":{"id":"","status":"in_progress","object":"interaction","model":""},"event_type":"interaction.created"}`)
+	created := []byte(
+		(`{"interaction":{"id":"","status":"in_progress","object":"interaction",` +
+			`"model":""},"event_type":` +
+			`"interaction.created"}`),
+	)
 	created, _ = sjson.SetBytes(created, "interaction.id", st.ID)
-	created, _ = sjson.SetBytes(created, "interaction.model", firstNonEmpty(modelName, root.Get("model").String()))
+	created, _ = sjson.SetBytes(
+		created,
+		"interaction.model",
+		firstNonEmpty(modelName, root.Get("model").String()),
+	)
 	out = append(out, translatorcommon.SSEEventData("interaction.created", created))
 	st.Created = true
 	return appendInteractionsStatusUpdate(out, st)
@@ -220,7 +267,9 @@ func appendInteractionsStatusUpdate(out [][]byte, st *openAIToInteractionsStream
 	if st.StatusUpdated {
 		return out
 	}
-	statusUpdate := []byte(`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`)
+	statusUpdate := []byte(
+		`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`,
+	)
 	statusUpdate, _ = sjson.SetBytes(statusUpdate, "interaction_id", st.ID)
 	out = append(out, translatorcommon.SSEEventData("interaction.status_update", statusUpdate))
 	st.StatusUpdated = true
@@ -276,7 +325,11 @@ func appendInteractionsTextDelta(
 	thought bool,
 ) [][]byte {
 	if thought {
-		payload := []byte(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`)
+		payload := []byte(
+			(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":` +
+				`"thought_summary"},"event_type":` +
+				`"step.delta"}`),
+		)
 		payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
 		payload, _ = sjson.SetBytes(payload, "delta.content.text", text)
 		return append(out, translatorcommon.SSEEventData("step.delta", payload))
@@ -287,7 +340,11 @@ func appendInteractionsTextDelta(
 	return append(out, translatorcommon.SSEEventData("step.delta", payload))
 }
 
-func appendInteractionsArgumentsDelta(out [][]byte, st *openAIToInteractionsStreamState, arguments string) [][]byte {
+func appendInteractionsArgumentsDelta(
+	out [][]byte,
+	st *openAIToInteractionsStreamState,
+	arguments string,
+) [][]byte {
 	payload := []byte(`{"index":0,"delta":{"arguments":"","type":"arguments_delta"},"event_type":"step.delta"}`)
 	payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
 	payload, _ = sjson.SetBytes(payload, "delta.arguments", arguments)
@@ -316,15 +373,23 @@ func appendInteractionsCompleted(
 	if st.Completed {
 		return out
 	}
+	out = appendInteractionsStepStop(out, st)
+	out = appendInteractionsToolStops(out, st)
 	if !st.Created {
 		out = appendInteractionsCreated(out, st, modelName, root)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	payload := []byte(`{"interaction":{"id":"","status":"completed","usage":{},"created":"","updated":"","service_tier":"standard","object":"interaction","model":""},"event_type":"interaction.completed"}`)
+	payload := []byte((`{"interaction":{"id":"","status":"completed","usage":{},"created":"","` +
+		`updated":"","service_tier":"standard","object":"interaction","model":"` +
+		`"},"event_type":"interaction.completed"}`))
 	payload, _ = sjson.SetBytes(payload, "interaction.id", st.ID)
 	payload, _ = sjson.SetBytes(payload, "interaction.created", now)
 	payload, _ = sjson.SetBytes(payload, "interaction.updated", now)
-	payload, _ = sjson.SetBytes(payload, "interaction.model", firstNonEmpty(modelName, root.Get("model").String()))
+	payload, _ = sjson.SetBytes(
+		payload,
+		"interaction.model",
+		firstNonEmpty(modelName, root.Get("model").String()),
+	)
 	usage := root.Get("usage")
 	if !usage.Exists() {
 		usage = st.Usage

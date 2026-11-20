@@ -39,7 +39,9 @@ func TestOpenAICompatExecutorUsesResolvedModelIsCompat(t *testing.T) {
 					Header:     http.Header{"Content-Type": []string{"application/json"}},
 					Body: io.NopCloser(
 						strings.NewReader(
-							`{"id":"chatcmpl-test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`,
+							`{"id":"chatcmpl-test","object":"chat.completion","choices":[{"index":0` +
+								`,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}` +
+								`]}`,
 						),
 					),
 					Request: req,
@@ -59,7 +61,11 @@ func TestOpenAICompatExecutorUsesResolvedModelIsCompat(t *testing.T) {
 	request := cliproxyexecutor.Request{
 		Model: "deepseek-v4-flash",
 		Payload: []byte(
-			`{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"prior reasoning","signature":"opaque-signature"},{"type":"text","text":"Reading files."},{"type":"tool_use","id":"call_1","name":"Read","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}]}`,
+			`{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content"` +
+				`:[{"type":"thinking","thinking":"prior reasoning","signature":"opaque-` +
+				`signature"},{"type":"text","text":"Reading files."},{"type":"tool_use"` +
+				`,"id":"call_1","name":"Read","input":{}}]},{"role":"user","content":[{` +
+				`"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}]}`,
 		),
 		Metadata: map[string]any{
 			"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},
@@ -102,7 +108,8 @@ func TestCodexExecutorUsesResolvedModelIsCompat(t *testing.T) {
 					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 					Body: io.NopCloser(
 						strings.NewReader(
-							"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n",
+							"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"" +
+								",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n",
 						),
 					),
 					Request: req,
@@ -115,7 +122,9 @@ func TestCodexExecutorUsesResolvedModelIsCompat(t *testing.T) {
 	request := cliproxyexecutor.Request{
 		Model: "deepseek-v4-flash",
 		Payload: []byte(
-			`{"model":"deepseek-v4-flash","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"delegated task"}]}]}`,
+			`{"model":"deepseek-v4-flash","input":[{"type":"agent_message","content` +
+				`":[{"type":"encrypted_content","encrypted_content":"delegated task"}]}` +
+				`]}`,
 		),
 		Metadata: map[string]any{
 			"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},
@@ -189,7 +198,9 @@ func TestClaudeExecutorUsesResolvedModelIsCompat(t *testing.T) {
 					cliproxyexecutor.Request{
 						Model: "deepseek-v4",
 						Payload: []byte(
-							`{"model":"deepseek-v4","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"prior reasoning"}],"encrypted_content":"opaque-signature"}]}`,
+							`{"model":"deepseek-v4","input":[{"type":"reasoning","summary":[{"type"` +
+								`:"summary_text","text":"prior reasoning"}],"encrypted_content":"opaque` +
+								`-signature"}]}`,
 						),
 						Metadata: map[string]any{
 							"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},
@@ -204,11 +215,13 @@ func TestClaudeExecutorUsesResolvedModelIsCompat(t *testing.T) {
 				if err != nil {
 					t.Fatalf("prepareClaudeRequest error: %v", err)
 				}
-				t.Cleanup(func() {
-					if errClose := prepared.httpReq.Body.Close(); errClose != nil {
-						t.Errorf("close request body: %v", errClose)
-					}
-				})
+				t.Cleanup(
+					func() {
+						if errClose := prepared.httpReq.Body.Close(); errClose != nil {
+							t.Errorf("close request body: %v", errClose)
+						}
+					},
+				)
 				if got := prepared.httpReq.Header.Get("Authorization"); got != testCase.wantAuthorization {
 					t.Fatalf("Authorization = %q, want %q", got, testCase.wantAuthorization)
 				}
@@ -247,13 +260,16 @@ func TestDeepSeekAnthropicCompatibilityRequest(t *testing.T) {
 		name         string
 		thinking     string
 		wantThinking string
-		wantBudget   bool
 	}{
 		{
 			name:         "thinking enabled",
 			thinking:     `{"type":"enabled","budget_tokens":4096}`,
-			wantThinking: "enabled",
-			wantBudget:   true,
+			wantThinking: "adaptive",
+		},
+		{
+			name:         "thinking adaptive",
+			thinking:     `{"type":"adaptive"}`,
+			wantThinking: "adaptive",
 		},
 		{
 			name:         "thinking disabled",
@@ -262,99 +278,117 @@ func TestDeepSeekAnthropicCompatibilityRequest(t *testing.T) {
 		},
 	}
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			var upstreamBody []byte
-			var upstreamHeaders http.Header
-			var upstreamURL string
-			ctx := util.WithRoundTripper(
-				t.Context(),
-				apiKeyCompatRoundTripper(func(req *http.Request) (*http.Response, error) {
-					var errRead error
-					upstreamBody, errRead = io.ReadAll(req.Body)
-					if errRead != nil {
-						t.Fatalf("read DeepSeek upstream body: %v", errRead)
-					}
-					upstreamHeaders = req.Header.Clone()
-					upstreamURL = req.URL.String()
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     http.Header{"Content-Type": []string{"application/json"}},
-						Body: io.NopCloser(strings.NewReader(
-							`{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
-						)),
-						Request: req,
-					}, nil
-				}),
-			)
-			payload := []byte(`{
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				var upstreamBody []byte
+				var upstreamHeaders http.Header
+				var upstreamURL string
+				ctx := util.WithRoundTripper(
+					t.Context(),
+					apiKeyCompatRoundTripper(
+						func(req *http.Request) (*http.Response, error) {
+							var errRead error
+							upstreamBody, errRead = io.ReadAll(req.Body)
+							if errRead != nil {
+								t.Fatalf("read DeepSeek upstream body: %v", errRead)
+							}
+							upstreamHeaders = req.Header.Clone()
+							upstreamURL = req.URL.String()
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     http.Header{"Content-Type": []string{"application/json"}},
+								Body: io.NopCloser(
+									strings.NewReader(
+										`{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-fl` +
+											`ash","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",` +
+											`"usage":{"input_tokens":1,"output_tokens":1}}`,
+									),
+								),
+								Request: req,
+							}, nil
+						},
+					),
+				)
+				//goland:noinspection SpellCheckingInspection
+				payload := []byte(`{
 				"model":"deepseek-flash",
 				"max_tokens":128,
-				"thinking":` + testCase.thinking + `,
-				"messages":[
-					{"role":"user","content":[
-						{"type":"text","text":"Describe this image."},
-						{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}
-					]},
-					{"role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"lookup","input":{"id":"42"}}]},
-					{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_1","content":"found"}]}
-				],
-				"tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}]
-			}`)
-			_, errExecute := NewClaudeExecutor(&config.Config{}).Execute(
-				ctx,
-				&cliproxyauth.Auth{
-					Provider: "claude",
-					Attributes: map[string]string{
-						"base_url": "https://api.deepseek.com/anthropic",
-						"api_key":  "test-key",
+				"thinking":` +
+					testCase.thinking +
+					(",\n\t\t\t\t\"messages\":[\n\t\t\t\t\t{\"role\":\"user\",\"content\":[\n\t\t\t\t\t\t{\"" +
+						"type\":\"text\",\"text\":\"Describe this image.\"},\n\t\t\t\t\t\t{\"type\":\"image\"" +
+						",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" +
+						"iVBORw0KGgo=\"}}\n\t\t\t\t\t]},\n\t\t\t\t\t{\"role\":\"assistant\",\"content\":[{\"" +
+						"type\":\"tool_use\",\"id\":\"tool_1\",\"name\":\"lookup\",\"input\":{\"id\":\"42\"}}" +
+						"]},\n\t\t\t\t\t{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"" +
+						"tool_use_id\":\"tool_1\",\"content\":\"found\"}]}\n\t\t\t\t],\n\t\t\t\t\"tools\":[{" +
+						"\"name\":\"lookup\",\"description\":\"Look up an item\",\"input_schema\":{\"type\":" +
+						"\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}}]\n" +
+						"\t\t\t}"))
+				_, errExecute := NewClaudeExecutor(&config.Config{}).Execute(
+					ctx,
+					&cliproxyauth.Auth{
+						Provider: "claude",
+						Attributes: map[string]string{
+							"base_url": "https://api.deepseek.com/anthropic",
+							"api_key":  "test-key",
+						},
 					},
-				},
-				cliproxyexecutor.Request{
-					Model:   "deepseek-flash",
-					Payload: payload,
-					Metadata: map[string]any{
-						"cliproxy.resolved_api_key_model_info": modelInfo,
+					cliproxyexecutor.Request{
+						Model:   "deepseek-flash",
+						Payload: payload,
+						Metadata: map[string]any{
+							"cliproxy.resolved_api_key_model_info": modelInfo,
+						},
 					},
-				},
-				cliproxyexecutor.Options{
-					SourceFormat:   sdktranslator.FormatClaude,
-					ResponseFormat: sdktranslator.FormatClaude,
-				},
-			)
-			if errExecute != nil {
-				t.Fatalf("Execute DeepSeek request: %v", errExecute)
-			}
-			if upstreamURL != "https://api.deepseek.com/anthropic/v1/messages?beta=true" {
-				t.Fatalf("DeepSeek upstream URL = %q", upstreamURL)
-			}
-			if got := upstreamHeaders.Get("x-api-key"); got != "test-key" {
-				t.Fatalf("DeepSeek x-api-key = %q, want test-key", got)
-			}
-			if got := upstreamHeaders.Get("Authorization"); got != "" {
-				t.Fatalf("DeepSeek Authorization = %q, want empty", got)
-			}
-			if got := upstreamHeaders.Get("Anthropic-Version"); got != "" {
-				t.Fatalf("DeepSeek Anthropic-Version = %q, want empty", got)
-			}
-			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != testCase.wantThinking {
-				t.Fatalf("DeepSeek thinking.type = %q, want %q; body=%s", got, testCase.wantThinking, upstreamBody)
-			}
-			if got := gjson.GetBytes(upstreamBody, "thinking.budget_tokens").Exists(); got != testCase.wantBudget {
-				t.Fatalf("DeepSeek thinking budget presence = %t, want %t; body=%s", got, testCase.wantBudget, upstreamBody)
-			}
-			if got := gjson.GetBytes(upstreamBody, "messages.0.content.1.source.data").String(); got != "iVBORw0KGgo=" {
-				t.Fatalf("DeepSeek image payload = %q; body=%s", got, upstreamBody)
-			}
-			if got := gjson.GetBytes(upstreamBody, "tools.0.name").String(); got != "lookup" {
-				t.Fatalf("DeepSeek tool definition = %q; body=%s", got, upstreamBody)
-			}
-			if got := gjson.GetBytes(upstreamBody, "messages.1.content.0.type").String(); got != "tool_use" {
-				t.Fatalf("DeepSeek tool_use block = %q; body=%s", got, upstreamBody)
-			}
-			if got := gjson.GetBytes(upstreamBody, "messages.2.content.0.type").String(); got != "tool_result" {
-				t.Fatalf("DeepSeek tool_result block = %q; body=%s", got, upstreamBody)
-			}
-		})
+					cliproxyexecutor.Options{
+						SourceFormat:   sdktranslator.FormatClaude,
+						ResponseFormat: sdktranslator.FormatClaude,
+					},
+				)
+				if errExecute != nil {
+					t.Fatalf("Execute DeepSeek request: %v", errExecute)
+				}
+				if upstreamURL != "https://api.deepseek.com/anthropic/v1/messages?beta=true" {
+					t.Fatalf("DeepSeek upstream URL = %q", upstreamURL)
+				}
+				if got := upstreamHeaders.Get("x-api-key"); got != "test-key" {
+					t.Fatalf("DeepSeek x-api-key = %q, want test-key", got)
+				}
+				if got := upstreamHeaders.Get("Authorization"); got != "" {
+					t.Fatalf("DeepSeek Authorization = %q, want empty", got)
+				}
+				if got := upstreamHeaders.Get("Anthropic-Version"); got != "" {
+					t.Fatalf("DeepSeek Anthropic-Version = %q, want empty", got)
+				}
+				if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != testCase.wantThinking {
+					t.Fatalf(
+						"DeepSeek thinking.type = %q, want %q; body=%s",
+						got,
+						testCase.wantThinking,
+						upstreamBody,
+					)
+				}
+				if gjson.GetBytes(upstreamBody, "thinking.budget_tokens").Exists() {
+					t.Fatalf("DeepSeek manual thinking budget was forwarded; body=%s", upstreamBody)
+				}
+				//goland:noinspection SpellCheckingInspection
+				if got := gjson.GetBytes(
+					upstreamBody, "messages.0.content.1.source.data",
+				).String(); got != "iVBORw0KGgo=" {
+					t.Fatalf("DeepSeek image payload = %q; body=%s", got, upstreamBody)
+				}
+				if got := gjson.GetBytes(upstreamBody, "tools.0.name").String(); got != "lookup" {
+					t.Fatalf("DeepSeek tool definition = %q; body=%s", got, upstreamBody)
+				}
+				if got := gjson.GetBytes(upstreamBody, "messages.1.content.0.type").String(); got != "tool_use" {
+					t.Fatalf("DeepSeek tool_use block = %q; body=%s", got, upstreamBody)
+				}
+				if got := gjson.GetBytes(upstreamBody, "messages.2.content.0.type").String(); got != "tool_result" {
+					t.Fatalf("DeepSeek tool_result block = %q; body=%s", got, upstreamBody)
+				}
+			},
+		)
 	}
 }
 
@@ -366,7 +400,9 @@ func TestGeminiExecutorUsesResolvedModelIsCompat(t *testing.T) {
 		cliproxyexecutor.Request{
 			Model: "deepseek-v4",
 			Payload: []byte(
-				`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"prior reasoning","signature":""}]}]}`,
+				`{"messages":[{"role":"assistant","content":[{"type":"thinking",` +
+					`"thinking":"prior reasoning","signature":` +
+					`""}]}]}`,
 			),
 			Metadata: map[string]any{
 				"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},
@@ -452,7 +488,8 @@ func TestGeminiInteractionsExecutorUsesResolvedModelIsCompat(t *testing.T) {
 func TestXAIExecutorUsesResolvedModelIsCompat(t *testing.T) {
 	executor := newXAIExecutor(&config.Config{})
 	payload := []byte(
-		`{"model":"deepseek-v4","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"prior reasoning"}],"encrypted_content":""}]}`,
+		`{"model":"deepseek-v4","input":[{"type":"reasoning","summary":[{"type"` +
+			`:"summary_text","text":"prior reasoning"}],"encrypted_content":""}]}`,
 	)
 	prepare := func(isCompat bool) *xaiPreparedRequest {
 		t.Helper()

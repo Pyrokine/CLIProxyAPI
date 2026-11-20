@@ -50,11 +50,20 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(
 	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, compat, compat)
 }
 
-func sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(ctx context.Context, provider string, body []byte) []byte {
+func sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(
+	ctx context.Context,
+	provider string,
+	body []byte,
+) []byte {
 	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true)
 }
 
-func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Context, provider string, body []byte, isCompat, keepForeign bool) []byte {
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(
+	ctx context.Context,
+	provider string,
+	body []byte,
+	isCompat, keepForeign bool,
+) []byte {
 	inputResult := util.GetGJSONBytesNoCopy(body, "input")
 	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
@@ -108,14 +117,18 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 			if openaiResponsesReasoningSummaryIsEmpty(item.Get("summary")) {
 				promoted, err := promoteOpenAIResponsesReasoningTextToSummary(nextItem, content)
 				if err != nil {
-					logWithRequestID(ctx).Debugf("%s: failed to promote reasoning text at input[%d]: %v", provider, index, err)
+					logWithRequestID(ctx).Debugf(
+						"%s: failed to promote reasoning text at input[%d]: %v", provider, index, err,
+					)
 				} else {
 					nextItem = promoted
 				}
 			}
 			cleared, err := sjson.SetRaw(nextItem, "content", "[]")
 			if err != nil {
-				logWithRequestID(ctx).Debugf("%s: failed to clear reasoning content at input[%d]: %v", provider, index, err)
+				logWithRequestID(ctx).Debugf(
+					"%s: failed to clear reasoning content at input[%d]: %v", provider, index, err,
+				)
 			} else {
 				nextItem = cleared
 				changed = true
@@ -126,7 +139,9 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 			if !isCompat && stripOrphanReasoningIDs && item.Get("id").Exists() {
 				withoutID, err := sjson.Delete(nextItem, "id")
 				if err != nil {
-					logWithRequestID(ctx).Debugf("%s: failed to drop orphan reasoning id at input[%d]: %v", provider, index, err)
+					logWithRequestID(ctx).Debugf(
+						"%s: failed to drop orphan reasoning id at input[%d]: %v", provider, index, err,
+					)
 				} else {
 					nextItem = withoutID
 					changed = true

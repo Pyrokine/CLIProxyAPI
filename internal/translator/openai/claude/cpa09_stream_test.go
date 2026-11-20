@@ -31,9 +31,14 @@ func TestCPA09OpenAIStreamUsesArrayPositionWhenToolIndexMissing(t *testing.T) {
 func TestCPA09OpenAIStreamKeepsOneActiveContentBlock(t *testing.T) {
 	events := runOpenAIClaudeStream(
 		t,
-		`{"id":"c1","model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"first","arguments":"{\"a\":"}}]}}]}`,
-		`{"id":"c1","model":"m","choices":[{"delta":{"content":"between","tool_calls":[{"index":1,"id":"call_2","function":{"name":"second","arguments":"{}"}}]}}]}`,
-		`{"id":"c1","model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`,
+		`{"id":"c1","model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"`+
+			`id":"call_1","function":{"name":"first","arguments":"{\"a\":"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"delta":{"content":"between","tool_`+
+			`calls":[{"index":1,"id":"call_2","function":{"name":"second","argument`+
+			`s":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"`+
+			`function":{"arguments":"1}"}}]},"finish_reason":"tool_calls"}],"usage"`+
+			`:{"prompt_tokens":5,"completion_tokens":2}}`,
 	)
 	active := false
 	for _, event := range events {
@@ -90,7 +95,8 @@ func TestCPA09OpenAIStreamEmitsDelayedUsageAndTerminalOnce(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"id":"c1","model":"m","choices":[{"delta":{"content":"answer"}}]}`),
 		[]byte(`data: {"id":"c1","model":"m","choices":[{"delta":{},"finish_reason":"stop"}]}`),
-		[]byte(`data: {"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4,"cache_creation_tokens":2}}}`),
+		[]byte((`data: {"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"` +
+			`prompt_tokens_details":{"cached_tokens":4,"cache_creation_tokens":2}}}`)),
 		[]byte(`data: [DONE]`),
 		[]byte(`data: [DONE]`),
 	}
@@ -103,10 +109,12 @@ func TestCPA09OpenAIStreamEmitsDelayedUsageAndTerminalOnce(t *testing.T) {
 			if !ok || !strings.HasPrefix(firstLine, "event: ") || !strings.HasPrefix(rest, "data: ") {
 				continue
 			}
-			events = append(events, sseEvent{
-				Type:    strings.TrimPrefix(firstLine, "event: "),
-				Payload: strings.TrimSpace(strings.TrimPrefix(rest, "data: ")),
-			})
+			events = append(
+				events, sseEvent{
+					Type:    strings.TrimPrefix(firstLine, "event: "),
+					Payload: strings.TrimSpace(strings.TrimPrefix(rest, "data: ")),
+				},
+			)
 		}
 	}
 	if got := countSSEEvents(events, "message_delta"); got != 1 {

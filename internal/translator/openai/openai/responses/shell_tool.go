@@ -11,14 +11,20 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-var errInvalidShellAction = errors.New("invalid local shell action: commands must be nonempty strings and limits must be positive integers")
+var errInvalidShellAction = errors.New(
+	"invalid local shell action: commands must be nonempty strings and limits must be positive integers",
+)
 
 type responsesLocalShell struct {
 	Name      string
 	Available bool
 }
 
-func newResponsesLocalShell(root gjson.Result, identity *translatorcommon.ResponsesToolIdentity, toolNames map[string]string) responsesLocalShell {
+func newResponsesLocalShell(
+	root gjson.Result,
+	identity *translatorcommon.ResponsesToolIdentity,
+	toolNames map[string]string,
+) responsesLocalShell {
 	var shell responsesLocalShell
 	toolLists := []gjson.Result{root.Get("tools")}
 	hasHistory := false
@@ -63,7 +69,10 @@ func (shell responsesLocalShell) matches(name string) bool {
 }
 
 func (shell responsesLocalShell) declaration() []byte {
-	tool := []byte(`{"type":"function","function":{"name":"","description":"请求客户端在其本地 shell 环境中执行命令，每个 commands 项是一条完整命令","parameters":{"type":"object","properties":{"commands":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_ms":{"type":"integer","minimum":1},"max_output_length":{"type":"integer","minimum":1}},"required":["commands"],"additionalProperties":false}}}`)
+	tool := []byte((`{"type":"function","function":{"name":"","description":"请求客户端在其本地 shell 环境中执行命令，每个 ` +
+		`commands 项是一条完整命令","parameters":{"type":"object","properties":{"commands":{"type":"array","items":{"` +
+		`type":"string"},"minItems":1},"timeout_ms":{"type":"integer","minimum":1},"max_output_length":{"` +
+		`type":"integer","minimum":1}},"required":["commands"],"additionalProperties":false}}}`))
 	tool, _ = sjson.SetBytes(tool, "function.name", shell.Name)
 	return tool
 }
@@ -109,17 +118,21 @@ func shellCallItem(callID, arguments, status string) ([]byte, error) {
 		}
 	}
 	valid := true
-	action.ForEach(func(key, value gjson.Result) bool {
-		switch key.String() {
-		case "commands":
-		case "timeout_ms", "max_output_length":
-			number := value.Float()
-			valid = value.Type == gjson.Null || (value.Type == gjson.Number && number > 0 && !math.IsInf(number, 0) && math.Trunc(number) == number)
-		default:
-			valid = false
-		}
-		return valid
-	})
+	action.ForEach(
+		func(key, value gjson.Result) bool {
+			switch key.String() {
+			case "commands":
+			case "timeout_ms", "max_output_length":
+				number := value.Float()
+				valid = value.Type == gjson.Null || (value.Type == gjson.Number && number > 0 && !math.IsInf(
+					number, 0,
+				) && math.Trunc(number) == number)
+			default:
+				valid = false
+			}
+			return valid
+		},
+	)
 	if !valid {
 		return nil, errInvalidShellAction
 	}
@@ -137,7 +150,8 @@ func shellCallPlaceholder(callID string) []byte {
 }
 
 func responsesShellFailure(responseID string, err error) []byte {
-	response := []byte(`{"id":"","object":"response","status":"failed","error":{"type":"server_error","code":"invalid_tool_arguments","message":"","param":null},"output":[]}`)
+	response := []byte((`{"id":"","object":"response","status":"failed","error":{"type":"server_error","code":` +
+		`"invalid_tool_arguments","message":"","param":null},"output":[]}`))
 	response, _ = sjson.SetBytes(response, "id", responseID)
 	response, _ = sjson.SetBytes(response, "error.message", err.Error())
 	return response

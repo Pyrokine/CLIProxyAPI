@@ -38,64 +38,100 @@ func TestOpenAICompatResponsesStreamFinalizesOnlyAfterFinishOrDone(t *testing.T)
 		{"EOF before finish", "", false, nil, "", true},
 		{"read error after finish", "stop", false, io.ErrUnexpectedEOF, "", true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			finishReason := "null"
-			if tc.finish != "" {
-				finishReason = `"` + tc.finish + `"`
-			}
-			upstream := "data: {\"id\":\"chat-eof\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n" +
-				"data: {\"id\":\"chat-eof\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":" + finishReason + "}]}\n\n" +
-				"data: {\"id\":\"chat-eof\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n"
-			if tc.done {
-				upstream += "data: [DONE]\n\n"
-			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = io.WriteString(w, upstream)
-			}))
-			defer server.Close()
-			auth := &cliproxyauth.Auth{Provider: "openai-compatibility", Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "test"}}
-			ctx := context.Background()
-			if tc.readErr != nil {
-				ctx = util.WithRoundTripper(ctx, openAICompatRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
-						Body: io.NopCloser(&terminalErrorReader{data: []byte(upstream), err: tc.readErr}), Request: req}, nil
-				}))
-			}
-			request := []byte(`{"model":"test","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true}`)
-			stream, err := NewOpenAICompatExecutor("openai-compatibility", &config.Config{}).ExecuteStream(ctx, auth,
-				cliproxyexecutor.Request{Model: "test", Payload: request}, cliproxyexecutor.Options{
-					SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse,
-					OriginalRequest: request, Stream: true,
-				})
-			if err != nil {
-				t.Fatal(err)
-			}
-			var output strings.Builder
-			var streamErr error
-			for chunk := range stream.Chunks {
-				output.Write(chunk.Payload)
-				if chunk.Err != nil {
-					streamErr = chunk.Err
+		t.Run(
+			tc.name, func(t *testing.T) {
+				finishReason := "null"
+				if tc.finish != "" {
+					finishReason = `"` + tc.finish + `"`
 				}
-			}
-			if (streamErr != nil) != tc.wantFailed {
-				t.Fatalf("stream error = %v, want failure %v; output=%s", streamErr, tc.wantFailed, output.String())
-			}
-			if tc.readErr != nil && !errors.Is(streamErr, tc.readErr) {
-				t.Fatalf("stream error = %v, want %v", streamErr, tc.readErr)
-			}
-			if tc.wantEvent != "" {
-				if got := strings.Count(output.String(), `"type":"`+tc.wantEvent+`"`); got != 1 {
-					t.Fatalf("terminal event count = %d, want 1; output=%s", got, output.String())
+				upstream := ("data: {\"id\":\"chat-eof\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"" +
+					"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"" +
+					"chat-eof\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{}," +
+					"\"finish_reason\":") + finishReason + "}]}\n\n" +
+					("data: {\"id\":\"chat-eof\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\"" +
+						":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n")
+				if tc.done {
+					upstream += "data: [DONE]\n\n"
 				}
-				if !strings.Contains(output.String(), `"input_tokens":3`) || !strings.Contains(output.String(), `"output_tokens":1`) {
-					t.Fatalf("late usage not included in terminal event: %s", output.String())
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, _ *http.Request) {
+							w.Header().Set("Content-Type", "text/event-stream")
+							_, _ = io.WriteString(w, upstream)
+						},
+					),
+				)
+				defer server.Close()
+				auth := &cliproxyauth.Auth{
+					Provider:   "openai-compatibility",
+					Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "test"},
 				}
-			} else if strings.Contains(output.String(), `"type":"response.completed"`) {
-				t.Fatalf("truncated stream reported completion: %s", output.String())
-			}
-		})
+				ctx := context.Background()
+				if tc.readErr != nil {
+					ctx = util.WithRoundTripper(
+						ctx, openAICompatRoundTripFunc(
+							func(req *http.Request) (*http.Response, error) {
+								return &http.Response{
+									StatusCode: http.StatusOK,
+									Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+									Body: io.NopCloser(
+										&terminalErrorReader{data: []byte(upstream), err: tc.readErr},
+									),
+									Request: req,
+								}, nil
+							},
+						),
+					)
+				}
+				request := []byte(
+					(`{"model":"test","input":[{"role":"user","content":[{"type":` +
+						`"input_text","text":"hello"}]}],"stream":` +
+						`true}`),
+				)
+				stream, err := NewOpenAICompatExecutor("openai-compatibility", &config.Config{}).ExecuteStream(
+					ctx, auth,
+					cliproxyexecutor.Request{Model: "test", Payload: request}, cliproxyexecutor.Options{
+						SourceFormat:    sdktranslator.FormatOpenAIResponse,
+						ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+						OriginalRequest: request, Stream: true,
+					},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var output strings.Builder
+				var streamErr error
+				for chunk := range stream.Chunks {
+					output.Write(chunk.Payload)
+					if chunk.Err != nil {
+						streamErr = chunk.Err
+					}
+				}
+				if (streamErr != nil) != tc.wantFailed {
+					t.Fatalf(
+						"stream error = %v, want failure %v; output=%s",
+						streamErr,
+						tc.wantFailed,
+						output.String(),
+					)
+				}
+				if tc.readErr != nil && !errors.Is(streamErr, tc.readErr) {
+					t.Fatalf("stream error = %v, want %v", streamErr, tc.readErr)
+				}
+				if tc.wantEvent != "" {
+					if got := strings.Count(output.String(), `"type":"`+tc.wantEvent+`"`); got != 1 {
+						t.Fatalf("terminal event count = %d, want 1; output=%s", got, output.String())
+					}
+					if !strings.Contains(output.String(), `"input_tokens":3`) || !strings.Contains(
+						output.String(), `"output_tokens":1`,
+					) {
+						t.Fatalf("late usage not included in terminal event: %s", output.String())
+					}
+				} else if strings.Contains(output.String(), `"type":"response.completed"`) {
+					t.Fatalf("truncated stream reported completion: %s", output.String())
+				}
+			},
+		)
 	}
 }
 
@@ -107,9 +143,19 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 		textOnly        bool
 		source          sdktranslator.Format
 	}{
-		{name: "OpenAI non-stream text-only", inputModalities: []string{"text"}, textOnly: true, source: sdktranslator.FormatOpenAI},
-		{name: "OpenAI stream text-only", stream: true, inputModalities: []string{"text"}, textOnly: true, source: sdktranslator.FormatOpenAI},
-		{name: "OpenAI multimodal", inputModalities: []string{"text", "image"}, source: sdktranslator.FormatOpenAI},
+		{
+			name: "OpenAI non-stream text-only", inputModalities: []string{"text"}, textOnly: true,
+			source: sdktranslator.FormatOpenAI,
+		},
+		{
+			name: "OpenAI stream text-only", stream: true, inputModalities: []string{"text"}, textOnly: true,
+			source: sdktranslator.FormatOpenAI,
+		},
+		{
+			name:            "OpenAI multimodal",
+			inputModalities: []string{"text", "image"},
+			source:          sdktranslator.FormatOpenAI,
+		},
 		{name: "OpenAI unspecified", source: sdktranslator.FormatOpenAI},
 		{name: "non-stream text-only", stream: false, inputModalities: []string{"text"}, textOnly: true},
 		{name: "stream text-only", stream: true, inputModalities: []string{"text"}, textOnly: true},
@@ -131,7 +177,14 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 								return
 							}
 							w.Header().Set("Content-Type", "application/json")
-							_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+							_, _ = w.Write(
+								[]byte(
+									(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"` +
+										`message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}` +
+										`],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}` +
+										`}`),
+								),
+							)
 						},
 					),
 				)
@@ -162,13 +215,22 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 						"provider_key": "compat",
 					},
 				}
-				payload := []byte(`{"model":"claude-client","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"inspect_image","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"image inspected"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}]}`)
+				payload := []byte((`{"model":"claude-client","max_tokens":64,"messages":[{"role":"assistant","` +
+					`content":[{"type":"tool_use","id":"call_1","name":"inspect_image","input":{}}]},{"role":` +
+					`"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text"` +
+					`,"text":"image inspected"},{"type":"image","source":{"type":"base64","media_type":"` +
+					`image/png","data":"AA=="}}]}]}]}`))
 				source := tt.source
 				if source == "" {
 					source = sdktranslator.FormatClaude
 				}
 				if source == sdktranslator.FormatOpenAI {
-					payload = []byte(`{"model":"claude-client","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"inspect_image","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"image inspected"},{"role":"user","content":[{"type":"text","text":"Images returned by the preceding tool call(s):"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}`)
+					payload = []byte((`{"model":"claude-client","messages":[{"role":"assistant","tool_calls":` +
+						`[{"id":"call_1","type":"function","function":{"name":"inspect_image","` +
+						`arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"` +
+						`image inspected"},{"role":"user","content":[{"type":"text","text":"Ima` +
+						`ges returned by the preceding tool call(s):"},{"type":"image_url","ima` +
+						`ge_url":{"url":"data:image/png;base64,AA=="}}]}]}`))
 				}
 				req := cliproxyexecutor.Request{Model: "mapped-model", Payload: payload}
 				opts := cliproxyexecutor.Options{
@@ -209,7 +271,8 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 				}
 				if !tt.textOnly {
 					relay := gjson.GetBytes(gotBody, "messages.2")
-					if relay.Get("role").String() != "user" || relay.Get("content.1.type").String() != "image_url" {
+					if relay.Get("role").String() != "user" ||
+						relay.Get("content.1.type").String() != "image_url" {
 						t.Fatalf("tool image relay missing; body=%s", string(gotBody))
 					}
 				}

@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,7 +89,7 @@ func (e *OpenAICompatExecutor) readClineChatCompletion(
 		}
 		data, hasData, valid := sseDataPayload(frame)
 		if !hasData {
-			for _, line := range bytes.Split(frame, []byte("\n")) {
+			for line := range bytes.SplitSeq(frame, []byte("\n")) {
 				line = bytes.TrimSpace(line)
 				if bytes.HasPrefix(line, []byte("{")) || bytes.HasPrefix(line, []byte("[")) {
 					return nil, clineResponseError("expected an SSE data frame")
@@ -212,7 +213,9 @@ func mergeClineResponseChunk(root map[string]any, choices map[int]*clineResponse
 		}
 		choice := choices[index]
 		if choice == nil {
-			choice = &clineResponseChoice{Index: index, Message: map[string]any{"role": "assistant"}, tools: make(map[int]map[string]any)}
+			choice = &clineResponseChoice{
+				Index: index, Message: map[string]any{"role": "assistant"}, tools: make(map[int]map[string]any),
+			}
 			choices[index] = choice
 		}
 		delta, ok := incoming["delta"].(map[string]any)
@@ -220,7 +223,8 @@ func mergeClineResponseChunk(root map[string]any, choices map[int]*clineResponse
 			return clineResponseError("missing completion delta")
 		}
 		for key, value := range delta {
-			if choice.FinishReason != nil && key != "provider_metadata" && key != "role" && value != nil && value != "" {
+			if choice.FinishReason != nil && key != "provider_metadata" && key != "role" && value != nil &&
+				value != "" {
 				return clineResponseError("content received after a finished choice")
 			}
 			switch key {
@@ -239,7 +243,8 @@ func mergeClineResponseChunk(root map[string]any, choices map[int]*clineResponse
 			}
 		}
 		if reason := incoming["finish_reason"]; reason != nil {
-			if text, valid := reason.(string); !valid || text == "" || (choice.FinishReason != nil && choice.FinishReason != reason) {
+			if text, valid := reason.(string); !valid || text == "" ||
+				(choice.FinishReason != nil && choice.FinishReason != reason) {
 				return clineResponseError("invalid completion finish reason")
 			}
 			choice.FinishReason = reason
@@ -347,10 +352,8 @@ func hasClineResponseText(node gjson.Result) bool {
 		return node.Get("text").Type == gjson.String && node.Get("text").String() != ""
 	}
 	if node.IsArray() {
-		for _, part := range node.Array() {
-			if hasClineResponseText(part) {
-				return true
-			}
+		if slices.ContainsFunc(node.Array(), hasClineResponseText) {
+			return true
 		}
 	}
 	return false
@@ -396,7 +399,14 @@ func validateClineCompletion(body []byte) error {
 					return clineResponseError("unsupported tool call type")
 				}
 				if call.Get("id").Type != gjson.String || call.Get("id").String() == "" ||
-					call.Get("function.name").Type != gjson.String || call.Get("function.name").String() == "" || arguments.Type != gjson.String ||
+					call.Get(
+						"function.name",
+					).Type !=
+						gjson.String ||
+					call.Get("function.name").String() ==
+						"" ||
+					arguments.Type !=
+						gjson.String ||
 					!gjson.Valid(arguments.String()) || !gjson.Parse(arguments.String()).IsObject() {
 					return clineResponseError("incomplete tool call")
 				}
@@ -404,7 +414,9 @@ func validateClineCompletion(body []byte) error {
 			}
 		}
 		if !hasContent {
-			return clineResponseError(fmt.Sprintf("assistant choice %s contains no output", choice.Get("index").Raw))
+			return clineResponseError(
+				fmt.Sprintf("assistant choice %s contains no output", choice.Get("index").Raw),
+			)
 		}
 	}
 	return nil

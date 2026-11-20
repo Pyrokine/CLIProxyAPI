@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -47,34 +48,132 @@ func TestNormalizeOpenAIToolImageRelaysTextOnly(t *testing.T) {
 	}{
 		{"image-only", claudeToolResultImagePlaceholder, "", openAIToolResultImageOmittedText},
 		{"text-and-image", "tool text", "", "tool text\n\n" + openAIToolResultImageOmittedText},
-		{"extra-user-text", "tool text", `,{"type":"text","text":"real user text"}`, "tool text\n\n" + openAIToolResultImageOmittedText},
+		{
+			"extra-user-text", "tool text", `,{"type":"text","text":"real user text"}`,
+			"tool text\n\n" + openAIToolResultImageOmittedText,
+		},
 		{"existing-marker", openAIToolResultImageOmittedText, "", openAIToolResultImageOmittedText},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			body := []byte(`{"messages":[{"role":"tool","tool_call_id":"fixture-call","content":"` + tc.tool + `"},{"role":"user","content":[{"type":"text","text":"` + claudeToolResultImageRelayNotice + `"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}` + tc.extra + `]},{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://fixture.invalid/user.png"}}]}]}`)
-			got := NormalizeOpenAIToolResultsTextOnly(body)
-			if content := gjson.GetBytes(got, "messages.0.content").String(); content != tc.want {
-				t.Fatalf("tool text = %q, want %q", content, tc.want)
-			}
-			messages := gjson.GetBytes(got, "messages").Array()
-			wantCount := 2
-			if tc.extra != "" {
-				wantCount = 3
-				if messages[1].Get("content.#").Int() != 1 || messages[1].Get("content.0.text").String() != "real user text" {
-					t.Fatalf("real text was not retained: %s", got)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				body := []byte(
+					`{"messages":[{"role":"tool","tool_call_id":"fixture-call","content":"` +
+						tc.tool +
+						`"},{"role":"user","content":[{"type":"text","text":"` +
+						claudeToolResultImageRelayNotice +
+						(`"},{"type":` +
+							`"image_url",` +
+							`"image_url":` +
+							`{"url":"data:` +
+							`image/png;` +
+							`base64,AA=="}}`) +
+						tc.extra +
+						(`]},{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://` +
+							`fixture.invalid/user.png"}}]}]}`),
+				)
+				got := NormalizeOpenAIToolResultsTextOnly(body)
+				if content := gjson.GetBytes(got, "messages.0.content").String(); content != tc.want {
+					t.Fatalf("tool text = %q, want %q", content, tc.want)
 				}
-			}
-			if len(messages) != wantCount || messages[len(messages)-1].Get("content.0.image_url.url").String() != "https://fixture.invalid/user.png" {
-				t.Fatalf("normal user image or relay count changed: %s", got)
-			}
-			if again := NormalizeOpenAIToolResultsTextOnly(got); string(again) != string(got) {
-				t.Fatalf("normalization is not idempotent: %s", again)
-			}
-		})
+				messages := gjson.GetBytes(got, "messages").Array()
+				wantCount := 2
+				if tc.extra != "" {
+					wantCount = 3
+					if messages[1].Get("content.#").Int() != 1 ||
+						messages[1].Get("content.0.text").String() != "real user text" {
+						t.Fatalf("real text was not retained: %s", got)
+					}
+				}
+				if len(messages) != wantCount ||
+					messages[len(messages)-1].Get("content.0.image_url.url").
+						String() !=
+						"https://fixture.invalid/user.png" {
+					t.Fatalf("normal user image or relay count changed: %s", got)
+				}
+				if again := NormalizeOpenAIToolResultsTextOnly(got); string(again) != string(got) {
+					t.Fatalf("normalization is not idempotent: %s", again)
+				}
+			},
+		)
 	}
-	quotedNotice := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"` + claudeToolResultImageRelayNotice + `"},{"type":"image_url","image_url":{"url":"https://fixture.invalid/user.png"}}]}]}`)
+	quotedNotice := []byte(
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"` +
+			claudeToolResultImageRelayNotice +
+			(`"},{"type":` +
+				`"image_url",` +
+				`"image_url":` +
+				`{"url":"https:` +
+				`//fixture.inva` +
+				`lid/user.png"}` +
+				`}]}]}`),
+	)
 	if got := NormalizeOpenAIToolResultsTextOnly(quotedNotice); string(got) != string(quotedNotice) {
 		t.Fatal("user image without a preceding tool was treated as a synthetic relay")
+	}
+}
+
+func TestNormalizeOpenAIToolResultsTextOnlyRelayedImages(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  [2]string
+	}{
+		{
+			name: "multiple preceding tools where one is placeholder",
+			input: `{"messages":[
+				{"role":"assistant","content":"","tool_calls":[
+					{"id":"call_1","type":"function","function":{"name":"tool1","arguments":"{}"}},
+					{"id":"call_2","type":"function","function":{"name":"tool2","arguments":"{}"}}
+				]},
+				{"role":"tool","tool_call_id":"call_1","content":"text result only"},
+				{"role":"tool","tool_call_id":"call_2","content":"` + claudeToolResultImagePlaceholder + `"},
+				{"role":"user","content":[
+					{"type":"text","text":"Images returned by the preceding tool call(s):"},
+					{"type":"image_url","image_url":{"url":"https://example.com/tool2.png"}}
+				]}
+			]}`,
+			want: [2]string{"text result only", openAIToolResultImageOmittedText},
+		},
+		{
+			name: "multiple preceding tools where image tool precedes text tool",
+			input: `{"messages":[
+				{"role":"assistant","content":"","tool_calls":[
+					{"id":"call_1","type":"function","function":{"name":"tool1","arguments":"{}"}},
+					{"id":"call_2","type":"function","function":{"name":"tool2","arguments":"{}"}}
+				]},
+				{"role":"tool","tool_call_id":"call_1","content":"` + claudeToolResultImagePlaceholder + `"},
+				{"role":"tool","tool_call_id":"call_2","content":"text result only"},
+				{"role":"user","content":[
+					{"type":"text","text":"Images returned by the preceding tool call(s):"},
+					{"type":"image_url","image_url":{"url":"https://example.com/tool1.png"}}
+				]}
+			]}`,
+			want: [2]string{openAIToolResultImageOmittedText, "text result only"},
+		},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				got := NormalizeOpenAIToolResultsTextOnly([]byte(test.input))
+				if strings.Contains(string(got), "image_url") {
+					t.Fatalf("text-only normalization left image_url in payload: %s", got)
+				}
+				messages := gjson.GetBytes(got, "messages").Array()
+				if len(messages) != 3 {
+					t.Fatalf("message count = %d, want 3; output=%s", len(messages), got)
+				}
+				for index, want := range test.want {
+					message := messages[index+1]
+					wantID := [2]string{"call_1", "call_2"}[index]
+					if message.Get("role").String() != "tool" ||
+						message.Get("tool_call_id").String() != wantID {
+						t.Fatalf("tool result %d changed identity or order: %s", index+1, got)
+					}
+					if content := message.Get("content").String(); content != want {
+						t.Fatalf("tool %d content = %q, want %q", index+1, content, want)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -108,9 +207,11 @@ func TestNormalizeOpenAIToolResultsTextOnlyImageAndUnknownContent(t *testing.T) 
 		want  string
 	}{
 		{
-			name:  "image-only array",
-			input: `{"messages":[{"role":"tool","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]}`,
-			want:  openAIToolResultImageOmittedText,
+			name: "image-only array",
+			input: `{"messages":[{"role":"tool","content":[{"type":"image_url",` +
+				`"image_url":{"url":"https://example.com/` +
+				`image.png"}}]}]}`,
+			want: openAIToolResultImageOmittedText,
 		},
 		{
 			name:  "image object",
@@ -140,7 +241,11 @@ func TestShouldNormalizeOpenAIToolResultsForModel(t *testing.T) {
 	compat := &config.OpenAICompatibility{
 		Models: []config.OpenAICompatibilityModel{
 			{Name: "upstream-text", Alias: "alias-text", InputModalities: []string{"text"}},
-			{Name: "upstream-multimodal", Alias: "alias-multimodal", InputModalities: []string{"text", "image"}},
+			{
+				Name:            "upstream-multimodal",
+				Alias:           "alias-multimodal",
+				InputModalities: []string{"text", "image"},
+			},
 			{Name: "upstream-unspecified", Alias: "alias-unspecified"},
 			{Name: "upstream-uppercase", Alias: "alias-uppercase", InputModalities: []string{"TEXT"}},
 			{Name: "pool-text", Alias: "shared-alias", InputModalities: []string{"text"}},

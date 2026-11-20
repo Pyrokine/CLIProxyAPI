@@ -34,6 +34,7 @@ type interactionsToResponsesStreamState struct {
 	Err                error
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (st *interactionsToResponsesStreamState) ResponseTranslationError() error {
 	return st.Err
 }
@@ -71,16 +72,16 @@ type responsesToInteractionsStreamState struct {
 	SentText               map[string]bool
 	UnkeyedTextDelta       bool
 	FunctionCallIndexes    map[string]int
+	FunctionStepsOpen      map[int]bool
 	FunctionArgsSent       map[string]bool
 }
 
 func convertInteractionsResponseToOpenAIResponses(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	_ = ctx
 	if param == nil {
 		var local any
 		param = &local
@@ -131,19 +132,22 @@ func convertInteractionsResponseToOpenAIResponses(
 	)
 	if st.Err != nil {
 		st.Completed = true
-		failure, _ := sjson.SetBytes([]byte(`{"error":{"type":"server_error"}}`), "error.message", st.Err.Error())
+		failure, _ := sjson.SetBytes(
+			[]byte(`{"error":{"type":"server_error"}}`),
+			"error.message",
+			st.Err.Error(),
+		)
 		return [][]byte{responsesFailedEvent(modelName, gjson.ParseBytes(failure), st)}
 	}
 	return events
 }
 
 func convertInteractionsResponseToOpenAIResponsesNonStream(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	originalRequestRawJSON, _, rawJSON []byte,
 	param *any,
 ) []byte {
-	_ = ctx
 	identity, patchTools, err := interactionsResponseToolIdentity(originalRequestRawJSON)
 	if err == nil && len(patchTools) > 0 && !gjson.ValidBytes(rawJSON) {
 		err = fmt.Errorf("invalid Interactions apply_patch response JSON")
@@ -154,10 +158,13 @@ func convertInteractionsResponseToOpenAIResponsesNonStream(
 		}
 		return nil
 	}
-	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
 	out := []byte(`{"id":"","object":"response","status":"completed","model":"","output":[]}`)
-	out, _ = sjson.SetBytes(out, "id", firstNonEmpty(root.Get("id").String(), root.Get("interaction.id").String()))
+	out, _ = sjson.SetBytes(
+		out,
+		"id",
+		firstNonEmpty(root.Get("id").String(), root.Get("interaction.id").String()),
+	)
 	model := responseModel(modelName, root)
 	signatureModel := firstNonEmpty(root.Get("interaction.model").String(), root.Get("model").String(), model)
 	out, _ = sjson.SetBytes(out, "model", model)
@@ -186,7 +193,11 @@ func convertInteractionsResponseToOpenAIResponsesNonStream(
 	return out
 }
 
-func interactionsResponseToolIdentity(request []byte) (*translatorcommon.ResponsesToolIdentity, map[string]bool, error) {
+func interactionsResponseToolIdentity(request []byte) (
+	*translatorcommon.ResponsesToolIdentity,
+	map[string]bool,
+	error,
+) {
 	identity := translatorcommon.NewResponsesToolIdentity(request)
 	var patchTools map[string]bool
 	for _, declaration := range identity.Declarations() {
@@ -207,7 +218,11 @@ func interactionsResponseToolIdentity(request []byte) (*translatorcommon.Respons
 	return translatorcommon.NewResponsesToolIdentity(normalized), patchTools, nil
 }
 
-func interactionsSourceStepIndex(explicit, step gjson.Result, fallback int, st *interactionsToResponsesStreamState) int {
+func interactionsSourceStepIndex(
+	explicit, step gjson.Result,
+	fallback int,
+	st *interactionsToResponsesStreamState,
+) int {
 	if len(st.PatchTools) == 0 {
 		return int(explicit.Int())
 	}
@@ -216,11 +231,23 @@ func interactionsSourceStepIndex(explicit, step gjson.Result, fallback int, st *
 		if !value.Exists() {
 			continue
 		}
-		if value.Type != gjson.Number || value.Int() < 0 || value.Float() != float64(value.Int()) || (indexed && index != int(value.Int())) {
+		if value.Type != gjson.Number || value.Int() < 0 || value.Float() != float64(value.Int()) ||
+			(indexed && index != int(value.Int())) {
 			st.Err = fmt.Errorf("invalid or conflicting Interactions source index")
 			return index
 		}
 		index, indexed = int(value.Int()), true
+	}
+	if indexed {
+		name := step.Get("name").String()
+		if declaration, err := st.ToolIdentity.ResolveDeclaration(
+			name, "",
+		); err == nil && !st.PatchTools[declaration.QualifiedName] {
+			return index
+		}
+		if call := st.FunctionCalls[index]; call != nil && call.Name != "" && !st.PatchTools[call.Name] {
+			return index
+		}
 	}
 	matched := -1
 	itemID, callID := step.Get("id").String(), step.Get("call_id").String()
@@ -258,19 +285,24 @@ func interactionsSourceStepIndex(explicit, step gjson.Result, fallback int, st *
 	return index
 }
 
-func updateInteractionsFunctionCall(index int, step gjson.Result, st *interactionsToResponsesStreamState, initial bool) [][]byte {
+func updateInteractionsFunctionCall(
+	index int,
+	step gjson.Result,
+	st *interactionsToResponsesStreamState,
+	initial bool,
+) [][]byte {
+	var typeError error
 	if kind := st.ItemTypes[index]; kind != "" && kind != "function_call" {
-		st.Err = fmt.Errorf("conflicting Interactions function call source type")
-		return nil
+		typeError = fmt.Errorf("conflicting Interactions function call source type")
 	}
 	call := st.FunctionCalls[index]
 	if call == nil {
 		call = &interactionsFunctionCallState{}
 		st.FunctionCalls[index] = call
 	}
-	if kind := step.Get("type"); kind.Exists() && (kind.Type != gjson.String || kind.String() != "function_call") {
-		st.Err = fmt.Errorf("conflicting Interactions function call type")
-		return nil
+	if kind := step.Get("type"); kind.Exists() &&
+		(kind.Type != gjson.String || kind.String() != "function_call") {
+		typeError = fmt.Errorf("conflicting Interactions function call type")
 	}
 	for _, field := range []struct {
 		name   string
@@ -301,12 +333,22 @@ func updateInteractionsFunctionCall(index int, step gjson.Result, st *interactio
 			*field.target = text
 		}
 	}
+	if typeError != nil {
+		if st.PatchTools[call.Name] {
+			st.Err = typeError
+			return nil
+		}
+		if call.Name == "" && call.PendingError == nil {
+			call.PendingError = typeError
+		}
+	}
 	if st.PatchTools[call.Name] && call.PendingError != nil {
 		st.Err = call.PendingError
 		return nil
 	}
 	args := step.Get("arguments")
-	if initial && !call.Added && call.Snapshot == "" && call.Arguments.Len() == 0 && strings.TrimSpace(args.Raw) == "{}" {
+	if initial && !call.Added && call.Snapshot == "" && call.Arguments.Len() == 0 &&
+		strings.TrimSpace(args.Raw) == "{}" {
 		args = gjson.Result{}
 	}
 	if args.Exists() {
@@ -324,7 +366,8 @@ func updateInteractionsFunctionCall(index int, step gjson.Result, st *interactio
 	}
 	st.ItemTypes[index] = "function_call"
 	st.ItemIDs[index] = call.ID
-	added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","status":"in_progress","arguments":""}}`)
+	added := []byte((`{"type":"response.output_item.added","output_index":0,"item":{"type":"` +
+		`function_call","status":"in_progress","arguments":""}}`))
 	added, _ = sjson.SetBytes(added, "sequence_number", nextResponsesSeq(st))
 	added, _ = sjson.SetBytes(added, "output_index", index)
 	added, _ = sjson.SetBytes(added, "item.id", call.ID)
@@ -362,7 +405,9 @@ func updateInteractionsFunctionCall(index int, step gjson.Result, st *interactio
 			call.Arguments.WriteString(fragments)
 		}
 		if call.Arguments.Len() > 0 {
-			if event := responsesFunctionCallArgumentsDeltaToResponses(index, call.ID, call.Arguments.String(), st); len(event) > 0 {
+			if event := responsesFunctionCallArgumentsDeltaToResponses(
+				index, call.ID, call.Arguments.String(), st,
+			); len(event) > 0 {
 				events = append(events, event)
 			}
 		}
@@ -386,7 +431,11 @@ func updateInteractionsFunctionCall(index int, step gjson.Result, st *interactio
 	return events
 }
 
-func restoreInteractionsResponseTool(item []byte, identity *translatorcommon.ResponsesToolIdentity, itemPath string) []byte {
+func restoreInteractionsResponseTool(
+	item []byte,
+	identity *translatorcommon.ResponsesToolIdentity,
+	itemPath string,
+) []byte {
 	prefix := itemPath
 	if prefix != "" {
 		prefix += "."
@@ -399,7 +448,9 @@ func restoreInteractionsResponseTool(item []byte, identity *translatorcommon.Res
 	if identity.IsCustom(name) {
 		arguments := gjson.GetBytes(item, prefix+"arguments").String()
 		item, _ = sjson.SetBytes(item, prefix+"type", "custom_tool_call")
-		item, _ = translatorcommon.SetStringWithoutHTMLEscape(item, prefix+"input", translatorcommon.UnwrapResponsesCustomToolInput(arguments))
+		item, _ = translatorcommon.SetStringWithoutHTMLEscape(
+			item, prefix+"input", translatorcommon.UnwrapResponsesCustomToolInput(arguments),
+		)
 		item, _ = sjson.DeleteBytes(item, prefix+"arguments")
 	}
 	return item
@@ -511,7 +562,11 @@ func convertInteractionsEventToResponses(
 	return nil
 }
 
-func interactionsStepToResponsesOutput(step gjson.Result, modelName string, forAntigravity bool) ([]byte, bool) {
+func interactionsStepToResponsesOutput(
+	step gjson.Result,
+	modelName string,
+	forAntigravity bool,
+) ([]byte, bool) {
 	switch step.Get("type").String() {
 	case "model_output":
 		item := []byte(`{"type":"message","status":"completed","role":"assistant","content":[]}`)
@@ -559,7 +614,11 @@ func responsesCreatedEvent(
 	root gjson.Result,
 	st *interactionsToResponsesStreamState,
 ) []byte {
-	payload := []byte(`{"type":"response.created","response":{"id":"","object":"response","status":"in_progress","model":"","output":[]}}`)
+	payload := []byte(
+		(`{"type":"response.created","response":{"id":"","object":"response",` +
+			`"status":"in_progress","model":"","output":` +
+			`[]}}`),
+	)
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
 	st.ID = firstNonEmpty(root.Get("interaction.id").String(), root.Get("id").String(), st.ID)
 	payload, _ = sjson.SetBytes(payload, "response.id", st.ID)
@@ -571,7 +630,9 @@ func responsesCreatedEvent(
 	if requestModelName == "" {
 		requestModelName = modelName
 	}
-	st.Model = firstNonEmpty(root.Get("interaction.model").String(), root.Get("model").String(), st.Model, requestModelName)
+	st.Model = firstNonEmpty(
+		root.Get("interaction.model").String(), root.Get("model").String(), st.Model, requestModelName,
+	)
 	if requestModelName != "" {
 		payload, _ = sjson.SetBytes(payload, "response.model", requestModelName)
 	}
@@ -592,7 +653,9 @@ func interactionsStepStartToResponses(
 	if len(st.PatchTools) > 0 && (stepType == "function_call" || st.FunctionCalls[index] != nil) {
 		events := updateInteractionsFunctionCall(index, step, st, true)
 		if call := st.FunctionCalls[index]; st.Err == nil && call.SourceStopped && call.Name != "" {
-			events = append(events, interactionsStepStopToResponses(gjson.Parse(fmt.Sprintf(`{"index":%d}`, index)), st)...)
+			events = append(
+				events, interactionsStepStopToResponses(gjson.Parse(fmt.Sprintf(`{"index":%d}`, index)), st)...,
+			)
 		}
 		return events
 	}
@@ -602,25 +665,37 @@ func interactionsStepStartToResponses(
 	}
 	if call := st.FunctionCalls[index]; stepType == "function_call" && call != nil {
 		itemID, callID := step.Get("id").String(), step.Get("call_id").String()
-		if itemID != "" && itemID != call.ID || callID != "" && callID != call.CallID || name != "" && name != call.Name {
+		if itemID != "" && itemID != call.ID || callID != "" && callID != call.CallID ||
+			name != "" && name != call.Name {
 			st.Err = fmt.Errorf("conflicting Interactions function call identity at index %d", index)
 			st.Completed = true
-			failure, _ := sjson.SetBytes([]byte(`{"error":{"type":"server_error"}}`), "error.message", st.Err.Error())
+			failure, _ := sjson.SetBytes(
+				[]byte(`{"error":{"type":"server_error"}}`),
+				"error.message",
+				st.Err.Error(),
+			)
 			return [][]byte{responsesFailedEvent(modelName, gjson.ParseBytes(failure), st)}
 		}
 		return nil
 	}
-	itemID := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String(), fmt.Sprintf("item_%d", index))
+	itemID := firstNonEmpty(
+		step.Get("id").String(),
+		step.Get("call_id").String(),
+		fmt.Sprintf("item_%d", index),
+	)
 	callID := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), itemID)
 	st.ItemIDs[index] = itemID
 	st.ItemTypes[index] = stepType
 	switch stepType {
 	case "model_output":
-		added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"message","status":"in_progress","role":"assistant","content":[]}}`)
+		added := []byte((`{"type":"response.output_item.added","output_index":0,"item":{"id":"",` +
+			`"type":"message","status":"in_progress","role":"assistant","content":[` +
+			`]}}`))
 		added, _ = sjson.SetBytes(added, "sequence_number", nextResponsesSeq(st))
 		added, _ = sjson.SetBytes(added, "output_index", index)
 		added, _ = sjson.SetBytes(added, "item.id", itemID)
-		part := []byte(`{"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"","part":{"type":"output_text","text":""}}`)
+		part := []byte((`{"type":"response.content_part.added","output_index":0,"content_index"` +
+			`:0,"item_id":"","part":{"type":"output_text","text":""}}`))
 		part, _ = sjson.SetBytes(part, "sequence_number", nextResponsesSeq(st))
 		part, _ = sjson.SetBytes(part, "output_index", index)
 		part, _ = sjson.SetBytes(part, "item_id", itemID)
@@ -632,7 +707,8 @@ func interactionsStepStartToResponses(
 		if signature := interactionsThoughtSignature(step, firstNonEmpty(st.Model, modelName)); signature != "" {
 			st.ReasoningEncrypted[index] = signature
 		}
-		added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","encrypted_content":"","summary":[]}}`)
+		added := []byte((`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"` +
+			`reasoning","status":"in_progress","encrypted_content":"","summary":[]}}`))
 		added, _ = sjson.SetBytes(added, "sequence_number", nextResponsesSeq(st))
 		added, _ = sjson.SetBytes(added, "output_index", index)
 		added, _ = sjson.SetBytes(added, "item.id", itemID)
@@ -654,7 +730,9 @@ func interactionsStepStartToResponses(
 			call.Arguments.WriteString(jsonStringValue(args, "{}"))
 		}
 		st.FunctionCalls[index] = call
-		added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","call_id":"","name":"","arguments":""}}`)
+		added := []byte((`{"type":"response.output_item.added","output_index":0,"item":{"id":"",` +
+			`"type":"function_call","status":"in_progress","call_id":"","name":"","` +
+			`arguments":""}}`))
 		added, _ = sjson.SetBytes(added, "sequence_number", nextResponsesSeq(st))
 		added, _ = sjson.SetBytes(added, "output_index", index)
 		added, _ = sjson.SetBytes(added, "item.id", itemID)
@@ -664,7 +742,8 @@ func interactionsStepStartToResponses(
 		events := [][]byte{emitResponsesEvent("response.output_item.added", added)}
 		if call.Arguments.Len() > 0 && !call.InitialArgumentsEmitted {
 			events = append(
-				events, responsesFunctionCallArgumentsDeltaToResponses(index, itemID, call.Arguments.String(), st),
+				events,
+				responsesFunctionCallArgumentsDeltaToResponses(index, itemID, call.Arguments.String(), st),
 			)
 			call.InitialArgumentsEmitted = true
 		}
@@ -682,7 +761,8 @@ func interactionsStepDeltaToResponses(root gjson.Result, st *interactionsToRespo
 	var events [][]byte
 	if len(st.PatchTools) > 0 {
 		call := st.FunctionCalls[index]
-		if call != nil && call.SourceStopped && delta.Get("type").String() == "arguments_delta" && delta.Get("arguments").String() != "" {
+		if call != nil && call.SourceStopped && delta.Get("type").String() == "arguments_delta" &&
+			delta.Get("arguments").String() != "" {
 			err := fmt.Errorf("interactions apply_patch delta after source stop")
 			if st.PatchTools[call.Name] || st.PatchTools[root.Get("step.name").String()] {
 				st.Err = err
@@ -693,7 +773,8 @@ func interactionsStepDeltaToResponses(root gjson.Result, st *interactionsToRespo
 				return nil
 			}
 		}
-		if step := root.Get("step"); step.IsObject() && (step.Get("type").String() == "function_call" || call != nil) {
+		if step := root.Get("step"); step.IsObject() &&
+			(step.Get("type").String() == "function_call" || call != nil) {
 			events = updateInteractionsFunctionCall(index, step, st, false)
 			if st.Err != nil {
 				return nil
@@ -707,7 +788,9 @@ func interactionsStepDeltaToResponses(root gjson.Result, st *interactionsToRespo
 			return nil
 		}
 		recordResponsesReasoningSummary(st, index, text)
-		return [][]byte{responsesReasoningSummaryEvent("response.reasoning_summary_text.delta", index, text, st)}
+		return [][]byte{
+			responsesReasoningSummaryEvent("response.reasoning_summary_text.delta", index, text, st),
+		}
 	case "thought_signature":
 		if signature := interactionsThoughtSignature(delta, st.Model); signature != "" {
 			st.ReasoningEncrypted[index] = signature
@@ -735,7 +818,9 @@ func interactionsStepDeltaToResponses(root gjson.Result, st *interactionsToRespo
 		}
 		arguments := delta.Get("arguments").String()
 		call.Arguments.WriteString(arguments)
-		if event := responsesFunctionCallArgumentsDeltaToResponses(index, call.ID, arguments, st); len(event) > 0 {
+		if event := responsesFunctionCallArgumentsDeltaToResponses(index, call.ID, arguments, st); len(
+			event,
+		) > 0 {
 			if len(st.PatchTools) > 0 && call.Name == "" {
 				call.Pending = append(call.Pending, event)
 				return events
@@ -744,7 +829,9 @@ func interactionsStepDeltaToResponses(root gjson.Result, st *interactionsToRespo
 		}
 		return events
 	default:
-		payload := []byte(`{"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"","delta":""}`)
+		payload := []byte(
+			`{"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"","delta":""}`,
+		)
 		payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
 		payload, _ = sjson.SetBytes(payload, "output_index", index)
 		payload, _ = sjson.SetBytes(payload, "item_id", st.ItemIDs[index])
@@ -802,7 +889,12 @@ func responsesFunctionCallArgumentsDoneToResponses(
 	return emitResponsesEvent(kind, payload)
 }
 
-func responsesReasoningSummaryEvent(kind string, index int, text string, st *interactionsToResponsesStreamState) []byte {
+func responsesReasoningSummaryEvent(
+	kind string,
+	index int,
+	text string,
+	st *interactionsToResponsesStreamState,
+) []byte {
 	payload := []byte(`{"type":"","output_index":0,"item_id":"","summary_index":0}`)
 	payload, _ = sjson.SetBytes(payload, "type", kind)
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
@@ -827,7 +919,8 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 	}
 	var updates [][]byte
 	if len(st.PatchTools) > 0 {
-		if step := root.Get("step"); step.IsObject() && (step.Get("type").String() == "function_call" || st.FunctionCalls[index] != nil) {
+		if step := root.Get("step"); step.IsObject() &&
+			(step.Get("type").String() == "function_call" || st.FunctionCalls[index] != nil) {
 			updates = updateInteractionsFunctionCall(index, step, st, false)
 			if st.Err != nil {
 				return nil
@@ -851,17 +944,23 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 		if builder := st.TextOutputs[index]; builder != nil {
 			text = builder.String()
 		}
-		textDone := []byte(`{"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"","text":"","logprobs":[]}`)
+		textDone := []byte(
+			(`{"type":"response.output_text.done","output_index":0,"content_index":` +
+				`0,"item_id":"","text":"","logprobs":` +
+				`[]}`),
+		)
 		textDone, _ = sjson.SetBytes(textDone, "sequence_number", nextResponsesSeq(st))
 		textDone, _ = sjson.SetBytes(textDone, "output_index", index)
 		textDone, _ = sjson.SetBytes(textDone, "item_id", itemID)
 		textDone, _ = sjson.SetBytes(textDone, "text", text)
-		part := []byte(`{"type":"response.content_part.done","output_index":0,"content_index":0,"item_id":"","part":{"type":"output_text","text":""}}`)
+		part := []byte((`{"type":"response.content_part.done","output_index":0,"content_index":` +
+			`0,"item_id":"","part":{"type":"output_text","text":""}}`))
 		part, _ = sjson.SetBytes(part, "sequence_number", nextResponsesSeq(st))
 		part, _ = sjson.SetBytes(part, "output_index", index)
 		part, _ = sjson.SetBytes(part, "item_id", itemID)
 		part, _ = sjson.SetBytes(part, "part.text", text)
-		done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"","type":"message","status":"completed","role":"assistant","content":[]}}`)
+		done := []byte((`{"type":"response.output_item.done","output_index":0,"item":{"id":"","` +
+			`type":"message","status":"completed","role":"assistant","content":[]}}`))
 		done, _ = sjson.SetBytes(done, "sequence_number", nextResponsesSeq(st))
 		done, _ = sjson.SetBytes(done, "output_index", index)
 		done, _ = sjson.SetBytes(done, "item.id", itemID)
@@ -901,7 +1000,8 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 			events = append(events, responsesFunctionCallArgumentsDoneToResponses(index, itemID, arguments, st))
 			call.ArgumentsDoneEmitted = true
 		}
-		done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"","type":"function_call","status":"completed","call_id":"","name":"","arguments":""}}`)
+		done := []byte((`{"type":"response.output_item.done","output_index":0,"item":{"id":"","type":"` +
+			`function_call","status":"completed","call_id":"","name":"","arguments":""}}`))
 		done, _ = sjson.SetBytes(done, "sequence_number", nextResponsesSeq(st))
 		done, _ = sjson.SetBytes(done, "output_index", index)
 		done, _ = sjson.SetBytes(done, "item.id", itemID)
@@ -920,7 +1020,11 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 	}
 }
 
-func responsesCompletedEvent(modelName string, root gjson.Result, st *interactionsToResponsesStreamState) []byte {
+func responsesCompletedEvent(
+	modelName string,
+	root gjson.Result,
+	st *interactionsToResponsesStreamState,
+) []byte {
 	if st.Completed {
 		return nil
 	}
@@ -932,7 +1036,9 @@ func responsesCompletedEvent(modelName string, root gjson.Result, st *interactio
 	if status == "incomplete" {
 		eventType = "response.incomplete"
 	}
-	payload := []byte(`{"type":"","response":{"id":"","object":"response","status":"","model":"","output":[],"usage":{}}}`)
+	payload := []byte(
+		`{"type":"","response":{"id":"","object":"response","status":"","model":"","output":[],"usage":{}}}`,
+	)
 	payload, _ = sjson.SetBytes(payload, "type", eventType)
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
 	interaction := root.Get("interaction")
@@ -941,24 +1047,42 @@ func responsesCompletedEvent(modelName string, root gjson.Result, st *interactio
 	)
 	payload, _ = sjson.SetBytes(payload, "response.status", status)
 	st.Model = firstNonEmpty(interaction.Get("model").String(), root.Get("model").String(), st.Model, modelName)
-	payload, _ = sjson.SetBytes(payload, "response.model", firstNonEmpty(interaction.Get("model").String(), modelName))
+	payload, _ = sjson.SetBytes(
+		payload,
+		"response.model",
+		firstNonEmpty(interaction.Get("model").String(), modelName),
+	)
 	payload = copyInteractionIncompleteDetailsToResponse(payload, root, "response.incomplete_details")
 	if environmentID := firstNonEmpty(interactionEnvironmentID(root), st.EnvironmentID); environmentID != "" {
 		st.EnvironmentID = environmentID
 		payload, _ = sjson.SetBytes(payload, "response.environment_id", environmentID)
 	}
 	payload = setResponsesCompletedOutput(payload, st)
-	payload = setResponsesUsageFromInteractions(payload, "response.usage", translatorcommon.InteractionsUsage(root))
+	payload = setResponsesUsageFromInteractions(
+		payload,
+		"response.usage",
+		translatorcommon.InteractionsUsage(root),
+	)
 	st.Completed = true
 	return emitResponsesEvent(eventType, payload)
 }
 
 func responsesFailedEvent(modelName string, root gjson.Result, st *interactionsToResponsesStreamState) []byte {
-	payload := []byte(`{"type":"response.failed","response":{"id":"","object":"response","status":"failed","model":"","output":[],"error":{"type":"server_error","message":""}}}`)
+	payload := []byte((`{"type":"response.failed","response":{"id":"","object":"response","status":"failed","` +
+		`model":"","output":[],"error":{"type":"server_error","message":""}}}`))
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
-	st.ID = firstNonEmpty(root.Get("interaction.id").String(), root.Get("response.id").String(), root.Get("interaction_id").String(), root.Get("id").String(), st.ID)
+	st.ID = firstNonEmpty(
+		root.Get("interaction.id").
+			String(),
+		root.Get("response.id").String(),
+		root.Get("interaction_id").String(),
+		root.Get("id").String(),
+		st.ID,
+	)
 	payload, _ = sjson.SetBytes(payload, "response.id", st.ID)
-	st.Model = firstNonEmpty(root.Get("interaction.model").String(), root.Get("response.model").String(), st.Model, modelName)
+	st.Model = firstNonEmpty(
+		root.Get("interaction.model").String(), root.Get("response.model").String(), st.Model, modelName,
+	)
 	payload, _ = sjson.SetBytes(payload, "response.model", st.Model)
 	if environmentID := firstNonEmpty(interactionEnvironmentID(root), st.EnvironmentID); environmentID != "" {
 		payload, _ = sjson.SetBytes(payload, "response.environment_id", environmentID)
@@ -1087,7 +1211,11 @@ func responsesFunctionCallArguments(call *interactionsFunctionCallState) string 
 	return call.Arguments.String()
 }
 
-func responsesCompletedOutputItem(index int, itemType string, st *interactionsToResponsesStreamState) ([]byte, bool) {
+func responsesCompletedOutputItem(
+	index int,
+	itemType string,
+	st *interactionsToResponsesStreamState,
+) ([]byte, bool) {
 	switch itemType {
 	case "model_output":
 		item := []byte(`{"id":"","type":"message","status":"completed","role":"assistant","content":[]}`)
@@ -1101,13 +1229,17 @@ func responsesCompletedOutputItem(index int, itemType string, st *interactionsTo
 	case "thought":
 		return responsesReasoningItem(index, st), true
 	case "function_call":
-		item := []byte(`{"id":"","type":"function_call","status":"completed","call_id":"","name":"","arguments":"{}"}`)
+		item := []byte(
+			`{"id":"","type":"function_call","status":"completed","call_id":"","name":"","arguments":"{}"}`,
+		)
 		itemID := st.ItemIDs[index]
 		item, _ = sjson.SetBytes(item, "id", itemID)
 		if call := st.FunctionCalls[index]; call != nil {
 			item, _ = sjson.SetBytes(item, "call_id", call.CallID)
 			item, _ = sjson.SetBytes(item, "name", call.Name)
-			item, _ = translatorcommon.SetStringWithoutHTMLEscape(item, "arguments", responsesFunctionCallArguments(call))
+			item, _ = translatorcommon.SetStringWithoutHTMLEscape(
+				item, "arguments", responsesFunctionCallArguments(call),
+			)
 		}
 		return restoreInteractionsResponseTool(item, st.ToolIdentity, ""), true
 	}
@@ -1151,8 +1283,11 @@ func setResponsesUsageFromInteractions(out []byte, path string, usage gjson.Resu
 
 func interactionIncompleteReason(root gjson.Result) string {
 	reason := firstNonEmpty(
-		root.Get("interaction.incomplete_details.reason").String(), root.Get("incomplete_details.reason").String(),
-		root.Get("interaction.finish_reason").String(), root.Get("finish_reason").String(),
+		root.Get("interaction.incomplete_details.reason").
+			String(),
+		root.Get("incomplete_details.reason").String(),
+		root.Get("interaction.finish_reason").String(),
+		root.Get("finish_reason").String(),
 	)
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "length", "max_tokens", "max_output_tokens":
@@ -1178,7 +1313,8 @@ func copyInteractionIncompleteDetailsToResponse(out []byte, root gjson.Result, p
 	if details.Exists() {
 		out, _ = sjson.SetRawBytes(out, path, []byte(details.Raw))
 	}
-	if reason := interactionIncompleteReason(root); reason != "" && gjson.GetBytes(out, path+".reason").String() == "" {
+	if reason := interactionIncompleteReason(root); reason != "" &&
+		gjson.GetBytes(out, path+".reason").String() == "" {
 		out, _ = sjson.SetBytes(out, path+".reason", reason)
 	}
 	return out
@@ -1203,14 +1339,11 @@ func responseEnvironmentID(root gjson.Result) string {
 }
 
 func convertOpenAIResponsesResponseToInteractions(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_, _, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	_ = ctx
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
 	if param == nil {
 		var local any
 		param = &local
@@ -1232,14 +1365,11 @@ func convertOpenAIResponsesResponseToInteractions(
 }
 
 func convertOpenAIResponsesResponseToInteractionsNonStream(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_, _, rawJSON []byte,
 	_ *any,
 ) []byte {
-	_ = ctx
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
 	if status := root.Get("status").String(); status != "" {
@@ -1273,6 +1403,9 @@ func convertOpenAIResponsesEventToInteractions(
 	rawJSON []byte,
 	st *responsesToInteractionsStreamState,
 ) [][]byte {
+	if st.Completed || st.Done {
+		return nil
+	}
 	payload := interactionsSSEPayload(rawJSON)
 	if len(payload) == 0 {
 		return nil
@@ -1363,25 +1496,7 @@ func openAIResponsesOutputItemAddedToInteractions(
 	item := root.Get("item")
 	switch item.Get("type").String() {
 	case "function_call":
-		out := ensureInteractionsCreatedDirect(nil, st, modelName)
-		out = appendInteractionsStepStopDirect(out, st)
-		step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-		name := item.Get("name").String()
-		if isAntigravityModel(modelName) {
-			name = translatorcommon.AntigravityToolNameToUpstream(name)
-		}
-		step, _ = sjson.SetBytes(step, "name", name)
-		itemID := firstNonEmpty(item.Get("id").String(), item.Get("call_id").String())
-		callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
-		if itemID != "" {
-			step, _ = sjson.SetBytes(step, "id", itemID)
-		}
-		if callID != "" {
-			step, _ = sjson.SetBytes(step, "call_id", callID)
-			st.FunctionCallIndexes[callID] = st.StepIndex
-		}
-		out = appendInteractionsStepStartDirect(out, st, "function_call", gjson.ParseBytes(step))
-		return out
+		return ensureInteractionsFunctionCallStep(nil, st, modelName, root)
 	case "message":
 		return ensureInteractionsStepDirect(nil, st, modelName, "model_output", gjson.Result{})
 	case "reasoning":
@@ -1405,10 +1520,17 @@ func openAIResponsesOutputItemDoneToInteractions(
 	switch item.Get("type").String() {
 	case "function_call":
 		out := ensureInteractionsFunctionCallStep(nil, st, modelName, root)
-		if args := item.Get("arguments"); args.Exists() && args.String() != "" && !st.hasSentFunctionArgs(functionArgsKeysFromResponsesEvent(root)) {
+		if args := item.Get("arguments"); args.Exists() && args.String() != "" &&
+			!st.hasSentFunctionArgs(functionArgsKeysFromResponsesEvent(root)) {
 			out = appendInteractionsArgumentsDeltaDirect(out, st, jsonStringValue(args, "{}"))
 		}
-		return appendInteractionsStepStopDirect(out, st)
+		index := st.ActiveStepIndex
+		payload, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop"}`), "index", index)
+		if st.FunctionStepsOpen[index] {
+			out = append(out, emitInteractionsEvent("step.stop", payload))
+			st.FunctionStepsOpen[index] = false
+		}
+		return out
 	case "reasoning":
 		hasSummary := false
 		item.Get("summary").ForEach(
@@ -1461,6 +1583,18 @@ func openAIResponsesCompletedToInteractions(
 		},
 	)
 	out = appendInteractionsStepStopDirect(out, st)
+	indexes := make([]int, 0, len(st.FunctionStepsOpen))
+	for index, open := range st.FunctionStepsOpen {
+		if open {
+			indexes = append(indexes, index)
+		}
+	}
+	slices.Sort(indexes)
+	for _, index := range indexes {
+		payload, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop"}`), "index", index)
+		out = append(out, emitInteractionsEvent("step.stop", payload))
+		st.FunctionStepsOpen[index] = false
+	}
 	out = appendInteractionsCompletedDirect(out, st, modelName, response)
 	return appendInteractionsDoneDirect(out, st)
 }
@@ -1523,10 +1657,20 @@ func appendInteractionsCreatedDirect(
 	if st.Created {
 		return out
 	}
-	st.ID = firstNonEmpty(response.Get("id").String(), st.ID, fmt.Sprintf("interaction_%d", time.Now().UnixNano()))
-	created := []byte(`{"interaction":{"id":"","status":"in_progress","object":"interaction","model":""},"event_type":"interaction.created"}`)
+	st.ID = firstNonEmpty(
+		response.Get("id").String(),
+		st.ID,
+		fmt.Sprintf("interaction_%d", time.Now().UnixNano()),
+	)
+	created := []byte(
+		(`{"interaction":{"id":"","status":"in_progress","object":"interaction",` +
+			`"model":""},"event_type":` +
+			`"interaction.created"}`),
+	)
 	created, _ = sjson.SetBytes(created, "interaction.id", st.ID)
-	st.Model = firstNonEmpty(response.Get("model").String(), response.Get("response.model").String(), modelName, st.Model)
+	st.Model = firstNonEmpty(
+		response.Get("model").String(), response.Get("response.model").String(), modelName, st.Model,
+	)
 	created, _ = sjson.SetBytes(created, "interaction.model", responseModel(modelName, response))
 	if environmentID := responseEnvironmentID(response); environmentID != "" {
 		st.EnvironmentID = environmentID
@@ -1544,7 +1688,9 @@ func appendInteractionsStatusUpdateDirect(out [][]byte, st *responsesToInteracti
 	if st.StatusUpdated {
 		return out
 	}
-	statusUpdate := []byte(`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`)
+	statusUpdate := []byte(
+		`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`,
+	)
 	statusUpdate, _ = sjson.SetBytes(statusUpdate, "interaction_id", st.ID)
 	out = append(out, emitInteractionsEvent("interaction.status_update", statusUpdate))
 	st.StatusUpdated = true
@@ -1587,7 +1733,11 @@ func ensureInteractionsThoughtStepDirect(
 	return out
 }
 
-func ensureInteractionsCreatedDirect(out [][]byte, st *responsesToInteractionsStreamState, modelName string) [][]byte {
+func ensureInteractionsCreatedDirect(
+	out [][]byte,
+	st *responsesToInteractionsStreamState,
+	modelName string,
+) [][]byte {
 	return appendInteractionsCreatedDirect(out, st, modelName, gjson.Result{})
 }
 
@@ -1631,7 +1781,11 @@ func appendInteractionsTextDeltaDirect(
 	thought bool,
 ) [][]byte {
 	if thought {
-		payload := []byte(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`)
+		payload := []byte(
+			(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":` +
+				`"thought_summary"},"event_type":` +
+				`"step.delta"}`),
+		)
 		payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
 		payload, _ = sjson.SetBytes(payload, "delta.content.text", text)
 		return append(out, emitInteractionsEvent("step.delta", payload))
@@ -1647,7 +1801,9 @@ func appendInteractionsThoughtSignatureDeltaDirect(
 	st *responsesToInteractionsStreamState,
 	signature string,
 ) [][]byte {
-	payload := []byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`)
+	payload := []byte(
+		`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`,
+	)
 	payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
 	payload, _ = sjson.SetBytes(payload, "delta.signature", signature)
 	st.ActiveThoughtSignature = signature
@@ -1688,11 +1844,15 @@ func appendInteractionsCompletedDirect(
 		return out
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	payload := []byte(`{"interaction":{"id":"","status":"completed","usage":{},"created":"","updated":"","service_tier":"standard","object":"interaction","model":""},"event_type":"interaction.completed"}`)
+	payload := []byte((`{"interaction":{"id":"","status":"completed","usage":{},"created":"","` +
+		`updated":"","service_tier":"standard","object":"interaction","model":"` +
+		`"},"event_type":"interaction.completed"}`))
 	payload, _ = sjson.SetBytes(payload, "interaction.id", st.ID)
 	payload, _ = sjson.SetBytes(payload, "interaction.created", now)
 	payload, _ = sjson.SetBytes(payload, "interaction.updated", now)
-	st.Model = firstNonEmpty(response.Get("model").String(), response.Get("response.model").String(), st.Model, modelName)
+	st.Model = firstNonEmpty(
+		response.Get("model").String(), response.Get("response.model").String(), st.Model, modelName,
+	)
 	payload, _ = sjson.SetBytes(payload, "interaction.model", responseModel(modelName, response))
 	if status := response.Get("status").String(); status != "" {
 		payload, _ = sjson.SetBytes(payload, "interaction.status", status)
@@ -1725,8 +1885,18 @@ func ensureInteractionsFunctionCallStep(
 	modelName string,
 	root gjson.Result,
 ) [][]byte {
-	if st.ActiveStepOpen && st.ActiveStepType == "function_call" {
-		return out
+	if st.FunctionCallIndexes == nil {
+		st.FunctionCallIndexes = make(map[string]int)
+	}
+	if st.FunctionStepsOpen == nil {
+		st.FunctionStepsOpen = make(map[int]bool)
+	}
+	keys := functionArgsKeysFromResponsesEvent(root)
+	for _, key := range keys {
+		if index, ok := st.FunctionCallIndexes[key]; ok {
+			st.ActiveStepIndex = index
+			return out
+		}
 	}
 	item := root.Get("item")
 	if !item.Exists() {
@@ -1754,7 +1924,14 @@ func ensureInteractionsFunctionCallStep(
 	}
 	out = ensureInteractionsCreatedDirect(out, st, modelName)
 	out = appendInteractionsStepStopDirect(out, st)
-	return appendInteractionsStepStartDirect(out, st, "function_call", gjson.ParseBytes(step))
+	out = appendInteractionsStepStartDirect(out, st, "function_call", gjson.ParseBytes(step))
+	for _, key := range keys {
+		st.FunctionCallIndexes[key] = st.ActiveStepIndex
+	}
+	st.FunctionStepsOpen[st.ActiveStepIndex] = true
+	st.ActiveStepOpen = false
+	st.ActiveStepType = ""
+	return out
 }
 
 func setInteractionsUsageFromResponses(out []byte, path string, usage gjson.Result) []byte {

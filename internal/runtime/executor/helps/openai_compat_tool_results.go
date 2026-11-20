@@ -73,7 +73,8 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 				parts := make([]string, 0)
 				notice, images := false, false
 				for _, part := range content.Array() {
-					if part.Get("type").String() == "text" && part.Get("text").String() == claudeToolResultImageRelayNotice {
+					if part.Get("type").String() == "text" &&
+						part.Get("text").String() == claudeToolResultImageRelayNotice {
 						notice = true
 					} else if isOpenAIImageToolResultPart(part) {
 						images = true

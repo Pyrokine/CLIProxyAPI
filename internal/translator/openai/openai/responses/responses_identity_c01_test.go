@@ -8,26 +8,22 @@ import (
 )
 
 func TestResponsesIdentityRequestAdditionalToolsStructuredOutputAndBatching(t *testing.T) {
-	request := []byte(`{
-		"tools":[
-			{"type":"namespace","name":"mcp__editor","tools":[{"type":"custom","name":"apply_patch"}]},
-			{"type":"function","name":"inspect","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}
-		],
-		"tool_choice":{"type":"custom","name":"apply_patch","namespace":"mcp__editor"},
-		"input":[
-			{"type":"additional_tools","tools":[{"type":"namespace","name":"mcp__editor","tools":[{"type":"custom","name":"apply_patch"}]}]},
-			{"type":"custom_tool_call","call_id":"call_patch","name":"apply_patch","namespace":"mcp__editor","input":"*** patch"},
-			{"type":"function_call","call_id":"call_inspect","name":"inspect","arguments":"{\"path\":\"a.go\"}"},
-			{"type":"custom_tool_call_output","call_id":"call_patch","output":[{"type":"input_text","text":"applied"}]},
-			{"type":"function_call_output","call_id":"call_inspect","output":[
-				{"type":"input_text","text":"preview"},
-				{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"low"}
-			]},
-			{"type":"message","role":"user","content":"continue"}
-		]
-	}`)
+	request := []byte(("{\n\t\t\"tools\":[\n\t\t\t{\"type\":\"namespace\",\"name\":\"mcp__editor\",\"tools\":[" +
+		"{\"type\":\"custom\",\"name\":\"apply_patch\"}]},\n\t\t\t{\"type\":\"function\",\"name\":\"inspect\"" +
+		",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}}\n\t\t],\n\t\t" +
+		"\"tool_choice\":{\"type\":\"custom\",\"name\":\"apply_patch\",\"namespace\":\"mcp__editor\"},\n\t\t" +
+		"\"input\":[\n\t\t\t{\"type\":\"additional_tools\",\"tools\":[{\"type\":\"namespace\",\"name\":\"" +
+		"mcp__editor\",\"tools\":[{\"type\":\"custom\",\"name\":\"apply_patch\"}]}]},\n\t\t\t{\"type\":\"" +
+		"custom_tool_call\",\"call_id\":\"call_patch\",\"name\":\"apply_patch\",\"namespace\":\"mcp__editor\"" +
+		",\"input\":\"*** patch\"},\n\t\t\t{\"type\":\"function_call\",\"call_id\":\"call_inspect\",\"name\":" +
+		"\"inspect\",\"arguments\":\"{\\\"path\\\":\\\"a.go\\\"}\"},\n\t\t\t{\"type\":\"" +
+		"custom_tool_call_output\",\"call_id\":\"call_patch\",\"output\":[{\"type\":\"input_text\",\"text\":" +
+		"\"applied\"}]},\n\t\t\t{\"type\":\"function_call_output\",\"call_id\":\"call_inspect\",\"output\":[" +
+		"\n\t\t\t\t{\"type\":\"input_text\",\"text\":\"preview\"},\n\t\t\t\t{\"type\":\"input_image\",\"" +
+		"image_url\":\"data:image/png;base64,AAAA\",\"detail\":\"low\"}\n\t\t\t]},\n\t\t\t{\"type\":\"" +
+		"message\",\"role\":\"user\",\"content\":\"continue\"}\n\t\t]\n\t}"))
 
-	output := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-test", request, false)
+	output := convertResponsesRequestToChatCompletions("gpt-test", request, false)
 	if got := gjson.GetBytes(output, "tools.#").Int(); got != 2 {
 		t.Fatalf("tool count = %d, want 2; output=%s", got, output)
 	}
@@ -49,7 +45,8 @@ func TestResponsesIdentityRequestAdditionalToolsStructuredOutputAndBatching(t *t
 	if got := assistant.Get("tool_calls.0.function.name").String(); got != "mcp__editor__apply_patch" {
 		t.Fatalf("custom history name = %q, want qualified name", got)
 	}
-	if got := gjson.Parse(assistant.Get("tool_calls.0.function.arguments").String()).Get("input").String(); got != "*** patch" {
+	if got := gjson.Parse(assistant.Get("tool_calls.0.function.arguments").String()).Get("input").String(); got !=
+		"*** patch" {
 		t.Fatalf("custom history input = %q, want patch", got)
 	}
 	if got := messages[1].Get("content").String(); got != "applied" {
@@ -71,9 +68,15 @@ func TestResponsesIdentityOpenAIStreamCustomItemDeltaDoneRoundTrip(t *testing.T)
 		"tools":[{"type":"namespace","name":"mcp__editor","tools":[{"type":"custom","name":"apply_patch"}]}]
 	}`)
 	chunks := [][]byte{
-		[]byte(`{"id":"chat_1","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"mcp__editor__apply_patch","arguments":"{\"input\":\"*** patch\"}"}}]}}]}`),
+		[]byte((`{"id":"chat_1","created":1,"choices":[{"index":0,"delta":{"tool_calls"` +
+			`:[{"index":0,"id":"call_1","type":"function","function":{"name":"mcp__` +
+			`editor__apply_patch","arguments":"{\"input\":\"*** patch\"}"}}]}}]}`)),
 		[]byte(`{"id":"chat_1","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`),
-		[]byte(`{"id":"chat_1","created":1,"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`),
+		[]byte(
+			(`{"id":"chat_1","created":1,"choices":[],"usage":{"prompt_tokens":11,` +
+				`"completion_tokens":7,"total_tokens":` +
+				`18}}`),
+		),
 		[]byte(`[DONE]`),
 	}
 
