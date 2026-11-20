@@ -89,9 +89,11 @@ func TestManagerMarkResultTargetsSchedulerModelShards(t *testing.T) {
 		&registry.ModelInfo{ID: modelC},
 		&registry.ModelInfo{ID: modelD},
 	)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID: authID, Provider: provider, Status: StatusActive,
-	})
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: authID, Provider: provider, Status: StatusActive,
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -185,14 +187,16 @@ func TestManagerMarkResultTargetsWholeQuotaFamily(t *testing.T) {
 		&registry.ModelInfo{ID: modelB},
 		&registry.ModelInfo{ID: modelC},
 	)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID: authID, Provider: provider, Status: StatusActive,
-		ModelStates: map[string]*ModelState{
-			modelA: {Status: StatusActive, Quota: QuotaState{Family: family, Generation: 1}},
-			modelB: {Status: StatusActive, Quota: QuotaState{Family: family, Generation: 1}},
-			modelC: {Status: StatusActive},
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: authID, Provider: provider, Status: StatusActive,
+			ModelStates: map[string]*ModelState{
+				modelA: {Status: StatusActive, Quota: QuotaState{Family: family, Generation: 1}},
+				modelB: {Status: StatusActive, Quota: QuotaState{Family: family, Generation: 1}},
+				modelC: {Status: StatusActive},
+			},
 		},
-	})
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -260,13 +264,15 @@ func TestManagerCredentialResultUpdatesEverySchedulerShard(t *testing.T) {
 		&registry.ModelInfo{ID: modelA},
 		&registry.ModelInfo{ID: modelB},
 	)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID: authID, Provider: provider, Status: StatusActive,
-		ModelStates: map[string]*ModelState{
-			modelA: {Status: StatusActive},
-			modelB: {Status: StatusActive},
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: authID, Provider: provider, Status: StatusActive,
+			ModelStates: map[string]*ModelState{
+				modelA: {Status: StatusActive},
+				modelB: {Status: StatusActive},
+			},
 		},
-	})
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -282,16 +288,18 @@ func TestManagerCredentialResultUpdatesEverySchedulerShard(t *testing.T) {
 		EffectKey:      authID,
 	}
 	retryAfter := time.Hour
-	manager.MarkResult(context.Background(), Result{
-		AuthID:          authID,
-		AuthGeneration:  registered.Generation,
-		Provider:        provider,
-		Model:           modelA,
-		Error:           &Error{HTTPStatus: http.StatusTooManyRequests, Message: "credential quota"},
-		RetryAfter:      &retryAfter,
-		Disposition:     disposition,
-		StateGeneration: stateGenerationForDisposition(registered, modelA, disposition),
-	})
+	manager.MarkResult(
+		context.Background(), Result{
+			AuthID:          authID,
+			AuthGeneration:  registered.Generation,
+			Provider:        provider,
+			Model:           modelA,
+			Error:           &Error{HTTPStatus: http.StatusTooManyRequests, Message: "credential quota"},
+			RetryAfter:      &retryAfter,
+			Disposition:     disposition,
+			StateGeneration: stateGenerationForDisposition(registered, modelA, disposition),
+		},
+	)
 
 	afterA := schedulerShardStateForTest(manager.scheduler, provider, modelA, authID)
 	afterB := schedulerShardStateForTest(manager.scheduler, provider, modelB, authID)
@@ -318,9 +326,11 @@ func TestSchedulerTargetedResultUsesLatestSnapshotWhenIncomingIsStale(t *testing
 		&registry.ModelInfo{ID: modelA},
 		&registry.ModelInfo{ID: modelB},
 	)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID: authID, Provider: provider, Status: StatusActive,
-	})
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: authID, Provider: provider, Status: StatusActive,
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -385,9 +395,11 @@ func TestSchedulerTargetedResultReusesRegisteredModelSet(t *testing.T) {
 		&registry.ModelInfo{ID: modelA},
 		&registry.ModelInfo{ID: modelB},
 	)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID: authID, Provider: provider, Status: StatusActive,
-	})
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: authID, Provider: provider, Status: StatusActive,
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -419,19 +431,25 @@ func TestSchedulerRegistryEpochRefreshesExistingShardsFromLatestAuth(t *testing.
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(authID, provider, []*registry.ModelInfo{{ID: modelA}})
 	reg.RegisterClient(otherID, provider, []*registry.ModelInfo{{ID: modelB}})
-	t.Cleanup(func() {
-		reg.UnregisterClient(authID)
-		reg.UnregisterClient(otherID)
-	})
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID: authID, Provider: provider, Status: StatusActive,
-	})
+	t.Cleanup(
+		func() {
+			reg.UnregisterClient(authID)
+			reg.UnregisterClient(otherID)
+		},
+	)
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: authID, Provider: provider, Status: StatusActive,
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
-	if _, errOther := manager.Register(context.Background(), &Auth{
-		ID: otherID, Provider: provider, Status: StatusActive,
-	}); errOther != nil {
+	if _, errOther := manager.Register(
+		context.Background(), &Auth{
+			ID: otherID, Provider: provider, Status: StatusActive,
+		},
+	); errOther != nil {
 		t.Fatalf("Register(other) error = %v", errOther)
 	}
 	warmSchedulerModels(t, manager, provider, authID, modelA)
@@ -467,9 +485,11 @@ func TestSchedulerTargetedResultUpdatesEmptyModelShard(t *testing.T) {
 		model    = "targeted-empty-model"
 	)
 	registerProjectionTestClient(t, authID, provider, &registry.ModelInfo{ID: model})
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID: authID, Provider: provider, Status: StatusActive,
-	})
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: authID, Provider: provider, Status: StatusActive,
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}

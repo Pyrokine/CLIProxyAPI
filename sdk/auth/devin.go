@@ -23,6 +23,7 @@ const (
 // DevinAuthenticator implements Devin OAuth login.
 type DevinAuthenticator struct {
 	CallbackPort int
+	AuthService  *devinauth.DevinAuthService
 }
 
 // NewDevinAuthenticator creates a Devin authenticator using an ephemeral loopback port.
@@ -65,8 +66,11 @@ func (authenticator *DevinAuthenticator) Login(
 		return nil, fmt.Errorf("generate Devin OAuth state: %w", err)
 	}
 
-	client := util.SetProxy(&cfg.SDKConfig, &http.Client{Timeout: devinHTTPTimeout})
-	service := devinauth.NewDevinAuthService(client)
+	service := authenticator.AuthService
+	if service == nil {
+		client := util.SetProxy(&cfg.SDKConfig, &http.Client{Timeout: devinHTTPTimeout})
+		service = devinauth.NewDevinAuthService(client)
+	}
 	var authCode, pastedToken string
 	if opts.NoBrowser {
 		if opts.Prompt == nil {
@@ -74,7 +78,9 @@ func (authenticator *DevinAuthenticator) Login(
 		}
 		authURL := service.BuildAuthorizationURL("", pkce.CodeChallenge, state)
 		fmt.Printf("Visit the following URL to continue Devin authentication:\n%s\n\n", authURL)
-		manualInput, manualErrors := misc.AsyncPrompt(opts.Prompt, "Paste the Devin authorization code or session token: ")
+		manualInput, manualErrors := misc.AsyncPrompt(
+			opts.Prompt, "Paste the Devin authorization code or session token: ",
+		)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

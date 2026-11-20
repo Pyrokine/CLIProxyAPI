@@ -14,6 +14,8 @@ import (
 )
 
 // MetaAuthenticator completes the Meta Muse device authorization flow.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type MetaAuthenticator struct{}
 
 func NewMetaAuthenticator() Authenticator             { return &MetaAuthenticator{} }

@@ -17,6 +17,8 @@ import (
 )
 
 // AntigravityAuthenticator implements OAuth login for the antigravity provider.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type AntigravityAuthenticator struct{}
 
 // NewAntigravityAuthenticator constructs a new authenticator instance.
@@ -25,9 +27,9 @@ func NewAntigravityAuthenticator() Authenticator { return &AntigravityAuthentica
 // Provider returns the provider key for antigravity.
 func (AntigravityAuthenticator) Provider() string { return "antigravity" }
 
-// RefreshLead 指定 Antigravity 凭证在到期前 50 分钟刷新
+// RefreshLead 指定 Antigravity 凭证在到期前 30 分钟刷新
 func (AntigravityAuthenticator) RefreshLead() *time.Duration {
-	return new(50 * time.Minute)
+	return new(30 * time.Minute)
 }
 
 // Login launches a local OAuth flow to obtain antigravity tokens and persists them.
@@ -172,12 +174,14 @@ waitForCallback:
 	if projectID != "" {
 		fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
 	}
-	return BuildAntigravityAuth(&AntigravityTokenResponse{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		ExpiresIn:    tokenResp.ExpiresIn,
-		TokenType:    tokenResp.TokenType,
-	}, email, projectID), nil
+	return BuildAntigravityAuth(
+		&AntigravityTokenResponse{
+			AccessToken:  tokenResp.AccessToken,
+			RefreshToken: tokenResp.RefreshToken,
+			ExpiresIn:    tokenResp.ExpiresIn,
+			TokenType:    tokenResp.TokenType,
+		}, email, projectID,
+	), nil
 }
 
 type callbackResult struct {
@@ -234,6 +238,8 @@ func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClie
 }
 
 // AntigravityDefaultCallbackPort is the default loopback callback port.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const AntigravityDefaultCallbackPort = antigravity.CallbackPort
 
 // AntigravityTokenResponse contains the tokens returned by Antigravity OAuth.
@@ -250,6 +256,8 @@ func AntigravityDefaultCallbackURI() string {
 }
 
 // AntigravityUserAgent returns the canonical Antigravity Hub user agent.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func AntigravityUserAgent() string {
 	return misc.AntigravityUserAgent()
 }
@@ -260,6 +268,8 @@ func BuildAntigravityAuthURL(state, redirectURI string) string {
 }
 
 // ExchangeAntigravityCode exchanges an authorization code through the supplied HTTP client.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func ExchangeAntigravityCode(
 	ctx context.Context,
 	code, redirectURI string,
@@ -284,6 +294,8 @@ func ExchangeAntigravityCode(
 }
 
 // FetchAntigravityUserInfo retrieves the account email through the supplied HTTP client.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func FetchAntigravityUserInfo(
 	ctx context.Context,
 	accessToken string,
@@ -293,6 +305,8 @@ func FetchAntigravityUserInfo(
 }
 
 // BuildAntigravityAuth creates an in-memory credential record without persisting it.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func BuildAntigravityAuth(
 	tokenResp *AntigravityTokenResponse,
 	email, projectID string,

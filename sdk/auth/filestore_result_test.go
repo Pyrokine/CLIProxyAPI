@@ -12,20 +12,34 @@ import (
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
-type sharedMetadataStorage struct{}
+type sharedMetadataStorage struct {
+	setterCalls int
+	saverCalls  int
+}
 
-func (*sharedMetadataStorage) SetMetadata(map[string]any) {}
-func (*sharedMetadataStorage) SaveTokenToFile(string) error { return nil }
+func (s *sharedMetadataStorage) SetMetadata(_ map[string]any) {
+	s.setterCalls++
+}
 
-func TestFileTokenStoreRejectsUncopyableMetadataStorage(t *testing.T) {
+func (s *sharedMetadataStorage) SaveTokenToFile(_ string) error {
+	s.saverCalls++
+	return nil
+}
+
+func TestManagerRejectsUncopyableMetadataStorage(t *testing.T) {
 	store := NewFileTokenStore()
 	store.SetBaseDir(t.TempDir())
 	record := &coreauth.Auth{
 		ID: "uncopyable.json", Metadata: map[string]any{"access_token": "fixture-token"},
 		Storage: &sharedMetadataStorage{},
 	}
-	if path, err := store.Save(context.Background(), record); err == nil || path != "" {
-		t.Fatalf("Save() = (%q, %v), want a storage snapshot error", path, err)
+	manager := coreauth.NewManager(store, nil, nil)
+	if saved, err := manager.Register(context.Background(), record); err == nil || saved != nil {
+		t.Fatalf("Register() = (%#v, %v), want a storage snapshot error", saved, err)
+	}
+	storage := record.Storage.(*sharedMetadataStorage)
+	if storage.setterCalls != 0 || storage.saverCalls != 0 {
+		t.Fatalf("rejected shared Storage was called: %#v", storage)
 	}
 	if _, errStat := os.Stat(filepath.Join(store.baseDirSnapshot(), record.ID)); !os.IsNotExist(errStat) {
 		t.Fatalf("uncopyable storage created a credential file: %v", errStat)
@@ -37,18 +51,22 @@ func TestResultPersistenceKeepsPublishedStorageOnSaveError(t *testing.T) {
 	store.SetBaseDir(t.TempDir())
 	manager := coreauth.NewManager(nil, nil, nil)
 	storage := &sharedMetadataStorage{}
-	registered, err := manager.Register(context.Background(), &coreauth.Auth{
-		ID: "uncopyable-result.json", Provider: "test", Status: coreauth.StatusActive,
-		Metadata: map[string]any{"access_token": "fixture-token"}, Storage: storage,
-	})
+	registered, err := manager.Register(
+		context.Background(), &coreauth.Auth{
+			ID: "uncopyable-result.json", Provider: "test", Status: coreauth.StatusActive,
+			Metadata: map[string]any{"access_token": "fixture-token"}, Storage: storage,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	manager.SetStore(store)
-	manager.MarkResult(context.Background(), coreauth.Result{
-		AuthID: registered.ID, AuthGeneration: registered.Generation,
-		Provider: registered.Provider, Model: "fixture-model", Success: true,
-	})
+	manager.MarkResult(
+		context.Background(), coreauth.Result{
+			AuthID: registered.ID, AuthGeneration: registered.Generation,
+			Provider: registered.Provider, Model: "fixture-model", Success: true,
+		},
+	)
 	current, ok := manager.GetByID(registered.ID)
 	if !ok || current == nil || current.Storage != storage {
 		t.Fatalf("failed persistence replaced the published storage: %#v", current)
@@ -69,18 +87,22 @@ func TestResultPersistenceDoesNotMutatePublishedStorage(t *testing.T) {
 		AccessToken: "fixture-token",
 		Metadata:    map[string]any{"marker": "before"},
 	}
-	registered, err := manager.Register(context.Background(), &coreauth.Auth{
-		ID: "storage-snapshot.json", Provider: "codex", Status: coreauth.StatusActive,
-		Metadata: map[string]any{"access_token": "fixture-token"}, Storage: storage,
-	})
+	registered, err := manager.Register(
+		context.Background(), &coreauth.Auth{
+			ID: "storage-snapshot.json", Provider: "codex", Status: coreauth.StatusActive,
+			Metadata: map[string]any{"access_token": "fixture-token"}, Storage: storage,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	manager.SetStore(store)
-	manager.MarkResult(context.Background(), coreauth.Result{
-		AuthID: registered.ID, AuthGeneration: registered.Generation,
-		Provider: registered.Provider, Model: "fixture-model", Success: true,
-	})
+	manager.MarkResult(
+		context.Background(), coreauth.Result{
+			AuthID: registered.ID, AuthGeneration: registered.Generation,
+			Provider: registered.Provider, Model: "fixture-model", Success: true,
+		},
+	)
 	if _, errStat := os.Stat(filepath.Join(store.baseDirSnapshot(), registered.ID)); errStat != nil {
 		t.Fatalf("credential was not saved: %v", errStat)
 	}
@@ -105,10 +127,12 @@ func TestExternalPersistenceMutationRefreshesVersionForRemoval(t *testing.T) {
 	store := NewFileTokenStore()
 	store.SetBaseDir(dir)
 	manager := coreauth.NewManager(store, nil, nil)
-	registered, err := manager.Register(context.Background(), &coreauth.Auth{
-		ID: "external-mutation.json", Provider: "fixture", Status: coreauth.StatusActive,
-		Metadata: map[string]any{"type": "fixture", "access_token": "before"},
-	})
+	registered, err := manager.Register(
+		context.Background(), &coreauth.Auth{
+			ID: "external-mutation.json", Provider: "fixture", Status: coreauth.StatusActive,
+			Metadata: map[string]any{"type": "fixture", "access_token": "before"},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +142,8 @@ func TestExternalPersistenceMutationRefreshesVersionForRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := manager.MutatePersistentAuth(context.Background(), registered.ID,
+	updated, err := manager.MutatePersistentAuth(
+		context.Background(), registered.ID,
 		func(context.Context) (*coreauth.Auth, error) {
 			if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
 				return nil, errWrite
@@ -129,7 +154,8 @@ func TestExternalPersistenceMutationRefreshesVersionForRemoval(t *testing.T) {
 				"path": path, coreauth.PersistedSHA256Attribute: hex.EncodeToString(digest[:]),
 			}
 			return next, nil
-		})
+		},
+	)
 	if err != nil || updated == nil {
 		t.Fatalf("MutatePersistentAuth() = (%#v, %v)", updated, err)
 	}
@@ -157,35 +183,44 @@ func TestResultPersistenceKeepsSavedFieldsInRuntime(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
-			store := NewFileTokenStore()
-			store.SetBaseDir(dir)
-			manager := coreauth.NewManager(nil, nil, nil)
-			registered, err := manager.Register(context.Background(), &coreauth.Auth{
-				ID: "result-persist.json", Provider: "codex", Status: coreauth.StatusActive,
-				Metadata: map[string]any{"access_token": "fixture-token"},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			manager.SetStore(store)
-			manager.MarkResult(context.Background(), coreauth.Result{
-				AuthID: registered.ID, AuthGeneration: registered.Generation,
-				Provider: registered.Provider, Model: "fixture-model",
-				Success: test.success, Disposition: test.disposition,
-			})
-			path := filepath.Join(dir, registered.ID)
-			if _, errStat := os.Stat(path); errStat != nil {
-				t.Fatalf("result was not persisted: %v", errStat)
-			}
-			current, ok := manager.GetByID(registered.ID)
-			if !ok || current == nil {
-				t.Fatal("credential disappeared")
-			}
-			if current.Attributes[coreauth.AttributePath] != path || current.Metadata["disabled"] != false {
-				t.Fatalf("saved metadata missing in runtime: path=%q disabled=%v", current.Attributes[coreauth.AttributePath], current.Metadata["disabled"])
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				dir := t.TempDir()
+				store := NewFileTokenStore()
+				store.SetBaseDir(dir)
+				manager := coreauth.NewManager(nil, nil, nil)
+				registered, err := manager.Register(
+					context.Background(), &coreauth.Auth{
+						ID: "result-persist.json", Provider: "codex", Status: coreauth.StatusActive,
+						Metadata: map[string]any{"access_token": "fixture-token"},
+					},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				manager.SetStore(store)
+				manager.MarkResult(
+					context.Background(), coreauth.Result{
+						AuthID: registered.ID, AuthGeneration: registered.Generation,
+						Provider: registered.Provider, Model: "fixture-model",
+						Success: test.success, Disposition: test.disposition,
+					},
+				)
+				path := filepath.Join(dir, registered.ID)
+				if _, errStat := os.Stat(path); errStat != nil {
+					t.Fatalf("result was not persisted: %v", errStat)
+				}
+				current, ok := manager.GetByID(registered.ID)
+				if !ok || current == nil {
+					t.Fatal("credential disappeared")
+				}
+				if current.Attributes[coreauth.AttributePath] != path || current.Metadata["disabled"] != false {
+					t.Fatalf(
+						"saved metadata missing in runtime: path=%q disabled=%v",
+						current.Attributes[coreauth.AttributePath], current.Metadata["disabled"],
+					)
+				}
+			},
+		)
 	}
 }

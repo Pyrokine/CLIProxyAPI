@@ -14,6 +14,8 @@ var credentialMetadataAliases = map[string]string{
 }
 
 // CanonicalCredentialMetadataKey returns the canonical name for a credential metadata key.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func CanonicalCredentialMetadataKey(key string) string {
 	if canonical, ok := credentialMetadataAliases[key]; ok {
 		return canonical

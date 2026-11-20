@@ -28,19 +28,23 @@ func TestAccessTokenExpirationSources(t *testing.T) {
 	past := now.Add(-time.Hour)
 
 	for _, padded := range []bool{false, true} {
-		t.Run(fmt.Sprintf("jwt-padded-%t", padded), func(t *testing.T) {
-			auth := &Auth{Metadata: map[string]any{
-				"access_token": routingAuthTestJWT(future, padded),
-				"expired":      past.Format(time.RFC3339),
-			}}
-			expiresAt, ok := auth.AccessTokenExpirationTime()
-			if !ok || expiresAt.Unix() != future.Unix() {
-				t.Fatalf("AccessTokenExpirationTime() = (%v, %t), want %v", expiresAt, ok, future)
-			}
-			if !auth.HasValidAccessToken(now) {
-				t.Fatal("future JWT access token reported invalid")
-			}
-		})
+		t.Run(
+			fmt.Sprintf("jwt-padded-%t", padded), func(t *testing.T) {
+				auth := &Auth{
+					Metadata: map[string]any{
+						"access_token": routingAuthTestJWT(future, padded),
+						"expired":      past.Format(time.RFC3339),
+					},
+				}
+				expiresAt, ok := auth.AccessTokenExpirationTime()
+				if !ok || expiresAt.Unix() != future.Unix() {
+					t.Fatalf("AccessTokenExpirationTime() = (%v, %t), want %v", expiresAt, ok, future)
+				}
+				if !auth.HasValidAccessToken(now) {
+					t.Fatal("future JWT access token reported invalid")
+				}
+			},
+		)
 	}
 
 	for _, test := range []struct {
@@ -72,13 +76,15 @@ func TestAccessTokenExpirationSources(t *testing.T) {
 			want: future,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			auth := &Auth{Metadata: test.meta}
-			expiresAt, ok := auth.AccessTokenExpirationTime()
-			if !ok || expiresAt.Unix() != test.want.Unix() {
-				t.Fatalf("AccessTokenExpirationTime() = (%v, %t), want %v", expiresAt, ok, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				auth := &Auth{Metadata: test.meta}
+				expiresAt, ok := auth.AccessTokenExpirationTime()
+				if !ok || expiresAt.Unix() != test.want.Unix() {
+					t.Fatalf("AccessTokenExpirationTime() = (%v, %t), want %v", expiresAt, ok, test.want)
+				}
+			},
+		)
 	}
 
 	expired := &Auth{Metadata: map[string]any{"access_token": routingAuthTestJWT(past, false)}}
@@ -118,9 +124,11 @@ func TestRefreshFailureKeepsValidTokenAndRemovesExpiredToken(t *testing.T) {
 		wantRetry          bool
 	}{
 		{
-			name:          "valid unauthorized token remains selectable",
-			expiry:        now.Add(2 * time.Hour),
-			refreshErr:    &Error{Code: "authentication_error", HTTPStatus: http.StatusUnauthorized, Message: "invalid_grant"},
+			name:   "valid unauthorized token remains selectable",
+			expiry: now.Add(2 * time.Hour),
+			refreshErr: &Error{
+				Code: "authentication_error", HTTPStatus: http.StatusUnauthorized, Message: "invalid_grant",
+			},
 			initialStatus: StatusActive,
 			wantStatus:    StatusActive,
 			wantRetry:     true,
@@ -138,9 +146,11 @@ func TestRefreshFailureKeepsValidTokenAndRemovesExpiredToken(t *testing.T) {
 			wantRetry:          true,
 		},
 		{
-			name:            "expired unauthorized token removed",
-			expiry:          now.Add(-time.Hour),
-			refreshErr:      &Error{Code: "authentication_error", HTTPStatus: http.StatusUnauthorized, Message: "invalid_grant"},
+			name:   "expired unauthorized token removed",
+			expiry: now.Add(-time.Hour),
+			refreshErr: &Error{
+				Code: "authentication_error", HTTPStatus: http.StatusUnauthorized, Message: "invalid_grant",
+			},
 			initialStatus:   StatusActive,
 			wantUnavailable: true,
 			wantStatus:      StatusError,
@@ -157,45 +167,54 @@ func TestRefreshFailureKeepsValidTokenAndRemovesExpiredToken(t *testing.T) {
 			wantRetry:       true,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			provider := "routing-refresh-" + fmt.Sprint(test.expiry.UnixNano()) + "-" + test.name
-			manager := NewManager(nil, &RoundRobinSelector{}, nil)
-			executor := &routingRefreshTestExecutor{provider: provider, refreshErr: test.refreshErr}
-			manager.RegisterExecutor(executor)
-			registered, errRegister := manager.Register(context.Background(), &Auth{
-				ID:            "auth-" + test.name,
-				Provider:      provider,
-				Status:        test.initialStatus,
-				StatusMessage: test.initialMessage,
-				Unavailable:   test.initialUnavailable,
-				Metadata: map[string]any{
-					"access_token": "opaque-access-token",
-					"expired":      test.expiry.Format(time.RFC3339Nano),
-				},
-			})
-			if errRegister != nil {
-				t.Fatalf("Register() error = %v", errRegister)
-			}
+		t.Run(
+			test.name, func(t *testing.T) {
+				provider := "routing-refresh-" + fmt.Sprint(test.expiry.UnixNano()) + "-" + test.name
+				manager := NewManager(nil, &RoundRobinSelector{}, nil)
+				executor := &routingRefreshTestExecutor{provider: provider, refreshErr: test.refreshErr}
+				manager.RegisterExecutor(executor)
+				registered, errRegister := manager.Register(
+					context.Background(), &Auth{
+						ID:            "auth-" + test.name,
+						Provider:      provider,
+						Status:        test.initialStatus,
+						StatusMessage: test.initialMessage,
+						Unavailable:   test.initialUnavailable,
+						Metadata: map[string]any{
+							"access_token": "opaque-access-token",
+							"expired":      test.expiry.Format(time.RFC3339Nano),
+						},
+					},
+				)
+				if errRegister != nil {
+					t.Fatalf("Register() error = %v", errRegister)
+				}
 
-			manager.refreshAuth(context.Background(), registered.ID)
-			updated, ok := manager.GetByID(registered.ID)
-			if !ok || updated == nil {
-				t.Fatal("auth disappeared after refresh failure")
-			}
-			if updated.Unavailable != test.wantUnavailable || updated.Status != test.wantStatus ||
-				updated.StatusMessage != test.wantMessage {
-				t.Fatalf("refresh failure state = unavailable:%t status:%q message:%q", updated.Unavailable, updated.Status, updated.StatusMessage)
-			}
-			if updated.LastError == nil {
-				t.Fatal("refresh failure did not retain LastError")
-			}
-			if test.wantRetry != !updated.NextRefreshAfter.IsZero() {
-				t.Fatalf("NextRefreshAfter = %v, want retry=%t", updated.NextRefreshAfter, test.wantRetry)
-			}
-			if test.expiry.After(now) && updated.NextRefreshAfter.After(test.expiry) {
-				t.Fatalf("NextRefreshAfter %v exceeds access token expiry %v", updated.NextRefreshAfter, test.expiry)
-			}
-		})
+				manager.refreshAuth(context.Background(), registered.ID)
+				updated, ok := manager.GetByID(registered.ID)
+				if !ok || updated == nil {
+					t.Fatal("auth disappeared after refresh failure")
+				}
+				if updated.Unavailable != test.wantUnavailable || updated.Status != test.wantStatus ||
+					updated.StatusMessage != test.wantMessage {
+					t.Fatalf(
+						"refresh failure state = unavailable:%t status:%q message:%q", updated.Unavailable,
+						updated.Status, updated.StatusMessage,
+					)
+				}
+				if updated.LastError == nil {
+					t.Fatal("refresh failure did not retain LastError")
+				}
+				if test.wantRetry != !updated.NextRefreshAfter.IsZero() {
+					t.Fatalf("NextRefreshAfter = %v, want retry=%t", updated.NextRefreshAfter, test.wantRetry)
+				}
+				if test.expiry.After(now) && updated.NextRefreshAfter.After(test.expiry) {
+					t.Fatalf(
+						"NextRefreshAfter %v exceeds access token expiry %v", updated.NextRefreshAfter, test.expiry,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -215,15 +234,17 @@ func TestRefreshFailurePublicationGuardsGenerationExecutorAndOwner(t *testing.T)
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	executor := &routingRefreshTestExecutor{provider: provider}
 	manager.RegisterExecutor(executor)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID:       "guarded-refresh-auth",
-		Provider: provider,
-		Status:   StatusActive,
-		Metadata: map[string]any{
-			"access_token": "valid-token",
-			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID:       "guarded-refresh-auth",
+			Provider: provider,
+			Status:   StatusActive,
+			Metadata: map[string]any{
+				"access_token": "valid-token",
+				"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+			},
 		},
-	})
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -278,15 +299,17 @@ func TestSchedulerDemotesExpiredAccessTokenAndRecoversAfterUpdate(t *testing.T) 
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(&routingRefreshTestExecutor{provider: provider})
 	registerSchedulerModels(t, provider, model, authID)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID:       authID,
-		Provider: provider,
-		Status:   StatusActive,
-		Metadata: map[string]any{
-			"access_token": "short-lived-token",
-			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID:       authID,
+			Provider: provider,
+			Status:   StatusActive,
+			Metadata: map[string]any{
+				"access_token": "short-lived-token",
+				"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+			},
 		},
-	})
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -334,6 +357,7 @@ func TestSchedulerDemotesExpiredAccessTokenAndRecoversAfterUpdate(t *testing.T) 
 	}
 }
 
+// noinspection GoBoolExpressions
 func TestAutoRefreshCheckWaitIsCapped(t *testing.T) {
 	if MaxAutoRefreshCheckInterval > 30*time.Second {
 		t.Fatalf("MaxAutoRefreshCheckInterval = %v, want at most 30s", MaxAutoRefreshCheckInterval)

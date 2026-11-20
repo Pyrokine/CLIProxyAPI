@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
@@ -19,8 +20,8 @@ type Store interface {
 	// List returns all auth records stored in the backend.
 	List(ctx context.Context) ([]*Auth, error)
 	// Save persists the provided auth record, replacing any existing one with same ID.
+	// Direct callers own Storage; Manager persistence requires an independent copy.
 	// Storage implementations must not mutate shared nested values in place.
-	// Storage that sets metadata must provide an independent CloneForPersistence.
 	Save(ctx context.Context, auth *Auth) (string, error)
 	// Delete removes the auth record identified by id.
 	Delete(ctx context.Context, id string) error
@@ -120,7 +121,8 @@ func BindPersistedAuthDigest(auth *Auth, digest [sha256.Size]byte) error {
 	return nil
 }
 
-// PrepareAuthForPersistence applies manager-owned metadata to an independent storage snapshot.
+// PrepareAuthForPersistence 准备独占保存对象，支持复制时使用独立 Storage 副本
+// Manager 在提交共享 Storage 前要求 PersistenceTokenStorage，直接保存由调用方持有对象所有权
 func PrepareAuthForPersistence(auth *Auth) error {
 	if auth == nil {
 		return nil
@@ -130,10 +132,25 @@ func PrepareAuthForPersistence(auth *Auth) error {
 		if copyStorage == nil {
 			return fmt.Errorf("token storage %T returned a nil persistence copy", auth.Storage)
 		}
+		value := reflect.ValueOf(copyStorage)
+		// Value-kind copies are valid; these reference kinds must also reject typed nils.
+		//goland:noinspection GoSwitchMissingCasesForIotaConsts
+		switch value.Kind() {
+		case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice:
+			if value.IsNil() {
+				return fmt.Errorf("token storage %T returned a nil persistence copy", auth.Storage)
+			}
+		}
+		if original := reflect.ValueOf(auth.Storage); value.Kind() == reflect.Pointer &&
+			value.Type().
+				Elem().
+				Size() !=
+				0 && original.Kind() == reflect.Pointer && value.Pointer() == original.Pointer() {
+			return fmt.Errorf("token storage %T returned its shared instance as a persistence copy", auth.Storage)
+		}
 		auth.Storage = copyStorage
-	} else if _, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-		return fmt.Errorf("token storage %T must implement CloneForPersistence", auth.Storage)
 	}
+	auth.Metadata = clonePersistenceMetadata(auth.Metadata)
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -143,6 +160,112 @@ func PrepareAuthForPersistence(auth *Auth) error {
 		setter.SetMetadata(auth.Metadata)
 	}
 	return nil
+}
+
+// clonePersistenceMetadata 复制 JSON 容器并保留别名和循环，扩展对象仍由其所有者管理
+func clonePersistenceMetadata(metadata map[string]any) map[string]any {
+	type containerKey struct {
+		typ     reflect.Type
+		pointer uintptr
+		length  int
+	}
+	copies := make(map[containerKey]any)
+	var clone func(any) any
+	clone = func(value any) any {
+		switch typed := value.(type) {
+		case map[string]any:
+			if typed == nil {
+				return typed
+			}
+			key := containerKey{typ: reflect.TypeOf(typed), pointer: reflect.ValueOf(typed).Pointer()}
+			if copied, exists := copies[key]; exists {
+				return copied
+			}
+			copied := make(map[string]any, len(typed))
+			copies[key] = copied
+			for name, item := range typed {
+				copied[name] = clone(item)
+			}
+			return copied
+		case []any:
+			if typed == nil {
+				return typed
+			}
+			key := containerKey{
+				typ: reflect.TypeOf(typed), pointer: reflect.ValueOf(typed).Pointer(), length: len(typed),
+			}
+			if copied, exists := copies[key]; exists {
+				return copied
+			}
+			copied := make([]any, len(typed))
+			copies[key] = copied
+			for index, item := range typed {
+				copied[index] = clone(item)
+			}
+			return copied
+		case map[string]string:
+			if typed == nil {
+				return typed
+			}
+			key := containerKey{typ: reflect.TypeOf(typed), pointer: reflect.ValueOf(typed).Pointer()}
+			if copied, exists := copies[key]; exists {
+				return copied
+			}
+			copied := maps.Clone(typed)
+			copies[key] = copied
+			return copied
+		case []string:
+			if typed == nil {
+				return typed
+			}
+			key := containerKey{
+				typ: reflect.TypeOf(typed), pointer: reflect.ValueOf(typed).Pointer(), length: len(typed),
+			}
+			if copied, exists := copies[key]; exists {
+				return copied
+			}
+			copied := append(typed[:0:0], typed...)
+			copies[key] = copied
+			return copied
+		case []byte:
+			if typed == nil {
+				return typed
+			}
+			key := containerKey{
+				typ: reflect.TypeOf(typed), pointer: reflect.ValueOf(typed).Pointer(), length: len(typed),
+			}
+			if copied, exists := copies[key]; exists {
+				return copied
+			}
+			copied := append(typed[:0:0], typed...)
+			copies[key] = copied
+			return copied
+		default:
+			return value
+		}
+	}
+	return clone(metadata).(map[string]any)
+}
+
+type persistedVersionCaptureContextKey struct{}
+
+type persistedVersionCapture struct {
+	version PersistedVersion
+	err     error
+}
+
+// RecordPersistedAuthVersion 在 Store 的保存锁内记录本次实际文件内容，供 Manager 校验后续更新
+// Store 应在成功提交后、Save 返回前调用，独立保存不会创建额外的版本读取
+func RecordPersistedAuthVersion(ctx context.Context, path string) {
+	if ctx == nil {
+		return
+	}
+	capture, _ := ctx.Value(persistedVersionCaptureContextKey{}).(*persistedVersionCapture)
+	if capture == nil {
+		return
+	}
+	capture.version, capture.err = ReadPersistedVersion(path)
+	capture.version.Path = path
 }
 
 // PersistedVersionForAuth identifies the content Store.Save was asked to persist.
@@ -200,6 +323,8 @@ func ReadPersistedVersion(path string) (PersistedVersion, error) {
 // CapturedPersistedFile holds an expected credential version outside its live path
 // until the caller either commits the deletion or restores it without replacing a
 // concurrently created newer file.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type CapturedPersistedFile struct {
 	path     string
 	tempPath string

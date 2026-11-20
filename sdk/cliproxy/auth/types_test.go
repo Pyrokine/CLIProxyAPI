@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -151,21 +153,106 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	if geminiIndex == duplicateIndex {
 		t.Fatalf("duplicate config entries should be separated by source-derived seed, got %q", geminiIndex)
 	}
+	legacyIndex := stableAuthIndex("gemini-api-key:+shared-key")
+	if !geminiAuth.MatchesIndex(legacyIndex) || !geminiDuplicate.MatchesIndex(legacyIndex) {
+		t.Fatal("source-aware indexes lost the original shared legacy reference")
+	}
+
+	metaAuth1 := &Auth{
+		Provider: "meta",
+		ID:       "meta:apikey:token1",
+		Attributes: map[string]string{
+			"api_key":   "meta-secret",
+			"base_url":  "https://api.meta.ai/v1",
+			"proxy_url": "socks5://127.0.0.1:1080",
+			"prefix":    "fast-",
+			"source":    "config:meta[token1]",
+		},
+	}
+	metaAuth2 := &Auth{
+		Provider: "meta",
+		ID:       "meta:apikey:token2",
+		Attributes: map[string]string{
+			"api_key":   "meta-secret",
+			"base_url":  "https://api.meta.ai/v1",
+			"proxy_url": "",
+			"prefix":    "",
+			"source":    "config:meta[token2]",
+		},
+	}
+	metaIndex1 := metaAuth1.EnsureIndex()
+	metaIndex2 := metaAuth2.EnsureIndex()
+	if metaIndex1 == "" {
+		t.Fatal("meta index should not be empty")
+	}
+	if metaIndex1 != metaIndex2 {
+		t.Fatalf(
+			"meta auth index should remain stable across proxy/prefix changes, got %q vs %q", metaIndex1, metaIndex2,
+		)
+	}
+}
+
+func TestEnsureIndexUsesOAuthTypeAndAbsolutePath(t *testing.T) {
+	t.Parallel()
+
+	wd, errWd := os.Getwd()
+	if errWd != nil {
+		t.Fatalf("os.Getwd returned error: %v", errWd)
+	}
+
+	relPath := "test-oauth.json"
+	absPath := filepath.Join(wd, relPath)
+	for _, test := range []struct {
+		provider string
+		authType string
+	}{
+		{"gemini-cli", "gemini"},
+		{"antigravity", "antigravity"},
+	} {
+		t.Run(
+			test.provider, func(t *testing.T) {
+				expectedSeed := test.authType + ":" + filepath.Clean(absPath)
+				expectedIndex := stableAuthIndex(expectedSeed)
+				a := &Auth{
+					Provider: test.provider,
+					Attributes: map[string]string{
+						"path": relPath,
+					},
+					Metadata: map[string]any{
+						"type": test.authType,
+					},
+				}
+				got := a.EnsureIndex()
+				if got == "" {
+					t.Fatal("auth index should not be empty")
+				}
+				if got != expectedIndex {
+					t.Fatalf("auth index = %q, want %q", got, expectedIndex)
+				}
+			},
+		)
+	}
 }
 
 func TestEnsureIndexMetaKeyStableAcrossConfigSources(t *testing.T) {
 	makeAuth := func(key, baseURL, source string) *Auth {
-		return &Auth{Provider: "meta", Attributes: map[string]string{
-			"api_key": key, "base_url": baseURL, "source": source,
-		}}
+		return &Auth{
+			Provider: "meta", Attributes: map[string]string{
+				"api_key": key, "base_url": baseURL, "source": source,
+			},
+		}
 	}
 	original := makeAuth("same-key", "https://api.meta.ai/v1", "config:meta[first]")
 	reordered := makeAuth("same-key", "https://api.meta.ai/v1", "config:meta[second]")
 	otherKey := makeAuth("different-key", "https://api.meta.ai/v1", "config:meta[first]")
 	otherBase := makeAuth("same-key", "https://proxy.example.test/v1", "config:meta[first]")
 	index := original.EnsureIndex()
-	if index == "" || index != reordered.EnsureIndex() || index == otherKey.EnsureIndex() || index == otherBase.EnsureIndex() {
-		t.Fatalf("Meta API key indexes must depend on credential identity, not config position: %q %q %q %q", index, reordered.Index, otherKey.Index, otherBase.Index)
+	if index == "" || index != reordered.EnsureIndex() || index == otherKey.EnsureIndex() ||
+		index == otherBase.EnsureIndex() {
+		t.Fatalf(
+			"Meta API key indexes must depend on credential identity, not config position: %q %q %q %q", index,
+			reordered.Index, otherKey.Index, otherBase.Index,
+		)
 	}
 }
 

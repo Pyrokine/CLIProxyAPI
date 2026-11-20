@@ -29,12 +29,14 @@ func TestSchedulerRemovalTombstoneRejectsDelayedSnapshots(t *testing.T) {
 	registeredAt := time.Unix(100, 0)
 	removedAt := time.Unix(200, 0)
 
-	scheduler.upsertAuth(&Auth{
-		ID:         authID,
-		Provider:   "gemini",
-		Generation: 7,
-		UpdatedAt:  registeredAt,
-	})
+	scheduler.upsertAuth(
+		&Auth{
+			ID:         authID,
+			Provider:   "gemini",
+			Generation: 7,
+			UpdatedAt:  registeredAt,
+		},
+	)
 	if !scheduler.recordRemovalTombstone(authID, 8, removedAt) {
 		t.Fatal("recordRemovalTombstone() rejected the authoritative removal")
 	}
@@ -62,12 +64,14 @@ func TestSchedulerRemovalTombstoneRejectsDelayedSnapshots(t *testing.T) {
 		}
 	}
 
-	scheduler.upsertAuth(&Auth{
-		ID:         authID,
-		Provider:   "gemini",
-		Generation: 9,
-		UpdatedAt:  registeredAt,
-	})
+	scheduler.upsertAuth(
+		&Auth{
+			ID:         authID,
+			Provider:   "gemini",
+			Generation: 9,
+			UpdatedAt:  registeredAt,
+		},
+	)
 	if got := schedulerAuthSnapshotForTest(scheduler, "gemini", authID); got == nil || got.Generation != 9 {
 		t.Fatalf("new registration was not scheduled: %#v", got)
 	}
@@ -85,24 +89,28 @@ func TestSchedulerRemovalWinsSameGenerationTimestampSkew(t *testing.T) {
 	authID := "scheduler-removal-clock-skew-auth"
 	newerUpdatedAt := time.Unix(400, 0)
 
-	scheduler.upsertAuth(&Auth{
-		ID:         authID,
-		Provider:   "gemini",
-		Generation: 5,
-		UpdatedAt:  newerUpdatedAt,
-	})
+	scheduler.upsertAuth(
+		&Auth{
+			ID:         authID,
+			Provider:   "gemini",
+			Generation: 5,
+			UpdatedAt:  newerUpdatedAt,
+		},
+	)
 	if !scheduler.recordRemovalTombstone(authID, 5, newerUpdatedAt.Add(-time.Hour)) {
 		t.Fatal("authoritative removal lost to the same credential generation timestamp")
 	}
 	if got := schedulerAuthSnapshotForTest(scheduler, "gemini", authID); got != nil {
 		t.Fatalf("same-generation authoritative removal left auth scheduled: %#v", got)
 	}
-	scheduler.upsertAuth(&Auth{
-		ID:         authID,
-		Provider:   "gemini",
-		Generation: 5,
-		UpdatedAt:  newerUpdatedAt,
-	})
+	scheduler.upsertAuth(
+		&Auth{
+			ID:         authID,
+			Provider:   "gemini",
+			Generation: 5,
+			UpdatedAt:  newerUpdatedAt,
+		},
+	)
 	if got := schedulerAuthSnapshotForTest(scheduler, "gemini", authID); got != nil {
 		t.Fatalf("snapshot tied with tombstone restored auth: %#v", got)
 	}
@@ -113,27 +121,33 @@ func TestSchedulerOrdersSameCredentialGenerationByUpdatedAt(t *testing.T) {
 	authID := "scheduler-updated-at-auth"
 	newerAt := time.Unix(300, 0)
 
-	scheduler.upsertAuth(&Auth{
-		ID:         authID,
-		Provider:   "gemini",
-		Generation: 5,
-		UpdatedAt:  newerAt,
-		Attributes: map[string]string{"priority": "10"},
-	})
-	scheduler.upsertAuth(&Auth{
-		ID:         authID,
-		Provider:   "claude",
-		Generation: 5,
-		UpdatedAt:  newerAt.Add(-time.Second),
-		Attributes: map[string]string{"priority": "1"},
-	})
-	scheduler.upsertAuth(&Auth{
-		ID:         authID,
-		Provider:   "claude",
-		Generation: 4,
-		UpdatedAt:  newerAt.Add(time.Hour),
-		Attributes: map[string]string{"priority": "1"},
-	})
+	scheduler.upsertAuth(
+		&Auth{
+			ID:         authID,
+			Provider:   "gemini",
+			Generation: 5,
+			UpdatedAt:  newerAt,
+			Attributes: map[string]string{"priority": "10"},
+		},
+	)
+	scheduler.upsertAuth(
+		&Auth{
+			ID:         authID,
+			Provider:   "claude",
+			Generation: 5,
+			UpdatedAt:  newerAt.Add(-time.Second),
+			Attributes: map[string]string{"priority": "1"},
+		},
+	)
+	scheduler.upsertAuth(
+		&Auth{
+			ID:         authID,
+			Provider:   "claude",
+			Generation: 4,
+			UpdatedAt:  newerAt.Add(time.Hour),
+			Attributes: map[string]string{"priority": "1"},
+		},
+	)
 
 	got := schedulerAuthSnapshotForTest(scheduler, "gemini", authID)
 	if got == nil || got.Provider != "gemini" || got.Attributes["priority"] != "10" {
@@ -143,13 +157,15 @@ func TestSchedulerOrdersSameCredentialGenerationByUpdatedAt(t *testing.T) {
 		t.Fatalf("stale provider snapshot was scheduled: %#v", staleProvider)
 	}
 
-	scheduler.upsertAuth(&Auth{
-		ID:         authID,
-		Provider:   "claude",
-		Generation: 5,
-		UpdatedAt:  newerAt.Add(time.Second),
-		Attributes: map[string]string{"priority": "20"},
-	})
+	scheduler.upsertAuth(
+		&Auth{
+			ID:         authID,
+			Provider:   "claude",
+			Generation: 5,
+			UpdatedAt:  newerAt.Add(time.Second),
+			Attributes: map[string]string{"priority": "20"},
+		},
+	)
 	got = schedulerAuthSnapshotForTest(scheduler, "claude", authID)
 	if got == nil || got.Attributes["priority"] != "20" {
 		t.Fatalf("newer same-generation snapshot was rejected: %#v", got)
@@ -180,12 +196,16 @@ func TestSchedulerRebuildPreservesRemovalTombstone(t *testing.T) {
 		t.Fatalf("rebuild restored a tombstoned snapshot: %#v", got)
 	}
 
-	scheduler.rebuild([]*Auth{{
-		ID:         authID,
-		Provider:   "gemini",
-		Generation: 4,
-		UpdatedAt:  registeredAt,
-	}})
+	scheduler.rebuild(
+		[]*Auth{
+			{
+				ID:         authID,
+				Provider:   "gemini",
+				Generation: 4,
+				UpdatedAt:  registeredAt,
+			},
+		},
+	)
 	if got := schedulerAuthSnapshotForTest(scheduler, "gemini", authID); got == nil || got.Generation != 4 {
 		t.Fatalf("rebuild rejected a newer registration: %#v", got)
 	}
@@ -232,16 +252,18 @@ func TestSchedulerConcurrentSnapshotsKeepHighestVersion(t *testing.T) {
 	var wg sync.WaitGroup
 	for generation := uint64(1); generation <= 64; generation++ {
 		generation := generation
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			scheduler.upsertAuth(&Auth{
-				ID:         authID,
-				Provider:   "gemini",
-				Generation: generation,
-				UpdatedAt:  updatedAt.Add(time.Duration(generation)),
-			})
-		}()
+		wg.Go(
+			func() {
+				scheduler.upsertAuth(
+					&Auth{
+						ID:         authID,
+						Provider:   "gemini",
+						Generation: generation,
+						UpdatedAt:  updatedAt.Add(time.Duration(generation)),
+					},
+				)
+			},
+		)
 	}
 	wg.Wait()
 

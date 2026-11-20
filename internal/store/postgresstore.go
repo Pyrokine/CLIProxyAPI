@@ -23,6 +23,9 @@ import (
 )
 
 const (
+	// PostgresDataFormatVersion identifies the config, auth, and cooldown table layout.
+	PostgresDataFormatVersion = 1
+
 	defaultConfigTable   = "config_store"
 	defaultAuthTable     = "auth_store"
 	defaultCooldownTable = "cooldown_store"
@@ -115,6 +118,71 @@ func (s *PostgresStore) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+// CheckUpdateReadiness checks the configured column types without loading stored content.
+func (s *PostgresStore) CheckUpdateReadiness(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for _, table := range []struct {
+		name    string
+		columns []string
+		types   []string
+	}{
+		{
+			s.cfg.ConfigTable, []string{"id", "content", "created_at", "updated_at"},
+			[]string{"text", "text", "timestamp with time zone", "timestamp with time zone"},
+		},
+		{
+			s.cfg.AuthTable, []string{"id", "content", "created_at", "updated_at"},
+			[]string{"text", "jsonb", "timestamp with time zone", "timestamp with time zone"},
+		},
+		{
+			s.cfg.CooldownTable, []string{"auth_id", "model", "content", "deleted", "created_at", "updated_at"},
+			[]string{"text", "text", "jsonb", "boolean", "timestamp with time zone", "timestamp with time zone"},
+		},
+	} {
+		projections := make([]string, len(table.columns))
+		values := make([]string, len(table.columns))
+		destinations := make([]any, len(table.columns))
+		for index, column := range table.columns {
+			projections[index] = fmt.Sprintf(
+				"pg_typeof((SELECT %s FROM %s LIMIT 1))::text", quoteIdentifier(column), s.fullTableName(table.name),
+			)
+			destinations[index] = &values[index]
+		}
+		rows, err := s.db.QueryContext(ctx, "SELECT "+strings.Join(projections, ", ")+" LIMIT 1")
+		if err != nil {
+			return fmt.Errorf("postgres store: check update readiness for %s: %w", table.name, err)
+		}
+		if rows.Next() {
+			err = rows.Scan(destinations...)
+		} else {
+			err = sql.ErrNoRows
+		}
+		if rows.Next() {
+			err = errors.Join(err, fmt.Errorf("readiness query returned more than one row"))
+		}
+		err = errors.Join(err, rows.Err(), rows.Close(), ctx.Err())
+		if err != nil {
+			return fmt.Errorf("postgres store: scan update readiness for %s: %w", table.name, err)
+		}
+		for index, value := range values {
+			if value != table.types[index] {
+				return fmt.Errorf(
+					"postgres store: incompatible column %s.%s type %q, expected %q", table.name, table.columns[index],
+					value, table.types[index],
+				)
+			}
+		}
+	}
+	return nil
 }
 
 // ensureSchema creates the required tables (and schema when provided).
@@ -223,6 +291,8 @@ func (s *PostgresStore) WorkDir() string {
 
 // SetBaseDir implements the optional token-store directory protocol. The
 // PostgreSQL store controls its own workspace, so runtime updates are ignored.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *PostgresStore) SetBaseDir(_ string) {}
 
 // Save persists authentication metadata to disk and PostgreSQL.
@@ -326,6 +396,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (save
 		return "", err
 	}
 	mutationComplete = true
+	cliproxyauth.RecordPersistedAuthVersion(ctx, path)
 	return path, nil
 }
 

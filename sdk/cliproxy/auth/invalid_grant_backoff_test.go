@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -29,23 +30,29 @@ func (e *invalidGrantBackoffExecutor) Refresh(_ context.Context, auth *Auth) (*A
 }
 
 func TestInvalidGrantBackoffRetainsValidAccessTokenAndReschedules(t *testing.T) {
-	executor := &invalidGrantBackoffExecutor{routingRefreshTestExecutor: routingRefreshTestExecutor{
+	executor := &invalidGrantBackoffExecutor{
 		provider:   "test-refresh-backoff",
 		refreshErr: &Error{Code: "authentication_error", HTTPStatus: http.StatusUnauthorized, Message: "invalid_grant"},
-	}}
+	}
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
-	registered, err := manager.Register(context.Background(), &Auth{
-		ID: "invalid-grant-valid", Provider: executor.Identifier(), Status: StatusActive, Runtime: alwaysDueRefresh{},
-		Metadata: map[string]any{
-			"access_token": "old-access", "refresh_token": "expired-refresh",
-			"expired": time.Now().Add(2 * time.Hour).Format(time.RFC3339Nano),
+	registered, err := manager.Register(
+		context.Background(), &Auth{
+			ID: "invalid-grant-valid", Provider: executor.Identifier(), Status: StatusActive,
+			Runtime: alwaysDueRefresh{},
+			Metadata: map[string]any{
+				"access_token": "old-access", "refresh_token": "expired-refresh",
+				"expired": time.Now().Add(2 * time.Hour).Format(time.RFC3339Nano),
+			},
 		},
-	})
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index, want := range []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 30 * time.Minute, 30 * time.Minute} {
+	for index, want := range []time.Duration{
+		time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 30 * time.Minute,
+		30 * time.Minute,
+	} {
 		if _, errRefresh := manager.refreshAuthForRequest(context.Background(), registered.ID, ""); errRefresh == nil {
 			t.Fatalf("attempt %d: expected invalid_grant", index+1)
 		}
@@ -53,10 +60,13 @@ func TestInvalidGrantBackoffRetainsValidAccessTokenAndReschedules(t *testing.T) 
 		if current.Unavailable || current.Status != StatusActive || current.RefreshFailures != min(index+1, 6) {
 			t.Fatalf("attempt %d: state = %+v", index+1, current)
 		}
-		if remaining := time.Until(current.NextRefreshAfter); remaining < want-time.Second || remaining > want+time.Second {
+		if remaining := time.Until(current.NextRefreshAfter); remaining < want-time.Second ||
+			remaining > want+time.Second {
 			t.Fatalf("attempt %d: retry after %v, want %v", index+1, remaining, want)
 		}
-		if manager.shouldRefresh(current, time.Now()) || !manager.shouldRefresh(current, current.NextRefreshAfter.Add(time.Millisecond)) {
+		if manager.shouldRefresh(current, time.Now()) || !manager.shouldRefresh(
+			current, current.NextRefreshAfter.Add(time.Millisecond),
+		) {
 			t.Fatalf("attempt %d: refresh scheduling ignored backoff", index+1)
 		}
 	}
@@ -86,18 +96,53 @@ func TestInvalidGrantBackoffRetainsValidAccessTokenAndReschedules(t *testing.T) 
 	}
 }
 
+func TestInvalidGrantRawProviderErrorSchedulesExpiredCredential(t *testing.T) {
+	rawErr := fmt.Errorf("oauth token refresh failed: invalid_grant: account checkpoint required")
+	executor := &invalidGrantBackoffExecutor{provider: "test-raw-invalid-grant", refreshErr: rawErr}
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	now := time.Now()
+	registered, err := manager.Register(
+		t.Context(), &Auth{
+			ID: "raw-fmt-invalid-grant", Provider: executor.Identifier(), Status: StatusActive,
+			Metadata: map[string]any{
+				"access_token": "expired-token", "refresh_token": "refresh-1",
+				"expires_at": now.Add(-time.Hour).Format(time.RFC3339),
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.refreshAuthForRequest(t.Context(), registered.ID, ""); err == nil {
+		t.Fatal("raw invalid_grant did not return a refresh error")
+	}
+	current, _ := manager.GetByID(registered.ID)
+	if wait := current.NextRefreshAfter.Sub(now); current.RefreshFailures != 1 || wait < 50*time.Second ||
+		wait > 70*time.Second {
+		t.Fatalf(
+			"raw invalid_grant backoff: failures=%d wait=%v, want one failure and one minute", current.RefreshFailures,
+			wait,
+		)
+	}
+}
+
 func TestInvalidGrantRefreshDoesNotScheduleDisabledCredential(t *testing.T) {
-	executor := &invalidGrantBackoffExecutor{routingRefreshTestExecutor: routingRefreshTestExecutor{
+	executor := &invalidGrantBackoffExecutor{
 		provider:   "test-disabled-refresh",
 		refreshErr: &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid_grant"},
-	}}
+	}
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
-	registered, err := manager.Register(context.Background(), &Auth{
-		ID: "invalid-grant-disabled", Provider: executor.Identifier(), Disabled: true, Status: StatusDisabled,
-		Metadata: map[string]any{"access_token": "old-access", "refresh_token": "invalid-refresh",
-			"expired": time.Now().Add(time.Hour).Format(time.RFC3339Nano)},
-	})
+	registered, err := manager.Register(
+		context.Background(), &Auth{
+			ID: "invalid-grant-disabled", Provider: executor.Identifier(), Disabled: true, Status: StatusDisabled,
+			Metadata: map[string]any{
+				"access_token": "old-access", "refresh_token": "invalid-refresh",
+				"expired": time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+			},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

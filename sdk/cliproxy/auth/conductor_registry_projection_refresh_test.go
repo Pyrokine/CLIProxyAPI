@@ -23,49 +23,51 @@ func TestSuccessfulCredentialRefreshPublishesAllPreservedModelStates(t *testing.
 	manager.RegisterExecutor(executor)
 	now := time.Now()
 	future := now.Add(time.Hour)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID:             authID,
-		Provider:       provider,
-		Status:         StatusError,
-		StatusMessage:  "unauthorized",
-		Unavailable:    true,
-		NextRetryAfter: future,
-		LastError:      &Error{HTTPStatus: http.StatusUnauthorized, Code: "unauthorized"},
-		Metadata: map[string]any{
-			"access_token":  "old-token",
-			"refresh_token": "refresh-token",
-		},
-		ModelStates: map[string]*ModelState{
-			unauthorizedModel: {
-				Status:         StatusError,
-				StatusMessage:  "unauthorized",
-				Unavailable:    true,
-				NextRetryAfter: future,
-				LastError:      &Error{HTTPStatus: http.StatusUnauthorized, Code: "unauthorized"},
-				EffectScope:    cliproxyexecutor.StateEffectScopeExactModel,
-				Generation:     2,
-				UpdatedAt:      now.Add(-time.Minute),
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID:             authID,
+			Provider:       provider,
+			Status:         StatusError,
+			StatusMessage:  "unauthorized",
+			Unavailable:    true,
+			NextRetryAfter: future,
+			LastError:      &Error{HTTPStatus: http.StatusUnauthorized, Code: "unauthorized"},
+			Metadata: map[string]any{
+				"access_token":  "old-token",
+				"refresh_token": "refresh-token",
 			},
-			quotaModel: {
-				Status:         StatusError,
-				StatusMessage:  "quota exhausted",
-				Unavailable:    true,
-				NextRetryAfter: future,
-				LastError:      &Error{HTTPStatus: http.StatusTooManyRequests, Code: "rate_limit"},
-				Quota: QuotaState{
-					Exceeded:      true,
-					Reason:        "quota",
-					Family:        quotaFamily,
-					NextRecoverAt: future,
-					Generation:    3,
+			ModelStates: map[string]*ModelState{
+				unauthorizedModel: {
+					Status:         StatusError,
+					StatusMessage:  "unauthorized",
+					Unavailable:    true,
+					NextRetryAfter: future,
+					LastError:      &Error{HTTPStatus: http.StatusUnauthorized, Code: "unauthorized"},
+					EffectScope:    cliproxyexecutor.StateEffectScopeExactModel,
+					Generation:     2,
+					UpdatedAt:      now.Add(-time.Minute),
 				},
-				EffectScope: cliproxyexecutor.StateEffectScopeQuotaFamily,
-				EffectKey:   quotaFamily,
-				Generation:  3,
-				UpdatedAt:   now,
+				quotaModel: {
+					Status:         StatusError,
+					StatusMessage:  "quota exhausted",
+					Unavailable:    true,
+					NextRetryAfter: future,
+					LastError:      &Error{HTTPStatus: http.StatusTooManyRequests, Code: "rate_limit"},
+					Quota: QuotaState{
+						Exceeded:      true,
+						Reason:        "quota",
+						Family:        quotaFamily,
+						NextRecoverAt: future,
+						Generation:    3,
+					},
+					EffectScope: cliproxyexecutor.StateEffectScopeQuotaFamily,
+					EffectKey:   quotaFamily,
+					Generation:  3,
+					UpdatedAt:   now,
+				},
 			},
 		},
-	})
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -190,20 +192,22 @@ func TestManagerRefreshSchedulerEntryReappliesCurrentRegistrationProjection(t *t
 		model    = "refresh-entry-route-alias"
 	)
 	future := time.Now().Add(time.Hour)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID: authID, Provider: provider, Status: StatusError,
-		ModelStates: map[string]*ModelState{
-			model: {
-				Status:         StatusError,
-				StatusMessage:  "quota exhausted",
-				Unavailable:    true,
-				NextRetryAfter: future,
-				Quota: QuotaState{
-					Exceeded: true, Reason: "quota", NextRecoverAt: future,
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: authID, Provider: provider, Status: StatusError,
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					StatusMessage:  "quota exhausted",
+					Unavailable:    true,
+					NextRetryAfter: future,
+					Quota: QuotaState{
+						Exceeded: true, Reason: "quota", NextRecoverAt: future,
+					},
 				},
 			},
 		},
-	})
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -230,9 +234,11 @@ func TestManagerRefreshSchedulerEntryReappliesCurrentRegistrationProjection(t *t
 	if reg.IsModelSuspendedForClient(authID, model) || reg.IsModelQuotaExceededForClient(authID, model) {
 		t.Fatal("re-registration retained the old registry projection")
 	}
-	if reg.ApplyClientModelProjections(authID, oldEpoch, ^uint64(0), []registry.ClientModelProjection{
-		{ModelID: model},
-	}) {
+	if reg.ApplyClientModelProjections(
+		authID, oldEpoch, ^uint64(0), []registry.ClientModelProjection{
+			{ModelID: model},
+		},
+	) {
 		t.Fatal("current registration accepted an old-epoch projection")
 	}
 

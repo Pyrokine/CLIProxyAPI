@@ -9,7 +9,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
-// noinspection GoUnusedGlobalVariable
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedGlobalVariable
 var ErrRefreshNotSupported = errors.New("cliproxy auth: refresh not supported")
 
 // LoginOptions captures generic knobs shared across authenticators.

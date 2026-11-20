@@ -31,25 +31,35 @@ func TestMetaCredentialIdentityUsesNormalizedEmail(t *testing.T) {
 func TestMetaReauthenticationPreservesStoredSettings(t *testing.T) {
 	dir := t.TempDir()
 	authSvc := metaauth.NewMetaAuth(nil)
-	first, err := MetaRecordFromBundle(authSvc, &metaauth.MetaAuthBundle{
-		TokenData: &metaauth.TokenData{AccessToken: "dca:original-fixture"},
-		MintedKey: &metaauth.MintedKeyResponse{APIKey: "original-api-key-fixture", UserEmail: "user@example.invalid"},
-	})
+	first, err := MetaRecordFromBundle(
+		authSvc, &metaauth.MetaAuthBundle{
+			TokenData: &metaauth.TokenData{AccessToken: "dca:original-fixture"},
+			MintedKey: &metaauth.MintedKeyResponse{
+				APIKey: "original-api-key-fixture", UserEmail: "user@example.invalid",
+			},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, first.FileName)
-	writeManagerCredential(t, path, map[string]any{
-		"type": "meta", "auth_kind": "oauth", "email": "user@example.invalid",
-		"access_token": "original-api-key-fixture", "dca_token": "dca:original-fixture",
-		"api_key": "original-api-key-fixture", "disabled": true,
-		"weight": 4, "proxy_url": "http://proxy.example.invalid", "prefix": "team",
-		"headers": map[string]any{"X-Team": "blue"}, "note": "keep",
-	})
-	second, err := MetaRecordFromBundle(authSvc, &metaauth.MetaAuthBundle{
-		TokenData: &metaauth.TokenData{AccessToken: "dca:replacement-fixture"},
-		MintedKey: &metaauth.MintedKeyResponse{APIKey: "replacement-api-key-fixture", UserEmail: " User@Example.Invalid "},
-	})
+	writeManagerCredential(
+		t, path, map[string]any{
+			"type": "meta", "auth_kind": "oauth", "email": "user@example.invalid",
+			"access_token": "original-api-key-fixture", "dca_token": "dca:original-fixture",
+			"api_key": "original-api-key-fixture", "disabled": true,
+			"weight": 4, "proxy_url": "http://proxy.example.invalid", "prefix": "team",
+			"headers": map[string]any{"X-Team": "blue"}, "note": "keep",
+		},
+	)
+	second, err := MetaRecordFromBundle(
+		authSvc, &metaauth.MetaAuthBundle{
+			TokenData: &metaauth.TokenData{AccessToken: "dca:replacement-fixture"},
+			MintedKey: &metaauth.MintedKeyResponse{
+				APIKey: "replacement-api-key-fixture", UserEmail: " User@Example.Invalid ",
+			},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,8 @@ package auth
 import "fmt"
 
 // GCPProject contains details about a Google Cloud project available to the user.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type GCPProject struct {
 	ProjectNumber  string           `json:"projectNumber"`
 	ProjectID      string           `json:"projectId"`
@@ -12,11 +14,15 @@ type GCPProject struct {
 }
 
 // GCPProjectLabels contains metadata labels associated with a Google Cloud project.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type GCPProjectLabels struct {
 	GenerativeLanguage string `json:"generative-language"`
 }
 
 // ProjectSelectionError indicates that the user must choose a specific project ID.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ProjectSelectionError struct {
 	Email    string
 	Projects []GCPProject
@@ -30,6 +36,8 @@ func (e *ProjectSelectionError) Error() string {
 }
 
 // ProjectsDisplay returns the projects list for caller presentation.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *ProjectSelectionError) ProjectsDisplay() []GCPProject {
 	if e == nil {
 		return nil

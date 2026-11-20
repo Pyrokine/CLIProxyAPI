@@ -34,47 +34,51 @@ func TestFileTokenStoreListIsLocalOnlyForAntigravityAndGemini(t *testing.T) {
 				`"client_id":"client","client_secret":"secret"}}`,
 		},
 	} {
-		t.Run(fixture.name, func(t *testing.T) {
-			dir := t.TempDir()
-			path := filepath.Join(dir, fixture.name+".json")
-			original := []byte(fixture.raw)
-			if errWrite := os.WriteFile(path, original, 0o600); errWrite != nil {
-				t.Fatal(errWrite)
-			}
+		t.Run(
+			fixture.name, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, fixture.name+".json")
+				original := []byte(fixture.raw)
+				if errWrite := os.WriteFile(path, original, 0o600); errWrite != nil {
+					t.Fatal(errWrite)
+				}
 
-			var calls atomic.Int64
-			previousClient := http.DefaultClient
-			http.DefaultClient = &http.Client{
-				Transport: discoveryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-					calls.Add(1)
-					return nil, fmt.Errorf("unexpected network request to %s", request.URL)
-				}),
-			}
-			t.Cleanup(func() { http.DefaultClient = previousClient })
+				var calls atomic.Int64
+				previousClient := http.DefaultClient
+				http.DefaultClient = &http.Client{
+					Transport: discoveryRoundTripFunc(
+						func(request *http.Request) (*http.Response, error) {
+							calls.Add(1)
+							return nil, fmt.Errorf("unexpected network request to %s", request.URL)
+						},
+					),
+				}
+				t.Cleanup(func() { http.DefaultClient = previousClient })
 
-			store := NewFileTokenStore()
-			store.SetBaseDir(dir)
-			auths, errList := store.List(context.Background())
-			if errList != nil {
-				t.Fatal(errList)
-			}
-			if len(auths) != 1 || auths[0] == nil {
-				t.Fatalf("List() = %#v", auths)
-			}
-			if calls.Load() != 0 {
-				t.Fatalf("List() made %d network requests", calls.Load())
-			}
-			current, errRead := os.ReadFile(path)
-			if errRead != nil {
-				t.Fatal(errRead)
-			}
-			if string(current) != string(original) {
-				t.Fatalf("List() rewrote credential: %s", current)
-			}
-			if _, exists := auths[0].Metadata["project_id"]; exists {
-				t.Fatalf("List() synthesized project_id: %#v", auths[0].Metadata)
-			}
-		})
+				store := NewFileTokenStore()
+				store.SetBaseDir(dir)
+				auths, errList := store.List(context.Background())
+				if errList != nil {
+					t.Fatal(errList)
+				}
+				if len(auths) != 1 || auths[0] == nil {
+					t.Fatalf("List() = %#v", auths)
+				}
+				if calls.Load() != 0 {
+					t.Fatalf("List() made %d network requests", calls.Load())
+				}
+				current, errRead := os.ReadFile(path)
+				if errRead != nil {
+					t.Fatal(errRead)
+				}
+				if string(current) != string(original) {
+					t.Fatalf("List() rewrote credential: %s", current)
+				}
+				if _, exists := auths[0].Metadata["project_id"]; exists {
+					t.Fatalf("List() synthesized project_id: %#v", auths[0].Metadata)
+				}
+			},
+		)
 	}
 }
 

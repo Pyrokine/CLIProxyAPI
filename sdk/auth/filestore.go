@@ -25,6 +25,8 @@ type PluginAuthParser interface {
 }
 
 // PluginMultiAuthParser expands one source into multiple plugin runtime auths.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PluginMultiAuthParser interface {
 	ParseAuths(context.Context, pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error)
 }
@@ -37,6 +39,7 @@ type pluginAuthParserContextKey struct{}
 
 var pluginAuthParserValue atomic.Value
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func RegisterPluginAuthParser(parser PluginAuthParser) {
 	pluginAuthParserValue.Store(pluginAuthParserHolder{parser: parser})
 }
@@ -257,7 +260,7 @@ func (s *FileTokenStore) saveWithBaseDir(
 	ctx context.Context,
 	baseDir string,
 	auth *cliproxyauth.Auth,
-) (string, error) {
+) (savedPath string, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -278,6 +281,12 @@ func (s *FileTokenStore) saveWithBaseDir(
 	if path == "" {
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
+	defer func() {
+		var publication *internalauth.TokenFilePublicationError
+		if errors.As(err, &publication) && filepath.Clean(publication.Path) == filepath.Clean(path) {
+			err = errors.Join(cliproxyauth.ErrAuthDurableStateUncertain, err)
+		}
+	}()
 	if cliproxyauth.IsPluginVirtualAuth(auth) {
 		return path, nil
 	}
@@ -363,6 +372,7 @@ func (s *FileTokenStore) saveWithBaseDir(
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID
 	}
+	cliproxyauth.RecordPersistedAuthVersion(ctx, path)
 
 	return path, nil
 }
@@ -538,6 +548,9 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 		return nil, errParse
 	}
 	if handled {
+		if pluginAuth == nil {
+			return nil, nil
+		}
 		pluginAuth.CreatedAt = info.ModTime()
 		pluginAuth.UpdatedAt = info.ModTime()
 		return pluginAuth, nil

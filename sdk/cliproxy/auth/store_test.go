@@ -8,7 +8,11 @@ import (
 )
 
 func TestDecodeCredentialMetadataPreservesNumbersAndObjectContract(t *testing.T) {
-	metadata, err := DecodeCredentialMetadata([]byte(`{"value":9007199254740993,"priority":4.0,"request_retry":2e0,"weight":1e0,"nested":[1.25,{"precise":0.1000000000000000000001,"tiny":1e-10000}]}`))
+	metadata, err := DecodeCredentialMetadata(
+		[]byte((`{"value":9007199254740993,"priority":4.0,"request_retry":2e0,"weight":` +
+			`1e0,"nested":[1.25,{"precise":0.1000000000000000000001,"tiny":1e-10000` +
+			`}]}`)),
+	)
 	if err != nil {
 		t.Fatalf("DecodeCredentialMetadata() error = %v", err)
 	}
@@ -20,7 +24,7 @@ func TestDecodeCredentialMetadataPreservesNumbersAndObjectContract(t *testing.T)
 	if precise["precise"] != json.Number("0.1000000000000000000001") || precise["tiny"] != json.Number("1e-10000") {
 		t.Fatalf("precise JSON numbers were not preserved: %v", precise)
 	}
-	if metadata["priority"] != float64(4) || metadata["request_retry"] != float64(2) || nested[0] != float64(1.25) {
+	if metadata["priority"] != float64(4) || metadata["request_retry"] != float64(2) || nested[0] != 1.25 {
 		t.Fatalf("lossless float64 consumer compatibility changed: %v", metadata)
 	}
 	auth := &Auth{Metadata: metadata}
@@ -83,10 +87,12 @@ func TestDigestPersistedJSONPreservesLargeIntegerIdentity(t *testing.T) {
 
 func TestPersistedVersionForAuthPreservesLargeIntegerIdentity(t *testing.T) {
 	for _, serial := range []int64{9007199254740992, 9007199254740993} {
-		auth := &Auth{Storage: struct {
-			quotaRevisionRawStorage
-			Serial int64 `json:"serial"`
-		}{Serial: serial}}
+		auth := &Auth{
+			Storage: struct {
+				quotaRevisionRawStorage
+				Serial int64 `json:"serial"`
+			}{Serial: serial},
+		}
 		version, err := PersistedVersionForAuth("synthetic.json", auth)
 		if err != nil {
 			t.Fatal(err)

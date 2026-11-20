@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v5"
 	"golang.org/x/sys/windows"
 )
 

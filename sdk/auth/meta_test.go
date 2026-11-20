@@ -31,7 +31,10 @@ func TestMetaRecordFromBundleKeepsDCASeparateFromAPIKey(t *testing.T) {
 func TestMetaRecordFromBundleRequiresMintedAPIKey(t *testing.T) {
 	for _, bundle := range []*metaauth.MetaAuthBundle{
 		{TokenData: &metaauth.TokenData{AccessToken: "dca:fixture"}},
-		{TokenData: &metaauth.TokenData{AccessToken: "dca:fixture"}, MintedKey: &metaauth.MintedKeyResponse{APIKey: "dca:fixture"}},
+		{
+			TokenData: &metaauth.TokenData{AccessToken: "dca:fixture"},
+			MintedKey: &metaauth.MintedKeyResponse{APIKey: "dca:fixture"},
+		},
 	} {
 		if record, err := MetaRecordFromBundle(metaauth.NewMetaAuth(nil), bundle); record != nil || err == nil {
 			t.Fatalf("invalid Meta bundle returned a usable record: %v", err)

@@ -24,70 +24,93 @@ func TestAutoRefreshBoundsPollingAndStopsWithParent(t *testing.T) {
 	}{
 		{"default", 0, 5 * time.Second},
 		{"short", 2 * time.Second, 2 * time.Second},
+		{"original short wait", 10 * time.Second, 10 * time.Second},
+		{"original long expiry wait", time.Hour, 30 * time.Second},
 		{"limit", 30 * time.Second, 30 * time.Second},
 		{"service legacy interval", 15 * time.Minute, 30 * time.Second},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				manager := NewManager(nil, nil, nil)
-				observer := &refreshTimingObserver{}
-				_, err := manager.Register(context.Background(), &Auth{
-					ID: "synthetic-refresh-timing", Provider: "synthetic-refresh-timing", Runtime: observer,
-					Metadata: map[string]any{"access_token": "synthetic-refresh-token"},
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				defer func() {
-					if err := manager.StopAutoRefresh(context.Background()); err != nil {
-						t.Error(err)
-					}
-				}()
-				manager.StartAutoRefresh(ctx, test.interval)
-				synctest.Wait()
-				if got := observer.checks.Load(); got != 1 {
-					t.Fatalf("initial checks=%d", got)
-				}
-				time.Sleep(test.expected - time.Nanosecond)
-				synctest.Wait()
-				if got := observer.checks.Load(); got != 1 {
-					t.Fatalf("early checks=%d", got)
-				}
-				time.Sleep(time.Nanosecond)
-				synctest.Wait()
-				if got := observer.checks.Load(); got != 2 {
-					t.Fatalf("checks at %s=%d, want 2", test.expected, got)
-				}
-				cancel()
-				synctest.Wait()
-				time.Sleep(time.Minute)
-				synctest.Wait()
-				if got := observer.checks.Load(); got != 2 {
-					t.Fatalf("checks after parent cancellation=%d", got)
-				}
-			})
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				synctest.Test(
+					t, func(t *testing.T) {
+						manager := NewManager(nil, nil, nil)
+						observer := &refreshTimingObserver{}
+						_, err := manager.Register(
+							context.Background(), &Auth{
+								ID: "synthetic-refresh-timing", Provider: "synthetic-refresh-timing", Runtime: observer,
+								Metadata: map[string]any{"access_token": "synthetic-refresh-token"},
+							},
+						)
+						if err != nil {
+							t.Fatal(err)
+						}
+						ctx, cancel := context.WithCancel(context.Background())
+						defer cancel()
+						defer func() {
+							if err := manager.StopAutoRefresh(context.Background()); err != nil {
+								t.Error(err)
+							}
+						}()
+						manager.StartAutoRefresh(ctx, test.interval)
+						synctest.Wait()
+						if got := observer.checks.Load(); got != 1 {
+							t.Fatalf("initial checks=%d", got)
+						}
+						time.Sleep(test.expected - time.Nanosecond)
+						synctest.Wait()
+						if got := observer.checks.Load(); got != 1 {
+							t.Fatalf("early checks=%d", got)
+						}
+						time.Sleep(time.Nanosecond)
+						synctest.Wait()
+						if got := observer.checks.Load(); got != 2 {
+							t.Fatalf("checks at %s=%d, want 2", test.expected, got)
+						}
+						cancel()
+						synctest.Wait()
+						time.Sleep(time.Minute)
+						synctest.Wait()
+						if got := observer.checks.Load(); got != 2 {
+							t.Fatalf("checks after parent cancellation=%d", got)
+						}
+					},
+				)
+			},
+		)
 	}
 }
 
 func TestAutoRefreshDoesNotDuplicatePendingCredential(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	registered, err := manager.Register(context.Background(), &Auth{
-		ID: "pending-refresh", Provider: "pending-refresh",
-		Metadata: map[string]any{"access_token": "old", "refresh_token": "refresh"},
-	})
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	registered, err := manager.Register(
+		context.Background(), &Auth{
+			ID: "queued", Provider: "issue6199-refresh", Status: StatusActive, LastRefreshedAt: now.Add(-time.Hour),
+			Metadata: map[string]any{
+				"access_token": "expired-access", "refresh_token": "refresh-queued",
+				"expires_at": now.Add(-time.Hour).Format(time.RFC3339), "refresh_interval_seconds": 1,
+			},
+		},
+	)
 	if err != nil {
 		t.Fatalf("Register() = %v", err)
 	}
-	now := time.Now()
 	job := manager.markRefreshPending(registered.ID, registered.Generation, now)
 	if job == nil {
 		t.Fatal("initial refresh was not scheduled")
 	}
-	if manager.markRefreshPending(registered.ID, registered.Generation, now.Add(2*refreshPendingBackoff)) != nil {
-		t.Fatal("running refresh was scheduled again after pending window")
+	for i := 1; i <= 3; i++ {
+		if manager.markRefreshPending(
+			registered.ID, registered.Generation, now.Add(time.Duration(i)*refreshPendingBackoff),
+		) != nil {
+			t.Fatal("queued refresh was scheduled again after pending window")
+		}
+	}
+	manager.mu.RLock()
+	pending := len(manager.autoRefreshJobs)
+	manager.mu.RUnlock()
+	if pending != 1 {
+		t.Fatalf("queued jobs=%d, want 1", pending)
 	}
 	manager.finishAutoRefreshJob(job)
 	current, _ := manager.GetByID(registered.ID)
@@ -108,6 +131,52 @@ func (e *refreshTimingExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, e
 	updated := auth.Clone()
 	updated.Metadata["access_token"] = "refreshed"
 	return updated, nil
+}
+
+func TestAutoRefreshRunningCredentialLeavesHealthyWorkerAvailable(t *testing.T) {
+	synctest.Test(
+		t, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			manager.SetConfig(&internalconfig.Config{AuthAutoRefreshWorkers: 2})
+			executor := &auditUncancelableRefreshExecutor{
+				entered: make(chan struct{}), release: make(chan struct{}), healthy: make(chan struct{}),
+			}
+			manager.RegisterExecutor(executor)
+			defer func() {
+				close(executor.release)
+				manager.refreshWorkers.Wait()
+			}()
+			if _, err := manager.Register(
+				t.Context(), &Auth{
+					ID: "stuck", Provider: executor.Identifier(),
+					Metadata: map[string]any{"access_token": "old-stuck", "refresh_interval_seconds": 3600},
+				},
+			); err != nil {
+				t.Fatal(err)
+			}
+			manager.checkRefreshes(t.Context())
+			<-executor.entered
+			time.Sleep(3 * refreshPendingBackoff)
+			if _, err := manager.Register(
+				t.Context(), &Auth{
+					ID: "healthy", Provider: executor.Identifier(),
+					Metadata: map[string]any{"access_token": "old-healthy", "refresh_interval_seconds": 3600},
+				},
+			); err != nil {
+				t.Fatal(err)
+			}
+			manager.checkRefreshes(t.Context())
+			<-executor.healthy
+			synctest.Wait()
+			current, _ := manager.GetByID("healthy")
+			if executor.stuckCalls.Load() != 1 || current.Metadata["access_token"] != "refreshed-healthy" {
+				t.Fatalf(
+					"running credential blocked spare worker or was queued twice: stuck calls=%d healthy=%+v",
+					executor.stuckCalls.Load(), current,
+				)
+			}
+		},
+	)
 }
 
 func TestAutoRefreshLimitsPendingJobs(t *testing.T) {
@@ -137,10 +206,12 @@ func TestAutoRefreshLimitsPendingJobs(t *testing.T) {
 
 func TestAutoRefreshUpdatedCredentialDoesNotInheritStalePendingWindow(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	registered, err := manager.Register(context.Background(), &Auth{
-		ID: "updated-refresh", Provider: "synthetic-auto-refresh-job",
-		Metadata: map[string]any{"access_token": "old"},
-	})
+	registered, err := manager.Register(
+		context.Background(), &Auth{
+			ID: "updated-refresh", Provider: "synthetic-auto-refresh-job",
+			Metadata: map[string]any{"access_token": "old"},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,10 +239,12 @@ func TestAutoRefreshQueuedJobSurvivesRequestResult(t *testing.T) {
 	manager.SetConfig(&internalconfig.Config{AuthAutoRefreshWorkers: 1})
 	executor := &refreshTimingExecutor{}
 	manager.RegisterExecutor(executor)
-	registered, err := manager.Register(WithSkipPersist(context.Background()), &Auth{
-		ID: "result-during-refresh-queue", Provider: executor.Identifier(),
-		Metadata: map[string]any{"access_token": "old", "refresh_interval_seconds": 3600},
-	})
+	registered, err := manager.Register(
+		WithSkipPersist(context.Background()), &Auth{
+			ID: "result-during-refresh-queue", Provider: executor.Identifier(),
+			Metadata: map[string]any{"access_token": "old", "refresh_interval_seconds": 3600},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,10 +286,14 @@ func TestAutoRefreshQueuedJobDoesNotRefreshRecreatedCredential(t *testing.T) {
 	manager.SetConfig(&internalconfig.Config{AuthAutoRefreshWorkers: 1})
 	executor := &refreshTimingExecutor{}
 	manager.RegisterExecutor(executor)
-	registered, err := manager.Register(context.Background(), &Auth{
-		ID: "recreated-refresh", Provider: executor.Identifier(),
-		Metadata: map[string]any{"email": "test@example.invalid", "access_token": "old", "refresh_interval_seconds": 3600},
-	})
+	registered, err := manager.Register(
+		context.Background(), &Auth{
+			ID: "recreated-refresh", Provider: executor.Identifier(),
+			Metadata: map[string]any{
+				"email": "test@example.invalid", "access_token": "old", "refresh_interval_seconds": 3600,
+			},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +301,7 @@ func TestAutoRefreshQueuedJobDoesNotRefreshRecreatedCredential(t *testing.T) {
 	semaphore := manager.refreshSemaphore
 	manager.mu.RUnlock()
 	semaphore <- struct{}{}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	manager.checkRefreshes(ctx)
 	manager.mu.RLock()
@@ -236,10 +313,14 @@ func TestAutoRefreshQueuedJobDoesNotRefreshRecreatedCredential(t *testing.T) {
 	if err := manager.Remove(WithRuntimeOnlyRemove(WithSkipPersist(context.Background())), registered.ID); err != nil {
 		t.Fatalf("Remove() = %v", err)
 	}
-	replacement, err := manager.Register(WithAllowAuthRecreate(context.Background()), &Auth{
-		ID: registered.ID, Provider: executor.Identifier(),
-		Metadata: map[string]any{"email": "test@example.invalid", "access_token": "replacement", "refresh_interval_seconds": 3600},
-	})
+	replacement, err := manager.Register(
+		WithAllowAuthRecreate(context.Background()), &Auth{
+			ID: registered.ID, Provider: executor.Identifier(),
+			Metadata: map[string]any{
+				"email": "test@example.invalid", "access_token": "replacement", "refresh_interval_seconds": 3600,
+			},
+		},
+	)
 	if err != nil || replacement == nil {
 		t.Fatalf("Register(replacement) = (%#v, %v)", replacement, err)
 	}
@@ -247,7 +328,10 @@ func TestAutoRefreshQueuedJobDoesNotRefreshRecreatedCredential(t *testing.T) {
 	manager.refreshWorkers.Wait()
 	current, _ := manager.GetByID(registered.ID)
 	if executor.calls.Load() != 0 || current.Metadata["access_token"] != "replacement" {
-		t.Fatalf("stale job refreshed replacement: calls=%d token=%v", executor.calls.Load(), current.Metadata["access_token"])
+		t.Fatalf(
+			"stale job refreshed replacement: calls=%d token=%v", executor.calls.Load(),
+			current.Metadata["access_token"],
+		)
 	}
 	manager.mu.RLock()
 	remaining := len(manager.autoRefreshJobs)
@@ -267,10 +351,12 @@ func TestAutoRefreshCanceledJobReleasesPendingWindow(t *testing.T) {
 	manager.SetConfig(&internalconfig.Config{AuthAutoRefreshWorkers: 1})
 	executor := &refreshTimingExecutor{}
 	manager.RegisterExecutor(executor)
-	registered, err := manager.Register(context.Background(), &Auth{
-		ID: "cancelled-refresh", Provider: executor.Identifier(),
-		Metadata: map[string]any{"email": "test@example.invalid", "refresh_interval_seconds": 3600},
-	})
+	registered, err := manager.Register(
+		context.Background(), &Auth{
+			ID: "cancelled-refresh", Provider: executor.Identifier(),
+			Metadata: map[string]any{"email": "test@example.invalid", "refresh_interval_seconds": 3600},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +378,60 @@ func TestAutoRefreshCanceledJobReleasesPendingWindow(t *testing.T) {
 	manager.mu.RUnlock()
 	current, _ := manager.GetByID(registered.ID)
 	if remaining != 0 || !current.NextRefreshAfter.IsZero() || executor.calls.Load() != 0 {
-		t.Fatalf("canceled job left pending state: jobs=%d next=%v calls=%d", remaining, current.NextRefreshAfter, executor.calls.Load())
+		t.Fatalf(
+			"canceled job left pending state: jobs=%d next=%v calls=%d", remaining, current.NextRefreshAfter,
+			executor.calls.Load(),
+		)
+	}
+}
+
+func TestShouldRefreshPreferredIntervalPrecedesProviderLead(t *testing.T) {
+	const provider = "synthetic-preferred-refresh"
+	RegisterRefreshLeadProvider(provider, func() *time.Duration { return new(24 * time.Hour) })
+	t.Cleanup(
+		func() {
+			refreshLeadMu.Lock()
+			delete(refreshLeadFactories, provider)
+			refreshLeadMu.Unlock()
+		},
+	)
+	now := time.Date(2020, time.January, 2, 3, 4, 5, 0, time.UTC)
+	manager := NewManager(nil, nil, nil)
+	for _, test := range []struct {
+		name          string
+		expiresIn     time.Duration
+		lastRefresh   time.Duration
+		attributeOnly bool
+		refresh       bool
+	}{
+		{name: "outside explicit lead", expiresIn: 12 * time.Hour, lastRefresh: time.Hour},
+		{name: "inside explicit lead", expiresIn: time.Hour, lastRefresh: time.Hour, refresh: true},
+		{name: "expired token", expiresIn: -time.Hour, lastRefresh: time.Minute, refresh: true},
+		{name: "elapsed interval", expiresIn: 48 * time.Hour, lastRefresh: 3 * time.Hour, refresh: true},
+		{name: "no expiry before interval", lastRefresh: time.Hour},
+		{name: "no expiry after interval", lastRefresh: 3 * time.Hour, refresh: true},
+		{name: "attribute interval", expiresIn: 12 * time.Hour, lastRefresh: time.Hour, attributeOnly: true},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				credential := &Auth{
+					Provider: provider, LastRefreshedAt: now.Add(-test.lastRefresh), Metadata: map[string]any{},
+					Attributes: map[string]string{},
+				}
+				if test.expiresIn != 0 {
+					credential.Metadata["expired"] = now.Add(test.expiresIn).Format(time.RFC3339)
+				}
+				if test.attributeOnly {
+					credential.Attributes["refreshIntervalSeconds"] = "7200"
+				} else {
+					credential.Metadata["refresh_interval_seconds"] = 7200
+					credential.Attributes["refreshIntervalSeconds"] = "60"
+				}
+				if got := manager.shouldRefresh(credential, now); got != test.refresh {
+					t.Fatalf("shouldRefresh=%t, want %t", got, test.refresh)
+				}
+			},
+		)
 	}
 }
 
@@ -301,11 +440,13 @@ func TestShouldRefreshUsesEvaluationTime(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	const provider = "synthetic-evaluation-clock"
 	RegisterRefreshLeadProvider(provider, func() *time.Duration { return new(50 * time.Minute) })
-	t.Cleanup(func() {
-		refreshLeadMu.Lock()
-		delete(refreshLeadFactories, provider)
-		refreshLeadMu.Unlock()
-	})
+	t.Cleanup(
+		func() {
+			refreshLeadMu.Lock()
+			delete(refreshLeadFactories, provider)
+			refreshLeadMu.Unlock()
+		},
+	)
 	for _, test := range []struct {
 		name      string
 		remaining time.Duration
@@ -315,13 +456,17 @@ func TestShouldRefreshUsesEvaluationTime(t *testing.T) {
 		{"at lead", 50 * time.Minute, true},
 		{"inside lead", 49 * time.Minute, true},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			credential := &Auth{Provider: provider, Metadata: map[string]any{
-				"expired": now.Add(test.remaining).Format(time.RFC3339),
-			}}
-			if got := manager.shouldRefresh(credential, now); got != test.refresh {
-				t.Fatalf("shouldRefresh=%t, want %t", got, test.refresh)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				credential := &Auth{
+					Provider: provider, Metadata: map[string]any{
+						"expired": now.Add(test.remaining).Format(time.RFC3339),
+					},
+				}
+				if got := manager.shouldRefresh(credential, now); got != test.refresh {
+					t.Fatalf("shouldRefresh=%t, want %t", got, test.refresh)
+				}
+			},
+		)
 	}
 }

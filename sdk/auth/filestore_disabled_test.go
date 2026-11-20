@@ -101,6 +101,9 @@ func TestFileTokenStoreDisabledStorageRequiresCreationIntentForMissingFile(t *te
 	}
 	savedStorage, ok := auth.Storage.(*disabledTestTokenStorage)
 	if !ok || savedStorage == storage || savedStorage.saves != 1 || storage.saves != 0 {
-		t.Fatalf("creation-intent Save() did not use an independent storage copy: %v, original saves=%d", auth.Storage, storage.saves)
+		t.Fatalf(
+			"creation-intent Save() did not use an independent storage copy: %v, original saves=%d", auth.Storage,
+			storage.saves,
+		)
 	}
 }

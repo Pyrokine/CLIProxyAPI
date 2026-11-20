@@ -24,6 +24,8 @@ type durablePersistedDeletionJournal struct {
 // DurablePersistedFileDeletion keeps an exact local credential version hidden
 // while its backing store deletion is committed. Its journal survives process
 // interruption so Bootstrap can finish the same conditional deletion.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type DurablePersistedFileDeletion struct {
 	path         string
 	capturedPath string
@@ -184,7 +186,8 @@ func recoverDurablePersistedFileDeletion(
 	if errDecode := json.Unmarshal(raw, &journal); errDecode != nil {
 		return nil, false, fmt.Errorf("decode credential deletion journal: %w", errDecode)
 	}
-	if journal.Target == "" || filepath.Base(journal.Target) != journal.Target || journal.Target == "." || journal.Target == ".." {
+	if journal.Target == "" || filepath.Base(journal.Target) != journal.Target || journal.Target == "." ||
+		journal.Target == ".." {
 		return nil, false, fmt.Errorf("credential deletion journal has invalid target")
 	}
 	digest, errDigest := hex.DecodeString(strings.TrimSpace(journal.SHA256))
@@ -233,6 +236,13 @@ func recoverDurablePersistedFileDeletion(
 		if errSync := syncPersistedDeletionDirectory(filepath.Dir(path)); errSync != nil {
 			return nil, false, errSync
 		}
+		capturedVersion, errVersion := ReadPersistedVersion(capturedPath)
+		if errVersion != nil {
+			return nil, false, errVersion
+		}
+		if capturedVersion.SHA256 != version.SHA256 {
+			return nil, false, fmt.Errorf("credential deletion capture digest does not match journal")
+		}
 		return deletion, true, nil
 	case errLive == nil:
 		if errRemove := deletion.removeJournal(); errRemove != nil {
@@ -253,6 +263,13 @@ func (d *DurablePersistedFileDeletion) Commit() error {
 	}
 	var errCommit error
 	if d.capturedPath != "" {
+		capturedVersion, errVersion := ReadPersistedVersion(d.capturedPath)
+		if errVersion != nil && !errors.Is(errVersion, fs.ErrNotExist) {
+			return fmt.Errorf("verify captured credential before deletion: %w", errVersion)
+		}
+		if errVersion == nil && capturedVersion.SHA256 != d.version.SHA256 {
+			return fmt.Errorf("captured credential version changed before deletion")
+		}
 		if errRemove := os.Remove(d.capturedPath); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
 			errCommit = fmt.Errorf("remove captured credential version: %w", errRemove)
 		}

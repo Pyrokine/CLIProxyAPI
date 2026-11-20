@@ -241,12 +241,14 @@ func (s *emptyPathManagerStore) Delete(context.Context, string) error {
 func TestManagerLoginPreservesExistingCredentialMetadata(t *testing.T) {
 	authDir := t.TempDir()
 	fileName := "demo.json"
-	writeManagerCredential(t, filepath.Join(authDir, fileName), map[string]any{
-		"type": "demo", "access_token": "old-token", "disabled": true,
-		"weight": 4, "proxy_url": "http://proxy.example", "prefix": "team",
-		"headers": map[string]any{"X-Team": "blue"}, "disable_cooling": false,
-		"request_retry": 0, "fingerprint_profile": "claude-code-cli", "note": "keep",
-	})
+	writeManagerCredential(
+		t, filepath.Join(authDir, fileName), map[string]any{
+			"type": "demo", "access_token": "old-token", "disabled": true,
+			"weight": 4, "proxy_url": "http://proxy.example", "prefix": "team",
+			"headers": map[string]any{"X-Team": "blue"}, "disable_cooling": false,
+			"request_retry": 0, "fingerprint_profile": "claude-code-cli", "note": "keep",
+		},
+	)
 	record := &coreauth.Auth{
 		ID: fileName, FileName: fileName, Provider: "demo",
 		Metadata: map[string]any{"type": "demo", "access_token": "new-token"},
@@ -278,11 +280,13 @@ func TestManagerLoginMigratesClaudeOnlyAfterCanonicalSave(t *testing.T) {
 	const email = "user@example.com"
 	legacyFileName := claudeauth.CredentialFileName(email, "", "")
 	legacyPath := filepath.Join(authDir, legacyFileName)
-	writeManagerCredential(t, legacyPath, map[string]any{
-		"type": "claude", "email": email, "organization_uuid": "organization-a",
-		"account_uuid": "account-a", "access_token": "old-token", "disabled": true,
-		"prefix": "team", "weight": 5,
-	})
+	writeManagerCredential(
+		t, legacyPath, map[string]any{
+			"type": "claude", "email": email, "organization_uuid": "organization-a",
+			"account_uuid": "account-a", "access_token": "old-token", "disabled": true,
+			"prefix": "team", "weight": 5,
+		},
+	)
 	canonicalFileName := claudeauth.CredentialFileName(email, "organization-a", "account-a")
 	record := &coreauth.Auth{
 		ID: canonicalFileName, FileName: canonicalFileName, Provider: "claude",
@@ -313,9 +317,11 @@ func TestManagerLoginKeepsClaudeLegacyWhenCanonicalSaveFails(t *testing.T) {
 	authDir := t.TempDir()
 	const email = "user@example.com"
 	legacyPath := filepath.Join(authDir, claudeauth.CredentialFileName(email, "", ""))
-	writeManagerCredential(t, legacyPath, map[string]any{
-		"type": "claude", "email": email, "organization_uuid": "organization-a", "account_uuid": "account-a",
-	})
+	writeManagerCredential(
+		t, legacyPath, map[string]any{
+			"type": "claude", "email": email, "organization_uuid": "organization-a", "account_uuid": "account-a",
+		},
+	)
 	canonicalFileName := claudeauth.CredentialFileName(email, "organization-a", "account-a")
 	saveErr := errors.New("save failed")
 	record := &coreauth.Auth{
@@ -340,9 +346,11 @@ func TestManagerLoginKeepsClaudeLegacyWhenCanonicalSaveReturnsEmptyPath(t *testi
 	authDir := t.TempDir()
 	const email = "user@example.com"
 	legacyPath := filepath.Join(authDir, claudeauth.CredentialFileName(email, "", ""))
-	writeManagerCredential(t, legacyPath, map[string]any{
-		"type": "claude", "email": email, "organization_uuid": "organization-a", "account_uuid": "account-a",
-	})
+	writeManagerCredential(
+		t, legacyPath, map[string]any{
+			"type": "claude", "email": email, "organization_uuid": "organization-a", "account_uuid": "account-a",
+		},
+	)
 	canonicalFileName := claudeauth.CredentialFileName(email, "organization-a", "account-a")
 	record := &coreauth.Auth{
 		ID: canonicalFileName, FileName: canonicalFileName, Provider: "claude",
@@ -372,10 +380,12 @@ func TestManagerLoginDoesNotMergeClaudeFromDifferentOrganization(t *testing.T) {
 	authDir := t.TempDir()
 	const email = "user@example.com"
 	legacyPath := filepath.Join(authDir, claudeauth.CredentialFileName(email, "", ""))
-	writeManagerCredential(t, legacyPath, map[string]any{
-		"type": "claude", "email": email, "organization_uuid": "organization-a",
-		"account_uuid": "shared-account", "prefix": "wrong-team",
-	})
+	writeManagerCredential(
+		t, legacyPath, map[string]any{
+			"type": "claude", "email": email, "organization_uuid": "organization-a",
+			"account_uuid": "shared-account", "prefix": "wrong-team",
+		},
+	)
 	canonicalFileName := claudeauth.CredentialFileName(email, "organization-b", "shared-account")
 	record := &coreauth.Auth{
 		ID: canonicalFileName, FileName: canonicalFileName, Provider: "claude",
@@ -446,11 +456,13 @@ func TestManagerLoginReusesDevinIdentityWhenEnrichmentFails(t *testing.T) {
 	token := devinauth.FormatSessionToken("private-token")
 	canonicalFileName := devinauth.CredentialFileName("user-1", "org-1", token)
 	canonicalPath := filepath.Join(authDir, canonicalFileName)
-	writeManagerCredential(t, canonicalPath, map[string]any{
-		"type": "devin", "api_key": token, "session_token": token,
-		"user_name": "same-name", "user_id": "user-1", "org_id": "org-1",
-		"disabled": true, "prefix": "team", "note": "keep",
-	})
+	writeManagerCredential(
+		t, canonicalPath, map[string]any{
+			"type": "devin", "api_key": token, "session_token": token,
+			"user_name": "same-name", "user_id": "user-1", "org_id": "org-1",
+			"disabled": true, "prefix": "team", "note": "keep",
+		},
+	)
 	fallbackFileName := devinauth.CredentialFileName("", "", token)
 	record := &coreauth.Auth{
 		ID: fallbackFileName, FileName: fallbackFileName, Provider: "devin",

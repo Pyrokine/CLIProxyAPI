@@ -25,9 +25,8 @@ type TokenStorage interface {
 	SaveTokenToFile(authFilePath string) error
 }
 
-// PersistenceTokenStorage creates an independent token object for a store save.
-// Token storage that supports SetMetadata must implement this interface so a
-// save cannot mutate the credential already published to request handlers.
+// PersistenceTokenStorage 为 Manager 保存已发布凭据提供独立 Storage 副本
+// 副本需独立持有 setter 和 saver 会修改的私有状态；直接保存独占对象时可沿用 TokenStorage
 type PersistenceTokenStorage interface {
 	TokenStorage
 	CloneForPersistence() TokenStorage
@@ -139,13 +138,19 @@ type Auth struct {
 	recentRequests            recentRequestRing
 	indexAssigned             bool
 	credentialGeneration      uint64
+	registrationGeneration    uint64
+	homeRuntimeOwner          *HomeDispatchSelection
+	quotaUpdateBase           *QuotaState
 	creditsHintManager        *Manager
 	creditsHintRemovalEpoch   uint64
 	creditsHintGeneration     uint64
+	creditsRetryAfter         time.Time
 	rejectedAccessTokenSHA256 string
 	quotaPersistedRevision    string
 	quotaPersistedSHA256      string
 }
+
+var authSnapshotMu sync.Mutex
 
 const (
 	AttributeAuthIndexSeed   = "auth_index_seed"
@@ -174,12 +179,14 @@ func MarkPluginVirtualAuth(auth *Auth, sourcePath string, ordinal int) {
 	if seedID == "" {
 		seedID = strconv.Itoa(ordinal)
 	}
-	auth.Attributes[AttributeAuthIndexSeed] = strings.Join([]string{
-		strings.ToLower(strings.TrimSpace(auth.Provider)),
-		sourcePath,
-		seedID,
-		strconv.Itoa(ordinal),
-	}, "|")
+	auth.Attributes[AttributeAuthIndexSeed] = strings.Join(
+		[]string{
+			strings.ToLower(strings.TrimSpace(auth.Provider)),
+			sourcePath,
+			seedID,
+			strconv.Itoa(ordinal),
+		}, "|",
+	)
 }
 
 // IsPluginVirtualAuth reports whether an auth was expanded from a plugin-owned source file.
@@ -216,8 +223,11 @@ type RecentRequestBucket struct {
 }
 
 // StateResetAuthority defines which action may clear an authoritative runtime state.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type StateResetAuthority string
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const (
 	StateResetAuthoritySuccess  StateResetAuthority = "same_generation_success"
 	StateResetAuthorityReset    StateResetAuthority = "reset"
@@ -237,7 +247,7 @@ type QuotaState struct {
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
 	// ObservedAt records when the current passive quota snapshot was observed.
-	ObservedAt time.Time `json:"observed_at,omitempty"`
+	ObservedAt time.Time `json:"observed_at"`
 	// Signals stores a bounded snapshot from one upstream response.
 	Signals map[string]string `json:"signals,omitempty"`
 	// Generation orders quota-family state changes.
@@ -247,6 +257,8 @@ type QuotaState struct {
 }
 
 // Clone returns an independent quota state copy.
+//
+//goland:noinspection GoMixedReceiverTypes,GoUnnecessarilyExportedIdentifiers
 func (q QuotaState) Clone() QuotaState {
 	copyQuota := q
 	if q.Signals != nil {
@@ -313,6 +325,8 @@ func (a *Auth) recordRecentRequest(now time.Time, success bool) {
 	if a == nil {
 		return
 	}
+	authSnapshotMu.Lock()
+	defer authSnapshotMu.Unlock()
 	bucketID := recentRequestBucketID(now)
 	idx := recentRequestBucketIndex(bucketID)
 	bucket := &a.recentRequests.buckets[idx]
@@ -336,8 +350,11 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 		return out
 	}
 
+	authSnapshotMu.Lock()
+	defer authSnapshotMu.Unlock()
 	currentBucketID := recentRequestBucketID(now)
-	if a.recentRequests.cachedBucketID == currentBucketID && len(a.recentRequests.cachedSnapshot) == recentRequestBucketCount {
+	if a.recentRequests.cachedBucketID == currentBucketID &&
+		len(a.recentRequests.cachedSnapshot) == recentRequestBucketCount {
 		return append(out, a.recentRequests.cachedSnapshot...)
 	}
 	for i := recentRequestBucketCount - 1; i >= 0; i-- {
@@ -366,8 +383,16 @@ func (a *Auth) Clone() *Auth {
 	if a == nil {
 		return nil
 	}
+	authSnapshotMu.Lock()
 	copyAuth := *a
+	copyAuth.recentRequests.cachedBucketID = 0
+	copyAuth.recentRequests.cachedSnapshot = nil
+	authSnapshotMu.Unlock()
 	copyAuth.Quota = a.Quota.Clone()
+	if a.quotaUpdateBase != nil {
+		base := a.quotaUpdateBase.Clone()
+		copyAuth.quotaUpdateBase = &base
+	}
 	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		maps.Copy(copyAuth.Attributes, a.Attributes)
@@ -495,7 +520,10 @@ func (a *Auth) EnsureIndex() string {
 	if a == nil {
 		return ""
 	}
-	if a.indexAssigned && a.Index != "" {
+	authSnapshotMu.Lock()
+	defer authSnapshotMu.Unlock()
+	if strings.TrimSpace(a.Index) != "" {
+		a.indexAssigned = true
 		return a.Index
 	}
 
@@ -510,6 +538,41 @@ func (a *Auth) EnsureIndex() string {
 	return idx
 }
 
+// MatchesIndex 匹配当前索引和旧 API key 引用，保持凭证身份不变
+func (a *Auth) MatchesIndex(index string) bool {
+	index = strings.TrimSpace(index)
+	if a == nil || index == "" {
+		return false
+	}
+	authSnapshotMu.Lock()
+	current := strings.TrimSpace(a.Index)
+	if current == index {
+		authSnapshotMu.Unlock()
+		return true
+	}
+	seed := a.indexSeed()
+	authSnapshotMu.Unlock()
+	derived := stableAuthIndex(seed)
+	if current == "" && derived == index {
+		return true
+	}
+	if current != "" && current != derived {
+		return false
+	}
+	prefix, _, hasTuple := strings.Cut(seed, "\x00")
+	if !hasTuple {
+		return false
+	}
+	switch prefix {
+	case "gemini-api-key", "claude-api-key", "codex-api-key", "openai-compatibility":
+		legacySeed := prefix + ":" + strings.TrimSpace(a.Attributes["base_url"]) + "+" +
+			strings.TrimSpace(a.Attributes["api_key"])
+		return stableAuthIndex(legacySeed) == index
+	default:
+		return false
+	}
+}
+
 // AssignIndex stores an externally assigned stable auth index.
 func (a *Auth) AssignIndex(index string) string {
 	if a == nil {
@@ -519,36 +582,27 @@ func (a *Auth) AssignIndex(index string) string {
 	if index == "" {
 		return a.EnsureIndex()
 	}
+	authSnapshotMu.Lock()
+	defer authSnapshotMu.Unlock()
 	a.Index = index
 	a.indexAssigned = true
 	return index
 }
 
 // Clone duplicates a model state including nested error details.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *ModelState) Clone() *ModelState {
 	if m == nil {
 		return nil
 	}
 	copyState := *m
 	copyState.Quota = m.Quota.Clone()
-	if m.LastError != nil {
-		copyState.LastError = &Error{
-			Code:            m.LastError.Code,
-			Message:         m.LastError.Message,
-			Retryable:       m.LastError.Retryable,
-			HTTPStatus:      m.LastError.HTTPStatus,
-			DispatchPhase:   m.LastError.DispatchPhase,
-			Outcome:         m.LastError.Outcome,
-			RetryDirective:  m.LastError.RetryDirective,
-			EffectScope:     m.LastError.EffectScope,
-			EffectKey:       m.LastError.EffectKey,
-			StateGeneration: m.LastError.StateGeneration,
-			cause:           m.LastError.cause,
-		}
-	}
+	copyState.LastError = cloneError(m.LastError)
 	return &copyState
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *Auth) ProxyInfo() string {
 	if a == nil {
 		return ""
@@ -585,6 +639,8 @@ func (a *Auth) DisableCoolingOverride() (bool, bool) {
 // ToolPrefixDisabled returns whether the proxy_ tool name prefix should be
 // skipped for this auth. When true, tool names are sent to Anthropic unchanged.
 // The value is read from metadata key "tool_prefix_disabled" (or "tool-prefix-disabled").
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *Auth) ToolPrefixDisabled() bool {
 	if a == nil || a.Metadata == nil {
 		return false
@@ -769,6 +825,14 @@ func (a *Auth) AccountInfo() (string, string) {
 	if a == nil {
 		return "", ""
 	}
+	kind := a.AuthKind()
+	if kind == AuthKindAPIKey {
+		key := authAttribute(a, AttributeAPIKey)
+		if key == "" {
+			key = authMetadataString(a, AttributeAPIKey)
+		}
+		return "api_key", key
+	}
 	// For Gemini CLI, include project ID in the OAuth account info if present.
 	if strings.ToLower(a.Provider) == "gemini-cli" {
 		if a.Metadata != nil {
@@ -807,11 +871,8 @@ func (a *Auth) AccountInfo() (string, string) {
 			}
 		}
 	}
-	// Fall back to API key (API-key auth)
-	if a.Attributes != nil {
-		if v := a.Attributes["api_key"]; v != "" {
-			return "api_key", v
-		}
+	if kind == AuthKindOAuth {
+		return "oauth", ""
 	}
 	return "", ""
 }
@@ -849,6 +910,8 @@ func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
 }
 
 // HasValidAccessToken reports whether a non-empty access token remains usable.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *Auth) HasValidAccessToken(now time.Time) bool {
 	if a == nil || authAccessToken(a) == "" {
 		return false

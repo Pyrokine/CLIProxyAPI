@@ -42,67 +42,71 @@ func TestFileTokenStoreListLoadsProxyURLAndPrefix(t *testing.T) {
 }
 
 func TestFileTokenStoreNormalizesLegacyCredentialMetadata(t *testing.T) {
-	t.Run("save", func(t *testing.T) {
-		authDir := t.TempDir()
-		store := NewFileTokenStore()
-		store.SetBaseDir(authDir)
-		auth := &cliproxyauth.Auth{
-			ID:       "legacy-save.json",
-			FileName: "legacy-save.json",
-			Metadata: map[string]any{
-				"type":            "codex",
-				"request-retry":   2,
-				"request_retry":   0,
-				"disable-cooling": true,
-			},
-		}
-		path, errSave := store.Save(context.Background(), auth)
-		if errSave != nil {
-			t.Fatalf("Save() error = %v", errSave)
-		}
-		raw, errRead := os.ReadFile(path)
-		if errRead != nil {
-			t.Fatalf("read saved credential: %v", errRead)
-		}
-		var metadata map[string]any
-		if errDecode := json.Unmarshal(raw, &metadata); errDecode != nil {
-			t.Fatalf("decode saved credential: %v", errDecode)
-		}
-		if metadata["request_retry"] != float64(0) || metadata["disable_cooling"] != true {
-			t.Fatalf("normalized saved metadata = %#v", metadata)
-		}
-		for _, legacyKey := range []string{"request-retry", "disable-cooling"} {
-			if _, exists := metadata[legacyKey]; exists {
-				t.Fatalf("saved metadata retained %q: %#v", legacyKey, metadata)
+	t.Run(
+		"save", func(t *testing.T) {
+			authDir := t.TempDir()
+			store := NewFileTokenStore()
+			store.SetBaseDir(authDir)
+			auth := &cliproxyauth.Auth{
+				ID:       "legacy-save.json",
+				FileName: "legacy-save.json",
+				Metadata: map[string]any{
+					"type":            "codex",
+					"request-retry":   2,
+					"request_retry":   0,
+					"disable-cooling": true,
+				},
 			}
-		}
-	})
+			path, errSave := store.Save(context.Background(), auth)
+			if errSave != nil {
+				t.Fatalf("Save() error = %v", errSave)
+			}
+			raw, errRead := os.ReadFile(path)
+			if errRead != nil {
+				t.Fatalf("read saved credential: %v", errRead)
+			}
+			var metadata map[string]any
+			if errDecode := json.Unmarshal(raw, &metadata); errDecode != nil {
+				t.Fatalf("decode saved credential: %v", errDecode)
+			}
+			if metadata["request_retry"] != float64(0) || metadata["disable_cooling"] != true {
+				t.Fatalf("normalized saved metadata = %#v", metadata)
+			}
+			for _, legacyKey := range []string{"request-retry", "disable-cooling"} {
+				if _, exists := metadata[legacyKey]; exists {
+					t.Fatalf("saved metadata retained %q: %#v", legacyKey, metadata)
+				}
+			}
+		},
+	)
 
-	t.Run("list", func(t *testing.T) {
-		authDir := t.TempDir()
-		if errWrite := os.WriteFile(
-			filepath.Join(authDir, "legacy-list.json"),
-			[]byte(`{"type":"codex","request-retry":2,"disable-cooling":true}`),
-			0o600,
-		); errWrite != nil {
-			t.Fatalf("write legacy credential: %v", errWrite)
-		}
-		store := NewFileTokenStore()
-		store.SetBaseDir(authDir)
-		auths, errList := store.List(context.Background())
-		if errList != nil || len(auths) != 1 {
-			t.Fatalf("List() auths/error = %#v/%v", auths, errList)
-		}
-		if auths[0].Metadata["request_retry"] != float64(2) || auths[0].Metadata["disable_cooling"] != true {
-			t.Fatalf("normalized listed metadata = %#v", auths[0].Metadata)
-		}
-		if retry, specified := auths[0].RequestRetryOverride(); !specified || retry != 2 {
-			t.Fatalf("numeric retry override = %d, specified=%v", retry, specified)
-		}
-		for _, legacyKey := range []string{"request-retry", "disable-cooling"} {
-			if _, exists := auths[0].Metadata[legacyKey]; exists {
-				t.Fatalf("listed metadata retained %q: %#v", legacyKey, auths[0].Metadata)
+	t.Run(
+		"list", func(t *testing.T) {
+			authDir := t.TempDir()
+			if errWrite := os.WriteFile(
+				filepath.Join(authDir, "legacy-list.json"),
+				[]byte(`{"type":"codex","request-retry":2,"disable-cooling":true}`),
+				0o600,
+			); errWrite != nil {
+				t.Fatalf("write legacy credential: %v", errWrite)
 			}
-		}
-	})
+			store := NewFileTokenStore()
+			store.SetBaseDir(authDir)
+			auths, errList := store.List(context.Background())
+			if errList != nil || len(auths) != 1 {
+				t.Fatalf("List() auths/error = %#v/%v", auths, errList)
+			}
+			if auths[0].Metadata["request_retry"] != float64(2) || auths[0].Metadata["disable_cooling"] != true {
+				t.Fatalf("normalized listed metadata = %#v", auths[0].Metadata)
+			}
+			if retry, specified := auths[0].RequestRetryOverride(); !specified || retry != 2 {
+				t.Fatalf("numeric retry override = %d, specified=%v", retry, specified)
+			}
+			for _, legacyKey := range []string{"request-retry", "disable-cooling"} {
+				if _, exists := auths[0].Metadata[legacyKey]; exists {
+					t.Fatalf("listed metadata retained %q: %#v", legacyKey, auths[0].Metadata)
+				}
+			}
+		},
+	)
 }

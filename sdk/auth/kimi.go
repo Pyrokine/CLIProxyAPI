@@ -17,18 +17,20 @@ import (
 var kimiRefreshLead = 5 * time.Minute
 
 // KimiAuthenticator implements the OAuth device flow for Kimi Code and Kimi.ai.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type KimiAuthenticator struct {
 	domain string
 }
 
 // NewKimiAuthenticator constructs a Kimi Code authenticator.
 func NewKimiAuthenticator() Authenticator {
-	return &KimiAuthenticator{domain: kimi.KimiDefaultDomain}
+	return &KimiAuthenticator{domain: kimi.DefaultDomain}
 }
 
 // NewKimiAIAuthenticator constructs a Kimi.ai authenticator.
 func NewKimiAIAuthenticator() Authenticator {
-	return &KimiAuthenticator{domain: kimi.KimiAIDomain}
+	return &KimiAuthenticator{domain: kimi.AIDomain}
 }
 
 // Provider returns the provider key for the selected Kimi service.
@@ -54,10 +56,10 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		opts = &LoginOptions{}
 	}
 
-	domain := kimi.KimiDefaultDomain
+	domain := kimi.DefaultDomain
 	displayName := "Kimi"
 	if kimi.IsKimiAIDomain(a.domain) {
-		domain = kimi.KimiAIDomain
+		domain = kimi.AIDomain
 		displayName = "Kimi.ai"
 	}
 	authSvc := kimi.NewAuthWithDomain(cfg, domain)
@@ -112,7 +114,8 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 
 // KimiRecordFromBundle creates a persistable credential for Kimi Code or Kimi.ai.
 func KimiRecordFromBundle(authSvc *kimi.Auth, bundle *kimi.AuthBundle) (*coreauth.Auth, error) {
-	if authSvc == nil || bundle == nil || bundle.TokenData == nil || strings.TrimSpace(bundle.TokenData.AccessToken) == "" {
+	if authSvc == nil || bundle == nil || bundle.TokenData == nil ||
+		strings.TrimSpace(bundle.TokenData.AccessToken) == "" {
 		return nil, fmt.Errorf("kimi: device authorization did not yield an access token")
 	}
 	storage := authSvc.CreateTokenStorage(bundle)

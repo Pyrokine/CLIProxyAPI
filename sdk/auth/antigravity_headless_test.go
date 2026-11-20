@@ -36,37 +36,43 @@ func TestAntigravityHeadlessOAuthUsesInjectedClientWithoutPersistence(t *testing
 	redirectURI := "http://127.0.0.1:1/oauth-callback"
 
 	var calls atomic.Int32
-	client := &http.Client{Transport: antigravityRoundTripper(func(req *http.Request) (*http.Response, error) {
-		calls.Add(1)
-		switch {
-		case req.URL.String() == "https://oauth2.googleapis.com/token":
-			body, errRead := io.ReadAll(req.Body)
-			if errRead != nil {
-				t.Fatalf("read token request: %v", errRead)
-			}
-			values, errParse := url.ParseQuery(string(body))
-			if errParse != nil {
-				t.Fatalf("parse token request: %v", errParse)
-			}
-			if values.Get("redirect_uri") != redirectURI {
-				t.Fatalf("redirect_uri = %q, want %q", values.Get("redirect_uri"), redirectURI)
-			}
-			return antigravityResponse(
-				http.StatusOK,
-				`{"access_token":"access-token","refresh_token":"refresh-token","expires_in":3600,"token_type":"Bearer"}`,
-			), nil
-		case strings.HasPrefix(req.URL.String(), "https://www.googleapis.com/oauth2/v2/userinfo"):
-			return antigravityResponse(http.StatusOK, `{"email":"engineer@example.com"}`), nil
-		case strings.Contains(req.URL.String(), ":loadCodeAssist"):
-			return antigravityResponse(
-				http.StatusOK,
-				`{"cloudaicompanionProject":"project-123"}`,
-			), nil
-		default:
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
-	})}
+	client := &http.Client{
+		Transport: antigravityRoundTripper(
+			func(req *http.Request) (*http.Response, error) {
+				calls.Add(1)
+				switch {
+				case req.URL.String() == "https://oauth2.googleapis.com/token":
+					body, errRead := io.ReadAll(req.Body)
+					if errRead != nil {
+						t.Fatalf("read token request: %v", errRead)
+					}
+					values, errParse := url.ParseQuery(string(body))
+					if errParse != nil {
+						t.Fatalf("parse token request: %v", errParse)
+					}
+					if values.Get("redirect_uri") != redirectURI {
+						t.Fatalf("redirect_uri = %q, want %q", values.Get("redirect_uri"), redirectURI)
+					}
+					return antigravityResponse(
+						http.StatusOK,
+						`{"access_token":"access-token","refresh_token":"refresh-token",`+
+							`"expires_in":3600,"token_type":`+
+							`"Bearer"}`,
+					), nil
+				case strings.HasPrefix(req.URL.String(), "https://www.googleapis.com/oauth2/v2/userinfo"):
+					return antigravityResponse(http.StatusOK, `{"email":"engineer@example.com"}`), nil
+				case strings.Contains(req.URL.String(), ":loadCodeAssist"):
+					return antigravityResponse(
+						http.StatusOK,
+						`{"cloudaicompanionProject":"project-123"}`,
+					), nil
+				default:
+					t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+					return nil, nil
+				}
+			},
+		),
+	}
 
 	record, errComplete := auth.CompleteAntigravityOAuth(
 		context.Background(),
@@ -96,9 +102,13 @@ func TestAntigravityHeadlessOAuthUsesInjectedClientWithoutPersistence(t *testing
 }
 
 func TestCompleteAntigravityOAuthPreservesTypedHTTPStatus(t *testing.T) {
-	client := &http.Client{Transport: antigravityRoundTripper(func(*http.Request) (*http.Response, error) {
-		return antigravityResponse(http.StatusForbidden, `{"error":"forbidden"}`), nil
-	})}
+	client := &http.Client{
+		Transport: antigravityRoundTripper(
+			func(*http.Request) (*http.Response, error) {
+				return antigravityResponse(http.StatusForbidden, `{"error":"forbidden"}`), nil
+			},
+		),
+	}
 	_, errComplete := auth.CompleteAntigravityOAuth(context.Background(), "code", "", client)
 	if errComplete == nil {
 		t.Fatal("expected upstream HTTP error")

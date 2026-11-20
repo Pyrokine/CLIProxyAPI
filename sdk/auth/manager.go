@@ -2,7 +2,7 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -11,8 +11,10 @@ import (
 
 	claudeauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/claude"
 	devinauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/devin"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // Manager aggregates authenticators and coordinates persistence via a token store.
@@ -35,6 +37,8 @@ func NewManager(store coreauth.Store, authenticators ...Authenticator) *Manager 
 }
 
 // Register adds or replaces an authenticator keyed by its provider identifier.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *Manager) Register(a Authenticator) {
 	if a == nil {
 		return
@@ -46,6 +50,8 @@ func (m *Manager) Register(a Authenticator) {
 }
 
 // SetStore updates the token store used for persistence.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *Manager) SetStore(store coreauth.Store) {
 	m.store = store
 }
@@ -83,6 +89,22 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 		authDir = strings.TrimSpace(cfg.AuthDir)
 	}
 	if authDir != "" {
+		authDir, err = util.ResolveAuthDir(authDir)
+		if err != nil {
+			return record, "", fmt.Errorf("cliproxy auth: %w", err)
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(record.Provider), "meta") && authDir != "" {
+		fileName, errFind := findExistingMetaCredential(ctx, authDir, record)
+		if errFind != nil {
+			return record, "", errFind
+		}
+		if fileName != "" {
+			record.ID = fileName
+			record.FileName = fileName
+		}
+	}
+	if authDir != "" {
 		existingMetadata, errRead := readExistingCredentialMetadata(authDir, record)
 		if errRead != nil {
 			return record, "", errRead
@@ -99,7 +121,9 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 			return record, "", err
 		}
 		if legacyClaudeCredential != nil {
-			if errMerge := coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata); errMerge != nil {
+			if errMerge := coreauth.MergeExistingAuthMetadata(
+				record, legacyClaudeCredential.Metadata,
+			); errMerge != nil {
 				return record, "", fmt.Errorf("cliproxy auth: preserve Claude legacy metadata: %w", errMerge)
 			}
 		}
@@ -111,7 +135,9 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 			return record, "", errFind
 		}
 		if existingDevinCredential != nil {
-			if errMerge := coreauth.MergeExistingAuthMetadata(record, existingDevinCredential.Metadata); errMerge != nil {
+			if errMerge := coreauth.MergeExistingAuthMetadata(
+				record, existingDevinCredential.Metadata,
+			); errMerge != nil {
 				return record, "", fmt.Errorf("cliproxy auth: preserve Devin credential metadata: %w", errMerge)
 			}
 			devinauth.ReuseExistingCredentialIdentity(record, existingDevinCredential)
@@ -129,7 +155,7 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 		if scopedStore, okScoped := m.store.(interface {
 			SaveWithBaseDir(context.Context, string, *coreauth.Auth) (string, error)
 		}); okScoped {
-			savedPath, err = scopedStore.SaveWithBaseDir(persistCtx, cfg.AuthDir, record)
+			savedPath, err = scopedStore.SaveWithBaseDir(persistCtx, authDir, record)
 		} else {
 			savedPath, err = m.store.Save(persistCtx, record)
 		}
@@ -150,7 +176,25 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 		if legacyID == "" {
 			legacyID = strings.TrimSpace(legacyClaudeCredential.FileName)
 		}
-		if errDelete := m.store.Delete(ctx, legacyID); errDelete != nil {
+		var errDelete error
+		if versionedStore, versioned := m.store.(coreauth.VersionedStore); versioned {
+			version := coreauth.PersistedVersion{Path: legacyID}
+			digest, errDigest := hex.DecodeString(legacyClaudeCredential.Attributes[coreauth.PersistedSHA256Attribute])
+			if errDigest != nil || len(digest) != len(version.SHA256) {
+				errDelete = fmt.Errorf("matching Claude legacy credential has no valid persisted version")
+			} else {
+				copy(version.SHA256[:], digest)
+				var deleted bool
+				deleted, errDelete = versionedStore.DeleteIfVersion(ctx, legacyID, version)
+				if errDelete == nil && !deleted {
+					errDelete = fmt.Errorf("matching Claude legacy credential changed before cleanup")
+				}
+			}
+		} else {
+			log.Warn("auth store has no conditional deletion; legacy Claude cleanup uses the store Delete contract")
+			errDelete = m.store.Delete(ctx, legacyID)
+		}
+		if errDelete != nil {
 			return record, savedPath, fmt.Errorf(
 				"cliproxy auth: canonical Claude credential saved but legacy credential cleanup failed: %w",
 				errDelete,
@@ -182,9 +226,71 @@ func readExistingCredentialMetadata(authDir string, record *coreauth.Auth) (map[
 	if errRead != nil {
 		return nil, fmt.Errorf("cliproxy auth: read existing credential %s: %w", filepath.Base(path), errRead)
 	}
-	metadata := make(map[string]any)
-	if errJSON := json.Unmarshal(raw, &metadata); errJSON != nil {
+	metadata, errJSON := coreauth.DecodeCredentialMetadata(raw)
+	if errJSON != nil {
 		return nil, fmt.Errorf("cliproxy auth: decode existing credential %s: %w", filepath.Base(path), errJSON)
 	}
 	return metadata, nil
+}
+
+func findExistingMetaCredential(ctx context.Context, authDir string, target *coreauth.Auth) (string, error) {
+	root, errRoot := filepath.Abs(authDir)
+	if errRoot != nil {
+		return "", fmt.Errorf("find existing Meta credential: %w", errRoot)
+	}
+	targetEmail, _ := target.Metadata["email"].(string)
+	targetDCA, _ := target.Metadata["dca_token"].(string)
+	targetEmail = strings.TrimSpace(targetEmail)
+	targetDCA = strings.TrimSpace(targetDCA)
+	matched := ""
+	errWalk := filepath.WalkDir(
+		root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if errContext := ctx.Err(); errContext != nil {
+				return errContext
+			}
+			name := strings.ToLower(entry.Name())
+			if entry.IsDir() || !strings.HasPrefix(name, "meta-") || !strings.HasSuffix(name, ".json") {
+				return nil
+			}
+			metadata, errRead := readExistingCredentialMetadata(root, &coreauth.Auth{FileName: path})
+			if errRead != nil {
+				return errRead
+			}
+			coreauth.NormalizeCredentialMetadata(metadata)
+			provider, _ := metadata["type"].(string)
+			if !strings.EqualFold(strings.TrimSpace(provider), "meta") {
+				return nil
+			}
+			kind, _ := metadata["auth_kind"].(string)
+			if kind = strings.TrimSpace(kind); kind != "" && !strings.EqualFold(kind, "oauth") {
+				return nil
+			}
+			email, _ := metadata["email"].(string)
+			dca, _ := metadata["dca_token"].(string)
+			email = strings.TrimSpace(email)
+			sameIdentity := targetEmail != "" && email != "" && strings.EqualFold(targetEmail, email)
+			if targetEmail == "" || email == "" {
+				sameIdentity = targetDCA != "" && strings.TrimSpace(dca) == targetDCA
+			}
+			if !sameIdentity {
+				return nil
+			}
+			if matched != "" {
+				return fmt.Errorf("multiple Meta credentials match the login identity")
+			}
+			var errRelative error
+			matched, errRelative = filepath.Rel(root, path)
+			return errRelative
+		},
+	)
+	if errors.Is(errWalk, os.ErrNotExist) {
+		return "", nil
+	}
+	if errWalk != nil {
+		return "", fmt.Errorf("find existing Meta credential: %w", errWalk)
+	}
+	return matched, nil
 }

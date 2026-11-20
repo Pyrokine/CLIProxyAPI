@@ -19,13 +19,15 @@ func TestOldWatcherEventCannotUndoUnpersistedRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(nil, nil, nil)
-	registered, err := manager.Register(context.Background(), &Auth{
-		ID: "refresh.json", Provider: "fixture", Status: StatusActive,
-		Attributes: map[string]string{
-			"path": path, PersistedSHA256Attribute: hex.EncodeToString(oldVersion.SHA256[:]),
+	registered, err := manager.Register(
+		context.Background(), &Auth{
+			ID: "refresh.json", Provider: "fixture", Status: StatusActive,
+			Attributes: map[string]string{
+				"path": path, PersistedSHA256Attribute: hex.EncodeToString(oldVersion.SHA256[:]),
+			},
+			Metadata: map[string]any{"access_token": "old", "refresh_token": "owner"},
 		},
-		Metadata: map[string]any{"access_token": "old", "refresh_token": "owner"},
-	})
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +42,7 @@ func TestOldWatcherEventCannotUndoUnpersistedRefresh(t *testing.T) {
 	intent := &authRefreshPersistenceIntent{
 		auth: current.Clone(), expectedVersion: &oldVersion,
 		nextVersion: refreshPersistenceNextVersion(&oldVersion, current),
-		generation: current.Generation, ctx: intentCtx, cancel: cancel,
+		generation:  current.Generation, ctx: intentCtx, cancel: cancel,
 	}
 	manager.pendingRefreshPersistenceRetries.Store(current.ID, intent)
 	defer manager.cancelPendingRefreshPersistence(current.ID)
@@ -54,7 +56,8 @@ func TestOldWatcherEventCannotUndoUnpersistedRefresh(t *testing.T) {
 	if authAccessToken(current) != "new" {
 		t.Fatalf("watcher restored the stale access token: %#v", current)
 	}
-	if pending, ok := manager.pendingRefreshPersistenceRetries.Load(current.ID); !ok || pending != intent || intentCtx.Err() != nil {
+	if pending, ok := manager.pendingRefreshPersistenceRetries.Load(current.ID); !ok || pending != intent ||
+		intentCtx.Err() != nil {
 		t.Fatal("watcher canceled the pending refreshed credential persistence")
 	}
 	manager.SetStore(&countingStore{list: []*Auth{registered.Clone()}})

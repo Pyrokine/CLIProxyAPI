@@ -14,6 +14,8 @@ import (
 )
 
 // XAIAuthenticator implements the xAI Grok OAuth device-code flow.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type XAIAuthenticator struct{}
 
 // NewXAIAuthenticator constructs a new xAI authenticator.

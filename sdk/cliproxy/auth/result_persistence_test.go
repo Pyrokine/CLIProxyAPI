@@ -53,7 +53,9 @@ func (s *recordingResultCooldownStore) snapshot() (int, []CooldownStateRecord) {
 	return s.saves, append([]CooldownStateRecord(nil), s.records...)
 }
 
-func TestManagerMarkResultKeepsRuntimeSchedulerRegistryAndCooldownStoreConsistentWhenAuthPersistenceFails(t *testing.T) {
+func TestManagerMarkResultKeepsRuntimeSchedulerRegistryAndCooldownStoreConsistentWhenAuthPersistenceFails(
+	t *testing.T,
+) {
 	const (
 		authID   = "result-persistence-failure"
 		provider = "result-persistence-provider"

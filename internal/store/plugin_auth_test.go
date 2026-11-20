@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,12 @@ func (storedPluginAuthParser) ParseAuth(
 	_ context.Context,
 	req pluginapi.AuthParseRequest,
 ) (*coreauth.Auth, bool, error) {
+	if req.Provider == "empty-plugin-provider" {
+		return nil, true, nil
+	}
+	if req.Provider == "canceled-plugin-provider" {
+		return nil, true, context.Canceled
+	}
 	if req.Provider != "plugin-provider" {
 		return nil, false, nil
 	}
@@ -26,6 +33,54 @@ func (storedPluginAuthParser) ParseAuth(
 		FileName: req.FileName,
 		Metadata: map[string]any{"type": req.Provider},
 	}, true, nil
+}
+
+func TestRemoteFileStoresSinglePluginResults(t *testing.T) {
+	readers := map[string]func(context.Context, string, string) (*coreauth.Auth, error){
+		"git":    (&GitTokenStore{}).readAuthFile,
+		"object": (&ObjectTokenStore{}).readAuthFile,
+	}
+	for name, read := range readers {
+		t.Run(
+			name, func(t *testing.T) {
+				for _, tc := range []struct {
+					provider string
+					wantID   string
+					wantErr  error
+				}{
+					{provider: "empty-plugin-provider"},
+					{provider: "plugin-provider", wantID: "account-123"},
+					{provider: "other-provider", wantID: "plugin.json"},
+					{provider: "canceled-plugin-provider", wantErr: context.Canceled},
+				} {
+					t.Run(
+						tc.provider, func(t *testing.T) {
+							directory := t.TempDir()
+							path := filepath.Join(directory, "plugin.json")
+							raw := []byte(`{"type":"` + tc.provider + `"}`)
+							if err := os.WriteFile(path, raw, 0o600); err != nil {
+								t.Fatal(err)
+							}
+							ctx := sdkauth.WithPluginAuthParser(t.Context(), storedPluginAuthParser{})
+							auth, err := read(ctx, path, directory)
+							if !errors.Is(err, tc.wantErr) {
+								t.Fatalf("read plugin auth: error=%v, want %v", err, tc.wantErr)
+							}
+							if tc.wantID == "" {
+								if auth != nil {
+									t.Fatalf("empty or failed plugin result produced an auth: %#v", auth)
+								}
+								return
+							}
+							if auth == nil || auth.ID != tc.wantID || auth.CreatedAt.IsZero() || auth.UpdatedAt.IsZero() {
+								t.Fatalf("read plugin auth = %#v, want %s with file timestamps", auth, tc.wantID)
+							}
+						},
+					)
+				}
+			},
+		)
+	}
 }
 
 func TestRemoteFileStoresUsePluginStableAuthID(t *testing.T) {

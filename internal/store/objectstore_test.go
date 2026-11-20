@@ -23,6 +23,7 @@ func newObjectStoreForTest(t *testing.T, handler http.Handler) *ObjectTokenStore
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
+	//goland:noinspection HttpUrlsUsage
 	store, err := NewObjectTokenStore(
 		ObjectStoreConfig{
 			Endpoint:  strings.TrimPrefix(server.URL, "http://"),
@@ -44,6 +45,7 @@ func writeObjectStoreLocation(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	w.Header().Set("Content-Type", "application/xml")
+	//goland:noinspection HttpUrlsUsage
 	_, _ = io.WriteString(
 		w,
 		`<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></LocationConstraint>`,
@@ -235,9 +237,11 @@ func TestObjectTokenStoreDeleteIfVersionPublishesConditionalTombstone(t *testing
 				switch {
 				case r.Method == http.MethodGet && r.URL.Query().Has("versioning"):
 					w.Header().Set("Content-Type", "application/xml")
+					//goland:noinspection HttpUrlsUsage
 					_, _ = io.WriteString(
 						w,
-						`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`,
+						`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01`+
+							`/"><Status>Enabled</Status></VersioningConfiguration>`,
 					)
 				case r.Method == http.MethodHead:
 					w.Header().Set("ETag", `"credential-etag"`)
@@ -313,9 +317,11 @@ func TestObjectTokenStoreRecoversInterruptedVersionedDeletionBeforeRemoteSync(t 
 				switch {
 				case r.Method == http.MethodGet && r.URL.Query().Has("versioning"):
 					w.Header().Set("Content-Type", "application/xml")
+					//goland:noinspection HttpUrlsUsage
 					_, _ = io.WriteString(
 						w,
-						`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`,
+						`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01`+
+							`/"><Status>Enabled</Status></VersioningConfiguration>`,
 					)
 				case r.Method == http.MethodHead:
 					w.Header().Set("ETag", `"credential-etag"`)
@@ -415,11 +421,13 @@ func TestObjectTokenStoreDeleteIfVersionMismatchHasNoRemoteSideEffect(t *testing
 }
 
 func TestParseObjectStoreAuthTombstone(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	raw := []byte(`{"deleted_version_id":"version-1","deleted_sha256":"abcd","_cliproxy_auth_deleted":true}`)
 	tombstone, ok := parseObjectStoreAuthTombstone(raw)
 	if !ok {
 		t.Fatal("parseObjectStoreAuthTombstone() rejected valid tombstone")
 	}
+	//goland:noinspection SpellCheckingInspection
 	if tombstone.DeletedVersionID != "version-1" || tombstone.DeletedSHA256 != "abcd" {
 		t.Fatalf("tombstone = %#v", tombstone)
 	}

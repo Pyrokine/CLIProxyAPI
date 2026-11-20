@@ -168,11 +168,13 @@ func QuotaCredentialRevisions(auth *Auth) (string, []string, error) {
 		return hex.EncodeToString(digest[:]), precise, nil
 	}
 	apiKey := strings.TrimSpace(auth.Attributes[AttributeAPIKey])
-	revision, precise, err := fingerprint(map[string]any{
-		"provider": strings.ToLower(strings.TrimSpace(auth.Provider)),
-		"api_key":  apiKey,
-		"metadata": material,
-	})
+	revision, precise, err := fingerprint(
+		map[string]any{
+			"provider": strings.ToLower(strings.TrimSpace(auth.Provider)),
+			"api_key":  apiKey,
+			"metadata": material,
+		},
+	)
 	if err != nil {
 		return "", nil, err
 	}

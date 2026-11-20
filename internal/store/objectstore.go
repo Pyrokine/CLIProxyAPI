@@ -51,6 +51,8 @@ type ObjectStoreConfig struct {
 
 // ObjectTokenStore persists configuration and authentication metadata using an S3-compatible object storage backend.
 // Files are mirrored to a local workspace so existing file-based flows continue to operate.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ObjectTokenStore struct {
 	client     *minio.Client
 	cfg        ObjectStoreConfig
@@ -129,6 +131,8 @@ func NewObjectTokenStore(cfg ObjectStoreConfig) (*ObjectTokenStore, error) {
 
 // SetBaseDir implements the optional token-store directory protocol. The object
 // store controls its own workspace, so runtime directory updates are ignored.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *ObjectTokenStore) SetBaseDir(_ string) {}
 
 // ConfigPath returns the managed configuration file path inside the spool directory.
@@ -286,6 +290,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		return "", err
 	}
 	mutationComplete = true
+	cliproxyauth.RecordPersistedAuthVersion(ctx, path)
 	return path, nil
 }
 
@@ -857,6 +862,9 @@ func (s *ObjectTokenStore) readAuthFile(ctx context.Context, path, baseDir strin
 		return nil, errParse
 	}
 	if handled {
+		if pluginAuth == nil {
+			return nil, nil
+		}
 		pluginAuth.CreatedAt = info.ModTime()
 		pluginAuth.UpdatedAt = info.ModTime()
 		return pluginAuth, nil

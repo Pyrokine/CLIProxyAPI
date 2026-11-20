@@ -145,9 +145,11 @@ func TestCredentialBindingSHA256UsesAccessTokenWithoutRefreshOwner(t *testing.T)
 }
 
 func TestQuotaCredentialRevisionsPreserveStatusAndLegacyIdentity(t *testing.T) {
-	base := &Auth{Provider: "codex", Metadata: map[string]any{
-		"type": "codex", "access_token": "synthetic-access", "disabled": false,
-	}, Attributes: map[string]string{PersistedSHA256Attribute: "old-file-digest"}}
+	base := &Auth{
+		Provider: "codex", Metadata: map[string]any{
+			"type": "codex", "access_token": "synthetic-access", "disabled": false,
+		}, Attributes: map[string]string{PersistedSHA256Attribute: "old-file-digest"},
+	}
 	revision, equivalent, err := QuotaCredentialRevisions(base)
 	if err != nil || revision == "" {
 		t.Fatalf("quota revision=%q, err=%v", revision, err)
@@ -176,23 +178,27 @@ func TestQuotaCredentialRevisionsPreserveStatusAndLegacyIdentity(t *testing.T) {
 }
 
 func TestQuotaCredentialRevisionsKeepExactMaterialIsolation(t *testing.T) {
-	base := &Auth{Provider: "codex", Metadata: map[string]any{
-		"type": "codex", "account_id": "same-account", "refresh_token": "same-owner",
-		"access_token": "synthetic-before", "note": "before",
-	}}
+	base := &Auth{
+		Provider: "codex", Metadata: map[string]any{
+			"type": "codex", "account_id": "same-account", "refresh_token": "same-owner",
+			"access_token": "synthetic-before", "note": "before",
+		},
+	}
 	revision, _, err := QuotaCredentialRevisions(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, field := range []string{"access_token", "refresh_token", "account_id", "note"} {
-		t.Run(field, func(t *testing.T) {
-			updated := base.Clone()
-			updated.Metadata[field] = "synthetic-after"
-			after, equivalent, err := QuotaCredentialRevisions(updated)
-			if err != nil || after == revision || slices.Contains(equivalent, revision) {
-				t.Fatalf("changed material retained old identity: revision=%q, err=%v", after, err)
-			}
-		})
+		t.Run(
+			field, func(t *testing.T) {
+				updated := base.Clone()
+				updated.Metadata[field] = "synthetic-after"
+				after, equivalent, err := QuotaCredentialRevisions(updated)
+				if err != nil || after == revision || slices.Contains(equivalent, revision) {
+					t.Fatalf("changed material retained old identity: revision=%q, err=%v", after, err)
+				}
+			},
+		)
 	}
 	base.Attributes = map[string]string{AttributeAPIKey: "synthetic-attribute-key"}
 	after, equivalent, err := QuotaCredentialRevisions(base)
@@ -229,30 +235,36 @@ func TestBindPersistedAuthDigestRequiresUnchangedMaterial(t *testing.T) {
 	}
 	original := hex.EncodeToString(digest[:])
 	for _, field := range []string{"unchanged", "disabled", "access_token", "note", "provider", "attribute_digest"} {
-		t.Run(field, func(t *testing.T) {
-			updated := auth.Clone()
-			switch field {
-			case "disabled":
-				updated.Disabled = true
-				updated.Metadata["disabled"] = true
-			case "access_token", "note":
-				updated.Metadata[field] = "changed"
-			case "provider":
-				updated.Provider = "claude"
-			case "attribute_digest":
-				updated.Attributes[PersistedSHA256Attribute] = strings.Repeat("f", 64)
-			}
-			_, equivalent, err := QuotaCredentialRevisions(updated)
-			want := field == "unchanged" || field == "disabled" || field == "attribute_digest"
-			if err != nil || slices.Contains(equivalent, original) != want || slices.Contains(equivalent, strings.Repeat("f", 64)) {
-				t.Fatalf("persisted material proof was not isolated: %v", err)
-			}
-		})
+		t.Run(
+			field, func(t *testing.T) {
+				updated := auth.Clone()
+				switch field {
+				case "disabled":
+					updated.Disabled = true
+					updated.Metadata["disabled"] = true
+				case "access_token", "note":
+					updated.Metadata[field] = "changed"
+				case "provider":
+					updated.Provider = "claude"
+				case "attribute_digest":
+					updated.Attributes[PersistedSHA256Attribute] = strings.Repeat("f", 64)
+				}
+				_, equivalent, err := QuotaCredentialRevisions(updated)
+				want := field == "unchanged" || field == "disabled" || field == "attribute_digest"
+				if err != nil || slices.Contains(equivalent, original) != want || slices.Contains(
+					equivalent, strings.Repeat("f", 64),
+				) {
+					t.Fatalf("persisted material proof was not isolated: %v", err)
+				}
+			},
+		)
 	}
 }
 
 func TestQuotaCredentialRevisionsRejectRoundedLegacyNumbers(t *testing.T) {
-	oldMetadata := map[string]any{"type": "codex", "access_token": "synthetic", "credential_serial": float64(9007199254740993)}
+	oldMetadata := map[string]any{
+		"type": "codex", "access_token": "synthetic", "credential_serial": float64(9007199254740993),
+	}
 	oldEnvelope, err := json.Marshal(map[string]any{"provider": "codex", "api_key": "", "metadata": oldMetadata})
 	if err != nil {
 		t.Fatal(err)
@@ -275,7 +287,9 @@ func TestQuotaCredentialRevisionsRejectRoundedLegacyNumbers(t *testing.T) {
 		t.Fatal(err)
 	}
 	revision, equivalent, err := QuotaCredentialRevisions(auth)
-	if err != nil || revision == hex.EncodeToString(oldRevision[:]) || slices.Contains(equivalent, hex.EncodeToString(digest[:])) {
+	if err != nil || revision == hex.EncodeToString(oldRevision[:]) || slices.Contains(
+		equivalent, hex.EncodeToString(digest[:]),
+	) {
 		t.Fatalf("rounded legacy material remained a quota identity: %v", err)
 	}
 }
@@ -293,7 +307,9 @@ func TestQuotaCredentialRevisionsPreserveJSONNumbers(t *testing.T) {
 			t.Fatal("adjacent large integers share a quota identity")
 		}
 		digest, err := DigestPersistedJSON(raw)
-		if err != nil || len(equivalent) != 1 || equivalent[0] != revision || slices.Contains(equivalent, hex.EncodeToString(digest[:])) {
+		if err != nil || len(equivalent) != 1 || equivalent[0] != revision || slices.Contains(
+			equivalent, hex.EncodeToString(digest[:]),
+		) {
 			t.Fatalf("precise numeric material accepted an ambiguous legacy candidate: %v", err)
 		}
 		previous = revision
@@ -314,27 +330,35 @@ func TestQuotaCredentialRevisionsRejectInvalidMaterial(t *testing.T) {
 		"array storage":        {Storage: quotaRevisionRawStorage{raw: []byte(`[]`)}},
 		"unsupported metadata": {Metadata: map[string]any{"invalid": make(chan int)}},
 	} {
-		t.Run(name, func(t *testing.T) {
-			revision, equivalent, err := QuotaCredentialRevisions(auth)
-			if err == nil || revision != "" || len(equivalent) != 0 {
-				t.Fatalf("invalid material accepted: revision=%q, equivalents=%v, err=%v", revision, equivalent, err)
-			}
-		})
+		t.Run(
+			name, func(t *testing.T) {
+				revision, equivalent, err := QuotaCredentialRevisions(auth)
+				if err == nil || revision != "" || len(equivalent) != 0 {
+					t.Fatalf(
+						"invalid material accepted: revision=%q, equivalents=%v, err=%v", revision, equivalent, err,
+					)
+				}
+			},
+		)
 	}
 }
 
 func TestQuotaCredentialRevisionsMergeStorageWithoutMutation(t *testing.T) {
 	const original = `{"type":"codex","access_token":"stored","refresh_token":"owner","disabled":true}`
 	raw := []byte(original)
-	auth := &Auth{Provider: "codex", Storage: quotaRevisionRawStorage{raw: raw},
-		Metadata: map[string]any{"access_token": "current", "disabled": false}}
+	auth := &Auth{
+		Provider: "codex", Storage: quotaRevisionRawStorage{raw: raw},
+		Metadata: map[string]any{"access_token": "current", "disabled": false},
+	}
 	revision, _, err := QuotaCredentialRevisions(auth)
 	if err != nil {
 		t.Fatal(err)
 	}
-	complete := &Auth{Provider: "codex", Metadata: map[string]any{
-		"type": "codex", "access_token": "current", "refresh_token": "owner", "disabled": false,
-	}}
+	complete := &Auth{
+		Provider: "codex", Metadata: map[string]any{
+			"type": "codex", "access_token": "current", "refresh_token": "owner", "disabled": false,
+		},
+	}
 	want, _, err := QuotaCredentialRevisions(complete)
 	if err != nil || revision != want || string(raw) != original ||
 		auth.Metadata["disabled"] != false || auth.Metadata["access_token"] != "current" {

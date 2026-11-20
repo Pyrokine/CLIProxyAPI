@@ -23,9 +23,11 @@ func schedulerAuthVersionForTest(t *testing.T, scheduler *authScheduler, authID 
 func TestManagerSyncSchedulerKeepsAuthSnapshotCurrent(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	const authID = "scheduler-rebuild-current-auth"
-	registered, err := manager.Register(WithSkipPersist(context.Background()), &Auth{
-		ID: authID, Provider: "gemini",
-	})
+	registered, err := manager.Register(
+		WithSkipPersist(context.Background()), &Auth{
+			ID: authID, Provider: "gemini",
+		},
+	)
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
@@ -56,9 +58,11 @@ func TestManagerSyncSchedulerKeepsAuthSnapshotCurrent(t *testing.T) {
 
 	resultDone := make(chan struct{})
 	go func() {
-		manager.MarkResult(context.Background(), Result{
-			AuthID: authID, AuthGeneration: registered.Generation, Success: true,
-		})
+		manager.MarkResult(
+			context.Background(), Result{
+				AuthID: authID, AuthGeneration: registered.Generation, Success: true,
+			},
+		)
 		close(resultDone)
 	}()
 	manager.scheduler.mu.Unlock()
@@ -86,10 +90,12 @@ func TestManagerSyncSchedulerKeepsAuthSnapshotCurrent(t *testing.T) {
 func TestManagerRemovePublishesSchedulerTombstoneGeneration(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	authID := "manager-removal-publication-auth"
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID:       authID,
-		Provider: "gemini",
-	})
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID:       authID,
+			Provider: "gemini",
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -120,7 +126,9 @@ func TestManagerRemovePublishesSchedulerTombstoneGeneration(t *testing.T) {
 	if recreated == nil || recreated.Generation <= tombstone.generation {
 		t.Fatalf("recreated auth = %#v, want generation above %d", recreated, tombstone.generation)
 	}
-	if got := schedulerAuthSnapshotForTest(manager.scheduler, "gemini", authID); got == nil || got.Generation != recreated.Generation {
+	if got := schedulerAuthSnapshotForTest(
+		manager.scheduler, "gemini", authID,
+	); got == nil || got.Generation != recreated.Generation {
 		t.Fatalf("recreated auth was not scheduled: %#v", got)
 	}
 }
@@ -128,10 +136,12 @@ func TestManagerRemovePublishesSchedulerTombstoneGeneration(t *testing.T) {
 func TestManagerRemoveIfGenerationPublishesSchedulerTombstone(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	authID := "manager-conditional-removal-publication-auth"
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID:       authID,
-		Provider: "gemini",
-	})
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID:       authID,
+			Provider: "gemini",
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -161,10 +171,12 @@ func TestManagerLoadPublishesSchedulerTombstonesForMissingAuths(t *testing.T) {
 	store := &countingStore{}
 	manager := NewManager(store, &RoundRobinSelector{}, nil)
 	authID := "manager-load-removal-publication-auth"
-	registered, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{
-		ID:       authID,
-		Provider: "gemini",
-	})
+	registered, errRegister := manager.Register(
+		WithSkipPersist(context.Background()), &Auth{
+			ID:       authID,
+			Provider: "gemini",
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -199,20 +211,24 @@ func TestManagerRemovePublishesSchedulerTombstoneBeforeInFlightMutationCompletes
 		entered: make(chan struct{}, 1),
 		release: make(chan struct{}),
 	}
-	t.Cleanup(func() {
-		select {
-		case <-store.release:
-		default:
-			close(store.release)
-		}
-	})
+	t.Cleanup(
+		func() {
+			select {
+			case <-store.release:
+			default:
+				close(store.release)
+			}
+		},
+	)
 	manager := NewManager(store, &RoundRobinSelector{}, nil)
 	authID := "manager-removal-in-flight-publication-auth"
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID:       authID,
-		Provider: "gemini",
-		Metadata: map[string]any{"token": "test"},
-	})
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID:       authID,
+			Provider: "gemini",
+			Metadata: map[string]any{"token": "test"},
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -222,11 +238,13 @@ func TestManagerRemovePublishesSchedulerTombstoneBeforeInFlightMutationCompletes
 	store.mu.Unlock()
 	markDone := make(chan struct{})
 	go func() {
-		manager.MarkResult(context.Background(), Result{
-			AuthID:         authID,
-			AuthGeneration: registered.Generation,
-			Success:        true,
-		})
+		manager.MarkResult(
+			context.Background(), Result{
+				AuthID:         authID,
+				AuthGeneration: registered.Generation,
+				Success:        true,
+			},
+		)
 		close(markDone)
 	}()
 	select {

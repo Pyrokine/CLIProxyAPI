@@ -31,6 +31,7 @@ type postgresTestState struct {
 	payload             string
 	localPath           string
 	localMissingAtQuery bool
+	readinessQuery      func(context.Context, string) (driver.Rows, error)
 }
 
 type postgresTestDriver struct {
@@ -106,13 +107,16 @@ func (c *postgresTestConn) ExecContext(
 }
 
 func (c *postgresTestConn) QueryContext(
-	_ context.Context,
+	ctx context.Context,
 	query string,
 	_ []driver.NamedValue,
 ) (driver.Rows, error) {
 	c.state.mu.Lock()
 	defer c.state.mu.Unlock()
 	c.state.queryCalls++
+	if c.state.readinessQuery != nil {
+		return c.state.readinessQuery(ctx, query)
+	}
 	if c.state.localPath != "" {
 		_, errStat := os.Stat(c.state.localPath)
 		c.state.localMissingAtQuery = errors.Is(errStat, os.ErrNotExist)

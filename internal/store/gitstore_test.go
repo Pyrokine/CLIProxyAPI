@@ -3,6 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,10 +14,17 @@ import (
 	"time"
 
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/go-git/go-git/v6"
-	gitconfig "github.com/go-git/go-git/v6/config"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-billy/v5"
+	"github.com/go-git/go-billy/v5/osfs"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/storage"
+	"github.com/go-git/go-git/v5/storage/filesystem"
+	"github.com/go-git/go-git/v5/storage/memory"
 )
 
 type callbackTokenStorage struct {
@@ -27,11 +37,232 @@ func (s *callbackTokenStorage) SaveTokenToFile(path string) error {
 
 func cleanupTestGitRepository(t *testing.T, repo *git.Repository) {
 	t.Helper()
-	t.Cleanup(func() {
-		if errClose := repo.Close(); errClose != nil {
-			t.Errorf("close Git repository: %v", errClose)
+	t.Cleanup(
+		func() {
+			if errClose := closeGitRepository(repo, "close Git test repository"); errClose != nil {
+				t.Errorf("close Git repository: %v", errClose)
+			}
+		},
+	)
+}
+
+type closingGitTestStorer struct {
+	storage.Storer
+	err   error
+	calls int
+}
+
+func (s *closingGitTestStorer) Close() error {
+	s.calls++
+	return s.err
+}
+
+func TestCloseGitRepositoryClosesUnderlyingStorerAndPreservesError(t *testing.T) {
+	closeErr := errors.New("synthetic storer close failure")
+	for _, failure := range []error{nil, closeErr} {
+		storer := &closingGitTestStorer{Storer: memory.NewStorage(), err: failure}
+		err := closeGitRepository(&git.Repository{Storer: storer}, "close synthetic repository")
+		if storer.calls != 1 || !errors.Is(err, failure) {
+			t.Fatalf("close calls=%d error=%v, want one close and %v", storer.calls, err, failure)
 		}
-	})
+		if failure != nil && !strings.Contains(err.Error(), "close synthetic repository") {
+			t.Fatalf("close error lost operation: %v", err)
+		}
+	}
+	if err := closeGitRepository(nil, "close absent repository"); err != nil {
+		t.Fatal(err)
+	}
+	if err := closeGitRepository(&git.Repository{Storer: memory.NewStorage()}, "close memory repository"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type trackingGitPackFilesystem struct {
+	billy.Filesystem
+	packs []billy.File
+}
+
+func (f *trackingGitPackFilesystem) Open(name string) (billy.File, error) {
+	file, err := f.Filesystem.Open(name)
+	if err == nil && strings.HasSuffix(name, ".pack") {
+		f.packs = append(f.packs, file)
+	}
+	return file, err
+}
+
+func TestCloseGitRepositoryReleasesPackedFilesystemHandles(t *testing.T) {
+	remoteDir := filepath.Join(t.TempDir(), "remote.git")
+	remote, err := git.PlainInit(remoteDir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestGitRepository(t, remote)
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	store := newRecoveryTestStore(t, remoteDir, repoDir)
+	saveRecoveryTestAuth(t, store, "synthetic.json", "synthetic-token")
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestGitRepository(t, repo)
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RepackObjects(&git.RepackConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	gitDir := filepath.Join(repoDir, ".git")
+	hash := head.Hash().String()
+	if err := os.Remove(filepath.Join(gitDir, "objects", hash[:2], hash[2:])); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := closeGitRepository(repo, "close packed test repository"); err != nil {
+		t.Fatal(err)
+	}
+	tracked := &trackingGitPackFilesystem{Filesystem: osfs.New(gitDir)}
+	storer := filesystem.NewStorageWithOptions(
+		tracked, cache.NewObjectLRUDefault(), filesystem.Options{KeepDescriptors: true},
+	)
+	reopened, err := git.Open(storer, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestGitRepository(t, reopened)
+	if _, err := reopened.CommitObject(head.Hash()); err != nil {
+		t.Fatal(err)
+	}
+	if len(tracked.packs) == 0 {
+		t.Fatal("reading packed commit did not open a packfile")
+	}
+	for _, file := range tracked.packs {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			t.Fatalf("packfile was closed before repository close: %v", err)
+		}
+	}
+	if err := closeGitRepository(reopened, "close retained packfile handles"); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range tracked.packs {
+		if _, err := file.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("packfile read after repository close=%v, want os.ErrClosed", err)
+		}
+	}
+	if err := os.Rename(gitDir, filepath.Join(repoDir, ".git.closed")); err != nil {
+		t.Fatalf("replace Git directory after repository close: %v", err)
+	}
+}
+
+func TestGitTokenStoreGitAuth(t *testing.T) {
+	for _, test := range []struct {
+		name, remote, username, password, expectedUser string
+	}{
+		{name: "anonymous", remote: "https://example.invalid/repo.git"},
+		{
+			name: "username only", remote: "http://example.invalid/repo.git",
+			username: "synthetic-user", expectedUser: "synthetic-user",
+		},
+		{
+			name: "password only", remote: "https://example.invalid/repo.git",
+			password: "synthetic-password", expectedUser: "git",
+		},
+		{
+			name: "username and password", remote: "https://example.invalid/repo.git",
+			username: "synthetic-user", password: "synthetic-password", expectedUser: "synthetic-user",
+		},
+		{
+			name: "uppercase HTTP scheme", remote: "HTTPS://example.invalid/repo.git",
+			password: "synthetic-password", expectedUser: "git",
+		},
+		{name: "SSH URL", remote: "ssh://git@example.invalid/repo.git", password: "synthetic-password"},
+		{name: "SCP style", remote: "git@example.invalid:repo.git", password: "synthetic-password"},
+		{name: "Git TCP", remote: "git://example.invalid/repo.git", password: "synthetic-password"},
+		{name: "local path", remote: "repo.git", password: "synthetic-password"},
+		{name: "file URL", remote: "file:///repo.git", password: "synthetic-password"},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				store := NewGitTokenStore(test.remote, test.username, test.password, "")
+				auth := store.gitAuth()
+				if test.expectedUser == "" {
+					if auth != nil {
+						t.Fatalf("auth=%v, want nil", auth)
+					}
+					return
+				}
+				basic, ok := auth.(*githttp.BasicAuth)
+				if !ok || basic.Username != test.expectedUser || basic.Password != test.password {
+					t.Fatalf("auth does not preserve configured basic credentials")
+				}
+			},
+		)
+	}
+}
+
+func TestGitTokenStoreHTTPAuthReachesTransportAndPreservesError(t *testing.T) {
+	for _, operation := range []string{"clone", "list", "push", "recovery clone"} {
+		t.Run(
+			operation, func(t *testing.T) {
+				var requests atomic.Int32
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, r *http.Request) {
+							requests.Add(1)
+							username, password, ok := r.BasicAuth()
+							if !ok || username != "git" || password != "synthetic-password" {
+								t.Error("Git transport did not send configured basic credentials")
+							}
+							w.WriteHeader(http.StatusForbidden)
+						},
+					),
+				)
+				defer server.Close()
+				remoteDir := filepath.Join(t.TempDir(), "remote.git")
+				remote, err := git.PlainInit(remoteDir, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cleanupTestGitRepository(t, remote)
+				repoDir := filepath.Join(t.TempDir(), "repo")
+				store := newRecoveryTestStore(t, remoteDir, repoDir)
+				if operation != "clone" {
+					saveRecoveryTestAuth(t, store, "synthetic.json", "synthetic-token")
+				}
+				store.remote = server.URL
+				store.password = "synthetic-password"
+				switch operation {
+				case "clone":
+					err = store.EnsureRepository()
+				case "recovery clone":
+					err = store.recoverRepositoryLocked(t.Context(), repoDir, store.gitAuth(), nil, nil, nil, nil)
+				default:
+					repo, errOpen := git.PlainOpen(repoDir)
+					if errOpen != nil {
+						t.Fatal(errOpen)
+					}
+					cleanupTestGitRepository(t, repo)
+					cfg, errConfig := repo.Config()
+					if errConfig != nil {
+						t.Fatal(errConfig)
+					}
+					cfg.Remotes["origin"].URLs = []string{server.URL}
+					if errConfig := repo.SetConfig(cfg); errConfig != nil {
+						t.Fatal(errConfig)
+					}
+					if operation == "list" {
+						err = store.EnsureRepository()
+					} else {
+						err = store.pushRepositoryHead(t.Context(), repo)
+					}
+				}
+				if requests.Load() == 0 || !errors.Is(err, transport.ErrAuthorizationFailed) {
+					t.Fatalf(
+						"Git %s requests=%d error=%v, want HTTP authorization failure", operation, requests.Load(), err,
+					)
+				}
+			},
+		)
+	}
 }
 
 func TestDisableGitCommitSigning(t *testing.T) {
@@ -44,11 +275,14 @@ func TestDisableGitCommitSigning(t *testing.T) {
 	if errConfig != nil {
 		t.Fatalf("repo.Config() error = %v", errConfig)
 	}
-	cfg.Commit.GpgSign = gitconfig.OptBoolTrue
+	cfg.Raw.Section("commit").SetOption("gpgsign", "true")
+	cfg.Raw.Section("commit").SetOption("template", "synthetic-template")
 	if errSetConfig := repo.SetConfig(cfg); errSetConfig != nil {
 		t.Fatalf("repo.SetConfig() error = %v", errSetConfig)
 	}
-	closeGitRepository(repo, "close signing test repository")
+	if err := closeGitRepository(repo, "close signing test repository"); err != nil {
+		t.Fatal(err)
+	}
 
 	if errDisable := disableGitCommitSigning(repoDir); errDisable != nil {
 		t.Fatalf("disableGitCommitSigning() error = %v", errDisable)
@@ -57,13 +291,20 @@ func TestDisableGitCommitSigning(t *testing.T) {
 	if errOpen != nil {
 		t.Fatalf("git.PlainOpen() error = %v", errOpen)
 	}
-	defer closeGitRepository(reopened, "close reopened signing test repository")
+	defer func(repository *git.Repository) {
+		if err := closeGitRepository(repository, "close reopened signing test repository"); err != nil {
+			t.Error(err)
+		}
+	}(reopened)
 	gotConfig, errGetConfig := reopened.Config()
 	if errGetConfig != nil {
 		t.Fatalf("reopened.Config() error = %v", errGetConfig)
 	}
-	if gotConfig.Commit.GpgSign != gitconfig.OptBoolFalse {
-		t.Fatalf("commit.gpgsign = %v, want false", gotConfig.Commit.GpgSign)
+	if got := gotConfig.Raw.Section("commit").Option("gpgsign"); got != "false" {
+		t.Fatalf("commit.gpgsign = %q, want false", got)
+	}
+	if got := gotConfig.Raw.Section("commit").Option("template"); got != "synthetic-template" {
+		t.Fatalf("commit.template = %q, want preserved value", got)
 	}
 }
 
@@ -82,6 +323,7 @@ func TestNormalizeGitStoreBranch(t *testing.T) {
 }
 
 func TestNormalizeGitPathUsesForwardSlashes(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	if got := normalizeGitPath(`auths\nested\token.json`); got != "auths/nested/token.json" {
 		t.Fatalf("normalizeGitPath() = %q, want forward slashes", got)
 	}
@@ -239,7 +481,7 @@ func TestGitTokenStoreSaveRollsBackFileWhenContextCancelsAfterWrite(t *testing.T
 	if errHead != nil {
 		t.Fatalf("read initial head: %v", errHead)
 	}
-	_ = repo.Close()
+	_ = closeGitRepository(repo, "close Git test repository")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	updated := initial.Clone()
@@ -343,7 +585,7 @@ func TestGitTokenStoreSaveRollsBackLocalStateWhenPushIsUncertain(t *testing.T) {
 	if errHead != nil {
 		t.Fatalf("read initial head: %v", errHead)
 	}
-	_ = repo.Close()
+	_ = closeGitRepository(repo, "close Git test repository")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	store.beforePush = cancel
@@ -391,10 +633,12 @@ func TestGitTokenStoreRequiresCreationIntentForMissingDisabledCredential(t *test
 		ID:       "disabled.json",
 		FileName: "disabled.json",
 		Disabled: true,
-		Storage: &callbackTokenStorage{save: func(string) error {
-			storageReached = true
-			return errReachedStorage
-		}},
+		Storage: &callbackTokenStorage{
+			save: func(string) error {
+				storageReached = true
+				return errReachedStorage
+			},
+		},
 		Metadata: map[string]any{"type": "codex"},
 	}
 
@@ -471,7 +715,7 @@ func TestGitTokenStoreDeleteCommitsTrackedFileAlreadyMissingLocally(t *testing.T
 		t.Fatalf("Delete() error = %v", errDelete)
 	}
 	cloneDir := t.TempDir()
-	remoteRepo, errClone := git.PlainClone(cloneDir, &git.CloneOptions{URL: remoteDir})
+	remoteRepo, errClone := git.PlainClone(cloneDir, false, &git.CloneOptions{URL: remoteDir})
 	if errClone != nil {
 		t.Fatalf("clone remote repository: %v", errClone)
 	}
@@ -515,7 +759,7 @@ func TestGitTokenStoreRecoversInterruptedVersionedDeletionOnRepositoryOpen(t *te
 		t.Fatalf("EnsureRepositoryContext() error = %v", errEnsure)
 	}
 	cloneDir := t.TempDir()
-	remoteRepo, errClone := git.PlainClone(cloneDir, &git.CloneOptions{URL: remoteDir})
+	remoteRepo, errClone := git.PlainClone(cloneDir, false, &git.CloneOptions{URL: remoteDir})
 	if errClone != nil {
 		t.Fatalf("clone remote repository: %v", errClone)
 	}
@@ -577,7 +821,7 @@ func TestGitTokenStoreRecoveryRejectsNewerRemoteCredential(t *testing.T) {
 		t.Fatalf("EnsureRepositoryContext() error = %v, want remote divergence", errEnsure)
 	}
 	cloneDir := t.TempDir()
-	remoteRepo, errClone := git.PlainClone(cloneDir, &git.CloneOptions{URL: remoteDir})
+	remoteRepo, errClone := git.PlainClone(cloneDir, false, &git.CloneOptions{URL: remoteDir})
 	if errClone != nil {
 		t.Fatalf("clone remote repository: %v", errClone)
 	}
@@ -638,7 +882,7 @@ func TestGitTokenStoreRejectsRemoteDivergenceBeforeLocalMutation(t *testing.T) {
 		t.Fatalf("store A credential changed after divergence: %s, want %s", after, before)
 	}
 	cloneDir := t.TempDir()
-	remoteRepo, errClone := git.PlainClone(cloneDir, &git.CloneOptions{URL: remoteDir})
+	remoteRepo, errClone := git.PlainClone(cloneDir, false, &git.CloneOptions{URL: remoteDir})
 	if errClone != nil {
 		t.Fatalf("clone remote after divergence: %v", errClone)
 	}
@@ -677,11 +921,11 @@ func TestGitTokenStoreLeaseConflictRestoresLocalMutation(t *testing.T) {
 	if errHead != nil {
 		t.Fatalf("read initial head: %v", errHead)
 	}
-	_ = localRepo.Close()
+	_ = closeGitRepository(localRepo, "close local Git test repository")
 
 	store.beforePush = func() {
 		concurrentDir := t.TempDir()
-		concurrentRepo, errClone := git.PlainClone(concurrentDir, &git.CloneOptions{URL: remoteDir})
+		concurrentRepo, errClone := git.PlainClone(concurrentDir, false, &git.CloneOptions{URL: remoteDir})
 		if errClone != nil {
 			t.Fatalf("clone concurrent repository: %v", errClone)
 		}

@@ -10,8 +10,8 @@ import (
 	"time"
 
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func TestInstallRecoveredGitDirectoryRetainsBackupWhenRestoreFails(t *testing.T) {
@@ -106,11 +106,15 @@ func TestGitTokenStoreCorruptionRecoveryUsesLatestRemoteAndPreservesLocalChanges
 
 	saveRecoveryTestAuth(t, store, "after-recovery.json", "local")
 	cloneDir := filepath.Join(root, "verification")
-	clone, errClone := git.PlainClone(cloneDir, &git.CloneOptions{URL: remoteDir})
+	clone, errClone := git.PlainClone(cloneDir, false, &git.CloneOptions{URL: remoteDir})
 	if errClone != nil {
 		t.Fatalf("clone remote after recovery: %v", errClone)
 	}
-	defer closeGitRepository(clone, "close recovery verification clone")
+	defer func(repository *git.Repository) {
+		if err := closeGitRepository(repository, "close recovery verification clone"); err != nil {
+			t.Error(err)
+		}
+	}(clone)
 	assertRecoveryTestAuthToken(t, filepath.Join(cloneDir, "auths", "after-recovery.json"), "local")
 }
 
@@ -236,7 +240,7 @@ func TestGitTokenStoreRecoveryHonorsCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if errRecover := store.recoverRepositoryLocked(
-		ctx, workspaceDir, store.gitClientOptions(), nil, nil, nil, (*git.Repository).Close,
+		ctx, workspaceDir, store.gitAuth(), nil, nil, nil, nil,
 	); !errors.Is(errRecover, context.Canceled) {
 		t.Fatalf("cancelled recovery error = %v, want context.Canceled", errRecover)
 	}
@@ -268,14 +272,14 @@ func TestGitTokenStoreRecoveryAbortsBeforeMutationWhenCallerCloseFails(t *testin
 	}
 	closeErr := errors.New("caller close failed")
 	closeRepository := func(repo *git.Repository) error {
-		if errClose := repo.Close(); errClose != nil {
+		if errClose := closeGitRepository(repo, "close Git recovery test repository"); errClose != nil {
 			t.Errorf("close caller repository: %v", errClose)
 		}
 		return closeErr
 	}
 
 	errRecover := store.recoverRepositoryLocked(
-		context.Background(), workspaceDir, store.gitClientOptions(), callerRepo, nil, nil, closeRepository,
+		context.Background(), workspaceDir, store.gitAuth(), callerRepo, nil, nil, closeRepository,
 	)
 	if !errors.Is(errRecover, closeErr) {
 		t.Fatalf("recovery error = %v, want caller close error", errRecover)
@@ -320,7 +324,7 @@ func TestGitTokenStoreRecoveryAbortsBeforeMutationWhenRecoveryHandlesCloseFail(t
 	closeCalls := 0
 	closeRepository := func(repo *git.Repository) error {
 		closeCalls++
-		if errClose := repo.Close(); errClose != nil {
+		if errClose := closeGitRepository(repo, "close Git recovery test repository"); errClose != nil {
 			t.Errorf("close recovery repository: %v", errClose)
 		}
 		switch closeCalls {
@@ -334,7 +338,7 @@ func TestGitTokenStoreRecoveryAbortsBeforeMutationWhenRecoveryHandlesCloseFail(t
 	}
 
 	errRecover := store.recoverRepositoryLocked(
-		context.Background(), workspaceDir, store.gitClientOptions(), callerRepo,
+		context.Background(), workspaceDir, store.gitAuth(), callerRepo,
 		baselineEntries, map[string]struct{}{}, closeRepository,
 	)
 	if !errors.Is(errRecover, baselineCloseErr) || !errors.Is(errRecover, cloneCloseErr) {
@@ -382,7 +386,7 @@ func TestGitTokenStoreRecoveryRollsBackWhenRecoveredRepoCloseFails(t *testing.T)
 	closeCalls := 0
 	closeRepository := func(repo *git.Repository) error {
 		closeCalls++
-		if errClose := repo.Close(); errClose != nil {
+		if errClose := closeGitRepository(repo, "close Git recovery test repository"); errClose != nil {
 			t.Errorf("close recovery repository: %v", errClose)
 		}
 		if closeCalls == 3 {
@@ -392,7 +396,7 @@ func TestGitTokenStoreRecoveryRollsBackWhenRecoveredRepoCloseFails(t *testing.T)
 	}
 
 	errRecover := store.recoverRepositoryLocked(
-		context.Background(), workspaceDir, store.gitClientOptions(), callerRepo,
+		context.Background(), workspaceDir, store.gitAuth(), callerRepo,
 		baselineEntries, map[string]struct{}{}, closeRepository,
 	)
 	if !errors.Is(errRecover, recoveredCloseErr) {
@@ -440,7 +444,11 @@ func removeRecoveryTestHeadFileObject(t *testing.T, repoDir, path string) {
 	if errOpen != nil {
 		t.Fatalf("open repository before object removal: %v", errOpen)
 	}
-	defer closeGitRepository(repo, "close object removal repository")
+	defer func(repository *git.Repository) {
+		if err := closeGitRepository(repository, "close object removal repository"); err != nil {
+			t.Error(err)
+		}
+	}(repo)
 	worktree, errWorktree := repo.Worktree()
 	if errWorktree != nil {
 		t.Fatalf("open worktree before object removal: %v", errWorktree)
@@ -484,7 +492,11 @@ func corruptRecoveryTestRepository(t *testing.T, repoDir string) {
 	if errOpen != nil {
 		t.Fatalf("open repository before corruption: %v", errOpen)
 	}
-	defer closeGitRepository(repo, "close full corruption repository")
+	defer func(repository *git.Repository) {
+		if err := closeGitRepository(repository, "close full corruption repository"); err != nil {
+			t.Error(err)
+		}
+	}(repo)
 	if errRepack := repo.RepackObjects(&git.RepackConfig{}); errRepack != nil {
 		t.Fatalf("repack repository objects: %v", errRepack)
 	}
