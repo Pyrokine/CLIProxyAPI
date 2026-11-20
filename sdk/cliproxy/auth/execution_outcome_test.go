@@ -100,6 +100,52 @@ func TestExecutionDispositionForAttemptClassifiesReplayAndScope(t *testing.T) {
 	}
 }
 
+func TestRequestScopedErrorPreservesExplicitProcessingOutcome(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusRequestTimeout, http.StatusBadGateway} {
+		for _, outcome := range []cliproxyexecutor.ExecutionOutcome{
+			cliproxyexecutor.ExecutionOutcomeUnknown,
+			cliproxyexecutor.ExecutionOutcomeFailed,
+			cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing,
+		} {
+			t.Run(
+				http.StatusText(status)+"/"+string(outcome), func(t *testing.T) {
+					cause := NewRequestScopedError(
+						"upstream processing state",
+						status,
+					).WithExecutionDisposition(
+						cliproxyexecutor.ExecutionDisposition{
+							DispatchPhase:  cliproxyexecutor.DispatchPhaseResponseStarted,
+							Outcome:        outcome,
+							RetryDirective: cliproxyexecutor.RetryDirectiveNoRetry,
+							EffectScope:    cliproxyexecutor.StateEffectScopeRequest,
+						}, 1,
+					)
+					for _, failure := range []error{cause, newStreamBootstrapError(cause, http.Header{})} {
+						disposition := executionDispositionForError(
+							failure,
+							cliproxyexecutor.DispatchPhaseMaybeSent,
+						)
+						if disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseResponseStarted ||
+							disposition.Outcome !=
+								outcome ||
+							disposition.RetryDirective !=
+								cliproxyexecutor.RetryDirectiveNoRetry ||
+							disposition.EffectScope !=
+								cliproxyexecutor.StateEffectScopeRequest ||
+							statusCodeFromError(failure) !=
+								status {
+							t.Fatalf(
+								"request-scoped error changed the upstream result: disposition=%+v error=%v",
+								disposition, failure,
+							)
+						}
+					}
+				},
+			)
+		}
+	}
+}
+
 func TestManagerMarkResultRejectsStaleCredentialGeneration(t *testing.T) {
 	manager, before := newExecutionOutcomeTestManager(
 		t, &Auth{
@@ -152,10 +198,12 @@ func TestManagerMarkResultRejectsStaleCredentialGeneration(t *testing.T) {
 }
 
 func TestManagerMarkResultKeepsInFlightQuotaAfterLabelUpdate(t *testing.T) {
-	manager, selected := newExecutionOutcomeTestManager(t, &Auth{
-		ID: "in-flight-label", Provider: "provider-a", Status: StatusActive,
-		Metadata: map[string]any{"access_token": "test-token"},
-	})
+	manager, selected := newExecutionOutcomeTestManager(
+		t, &Auth{
+			ID: "in-flight-label", Provider: "provider-a", Status: StatusActive,
+			Metadata: map[string]any{"access_token": "test-token"},
+		},
+	)
 	retryAfter := time.Hour
 	failure := executionResult(
 		selected, selected.Provider, "model-a",
@@ -170,11 +218,15 @@ func TestManagerMarkResultKeepsInFlightQuotaAfterLabelUpdate(t *testing.T) {
 		updated.credentialGeneration != selected.credentialGeneration {
 		t.Fatalf("Update(label) = (%#v, %v)", updated, err)
 	}
-	manager.SetResultPolicy(ResultPolicyFunc(func(_ context.Context, result Result) Result {
-		result.AuthGeneration = 0
-		result.generationSnapshot = resultGenerationSnapshot{}
-		return result
-	}))
+	manager.SetResultPolicy(
+		ResultPolicyFunc(
+			func(_ context.Context, result Result) Result {
+				result.AuthGeneration = 0
+				result.generationSnapshot = resultGenerationSnapshot{}
+				return result
+			},
+		),
+	)
 	manager.MarkResult(context.Background(), failure)
 
 	current := getExecutionOutcomeTestAuth(t, manager, selected.ID)
@@ -186,10 +238,12 @@ func TestManagerMarkResultKeepsInFlightQuotaAfterLabelUpdate(t *testing.T) {
 }
 
 func TestManagerMarkResultCountsInFlightRequestFaultAfterLabelUpdate(t *testing.T) {
-	manager, selected := newExecutionOutcomeTestManager(t, &Auth{
-		ID: "in-flight-neutral-label", Provider: "provider-a", Status: StatusActive,
-		Metadata: map[string]any{"access_token": "test-token"},
-	})
+	manager, selected := newExecutionOutcomeTestManager(
+		t, &Auth{
+			ID: "in-flight-neutral-label", Provider: "provider-a", Status: StatusActive,
+			Metadata: map[string]any{"access_token": "test-token"},
+		},
+	)
 	result := executionResult(
 		selected, selected.Provider, "model-a", context.Canceled,
 		cliproxyexecutor.DispatchPhaseMaybeSent,
@@ -208,10 +262,12 @@ func TestManagerMarkResultCountsInFlightRequestFaultAfterLabelUpdate(t *testing.
 }
 
 func TestManagerMarkResultRejectsOldResultAfterSameTokenRecreation(t *testing.T) {
-	manager, selected := newExecutionOutcomeTestManager(t, &Auth{
-		ID: "same-token-recreation", Provider: "provider-a", Status: StatusActive,
-		Metadata: map[string]any{"access_token": "test-token"},
-	})
+	manager, selected := newExecutionOutcomeTestManager(
+		t, &Auth{
+			ID: "same-token-recreation", Provider: "provider-a", Status: StatusActive,
+			Metadata: map[string]any{"access_token": "test-token"},
+		},
+	)
 	failure := executionResult(
 		selected, selected.Provider, "model-a",
 		executionOutcomeStatusError{status: http.StatusTooManyRequests},
@@ -220,10 +276,12 @@ func TestManagerMarkResultRejectsOldResultAfterSameTokenRecreation(t *testing.T)
 	if err := manager.Remove(WithSkipPersist(context.Background()), selected.ID); err != nil {
 		t.Fatalf("Remove() error = %v", err)
 	}
-	recreated, err := manager.Register(WithAllowAuthRecreate(context.Background()), &Auth{
-		ID: selected.ID, Provider: selected.Provider, Status: StatusActive,
-		Metadata: map[string]any{"access_token": "test-token"},
-	})
+	recreated, err := manager.Register(
+		WithAllowAuthRecreate(context.Background()), &Auth{
+			ID: selected.ID, Provider: selected.Provider, Status: StatusActive,
+			Metadata: map[string]any{"access_token": "test-token"},
+		},
+	)
 	if err != nil || recreated == nil || recreated.credentialGeneration == selected.credentialGeneration {
 		t.Fatalf("Register(recreate) = (%#v, %v)", recreated, err)
 	}
@@ -284,7 +342,8 @@ func TestManagerMarkResultRejectsStaleExactModelGeneration(t *testing.T) {
 		),
 	)
 	cleared := getExecutionOutcomeTestAuth(t, manager, before.ID).ModelStates["model-a"]
-	if cleared == nil || cleared.Unavailable || cleared.LastError != nil || cleared.Generation != state.Generation+1 {
+	if cleared == nil || cleared.Unavailable || cleared.LastError != nil ||
+		cleared.Generation != state.Generation+1 {
 		t.Fatalf("fresh success did not clear model state: %+v", cleared)
 	}
 }
@@ -295,8 +354,16 @@ func TestManagerMarkResultKeepsQuotaFamilyAtomicAndDecaysBackoff(t *testing.T) {
 		t, &Auth{
 			ID: "quota-auth", Provider: "provider-a", Status: StatusActive,
 			ModelStates: map[string]*ModelState{
-				"model-a": {Status: StatusActive, Generation: 1, Quota: QuotaState{Family: family, Generation: 1}},
-				"model-b": {Status: StatusActive, Generation: 1, Quota: QuotaState{Family: family, Generation: 1}},
+				"model-a": {
+					Status:     StatusActive,
+					Generation: 1,
+					Quota:      QuotaState{Family: family, Generation: 1},
+				},
+				"model-b": {
+					Status:     StatusActive,
+					Generation: 1,
+					Quota:      QuotaState{Family: family, Generation: 1},
+				},
 			},
 		},
 	)

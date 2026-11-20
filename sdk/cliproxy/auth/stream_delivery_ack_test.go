@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
@@ -105,47 +106,105 @@ func TestWrapStreamResultForwardsExecutorTerminalOnce(t *testing.T) {
 		{name: "delivered", success: true},
 		{name: "downstream failure", ackErr: errors.New("downstream write failed")},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			hook := newStreamDeliveryResultHook()
-			manager := NewManager(nil, nil, hook)
-			originalAcknowledged := make(chan error, 1)
-			source := make(chan coreexecutor.StreamChunk, 2)
-			source <- coreexecutor.StreamChunk{Payload: []byte("payload")}
-			source <- coreexecutor.StreamChunk{Terminal: true, Acknowledge: func(err error) {
-				originalAcknowledged <- err
-			}}
-			close(source)
-
-			stream := manager.wrapStreamResult(
-				coreexecutor.WithStreamDeliveryAcknowledgement(context.Background()),
-				&Auth{ID: "runtime-stream", Provider: "codex"}, "codex", "gpt-5",
-				nil, nil, source, OAuthModelAliasResult{},
-			)
-			payload := <-stream.Chunks
-			if string(payload.Payload) != "payload" {
-				t.Fatalf("payload chunk = %#v", payload)
-			}
-			payload.Acknowledge(nil)
-			terminal := <-stream.Chunks
-			if !terminal.Terminal || terminal.Acknowledge == nil {
-				t.Fatalf("terminal chunk = %#v", terminal)
-			}
-			assertNoStreamDeliveryResult(t, hook)
-			terminal.Acknowledge(tc.ackErr)
-			if acknowledged := <-originalAcknowledged; !errors.Is(acknowledged, tc.ackErr) {
-				t.Fatalf("source terminal acknowledgement = %v, want %v", acknowledged, tc.ackErr)
-			}
-			for chunk := range stream.Chunks {
-				t.Fatalf("duplicate terminal chunk = %#v", chunk)
-			}
-			select {
-			case result := <-hook.result:
-				if result.Success != tc.success {
-					t.Fatalf("result = %#v, want success %t", result, tc.success)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				hook := newStreamDeliveryResultHook()
+				manager := NewManager(nil, nil, hook)
+				originalAcknowledged := make(chan error, 1)
+				source := make(chan coreexecutor.StreamChunk, 2)
+				source <- coreexecutor.StreamChunk{Payload: []byte("payload")}
+				source <- coreexecutor.StreamChunk{
+					Terminal: true, Acknowledge: func(err error) {
+						originalAcknowledged <- err
+					},
 				}
-			case <-time.After(time.Second):
-				t.Fatal("terminal delivery result was not recorded")
-			}
+				close(source)
+
+				stream := manager.wrapStreamResult(
+					coreexecutor.WithStreamDeliveryAcknowledgement(context.Background()),
+					&Auth{ID: "runtime-stream", Provider: "codex"}, "codex", "gpt-5",
+					nil, nil, source, OAuthModelAliasResult{},
+				)
+				payload := <-stream.Chunks
+				if string(payload.Payload) != "payload" {
+					t.Fatalf("payload chunk = %#v", payload)
+				}
+				payload.Acknowledge(nil)
+				terminal := <-stream.Chunks
+				if !terminal.Terminal || terminal.Acknowledge == nil {
+					t.Fatalf("terminal chunk = %#v", terminal)
+				}
+				assertNoStreamDeliveryResult(t, hook)
+				terminal.Acknowledge(tc.ackErr)
+				if acknowledged := <-originalAcknowledged; !errors.Is(acknowledged, tc.ackErr) {
+					t.Fatalf("source terminal acknowledgement = %v, want %v", acknowledged, tc.ackErr)
+				}
+				for chunk := range stream.Chunks {
+					t.Fatalf("duplicate terminal chunk = %#v", chunk)
+				}
+				select {
+				case result := <-hook.result:
+					if result.Success != tc.success {
+						t.Fatalf("result = %#v, want success %t", result, tc.success)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("terminal delivery result was not recorded")
+				}
+			},
+		)
+	}
+}
+
+func TestWrapStreamResultAcknowledgesDiscardedChunksAfterDeliveryFailure(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		buffered bool
+	}{
+		{name: "source"},
+		{name: "bootstrap", buffered: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				failure := errors.New("downstream write failed")
+				acknowledged := make(chan error, 2)
+				payload := coreexecutor.StreamChunk{Payload: []byte("payload")}
+				source := make(chan coreexecutor.StreamChunk, 3)
+				var initial []coreexecutor.StreamChunk
+				if test.buffered {
+					initial = []coreexecutor.StreamChunk{payload}
+				} else {
+					source <- payload
+				}
+				for _, chunk := range []coreexecutor.StreamChunk{
+					{Payload: []byte("discarded")}, {Terminal: true},
+				} {
+					chunk.Acknowledge = func(err error) { acknowledged <- err }
+					source <- chunk
+				}
+				close(source)
+				manager := NewManager(nil, nil, nil)
+				stream := manager.wrapStreamResult(
+					coreexecutor.WithStreamDeliveryAcknowledgement(t.Context()),
+					&Auth{ID: t.Name(), Provider: "codex"}, "codex", "gpt-5",
+					nil, initial, source, OAuthModelAliasResult{},
+				)
+				first := <-stream.Chunks
+				first.Acknowledge(failure)
+				for chunk := range stream.Chunks {
+					t.Fatalf("chunk forwarded after delivery failure: %#v", chunk)
+				}
+				synctest.Wait()
+				for range 2 {
+					select {
+					case err := <-acknowledged:
+						if !errors.Is(err, failure) {
+							t.Fatalf("discard acknowledgement = %v, want %v", err, failure)
+						}
+					default:
+						t.Fatal("discarded chunk was not acknowledged")
+					}
+				}
+			})
 		})
 	}
 }
@@ -193,6 +252,66 @@ func TestWrapStreamResultTreatsDeliveryFailureAsRequestScoped(t *testing.T) {
 	}
 	if len(current.ModelStates) != 0 {
 		t.Fatalf("downstream failure changed model state: %#v", current.ModelStates)
+	}
+}
+
+func TestWrapStreamResultDeliversTerminalErrorAfterAttemptCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		acknowledged bool
+	}{
+		{name: "legacy"},
+		{name: "acknowledged", acknowledged: true},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				clientCtx, cancelClient := context.WithTimeout(t.Context(), time.Second)
+				defer cancelClient()
+				if test.acknowledged {
+					clientCtx = coreexecutor.WithStreamDeliveryAcknowledgement(clientCtx)
+				}
+				attemptCtx, cancelAttempt := context.WithCancel(clientCtx)
+				upstreamErr := &Error{HTTPStatus: http.StatusBadGateway, Message: "terminal upstream failure"}
+				source := make(chan coreexecutor.StreamChunk, 1)
+				source <- coreexecutor.StreamChunk{Err: upstreamErr}
+				close(source)
+				cancelAttempt()
+				hook := newStreamDeliveryResultHook()
+				manager := NewManager(nil, nil, hook)
+				stream := manager.wrapStreamResultWithOptions(
+					attemptCtx, clientCtx, &Auth{ID: t.Name(), Provider: "codex"}, "codex", "gpt-5",
+					coreexecutor.Options{}, nil, nil, source, OAuthModelAliasResult{},
+				)
+				select {
+				case chunk, open := <-stream.Chunks:
+					if !open || !errors.Is(chunk.Err, upstreamErr) || (chunk.Acknowledge != nil) != test.acknowledged {
+						t.Fatalf(
+							"terminal chunk=%#v open=%t, want original error and matching acknowledgement", chunk, open,
+						)
+					}
+					if chunk.Acknowledge != nil {
+						assertNoStreamDeliveryResult(t, hook)
+						chunk.Acknowledge(nil)
+					}
+				case <-clientCtx.Done():
+					t.Fatal("ended upstream attempt prevented terminal error delivery")
+				}
+				for chunk := range stream.Chunks {
+					t.Fatalf("duplicate terminal chunk = %#v", chunk)
+				}
+				if clientCtx.Err() != nil {
+					t.Fatalf("upstream attempt canceled its downstream caller: %v", clientCtx.Err())
+				}
+				select {
+				case result := <-hook.result:
+					if result.Success || result.Error == nil || result.Error.HTTPStatus != http.StatusBadGateway {
+						t.Fatalf("upstream failure result = %#v, want original bad gateway", result)
+					}
+				case <-clientCtx.Done():
+					t.Fatal("delivered upstream failure was not recorded")
+				}
+			},
+		)
 	}
 }
 
@@ -280,57 +399,125 @@ func TestWrapStreamResultAcknowledgesCancellationWhileWaitingForDelivery(t *test
 }
 
 func TestWrapStreamResultCancellationWhileWaitingForSourceReleasesQuotaLease(t *testing.T) {
-	hook := newStreamDeliveryResultHook()
-	manager := NewManager(nil, &QuotaAwareSelector{}, hook)
-	auth, errRegister := manager.Register(
-		context.Background(),
-		&Auth{ID: "stalled-stream", Index: "stalled-index", Provider: "codex", Status: StatusActive},
-	)
-	if errRegister != nil {
-		t.Fatalf("register auth: %v", errRegister)
-	}
-	manager.scheduler.mu.Lock()
-	lease := manager.scheduler.acquireQuotaInFlightLocked(auth, auth.Provider, time.Now())
-	manager.scheduler.mu.Unlock()
-	if lease == nil {
-		t.Fatal("quota in-flight lease was not created")
-	}
-	ctx, cancel := context.WithCancel(
-		coreexecutor.WithStreamDeliveryAcknowledgement(context.Background()),
-	)
-	ctx, transfer := withQuotaInFlightTransfer(ctx, lease)
-	if transfer == nil {
-		t.Fatal("quota in-flight lease transfer was not created")
-	}
-	source := make(chan coreexecutor.StreamChunk)
-	stream := manager.wrapStreamResult(
-		ctx, auth.Clone(), auth.Provider, "gpt-5", nil, nil, source, OAuthModelAliasResult{},
-	)
-	waitForQuotaInFlightCounts(t, manager, 1)
+	for _, sample := range []struct {
+		name         string
+		acknowledged bool
+		sourceError  error
+	}{
+		{name: "legacy"},
+		{name: "acknowledged", acknowledged: true},
+		{name: "legacy-source-error", sourceError: context.Canceled},
+	} {
+		t.Run(
+			sample.name, func(t *testing.T) {
+				hook := newStreamDeliveryResultHook()
+				manager := NewManager(nil, &QuotaAwareSelector{}, hook)
+				auth, errRegister := manager.Register(
+					context.Background(),
+					&Auth{ID: "stalled-stream", Index: "stalled-index", Provider: "codex", Status: StatusActive},
+				)
+				if errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+				manager.scheduler.mu.Lock()
+				lease := manager.scheduler.acquireQuotaInFlightLocked(auth, auth.Provider, time.Now())
+				manager.scheduler.mu.Unlock()
+				if lease == nil {
+					t.Fatal("quota in-flight lease was not created")
+				}
+				ctx := context.Background()
+				if sample.acknowledged {
+					ctx = coreexecutor.WithStreamDeliveryAcknowledgement(ctx)
+				}
+				ctx, cancel := context.WithCancel(ctx)
+				defer cancel()
+				ctx, transfer := withQuotaInFlightTransfer(ctx, lease)
+				if transfer == nil {
+					t.Fatal("quota in-flight lease transfer was not created")
+				}
+				source := make(chan coreexecutor.StreamChunk, 1)
+				stream := manager.wrapStreamResult(
+					ctx, auth.Clone(), auth.Provider, "gpt-5", nil, nil, source, OAuthModelAliasResult{},
+				)
+				t.Cleanup(
+					func() {
+						close(source)
+						for range stream.Chunks {
+						}
+					},
+				)
+				waitForQuotaInFlightCounts(t, manager, 1)
 
-	cancel()
-	select {
-	case _, ok := <-stream.Chunks:
-		if ok {
-			t.Fatal("wrapper emitted a chunk after cancellation")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("wrapper output did not close after source wait cancellation")
-	}
-	waitForQuotaInFlightCounts(t, manager, 0)
+				cancel()
+				waitForQuotaInFlightCounts(t, manager, 0)
+				if sample.sourceError != nil {
+					source <- coreexecutor.StreamChunk{Err: sample.sourceError}
+				}
+				select {
+				case _, ok := <-stream.Chunks:
+					if ok {
+						t.Fatal("wrapper emitted a chunk after cancellation")
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("wrapper output did not close within the source cleanup bound")
+				}
 
-	select {
-	case result := <-hook.result:
-		if result.Success || result.Error == nil || !result.Error.IsRequestScoped() {
-			t.Fatalf("cancellation result = %#v, want request-scoped failure", result)
+				if sample.acknowledged || sample.sourceError != nil {
+					select {
+					case result := <-hook.result:
+						if result.Success || result.Error == nil ||
+							result.Disposition.EffectScope != coreexecutor.StateEffectScopeRequest ||
+							sample.acknowledged && !result.Error.IsRequestScoped() {
+							t.Fatalf("cancellation result = %#v, want request-scoped failure", result)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("source wait cancellation was not recorded")
+					}
+				} else {
+					select {
+					case result := <-hook.result:
+						t.Fatalf("legacy cancellation recorded an execution result: %#v", result)
+					default:
+					}
+				}
+				current, ok := manager.GetByID(auth.ID)
+				if !ok || current.Status != StatusActive || current.Unavailable || len(current.ModelStates) != 0 {
+					t.Fatalf("auth changed availability after source wait cancellation: %#v", current)
+				}
+			},
+		)
+	}
+}
+
+func TestHomeOwnedStreamAcknowledgesChunkCanceledBeforeForwarding(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(nil)
+		failure := errors.New("downstream disconnected")
+		acknowledged := make(chan error, 1)
+		source := make(chan coreexecutor.StreamChunk)
+		stream := wrapHomeOwnedStream(
+			ctx, &coreexecutor.StreamResult{Chunks: source}, nil, nil, false,
+		)
+		source <- coreexecutor.StreamChunk{
+			Terminal:    true,
+			Acknowledge: func(err error) { acknowledged <- err },
 		}
-	case <-time.After(time.Second):
-		t.Fatal("source wait cancellation was not recorded")
-	}
-	current, ok := manager.GetByID(auth.ID)
-	if !ok || current.Status != StatusActive || current.Unavailable || len(current.ModelStates) != 0 {
-		t.Fatalf("auth changed availability after source wait cancellation: %#v", current)
-	}
+		close(source)
+		cancel(failure)
+		synctest.Wait()
+		select {
+		case err := <-acknowledged:
+			if !errors.Is(err, failure) {
+				t.Fatalf("undelivered chunk acknowledgement = %v, want %v", err, failure)
+			}
+		default:
+			t.Fatal("chunk held during cancellation was not acknowledged")
+		}
+		for chunk := range stream.Chunks {
+			t.Fatalf("chunk forwarded after cancellation: %#v", chunk)
+		}
+	})
 }
 
 func TestHomeStreamScopeEndsAfterSourceWaitCancellationOnce(t *testing.T) {
@@ -427,12 +614,22 @@ func TestHomeStreamScopeEndsAfterDeliveryFailureOnce(t *testing.T) {
 		t.Fatalf("new selection: %v", errSelection)
 	}
 	manager := NewManager(nil, nil, nil)
-	ctx := coreexecutor.WithStreamDeliveryAcknowledgement(context.Background())
-	source := make(chan coreexecutor.StreamChunk, 1)
-	source <- coreexecutor.StreamChunk{Payload: []byte("payload")}
-	close(source)
+	ctx := coreexecutor.WithStreamDeliveryAcknowledgement(t.Context())
+	attemptCtx, releaseAttempt, errAttempt := selection.AttemptContext(ctx)
+	if errAttempt != nil {
+		t.Fatalf("new attempt context: %v", errAttempt)
+	}
+	t.Cleanup(releaseAttempt)
+	source := make(chan coreexecutor.StreamChunk)
+	failureCause := make(chan error, 1)
+	go func() {
+		defer close(source)
+		source <- coreexecutor.StreamChunk{Payload: []byte("payload")}
+		<-attemptCtx.Done()
+		failureCause <- context.Cause(attemptCtx)
+	}()
 	stream := manager.wrapStreamResult(
-		ctx,
+		attemptCtx,
 		&Auth{ID: "home-auth", Provider: "codex"},
 		"codex",
 		"gpt-5",
@@ -441,11 +638,15 @@ func TestHomeStreamScopeEndsAfterDeliveryFailureOnce(t *testing.T) {
 		source,
 		OAuthModelAliasResult{},
 	)
-	owned := wrapHomeOwnedStream(ctx, stream, selection, func() {}, true)
+	owned := wrapHomeOwnedStream(ctx, stream, selection, releaseAttempt, true)
 
 	payload := <-owned.Chunks
-	payload.Acknowledge(errors.New("downstream write failed"))
+	failure := errors.New("downstream write failed")
+	payload.Acknowledge(failure)
 	for range owned.Chunks {
+	}
+	if cause := <-failureCause; !errors.Is(cause, failure) {
+		t.Fatalf("executor cancellation cause = %v, want %v", cause, failure)
 	}
 	if selection.Active() || released != 1 {
 		t.Fatalf("selection state after delivery failure: active=%v released=%d", selection.Active(), released)

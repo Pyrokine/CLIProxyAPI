@@ -24,11 +24,13 @@ func captureExecutionWarnings(t *testing.T) func() []*log.Entry {
 	logger.SetOutput(io.Discard)
 	logger.SetLevel(log.WarnLevel)
 	hook := logtest.NewLocal(logger)
-	t.Cleanup(func() {
-		logger.ReplaceHooks(hooks)
-		logger.SetLevel(level)
-		logger.SetOutput(output)
-	})
+	t.Cleanup(
+		func() {
+			logger.ReplaceHooks(hooks)
+			logger.SetLevel(level)
+			logger.SetOutput(output)
+		},
+	)
 	return func() []*log.Entry {
 		var entries []*log.Entry
 		for _, entry := range hook.AllEntries() {
@@ -52,15 +54,22 @@ func (e markedExecutionDiagnostic) ExecutionDisposition() cliproxyexecutor.Execu
 func TestWarnLogUpstreamFailurePreservesSafeFields(t *testing.T) {
 	warnings := captureExecutionWarnings(t)
 	ctx := logging.WithRequestID(context.Background(), "full-synthetic-request-id")
-	err := fmt.Errorf("wrapped: %w", markedExecutionDiagnostic{diagnostic: "access token expired\nAuthorization: Bearer synthetic-secret"})
-	auth := &Auth{ID: "private-filename.json", Index: "synthetic-index", Metadata: map[string]any{"access_token": "never-log-auth"}}
+	err := fmt.Errorf(
+		"wrapped: %w",
+		markedExecutionDiagnostic{diagnostic: "access token expired\nAuthorization: Bearer synthetic-secret"},
+	)
+	auth := &Auth{
+		ID: "private-filename.json", Index: "synthetic-index",
+		Metadata: map[string]any{"access_token": "never-log-auth"},
+	}
 	warnLogUpstreamFailure(ctx, auth, "provider", "model", time.Now(), err, cliproxyexecutor.DispatchPhaseNotSent)
 	entries := warnings()
 	if len(entries) != 1 {
 		t.Fatalf("warnings=%d, want 1", len(entries))
 	}
 	entry := entries[0]
-	if entry.Data["status"] != 502 || entry.Data["phase"] != cliproxyexecutor.DispatchPhaseNotSent || entry.Data["auth_index"] != auth.Index {
+	if entry.Data["status"] != 502 || entry.Data["phase"] != cliproxyexecutor.DispatchPhaseNotSent ||
+		entry.Data["auth_index"] != auth.Index {
 		t.Fatalf("warning fields=%v", entry.Data)
 	}
 	wire, errFormat := (&logging.LogFormatter{}).Format(entry)
@@ -68,7 +77,10 @@ func TestWarnLogUpstreamFailurePreservesSafeFields(t *testing.T) {
 		t.Fatal(errFormat)
 	}
 	line := string(wire)
-	for _, want := range []string{"status=502", "phase=not_sent", "duration=", "provider=provider", "model=model", "synthetic-index", "full-synthetic-request-id", "access token expired", "REDACTED"} {
+	for _, want := range []string{
+		"status=502", "phase=not_sent", "duration=", "provider=provider", "model=model", "synthetic-index",
+		"full-synthetic-request-id", "access token expired", "REDACTED",
+	} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("log missing %q: %q", want, line)
 		}
@@ -96,7 +108,9 @@ func TestWarnLogUpstreamFailureSuppressesNonUpstreamFailures(t *testing.T) {
 		{ctx, errors.New("upstream failure after caller cancellation")},
 		{context.Background(), &Error{Code: requestScopedErrorCode, HTTPStatus: 400, Message: "invalid request"}},
 	} {
-		warnLogUpstreamFailure(test.ctx, nil, "provider", "model", time.Now(), test.err, cliproxyexecutor.DispatchPhaseMaybeSent)
+		warnLogUpstreamFailure(
+			test.ctx, nil, "provider", "model", time.Now(), test.err, cliproxyexecutor.DispatchPhaseMaybeSent,
+		)
 	}
 	if got := len(warnings()); got != 0 {
 		t.Fatalf("warnings=%d, want 0", got)
@@ -105,42 +119,51 @@ func TestWarnLogUpstreamFailureSuppressesNonUpstreamFailures(t *testing.T) {
 
 func TestHomeExecutionWarningsOncePerFailedAttempt(t *testing.T) {
 	for _, mode := range []string{"execute", "count", "stream", "bootstrap", "started"} {
-		t.Run(mode, func(t *testing.T) {
-			warnings := captureExecutionWarnings(t)
-			executor := &c08HomeRefreshExecutor{streamMode: mode}
-			manager := newC08HomeRefreshManager(&c08HomeRefreshDispatcher{}, executor)
-			request := cliproxyexecutor.Request{Model: "model-a"}
-			var err error
-			switch mode {
-			case "execute":
-				_, err = manager.Execute(context.Background(), []string{c08HomeRefreshProvider}, request, cliproxyexecutor.Options{})
-			case "count":
-				_, err = manager.ExecuteCount(context.Background(), []string{c08HomeRefreshProvider}, request, cliproxyexecutor.Options{})
-			default:
-				var stream *cliproxyexecutor.StreamResult
-				stream, err = manager.ExecuteStream(context.Background(), []string{c08HomeRefreshProvider}, request, cliproxyexecutor.Options{Stream: true})
-				if err == nil {
-					for chunk := range stream.Chunks {
-						if chunk.Err != nil {
-							err = chunk.Err
+		t.Run(
+			mode, func(t *testing.T) {
+				warnings := captureExecutionWarnings(t)
+				executor := &c08HomeRefreshExecutor{streamMode: mode}
+				manager := newC08HomeRefreshManager(&c08HomeRefreshDispatcher{}, executor)
+				request := cliproxyexecutor.Request{Model: "model-a"}
+				var err error
+				switch mode {
+				case "execute":
+					_, err = manager.Execute(
+						context.Background(), []string{c08HomeRefreshProvider}, request, cliproxyexecutor.Options{},
+					)
+				case "count":
+					_, err = manager.ExecuteCount(
+						context.Background(), []string{c08HomeRefreshProvider}, request, cliproxyexecutor.Options{},
+					)
+				default:
+					var stream *cliproxyexecutor.StreamResult
+					stream, err = manager.ExecuteStream(
+						context.Background(), []string{c08HomeRefreshProvider}, request,
+						cliproxyexecutor.Options{Stream: true},
+					)
+					if err == nil {
+						for chunk := range stream.Chunks {
+							if chunk.Err != nil {
+								err = chunk.Err
+							}
 						}
 					}
 				}
-			}
-			if statusCodeFromError(err) != 401 {
-				t.Fatalf("error=%v", err)
-			}
-			entries := warnings()
-			if len(entries) != 1 {
-				t.Fatalf("warnings=%d, want 1", len(entries))
-			}
-			if mode == "started" && entries[0].Data["phase"] != cliproxyexecutor.DispatchPhaseResponseStarted {
-				t.Fatalf("phase=%v", entries[0].Data["phase"])
-			}
-			if executor.refreshCalls.Load() != 0 {
-				t.Fatal("Home credential was refreshed")
-			}
-		})
+				if statusCodeFromError(err) != 401 {
+					t.Fatalf("error=%v", err)
+				}
+				entries := warnings()
+				if len(entries) != 1 {
+					t.Fatalf("warnings=%d, want 1", len(entries))
+				}
+				if mode == "started" && entries[0].Data["phase"] != cliproxyexecutor.DispatchPhaseResponseStarted {
+					t.Fatalf("phase=%v", entries[0].Data["phase"])
+				}
+				if executor.refreshCalls.Load() != 0 {
+					t.Fatal("Home credential was refreshed")
+				}
+			},
+		)
 	}
 }
 
@@ -153,17 +176,30 @@ func TestManagedExecutionWarningsRetainRecoveredUnauthorized(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	executor := &diagnosticRefreshExecutor{&c08HomeRefreshExecutor{}}
 	manager.RegisterExecutor(executor)
-	credential, err := manager.Register(context.Background(), &Auth{ID: "diagnostic-managed", Provider: c08HomeRefreshProvider, Metadata: map[string]any{"access_token": "stale-access-token", "refresh_token": "synthetic-refresh"}})
+	credential, err := manager.Register(
+		context.Background(), &Auth{
+			ID: "diagnostic-managed", Provider: c08HomeRefreshProvider,
+			Metadata: map[string]any{"access_token": "stale-access-token", "refresh_token": "synthetic-refresh"},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "model-a"}})
+	registry.GetGlobalRegistry().RegisterClient(
+		credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "model-a"}},
+	)
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential.ID) })
-	_, err = manager.Execute(context.Background(), []string{credential.Provider}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{})
+	_, err = manager.Execute(
+		context.Background(), []string{credential.Provider}, cliproxyexecutor.Request{Model: "model-a"},
+		cliproxyexecutor.Options{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if executor.refreshCalls.Load() != 1 || executor.executeCalls.Load() != 2 || len(warnings()) != 1 {
-		t.Fatalf("refresh=%d execute=%d warnings=%d", executor.refreshCalls.Load(), executor.executeCalls.Load(), len(warnings()))
+		t.Fatalf(
+			"refresh=%d execute=%d warnings=%d", executor.refreshCalls.Load(), executor.executeCalls.Load(),
+			len(warnings()),
+		)
 	}
 }

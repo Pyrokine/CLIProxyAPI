@@ -14,26 +14,54 @@ func TestClaudeFingerprintProfilePresence(t *testing.T) {
 		bad  bool
 	}{
 		{name: "absent"},
-		{name: "legacy", auth: &Auth{Metadata: map[string]any{"fingerprint-profile": " OAUTH-CLI "}}, want: "claude-code-cli", set: true},
-		{name: "canonical clear", auth: &Auth{Metadata: map[string]any{"fingerprint_profile": "", "fingerprint-profile": "oauth-cli"}}, set: true},
-		{name: "attribute clear", auth: &Auth{Attributes: map[string]string{"fingerprint_profile": ""}, Metadata: map[string]any{"fingerprint_profile": "claude-code-cli"}}, set: true},
-		{name: "bad canonical", auth: &Auth{Metadata: map[string]any{"fingerprint_profile": "typo", "fingerprint-profile": "oauth-cli"}}, set: true, bad: true},
-		{name: "null canonical", auth: &Auth{Metadata: map[string]any{"fingerprint_profile": nil}}, set: true, bad: true},
-		{name: "bad attributes", auth: &Auth{Attributes: map[string]string{"fingerprint_profile": "typo"}}, set: true, bad: true},
+		{
+			name: "legacy", auth: &Auth{Metadata: map[string]any{"fingerprint-profile": " OAUTH-CLI "}},
+			want: "claude-code-cli", set: true,
+		},
+		{
+			name: "canonical clear",
+			auth: &Auth{Metadata: map[string]any{"fingerprint_profile": "", "fingerprint-profile": "oauth-cli"}},
+			set:  true,
+		},
+		{
+			name: "attribute clear", auth: &Auth{
+				Attributes: map[string]string{"fingerprint_profile": ""},
+				Metadata:   map[string]any{"fingerprint_profile": "claude-code-cli"},
+			}, set: true,
+		},
+		{
+			name: "bad canonical",
+			auth: &Auth{Metadata: map[string]any{"fingerprint_profile": "typo", "fingerprint-profile": "oauth-cli"}},
+			set:  true, bad: true,
+		},
+		{
+			name: "null canonical", auth: &Auth{Metadata: map[string]any{"fingerprint_profile": nil}}, set: true,
+			bad: true,
+		},
+		{
+			name: "bad attributes", auth: &Auth{Attributes: map[string]string{"fingerprint_profile": "typo"}},
+			set: true, bad: true,
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			profile, set, err := ClaudeFingerprintProfile(tc.auth)
-			if profile != tc.want || set != tc.set || (err != nil) != tc.bad {
-				t.Fatalf("got (%q,%t,%v), want (%q,%t,error:%t)", profile, set, err, tc.want, tc.set, tc.bad)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				profile, set, err := ClaudeFingerprintProfile(tc.auth)
+				if profile != tc.want || set != tc.set || (err != nil) != tc.bad {
+					t.Fatalf("got (%q,%t,%v), want (%q,%t,error:%t)", profile, set, err, tc.want, tc.set, tc.bad)
+				}
+			},
+		)
 	}
 }
 
 func TestApplyClaudeFingerprintProfileMetadataClearsStaleSources(t *testing.T) {
 	auth := &Auth{
-		Attributes: map[string]string{"fingerprint_profile": "claude-code-cli", "fingerprint-profile": "oauth-cli", "keep": "attribute"},
-		Metadata:   map[string]any{"fingerprint_profile": "claude-code-cli", "fingerprint-profile": "oauth-cli", "keep": "metadata"},
+		Attributes: map[string]string{
+			"fingerprint_profile": "claude-code-cli", "fingerprint-profile": "oauth-cli", "keep": "attribute",
+		},
+		Metadata: map[string]any{
+			"fingerprint_profile": "claude-code-cli", "fingerprint-profile": "oauth-cli", "keep": "metadata",
+		},
 	}
 	if err := ApplyClaudeFingerprintProfileMetadata(auth, map[string]any{"fingerprint_profile": ""}); err != nil {
 		t.Fatal(err)

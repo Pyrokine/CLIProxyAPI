@@ -15,7 +15,12 @@ type headerSessionExecutor struct {
 	headers chan string
 }
 
-func (e *headerSessionExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *headerSessionExecutor) Execute(
+	ctx context.Context,
+	_ *Auth,
+	_ cliproxyexecutor.Request,
+	_ cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.test", nil)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -25,11 +30,21 @@ func (e *headerSessionExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxy
 	return cliproxyexecutor.Response{Payload: []byte(`{}`)}, nil
 }
 
-func (e *headerSessionExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *headerSessionExecutor) CountTokens(
+	ctx context.Context,
+	auth *Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	return e.Execute(ctx, auth, req, opts)
 }
 
-func (e *headerSessionExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *headerSessionExecutor) ExecuteStream(
+	ctx context.Context,
+	auth *Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (*cliproxyexecutor.StreamResult, error) {
 	if _, err := e.Execute(ctx, auth, req, opts); err != nil {
 		return nil, err
 	}
@@ -40,53 +55,69 @@ func (e *headerSessionExecutor) ExecuteStream(ctx context.Context, auth *Auth, r
 
 func TestManagerPropagatesCanonicalSessionToCustomHeaders(t *testing.T) {
 	for _, mode := range []string{"execute", "count", "stream"} {
-		for _, explicit := range []string{"absent", "explicit", ""} {
-			t.Run(mode+"/"+explicit, func(t *testing.T) {
-				manager := NewManager(nil, nil, nil)
-				executor := &headerSessionExecutor{headers: make(chan string, 1)}
-				manager.RegisterExecutor(executor)
-				auth := &Auth{ID: "session-header-test", Provider: "test", Status: StatusActive}
-				if _, err := manager.Register(context.Background(), auth); err != nil {
-					t.Fatal(err)
-				}
-				reg := registry.GetGlobalRegistry()
-				reg.RegisterClient(auth.ID, "test", []*registry.ModelInfo{{ID: "test-model"}})
-				t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
-				manager.RefreshSchedulerEntry(auth.ID)
-				ctx := context.Background()
-				want := "caller-session"
-				if explicit != "absent" {
-					ctx = util.WithSessionID(util.WithSessionID(ctx, "parent"), explicit)
-					want = explicit
-				}
-				req := cliproxyexecutor.Request{Model: "test-model", Payload: []byte(`{}`)}
-				opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": {"caller-session"}}}
-				var err error
-				switch mode {
-				case "execute":
-					_, err = manager.Execute(ctx, []string{"test"}, req, opts)
-				case "count":
-					_, err = manager.ExecuteCount(ctx, []string{"test"}, req, opts)
-				case "stream":
-					var result *cliproxyexecutor.StreamResult
-					result, err = manager.ExecuteStream(ctx, []string{"test"}, req, opts)
-					if err == nil {
-						for range result.Chunks {
+		for _, explicit := range []string{"absent", "explicit", "", "after-auth"} {
+			t.Run(
+				mode+"/"+explicit, func(t *testing.T) {
+					manager := NewManager(nil, nil, nil)
+					executor := &headerSessionExecutor{headers: make(chan string, 1)}
+					manager.RegisterExecutor(executor)
+					auth := &Auth{ID: "session-header-test", Provider: "test", Status: StatusActive}
+					if _, err := manager.Register(context.Background(), auth); err != nil {
+						t.Fatal(err)
+					}
+					reg := registry.GetGlobalRegistry()
+					reg.RegisterClient(auth.ID, "test", []*registry.ModelInfo{{ID: "test-model"}})
+					t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+					manager.RefreshSchedulerEntry(auth.ID)
+					ctx := context.Background()
+					want := "caller-session"
+					if explicit != "absent" && explicit != "after-auth" {
+						ctx = util.WithSessionID(util.WithSessionID(ctx, "parent"), explicit)
+						want = explicit
+					}
+					req := cliproxyexecutor.Request{Model: "test-model", Payload: []byte(`{}`)}
+					opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": {"caller-session"}}}
+					if explicit == "after-auth" {
+						want = "rewritten-session"
+						opts.RequestAfterAuthInterceptor = func(
+							_ context.Context,
+							input cliproxyexecutor.RequestAfterAuthInterceptRequest,
+						) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+							next := input.Options
+							next.Headers = http.Header{"X-Session-Id": {want}}
+							next.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = "header:" + want
+							return cliproxyexecutor.RequestAfterAuthInterceptResponse{
+								Handled: true, Request: input.Request, Options: next,
+							}
 						}
 					}
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				select {
-				case got := <-executor.headers:
-					if got != want {
-						t.Fatalf("dynamic session = %q, want %q", got, want)
+					var err error
+					switch mode {
+					case "execute":
+						_, err = manager.Execute(ctx, []string{"test"}, req, opts)
+					case "count":
+						_, err = manager.ExecuteCount(ctx, []string{"test"}, req, opts)
+					case "stream":
+						var result *cliproxyexecutor.StreamResult
+						result, err = manager.ExecuteStream(ctx, []string{"test"}, req, opts)
+						if err == nil {
+							for range result.Chunks {
+							}
+						}
 					}
-				default:
-					t.Fatal("executor was not called")
-				}
-			})
+					if err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case got := <-executor.headers:
+						if got != want {
+							t.Fatalf("dynamic session = %q, want %q", got, want)
+						}
+					default:
+						t.Fatal("executor was not called")
+					}
+				},
+			)
 		}
 	}
 }

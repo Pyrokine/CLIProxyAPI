@@ -14,6 +14,8 @@ import (
 )
 
 // SessionInfo contains the flat session identity and its immediate parent.
+//
+//goland:noinspection GoNameStartsWithPackageName,GoUnnecessarilyExportedIdentifiers
 type SessionInfo struct {
 	SessionID       string         `json:"session_id"`
 	ParentSessionID string         `json:"parent_session_id,omitempty"`
@@ -41,27 +43,31 @@ func newSessionObject(result gjson.Result) sessionObject {
 	if result.Type != gjson.JSON {
 		return object
 	}
-	result.ForEach(func(key, value gjson.Result) bool {
-		if object.fields == nil {
-			object.fields = make(map[string]gjson.Result)
-		}
-		if _, exists := object.fields[key.Str]; exists {
-			if object.duplicates == nil {
-				object.duplicates = make(map[string]bool)
+	result.ForEach(
+		func(key, value gjson.Result) bool {
+			if object.fields == nil {
+				object.fields = make(map[string]gjson.Result)
 			}
-			object.duplicates[key.Str] = true
-		} else {
-			object.fields[key.Str] = value
-		}
-		return true
-	})
+			if _, exists := object.fields[key.Str]; exists {
+				if object.duplicates == nil {
+					object.duplicates = make(map[string]bool)
+				}
+				object.duplicates[key.Str] = true
+			} else {
+				object.fields[key.Str] = value
+			}
+			return true
+		},
+	)
 	return object
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (object sessionObject) Exists() bool {
 	return object.result.Exists()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (object sessionObject) Get(path string) gjson.Result {
 	key, remaining, nested := strings.Cut(path, ".")
 	if nested && object.duplicates[key] {
@@ -148,15 +154,48 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		defaultAgent  string
 		parentHeaders []string
 	}{
-		{"X-Http-Session-Id", "agy", "agy:", "main", []string{"X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID", "X-Parent-Id"}},
-		{"X-Session-ID", "generic", "header:", "main", []string{"X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID", "X-Parent-Id"}},
-		{"X-Session-Affinity", "opencode", "affinity:", "main", []string{"X-Parent-Session-Affinity", "X-Parent-Session-ID", "X-Parent-ID", "X-Parent-Id"}},
-		{"X-Slot-Session-Id", "pi", "slot:", "slot", []string{"X-Parent-Slot-Session-Id", "X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID", "X-Parent-Id"}},
-		{"X-Task-ID", "task", "task:", "main", []string{"X-Parent-Task-ID", "X-Parent-Task-Id", "X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID", "X-Parent-Id"}},
-		{"X-Task-Id", "task", "task:", "main", []string{"X-Parent-Task-ID", "X-Parent-Task-Id", "X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID", "X-Parent-Id"}},
+		{
+			"X-Http-Session-Id", "agy", "agy:", "main",
+			[]string{"X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID", "X-Parent-Id"},
+		},
+		{
+			"X-Session-ID", "generic", "header:", "main",
+			[]string{"X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID", "X-Parent-Id"},
+		},
+		{
+			"X-Session-Affinity", "opencode", "affinity:", "main",
+			[]string{"X-Parent-Session-Affinity", "X-Parent-Session-ID", "X-Parent-ID", "X-Parent-Id"},
+		},
+		{
+			"X-Slot-Session-Id", "pi", "slot:", "slot", []string{
+				"X-Parent-Slot-Session-Id", "X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID", "X-Parent-Id",
+			},
+		},
+		{
+			"X-Task-ID", "task", "task:", "main", []string{
+				"X-Parent-Task-ID", "X-Parent-Task-Id", "X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID",
+				"X-Parent-Id",
+			},
+		},
+		{
+			"X-Task-Id", "task", "task:", "main", []string{
+				"X-Parent-Task-ID", "X-Parent-Task-Id", "X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID",
+				"X-Parent-Id",
+			},
+		},
+		{
+			"X-Task_ID", "task", "task:", "main", []string{
+				"X-Parent-Task-ID", "X-Parent-Task-Id", "X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-ID",
+				"X-Parent-Id",
+			},
+		},
 		{"X-Conversation-Id", "conv", "conv:", "main", []string{"X-Parent-Conversation-Id", "X-Parent-ID"}},
 		{"X-Thread-Id", "openai-thread", "thread:", "main", []string{"X-Parent-Thread-Id", "X-Parent-ID"}},
-		{"X-Client-Request-Id", "generic", "clientreq:", "main", []string{"X-Parent-Session-ID", "X-Parent-ID", "X-Parent-Id"}},
+		{
+			"X-Client-Request-Id", "generic", "clientreq:", "main",
+			[]string{"X-Parent-Session-ID", "X-Parent-ID", "X-Parent-Id"},
+		},
+		{"X-Amp-Thread-Id", "amp", "amp:", "main", []string{"X-Parent-Thread-Id", "X-Parent-ID"}},
 	}
 	for _, candidate := range headerSessions {
 		sessionID := sessionHeaderValue(headers, candidate.header)
@@ -167,17 +206,25 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		if parentID == "" {
 			parentID = parentCandidate
 		}
-		return finalizeSessionInfo(buildPrefixedInfo(info, candidate.clientType, candidate.prefix, sessionID, parentID, candidate.defaultAgent))
+		return finalizeSessionInfo(
+			buildPrefixedInfo(
+				info, candidate.clientType, candidate.prefix, sessionID, parentID, candidate.defaultAgent,
+			),
+		)
 	}
 
 	if !root.Exists() {
 		return extractMetadataSession(info, metadata)
 	}
 
-	if cacheID := firstSessionPath(root, requestRoot, hasNestedRequest, "cachedContent", "cached_content"); cacheID != "" {
+	if cacheID := firstSessionPath(
+		root, requestRoot, hasNestedRequest, "cachedContent", "cached_content",
+	); cacheID != "" {
 		return finalizeSessionInfo(buildPrefixedInfo(info, "gemini", "geminicache:", cacheID, parentCandidate, "main"))
 	}
-	if threadID := firstSessionPath(root, requestRoot, hasNestedRequest, "thread_id", "threadId", "metadata.thread_id"); threadID != "" {
+	if threadID := firstSessionPath(
+		root, requestRoot, hasNestedRequest, "thread_id", "threadId", "metadata.thread_id",
+	); threadID != "" {
 		bodyInfo := buildPrefixedInfo(info, "openai-thread", "thread:", threadID, parentCandidate, "main")
 		markBodyLineage(&bodyInfo, root, requestRoot, hasNestedRequest)
 		return finalizeSessionInfo(bodyInfo)
@@ -221,7 +268,9 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		return finalizeSessionInfo(bodyInfo)
 	}
 
-	if promptCacheKey := firstSessionPath(root, requestRoot, hasNestedRequest, "prompt_cache_key", "promptCacheKey"); promptCacheKey != "" {
+	if promptCacheKey := firstSessionPath(
+		root, requestRoot, hasNestedRequest, "prompt_cache_key", "promptCacheKey",
+	); promptCacheKey != "" {
 		return finalizeSessionInfo(buildPrefixedInfo(info, "generic", "pck:", promptCacheKey, parentCandidate, "main"))
 	}
 	conversation := root.Get("conversation")
@@ -243,7 +292,8 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	}
 	if conversationID = firstSessionPath(
 		root, requestRoot, hasNestedRequest,
-		"conversation_id", "conversationId", "chat_id", "chatId", "metadata.conversation_id", "extra_body.conversation_id",
+		"conversation_id", "conversationId", "chat_id", "chatId", "metadata.conversation_id",
+		"extra_body.conversation_id",
 	); conversationID != "" {
 		return finalizeSessionInfo(buildPrefixedInfo(info, "conv", "conv:", conversationID, parentCandidate, "main"))
 	}
@@ -280,7 +330,9 @@ func buildClaudeInfo(
 	if agentID == "" {
 		_, _, agentID = ClaudeMetadataIdentities(payload)
 	}
-	return buildClaudeMetadataInfo(info, sessionID, parentCandidate, agentID, headers, root, requestRoot, hasNestedRequest)
+	return buildClaudeMetadataInfo(
+		info, sessionID, parentCandidate, agentID, headers, root, requestRoot, hasNestedRequest,
+	)
 }
 
 func buildClaudeMetadataInfo(
@@ -299,7 +351,9 @@ func buildClaudeMetadataInfo(
 	}
 	parentAgentID := firstHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id")
 	if parentAgentID == "" {
-		parentAgentID = firstSessionPath(root, requestRoot, hasNestedRequest, "metadata.parent_agent_id", "metadata.parentAgentId")
+		parentAgentID = firstSessionPath(
+			root, requestRoot, hasNestedRequest, "metadata.parent_agent_id", "metadata.parentAgentId",
+		)
 	}
 	if agentID != "" && agentID != "main" {
 		info.SessionID = "claude:" + sessionID + ":agent:" + agentID
@@ -381,7 +435,13 @@ func extractCodexInfo(
 
 	agentName := ""
 	if turnMetadata.Exists() {
-		agentName = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(turnMetadata.Get("agent_name").String(), "/root/"), "/"))
+		agentName = strings.TrimSpace(
+			strings.TrimPrefix(
+				strings.TrimPrefix(
+					turnMetadata.Get("agent_name").String(), "/root/",
+				), "/",
+			),
+		)
 		agentName = normalizedSessionCandidate(agentName)
 		if agentName == "root" || agentName == "main" {
 			agentName = ""
@@ -425,7 +485,9 @@ func extractCodexInfo(
 	if primary == "" {
 		primary = threadID
 	}
-	info = buildPrefixedInfo(info, "codex", "codex:", primary, firstNonSelf(parentThread, parentCandidate, primary), "main")
+	info = buildPrefixedInfo(
+		info, "codex", "codex:", primary, firstNonSelf(parentThread, parentCandidate, primary), "main",
+	)
 	if info.ParentSessionID != "" {
 		info.IsSubagent = true
 	}
@@ -456,17 +518,23 @@ func markBodyLineage(info *SessionInfo, root, requestRoot sessionObject, hasNest
 }
 
 func extractMetadataSession(info SessionInfo, metadata map[string]any) (SessionInfo, bool) {
-	if executionID := normalizedMetadataSessionCandidate(metadata, cliproxyexecutor.ExecutionSessionMetadataKey); executionID != "" {
+	if executionID := normalizedMetadataSessionCandidate(
+		metadata, cliproxyexecutor.ExecutionSessionMetadataKey,
+	); executionID != "" {
 		info.ClientType = "generic"
 		info.SessionID = "execution:" + executionID
 		info.AgentName = "main"
 		return finalizeSessionInfo(info)
 	}
-	if lcpID := normalizedMetadataSessionCandidate(metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey); lcpID != "" {
+	if lcpID := normalizedMetadataSessionCandidate(
+		metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey,
+	); lcpID != "" {
 		info.ClientType = "lcp"
 		info.SessionID = lcpID
 		info.AgentName = "main"
-		if parentID := normalizedMetadataSessionCandidate(metadata, cliproxyexecutor.ParentSessionIDMetadataKey); parentID != "" && parentID != lcpID {
+		if parentID := normalizedMetadataSessionCandidate(
+			metadata, cliproxyexecutor.ParentSessionIDMetadataKey,
+		); parentID != "" && parentID != lcpID {
 			info.ParentSessionID = parentID
 			if isCompaction, _ := metadata[cliproxyexecutor.IsCompactionMetadataKey].(bool); isCompaction {
 				info.IsCompaction = true
@@ -544,10 +612,7 @@ func BoundSessionIdentity(identity string) string {
 	}
 	sum := sha256.Sum256([]byte(identity))
 	digest := hex.EncodeToString(sum[:])
-	prefixLength := 256 - 1 - len(digest)
-	if prefixLength > len(identity) {
-		prefixLength = len(identity)
-	}
+	prefixLength := min(256-1-len(digest), len(identity))
 	prefix := identity[:prefixLength]
 	for len(prefix) > 0 && !utf8.ValidString(prefix) {
 		prefix = prefix[:len(prefix)-1]

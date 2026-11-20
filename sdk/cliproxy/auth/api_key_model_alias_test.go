@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
 func TestLookupAPIKeyUpstreamModel(t *testing.T) {
@@ -68,7 +70,13 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 			tt.name, func(t *testing.T) {
 				resolved := mgr.lookupAPIKeyUpstreamModel(tt.authID, tt.input)
 				if resolved != tt.want {
-					t.Errorf("lookupAPIKeyUpstreamModel(%q, %q) = %q, want %q", tt.authID, tt.input, resolved, tt.want)
+					t.Errorf(
+						"lookupAPIKeyUpstreamModel(%q, %q) = %q, want %q",
+						tt.authID,
+						tt.input,
+						resolved,
+						tt.want,
+					)
 				}
 			},
 		)
@@ -189,10 +197,12 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 
 	ctx := context.Background()
 	_, _ = mgr.Register(
-		ctx, &Auth{ID: "gemini-auth", Provider: "gemini", Attributes: map[string]string{"api_key": "gemini-key"}},
+		ctx,
+		&Auth{ID: "gemini-auth", Provider: "gemini", Attributes: map[string]string{"api_key": "gemini-key"}},
 	)
 	_, _ = mgr.Register(
-		ctx, &Auth{ID: "claude-auth", Provider: "claude", Attributes: map[string]string{"api_key": "claude-key"}},
+		ctx,
+		&Auth{ID: "claude-auth", Provider: "claude", Attributes: map[string]string{"api_key": "claude-key"}},
 	)
 	_, _ = mgr.Register(
 		ctx, &Auth{ID: "codex-auth", Provider: "codex", Attributes: map[string]string{"api_key": "codex-key"}},
@@ -224,7 +234,10 @@ func TestResolveOpenAICompatConfig_SkipsDisabled(t *testing.T) {
 				Name: "pool", Disabled: true,
 				Models: []internalconfig.OpenAICompatibilityModel{{Name: "disabled-model", Alias: "alias"}},
 			},
-			{Name: "pool", Models: []internalconfig.OpenAICompatibilityModel{{Name: "active-model", Alias: "alias"}}},
+			{
+				Name:   "pool",
+				Models: []internalconfig.OpenAICompatibilityModel{{Name: "active-model", Alias: "alias"}},
+			},
 		},
 	}
 
@@ -240,10 +253,155 @@ func TestResolveOpenAICompatConfig_SkipsDisabled(t *testing.T) {
 	}
 }
 
+func TestOriginalModelConfigSelectionKeepsPrefixAndProxy(t *testing.T) {
+	for _, provider := range []struct{ name, configKey string }{
+		{"claude", "claude-api-key"}, {"codex", "codex-api-key"}, {"xai", "xai-api-key"},
+		{"meta", "meta-api-key"}, {"gemini", "gemini-api-key"},
+		{"gemini-interactions", "interactions-api-key"}, {"vertex", "vertex-api-key"},
+	} {
+		for _, setting := range []string{"prefix", "proxy", "both"} {
+			for _, mode := range []string{"execute", "stream"} {
+				t.Run(
+					provider.name+"/"+setting+"/"+mode, func(t *testing.T) {
+						firstPrefix, firstProxy := "other", "direct"
+						if setting == "prefix" {
+							firstProxy = "none"
+						}
+						if setting == "proxy" {
+							firstPrefix = "team"
+						}
+						entries := []map[string]any{
+							{
+								"api-key": "synthetic-shared-key", "base-url": "https://models.synthetic.invalid",
+								"prefix": firstPrefix, "proxy-url": firstProxy,
+								"models": []map[string]any{{"name": "first-upstream", "alias": "public-model"}},
+							},
+							{
+								"api-key": "synthetic-shared-key", "base-url": "https://models.synthetic.invalid",
+								"prefix": "team", "proxy-url": "none",
+								"models": []map[string]any{
+									{"name": "second-upstream", "alias": "public-model"},
+								},
+							},
+						}
+						raw, err := json.Marshal(map[string]any{provider.configKey: entries})
+						if err != nil {
+							t.Fatal(err)
+						}
+						cfg := &internalconfig.Config{}
+						if err := json.Unmarshal(raw, cfg); err != nil {
+							t.Fatal(err)
+						}
+						manager := NewManager(nil, nil, nil)
+						manager.SetHomeClientProvider(func() HomeClient { return nil })
+						manager.SetConfig(cfg)
+						capture := &forceMappingExecutor{id: provider.name}
+						manager.RegisterExecutor(capture)
+						credential, err := manager.Register(
+							t.Context(), &Auth{
+								ID: t.Name(), Provider: provider.name, Prefix: "team", ProxyURL: "none",
+								Attributes: map[string]string{
+									AttributeAPIKey: "synthetic-shared-key",
+									"base_url":      "https://models.synthetic.invalid",
+									AttributeSource: AuthSourceFile,
+								},
+							},
+						)
+						if err != nil {
+							t.Fatal(err)
+						}
+						registerProjectionTestClient(
+							t, credential.ID, provider.name,
+							&registry.ModelInfo{ID: "team/public-model"},
+						)
+						manager.RefreshSchedulerEntry(credential.ID)
+						if cached := manager.lookupAPIKeyUpstreamModel(
+							credential.ID, "public-model(high)",
+						); cached != "second-upstream(high)" {
+							t.Errorf("compiled alias=%s, want second-upstream(high)", cached)
+						}
+						if resolved := manager.ResolveExecutionModel(
+							credential, "team/public-model(high)",
+						); resolved != "second-upstream(high)" {
+							t.Errorf("resolved target=%s, want second-upstream(high)", resolved)
+						}
+						originalForceMappingPayload(
+							t, manager, provider.name, "team/public-model(high)", mode == "stream",
+						)
+						models := capture.ExecuteModels()
+						if mode == "stream" {
+							models = capture.StreamModels()
+						}
+						if len(models) != 1 || models[0] != "second-upstream(high)" {
+							t.Fatalf("executed targets=%v, want one second-upstream(high)", models)
+						}
+					},
+				)
+			}
+		}
+	}
+}
+
+func TestOriginalModelConfigSelectionKeepsIndexAndCredentialFallback(t *testing.T) {
+	entries := []internalconfig.ClaudeKey{
+		{
+			APIKey:   "synthetic-key",
+			BaseURL:  "https://models.synthetic.invalid",
+			Prefix:   "first",
+			ProxyURL: "direct",
+		},
+		{
+			APIKey:   "synthetic-key",
+			BaseURL:  "https://models.synthetic.invalid",
+			Prefix:   "team",
+			ProxyURL: "none",
+		},
+	}
+	for _, test := range []struct {
+		name, index, key, base, prefix string
+		want                           int
+	}{
+		{"matching settings", "", "synthetic-key", "https://models.synthetic.invalid", "team", 1},
+		{"first index wins", "0", "synthetic-key", "https://models.synthetic.invalid", "team", 0},
+		{"second index", "1", "synthetic-key", "https://models.synthetic.invalid", "team", 1},
+		{"invalid index", "invalid", "synthetic-key", "https://models.synthetic.invalid", "team", -1},
+		{"out of range index", "2", "synthetic-key", "https://models.synthetic.invalid", "team", -1},
+		{"indexed credential changed", "1", "different-key", "https://models.synthetic.invalid", "team", -1},
+		{"credential fallback", "", "synthetic-key", "https://models.synthetic.invalid", "unmatched", 0},
+		{"base only", "", "", "https://models.synthetic.invalid", "team", 1},
+		{"key only fallback", "", "synthetic-key", "https://unknown.synthetic.invalid", "team", 0},
+		{"missing identity", "", "", "", "team", -1},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				auth := &Auth{
+					Prefix: test.prefix, ProxyURL: "none", Attributes: map[string]string{
+						AttributeAPIKey: test.key, "base_url": test.base,
+					},
+				}
+				if test.index != "" {
+					auth.Attributes[AttributeConfigIndex] = test.index
+				}
+				got := resolveAPIKeyConfig(entries, auth)
+				if test.want < 0 {
+					if got != nil {
+						t.Fatalf("unexpected configuration: %+v", got)
+					}
+				} else if got != &entries[test.want] {
+					t.Fatalf("configuration=%+v, want entry %d", got, test.want)
+				}
+			},
+		)
+	}
+}
+
 func TestApplyAPIKeyModelAlias(t *testing.T) {
 	cfg := &internalconfig.Config{
 		GeminiKey: []internalconfig.GeminiKey{
-			{APIKey: "k", Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-pro-exp-03-25", Alias: "g25p"}}},
+			{
+				APIKey: "k",
+				Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-pro-exp-03-25", Alias: "g25p"}},
+			},
 		},
 	}
 
@@ -252,7 +410,11 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 
 	ctx := context.Background()
 	apiKeyAuth := &Auth{ID: "a1", Provider: "gemini", Attributes: map[string]string{"api_key": "k"}}
-	oauthAuth := &Auth{ID: "oauth-auth", Provider: "gemini", Attributes: map[string]string{"auth_kind": "oauth"}}
+	oauthAuth := &Auth{
+		ID:         "oauth-auth",
+		Provider:   "gemini",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
 	_, _ = mgr.Register(ctx, apiKeyAuth)
 
 	tests := []struct {

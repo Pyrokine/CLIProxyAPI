@@ -48,6 +48,7 @@ func executionDispositionForAttempt(
 	return disposition
 }
 
+// noinspection GoTypeAssertionOnErrors
 func executionDispositionForError(
 	err error,
 	fallbackPhase cliproxyexecutor.DispatchPhase,
@@ -88,16 +89,25 @@ func executionDispositionForError(
 		}
 	}
 	disposition = disposition.Normalize(normalizationPhase)
+	_, requestRule := dispositionErr.(*requestRuleDispositionError)
+	authErr, _ := errors.AsType[*Error](err)
+	forceCooldown := authErr != nil && authErr.Code == ErrorCodeForceCooldown
 
 	switch {
 	case isRequestScopedError(err):
 		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNoRetry
 		disposition.EffectScope = cliproxyexecutor.StateEffectScopeRequest
-		if disposition.DispatchPhase == cliproxyexecutor.DispatchPhaseNotSent || status >= http.StatusBadRequest {
-			disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
-		} else {
-			disposition.Outcome = cliproxyexecutor.ExecutionOutcomeUnknown
+		if dispositionErr == nil {
+			if disposition.DispatchPhase == cliproxyexecutor.DispatchPhaseNotSent || status >= http.StatusBadRequest {
+				disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
+			} else {
+				disposition.Outcome = cliproxyexecutor.ExecutionOutcomeUnknown
+			}
 		}
+	case !requestRule && !forceCooldown && isRequestInvalidError(err):
+		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNoRetry
+		disposition.EffectScope = cliproxyexecutor.StateEffectScopeRequest
+		disposition.EffectKey = ""
 	case isTransientTransportError(err):
 		disposition.DispatchPhase = cliproxyexecutor.DispatchPhaseNotSent
 		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
@@ -328,17 +338,7 @@ func errorForResultWithDisposition(
 	disposition cliproxyexecutor.ExecutionDisposition,
 	stateGeneration uint64,
 ) *Error {
-	resultErr := errorForResult(err)
-	if resultErr == nil {
-		return nil
-	}
-	resultErr.DispatchPhase = disposition.DispatchPhase
-	resultErr.Outcome = disposition.Outcome
-	resultErr.RetryDirective = disposition.RetryDirective
-	resultErr.EffectScope = disposition.EffectScope
-	resultErr.EffectKey = disposition.EffectKey
-	resultErr.StateGeneration = stateGeneration
-	return resultErr
+	return errorForResult(err).WithExecutionDisposition(disposition, stateGeneration)
 }
 
 func modelStateForDisposition(
@@ -493,6 +493,8 @@ func quotaFamilyGeneration(auth *Auth, family string) uint64 {
 }
 
 // QuotaFamilyGeneration returns the normalized generation for one quota family.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func QuotaFamilyGeneration(auth *Auth, family string) uint64 {
 	return quotaFamilyGeneration(auth, strings.TrimSpace(family))
 }

@@ -22,32 +22,57 @@ func TestDeriveIDStableAcrossConversationGrowth(t *testing.T) {
 		{
 			name:   "openai chat",
 			format: sdktranslator.FormatOpenAI,
-			first:  `{"messages":[{"role":"system","content":"system prompt"},{"role":"developer","content":"developer prompt"},{"role":"user","content":"complete first user prompt"}]}`,
-			later:  `{"messages":[{"role":"system","content":"system prompt"},{"role":"developer","content":"developer prompt"},{"role":"user","content":"complete first user prompt"},{"role":"assistant","content":"answer"},{"role":"developer","content":"later instruction"},{"role":"user","content":"next"}]}`,
+			first: `{"messages":[{"role":"system","content":"system prompt"},{"role":"developer","content":"` +
+				`developer prompt"},{"role":"user","content":"complete first user prompt"}]}`,
+			later: `{"messages":[{"role":"system","content":"system prompt"},{"role":"developer","content":"` +
+				`developer prompt"},{"role":"user","content":"complete first user prompt"},{"role":"` +
+				`assistant","content":"answer"},{"role":"developer","content":"later instruction"},{"role":"` +
+				`user","content":"next"}]}`,
 		},
 		{
 			name:   "claude messages",
 			format: sdktranslator.FormatClaude,
-			first:  `{"system":[{"type":"text","text":"system prompt"}],"messages":[{"role":"user","content":[{"type":"text","text":"complete first user prompt"}]}]}`,
-			later:  `{"system":[{"type":"text","text":"system prompt"}],"messages":[{"role":"user","content":[{"type":"text","text":"complete first user prompt"}]},{"role":"assistant","content":"answer"},{"role":"user","content":"next"}]}`,
+			first: `{"system":[{"type":"text","text":"system prompt"}],"messages":[{"role"` +
+				`:"user","content":[{"type":"text","text":"complete first user prompt"}` +
+				`]}]}`,
+			later: `{"system":[{"type":"text","text":"system prompt"}],"messages":[{"role"` +
+				`:"user","content":[{"type":"text","text":"complete first user prompt"}` +
+				`]},{"role":"assistant","content":"answer"},{"role":"user","content":"n` +
+				`ext"}]}`,
 		},
 		{
 			name:   "openai responses",
 			format: sdktranslator.FormatOpenAIResponse,
-			first:  `{"instructions":"system prompt","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer prompt"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"complete first user prompt"}]}]}`,
-			later:  `{"instructions":"system prompt","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer prompt"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"complete first user prompt"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`,
+			first: `{"instructions":"system prompt","input":[{"type":"message","role":"developer","content":[` +
+				`{"type":"input_text","text":"developer prompt"}]},{"type":"message","role":"user","content":` +
+				`[{"type":"input_text","text":"complete first user prompt"}]}]}`,
+			later: `{"instructions":"system prompt","input":[{"type":"message","role":"developer","content":[` +
+				`{"type":"input_text","text":"developer prompt"}]},{"type":"message","role":"user","content":` +
+				`[{"type":"input_text","text":"complete first user prompt"}]},{"type":"message","role":"` +
+				`assistant","content":[{"type":"output_text","text":"answer"}]},{"type":"message","role":"` +
+				`user","content":[{"type":"input_text","text":"next"}]}]}`,
 		},
 		{
 			name:   "gemini",
 			format: sdktranslator.FormatGemini,
-			first:  `{"systemInstruction":{"parts":[{"text":"system prompt"}]},"contents":[{"role":"user","parts":[{"text":"complete first user prompt"}]}]}`,
-			later:  `{"systemInstruction":{"parts":[{"text":"system prompt"}]},"contents":[{"role":"user","parts":[{"text":"complete first user prompt"}]},{"role":"model","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text":"next"}]}]}`,
+			first: `{"systemInstruction":{"parts":[{"text":"system prompt"}]},"contents":[` +
+				`{"role":"user","parts":[{"text":"complete first user prompt"}]}]}`,
+			later: `{"systemInstruction":{"parts":[{"text":"system prompt"}]},"contents":[` +
+				`{"role":"user","parts":[{"text":"complete first user prompt"}]},{"role` +
+				`":"model","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text"` +
+				`:"next"}]}]}`,
 		},
 		{
 			name:   "interactions",
 			format: sdktranslator.FormatInteractions,
-			first:  `{"system_instruction":"system prompt","input":[{"type":"developer_instruction","text":"developer prompt"},{"type":"user_input","content":[{"type":"text","text":"complete first user prompt"}]}]}`,
-			later:  `{"system_instruction":"system prompt","input":[{"type":"developer_instruction","text":"developer prompt"},{"type":"user_input","content":[{"type":"text","text":"complete first user prompt"}]},{"type":"model_output","content":[{"type":"text","text":"answer"}]},{"type":"user_input","content":[{"type":"text","text":"next"}]}]}`,
+			first: `{"system_instruction":"system prompt","input":[{"type":"developer_inst` +
+				`ruction","text":"developer prompt"},{"type":"user_input","content":[{"` +
+				`type":"text","text":"complete first user prompt"}]}]}`,
+			later: `{"system_instruction":"system prompt","input":[{"type":"developer_inst` +
+				`ruction","text":"developer prompt"},{"type":"user_input","content":[{"` +
+				`type":"text","text":"complete first user prompt"}]},{"type":"model_out` +
+				`put","content":[{"type":"text","text":"answer"}]},{"type":"user_input"` +
+				`,"content":[{"type":"text","text":"next"}]}]}`,
 		},
 	}
 
@@ -72,15 +97,33 @@ func TestDeriveIDInstructionPrefixAndFullUser(t *testing.T) {
 	t.Parallel()
 
 	prefix := strings.Repeat("界", 50)
-	first := []byte(`{"messages":[{"role":"system","content":"` + prefix + `timestamp-a"},{"role":"user","content":"` + strings.Repeat(
-		"u", 120,
-	) + `a"}]}`)
-	sameRoot := []byte(`{"messages":[{"role":"system","content":"` + prefix + `timestamp-b"},{"role":"user","content":"` + strings.Repeat(
-		"u", 120,
-	) + `a"}]}`)
-	differentUser := []byte(`{"messages":[{"role":"system","content":"` + prefix + `timestamp-b"},{"role":"user","content":"` + strings.Repeat(
-		"u", 120,
-	) + `b"}]}`)
+	first := []byte(
+		`{"messages":[{"role":"system","content":"` +
+			prefix +
+			`timestamp-a"},{"role":"user","content":"` +
+			strings.Repeat(
+				"u",
+				120,
+			) + `a"}]}`,
+	)
+	sameRoot := []byte(
+		`{"messages":[{"role":"system","content":"` +
+			prefix +
+			`timestamp-b"},{"role":"user","content":"` +
+			strings.Repeat(
+				"u",
+				120,
+			) + `a"}]}`,
+	)
+	differentUser := []byte(
+		`{"messages":[{"role":"system","content":"` +
+			prefix +
+			`timestamp-b"},{"role":"user","content":"` +
+			strings.Repeat(
+				"u",
+				120,
+			) + `b"}]}`,
+	)
 
 	firstID := DeriveID(sdktranslator.FormatOpenAI, first, "caller-a")
 	if firstID == "" {
@@ -104,9 +147,15 @@ func TestDeriveIDCallerIsolationAndGeminiCachedContent(t *testing.T) {
 		t.Fatalf("caller isolation failed: callerA=%q callerB=%q", callerA, callerB)
 	}
 
-	firstCached := []byte(`{"cachedContent":"cachedContents/abc","contents":[{"role":"user","parts":[{"text":"first"}]}]}`)
-	grownCached := []byte(`{"cachedContent":"cachedContents/abc","contents":[{"role":"user","parts":[{"text":"first"}]},{"role":"model","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text":"next"}]}]}`)
-	differentCached := []byte(`{"cachedContent":"cachedContents/abc","contents":[{"role":"user","parts":[{"text":"different"}]}]}`)
+	firstCached := []byte(
+		`{"cachedContent":"cachedContents/abc","contents":[{"role":"user","parts":[{"text":"first"}]}]}`,
+	)
+	grownCached := []byte(`{"cachedContent":"cachedContents/abc","contents":[{"role":"user","part` +
+		`s":[{"text":"first"}]},{"role":"model","parts":[{"text":"answer"}]},{"` +
+		`role":"user","parts":[{"text":"next"}]}]}`)
+	differentCached := []byte(
+		`{"cachedContent":"cachedContents/abc","contents":[{"role":"user","parts":[{"text":"different"}]}]}`,
+	)
 	firstID := DeriveID(sdktranslator.FormatGemini, firstCached, "caller-a")
 	grownID := DeriveID(sdktranslator.FormatGemini, grownCached, "caller-a")
 	differentID := DeriveID(sdktranslator.FormatGemini, differentCached, "caller-a")
@@ -158,16 +207,22 @@ func TestEnrichSkipsDerivationForExplicitSessions(t *testing.T) {
 			headers: http.Header{"X-Session-Affinity": []string{"opencode-session"}},
 		},
 		{
-			name:    "Responses conversation object",
-			payload: []byte(`{"conversation":{"id":"conversation-session"},"messages":[{"role":"user","content":"hello"}]}`),
+			name: "Responses conversation object",
+			payload: []byte(
+				`{"conversation":{"id":"conversation-session"},"messages":[{"role":"user","content":"hello"}]}`,
+			),
 		},
 		{
-			name:    "Responses conversation string",
-			payload: []byte(`{"conversation":"conversation-session","messages":[{"role":"user","content":"hello"}]}`),
+			name: "Responses conversation string",
+			payload: []byte(
+				`{"conversation":"conversation-session","messages":[{"role":"user","content":"hello"}]}`,
+			),
 		},
 		{
-			name:    "metadata user id",
-			payload: []byte(`{"metadata":{"user_id":"explicit-user"},"messages":[{"role":"user","content":"hello"}]}`),
+			name: "metadata user id",
+			payload: []byte(
+				`{"metadata":{"user_id":"explicit-user"},"messages":[{"role":"user","content":"hello"}]}`,
+			),
 		},
 		{
 			name: "long legacy Claude metadata session",
@@ -175,8 +230,10 @@ func TestEnrichSkipsDerivationForExplicitSessions(t *testing.T) {
 				`_session_ac980658-63bd-4fb3-97ba-8da64cb1e344"},"messages":[{"role":"user","content":"hello"}]}`),
 		},
 		{
-			name:    "JSON metadata user id without nested session",
-			payload: []byte(`{"metadata":{"user_id":"{\"device_id\":\"abc123\"}"},"messages":[{"role":"user","content":"hello"}]}`),
+			name: "JSON metadata user id without nested session",
+			payload: []byte(
+				`{"metadata":{"user_id":"{\"device_id\":\"abc123\"}"},"messages":[{"role":"user","content":"hello"}]}`,
+			),
 		},
 		{
 			name:    "body session id",
@@ -224,7 +281,8 @@ func TestEnrichSkipsDerivationForExplicitSessions(t *testing.T) {
 				if got := DerivedID(enrichedOpts.Metadata); got != "" {
 					t.Fatalf("options DerivedSessionID = %q, want empty", got)
 				}
-				if test.name == "execution session option metadata" || test.name == "execution session request metadata" {
+				if test.name == "execution session option metadata" ||
+					test.name == "execution session request metadata" {
 					if got := metadataString(
 						enrichedReq.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey,
 					); got != "execution-session" {
@@ -307,9 +365,11 @@ func TestEnrichDerivesAfterInvalidSessionIdentity(t *testing.T) {
 			headers: http.Header{"X-Session-Affinity": []string{"bad\nsession"}},
 		},
 		{
-			name:           "oversized execution session option metadata",
-			payload:        []byte(`{"input":"hello"}`),
-			optionMetadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: strings.Repeat("x", 257)},
+			name:    "oversized execution session option metadata",
+			payload: []byte(`{"input":"hello"}`),
+			optionMetadata: map[string]any{
+				cliproxyexecutor.ExecutionSessionMetadataKey: strings.Repeat("x", 257),
+			},
 		},
 		{
 			name:            "control character execution session request metadata",
@@ -317,9 +377,11 @@ func TestEnrichDerivesAfterInvalidSessionIdentity(t *testing.T) {
 			requestMetadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "bad\nsession"},
 		},
 		{
-			name:           "oversized retained derived session option metadata",
-			payload:        []byte(`{"input":"hello"}`),
-			optionMetadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: strings.Repeat("x", 257)},
+			name:    "oversized retained derived session option metadata",
+			payload: []byte(`{"input":"hello"}`),
+			optionMetadata: map[string]any{
+				cliproxyexecutor.DerivedSessionIDMetadataKey: strings.Repeat("x", 257),
+			},
 		},
 		{
 			name:            "control character retained derived session request metadata",
@@ -343,7 +405,12 @@ func TestEnrichDerivesAfterInvalidSessionIdentity(t *testing.T) {
 				optionsID := DerivedID(enrichedOpts.Metadata)
 				wantID := DeriveID(sdktranslator.FormatOpenAIResponse, test.payload, "")
 				if requestID != wantID || optionsID != wantID {
-					t.Fatalf("derived identities = request:%q options:%q, want %q", requestID, optionsID, wantID)
+					t.Fatalf(
+						"derived identities = request:%q options:%q, want %q",
+						requestID,
+						optionsID,
+						wantID,
+					)
 				}
 				if got := metadataString(
 					enrichedReq.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey,

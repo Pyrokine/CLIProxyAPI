@@ -19,7 +19,9 @@ import (
 const (
 	toolStreamFixtureProvider = "tool-stream-provider"
 	toolStreamFixtureModel    = "gpt-5-tool"
-	toolStreamFixturePayload  = `{"type":"response.output_item.done","item":{"type":"function_call","id":"call_weather","call_id":"call_weather","name":"weather","arguments":"{\"city\":\"北京\"}"}}`
+	toolStreamFixturePayload  = `{"type":"response.output_item.done","item":{"type":"function_call","id` +
+		`":"call_weather","call_id":"call_weather","name":"weather","arguments"` +
+		`:"{\"city\":\"北京\"}"}}`
 )
 
 type toolStreamFixtureAttempt struct {
@@ -343,7 +345,8 @@ func assertNoMoreToolStreamFixtureResults(t *testing.T, hook *streamDeliveryResu
 
 func assertToolStreamFixturePayload(t *testing.T, chunk cliproxyexecutor.StreamChunk, authIDs ...string) {
 	t.Helper()
-	if chunk.Terminal || chunk.Err != nil || chunk.Acknowledge == nil || string(chunk.Payload) != toolStreamFixturePayload {
+	if chunk.Terminal || chunk.Err != nil || chunk.Acknowledge == nil ||
+		string(chunk.Payload) != toolStreamFixturePayload {
 		t.Fatalf("tool stream payload = %#v", chunk)
 	}
 	for _, authID := range authIDs {
@@ -396,7 +399,8 @@ func TestToolStreamExecutionPathConformance(t *testing.T) {
 							t.Fatalf("upstream payload acknowledgement = %v", errAck)
 						}
 						terminal := <-stream.Chunks
-						if !terminal.Terminal || terminal.Acknowledge == nil || len(terminal.Payload) != 0 || terminal.Err != nil {
+						if !terminal.Terminal || terminal.Acknowledge == nil || len(terminal.Payload) != 0 ||
+							terminal.Err != nil {
 							t.Fatalf("transport terminal = %#v", terminal)
 						}
 						assertNoStreamDeliveryResult(t, harness.hook)
@@ -515,7 +519,8 @@ func TestToolStreamExecutionPathConformance(t *testing.T) {
 							t.Fatal("bootstrap error stream remained open")
 						}
 						result := readToolStreamFixtureResult(t, harness.hook)
-						if result.Success || result.Disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseMaybeSent ||
+						if result.Success ||
+							result.Disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseMaybeSent ||
 							result.Disposition.Outcome != cliproxyexecutor.ExecutionOutcomeUnknown ||
 							result.Disposition.RetryDirective != cliproxyexecutor.RetryDirectiveNoRetry ||
 							result.Disposition.EffectScope != cliproxyexecutor.StateEffectScopeRequest {
@@ -559,13 +564,15 @@ func TestToolStreamExecutionPathConformance(t *testing.T) {
 						}
 
 						failure := readToolStreamFixtureResult(t, harness.hook)
-						if failure.Success || failure.Disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseNotSent ||
+						if failure.Success ||
+							failure.Disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseNotSent ||
 							failure.Disposition.Outcome != cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing ||
 							failure.Disposition.RetryDirective != cliproxyexecutor.RetryDirectiveNextAuth {
 							t.Fatalf("not-sent bootstrap result = %#v", failure)
 						}
 						success := readToolStreamFixtureResult(t, harness.hook)
-						if !success.Success || success.Disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseDownstreamCommitted ||
+						if !success.Success ||
+							success.Disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseDownstreamCommitted ||
 							success.Disposition.Outcome != cliproxyexecutor.ExecutionOutcomeSucceeded {
 							t.Fatalf("retried stream result = %#v", success)
 						}

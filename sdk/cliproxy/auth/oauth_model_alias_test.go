@@ -219,12 +219,16 @@ func TestOAuthModelAliasChannel_Meta(t *testing.T) {
 func TestApplyOAuthModelAliasMetaOAuthWithMintedAPIKey(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{})
-	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
-		"meta": {{Name: "muse-spark-1.3", Alias: "muse-latest", ForceMapping: true}},
-	})
-	auth := &Auth{Provider: "meta", Attributes: map[string]string{
-		"auth_kind": "oauth", "api_key": "LLM|fixture", "dca_token": "dca:fixture",
-	}}
+	manager.SetOAuthModelAlias(
+		map[string][]internalconfig.OAuthModelAlias{
+			"meta": {{Name: "muse-spark-1.3", Alias: "muse-latest", ForceMapping: true}},
+		},
+	)
+	auth := &Auth{
+		Provider: "meta", Attributes: map[string]string{
+			"auth_kind": "oauth", "api_key": "LLM|fixture", "dca_token": "dca:fixture",
+		},
+	}
 	result := manager.applyOAuthModelAliasWithResult(auth, "muse-latest(max)")
 	if result.UpstreamModel != "muse-spark-1.3(max)" || !result.ForceMapping || result.OriginalAlias != "muse-latest" {
 		t.Fatalf("Meta OAuth alias = %#v", result)
@@ -342,13 +346,17 @@ func TestApplyOAuthModelAliasWithResult_NoForceMappingPreservesRequestedModelInO
 
 func TestCredentialOAuthAliasesOverrideGlobalAndClear(t *testing.T) {
 	mgr := NewManager(nil, nil, nil)
-	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
-		"codex": {{Name: "global-model", Alias: "shared"}},
-	})
+	mgr.SetOAuthModelAlias(
+		map[string][]internalconfig.OAuthModelAlias{
+			"codex": {{Name: "global-model", Alias: "shared"}},
+		},
+	)
 	auth := &Auth{Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
-	if err := SetOAuthModelAliasesAttribute(auth, []internalconfig.OAuthModelAlias{
-		{Name: "credential-model", Alias: "shared", Fork: true, ForceMapping: true},
-	}); err != nil {
+	if err := SetOAuthModelAliasesAttribute(
+		auth, []internalconfig.OAuthModelAlias{
+			{Name: "credential-model", Alias: "shared", Fork: true, ForceMapping: true},
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
 	result := mgr.applyOAuthModelAliasWithResult(auth, "shared(high)")
@@ -369,15 +377,19 @@ func TestCredentialOAuthAliasesOverrideGlobalAndClear(t *testing.T) {
 		t.Fatalf("API key used OAuth alias: %q", resolved)
 	}
 
-	fileAuth := &Auth{Provider: "codex", Metadata: map[string]any{
-		"api_key": "synthetic-key", "access_token": "synthetic-token",
-	}}
+	fileAuth := &Auth{
+		Provider: "codex", Metadata: map[string]any{
+			"api_key": "synthetic-key", "access_token": "synthetic-token",
+		},
+	}
 	if fileAuth.AuthKind() != AuthKindAPIKey {
 		t.Fatalf("file API key classified as %q", fileAuth.AuthKind())
 	}
-	if err := SetOAuthModelAliasesAttribute(fileAuth, []internalconfig.OAuthModelAlias{
-		{Name: "credential-model", Alias: "shared"},
-	}); err != nil {
+	if err := SetOAuthModelAliasesAttribute(
+		fileAuth, []internalconfig.OAuthModelAlias{
+			{Name: "credential-model", Alias: "shared"},
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
 	if resolved := mgr.applyOAuthModelAlias(fileAuth, "shared(high)"); resolved != "shared(high)" {
@@ -399,18 +411,23 @@ func TestOAuthModelAliasesFromMetadataRejectsMalformedRows(t *testing.T) {
 	}{
 		{name: "not an array", value: map[string]any{"name": "model"}},
 		{name: "missing alias", value: []any{map[string]any{"name": "model"}}},
-		{name: "duplicate alias", value: []any{
-			map[string]any{"name": "a", "alias": "shared"},
-			map[string]any{"name": "b", "alias": "SHARED"},
-		}},
+		{
+			name: "duplicate alias", value: []any{
+				map[string]any{"name": "a", "alias": "shared"},
+				map[string]any{"name": "b", "alias": "SHARED"},
+			},
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := OAuthModelAliasesFromMetadata(map[string]any{"model_aliases": tc.value}); err == nil {
-				t.Fatal("invalid aliases accepted")
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				if _, err := OAuthModelAliasesFromMetadata(map[string]any{"model_aliases": tc.value}); err == nil {
+					t.Fatal("invalid aliases accepted")
+				}
+			},
+		)
 	}
-	if aliases, err := OAuthModelAliasesFromMetadata(map[string]any{"model_aliases": []any{}}); err != nil || len(aliases) != 0 {
+	if aliases, err := OAuthModelAliasesFromMetadata(map[string]any{"model_aliases": []any{}}); err != nil ||
+		len(aliases) != 0 {
 		t.Fatalf("empty aliases = %#v error = %v", aliases, err)
 	}
 }
@@ -424,51 +441,84 @@ func TestModelAliasExactSuffixPrecedence(t *testing.T) {
 		name, requested, upstream, responseAlias string
 		forceMapping                             bool
 	}{
-		{name: "exact", requested: "public(low)", upstream: "low-upstream(low)", responseAlias: "public(low)", forceMapping: true},
-		{name: "case insensitive", requested: "PUBLIC(low)", upstream: "low-upstream(low)", responseAlias: "public(low)", forceMapping: true},
-		{name: "base fallback", requested: "public(high)", upstream: "base-upstream(high)", responseAlias: "public(high)"},
+		{
+			name: "exact", requested: "public(low)", upstream: "low-upstream(low)", responseAlias: "public(low)",
+			forceMapping: true,
+		},
+		{
+			name: "case insensitive", requested: "PUBLIC(low)", upstream: "low-upstream(low)",
+			responseAlias: "public(low)", forceMapping: true,
+		},
+		{
+			name: "base fallback", requested: "public(high)", upstream: "base-upstream(high)",
+			responseAlias: "public(high)",
+		},
 		{name: "base", requested: "public", upstream: "base-upstream", responseAlias: "public"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manager := NewManager(nil, nil, nil)
-			manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{"codex": aliases})
-			oauth := &Auth{Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
-			check := func(t *testing.T, result OAuthModelAliasResult) {
-				t.Helper()
-				if result.UpstreamModel != tc.upstream || result.ForceMapping != tc.forceMapping || result.OriginalAlias != tc.responseAlias {
-					t.Fatalf("alias result = %+v, want upstream=%q force=%t response=%q", result, tc.upstream, tc.forceMapping, tc.responseAlias)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				manager := NewManager(nil, nil, nil)
+				manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{"codex": aliases})
+				oauth := &Auth{Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
+				check := func(t *testing.T, result OAuthModelAliasResult) {
+					t.Helper()
+					if result.UpstreamModel != tc.upstream || result.ForceMapping != tc.forceMapping ||
+						result.OriginalAlias != tc.responseAlias {
+						t.Fatalf(
+							"alias result = %+v, want upstream=%q force=%t response=%q", result, tc.upstream,
+							tc.forceMapping, tc.responseAlias,
+						)
+					}
 				}
-			}
-			t.Run("global OAuth", func(t *testing.T) {
-				check(t, manager.applyOAuthModelAliasWithResult(oauth, tc.requested))
-			})
-			if err := SetOAuthModelAliasesAttribute(oauth, aliases); err != nil {
-				t.Fatal(err)
-			}
-			t.Run("credential OAuth", func(t *testing.T) {
-				check(t, manager.applyOAuthModelAliasWithResult(oauth, tc.requested))
-			})
-			manager.SetConfig(&internalconfig.Config{CodexKey: []internalconfig.CodexKey{{
-				APIKey: "fixture-exact-alias",
-				Models: []internalconfig.CodexModel{
-					{Name: "base-upstream", Alias: "public"},
-					{Name: "low-upstream", Alias: "public(low)", ForceMapping: true},
-				},
-			}}})
-			keyAuth := &Auth{ID: "exact-alias-key", Provider: "codex", Attributes: map[string]string{
-				"auth_kind": "apikey", "api_key": "fixture-exact-alias",
-			}}
-			if _, err := manager.Register(t.Context(), keyAuth); err != nil {
-				t.Fatal(err)
-			}
-			t.Run("API key lookup", func(t *testing.T) {
-				if resolved := manager.lookupAPIKeyUpstreamModel(keyAuth.ID, tc.requested); resolved != tc.upstream {
-					t.Fatalf("lookup model = %q, want %q", resolved, tc.upstream)
+				t.Run(
+					"global OAuth", func(t *testing.T) {
+						check(t, manager.applyOAuthModelAliasWithResult(oauth, tc.requested))
+					},
+				)
+				if err := SetOAuthModelAliasesAttribute(oauth, aliases); err != nil {
+					t.Fatal(err)
 				}
-			})
-			t.Run("API key result", func(t *testing.T) {
-				check(t, manager.resolveAPIKeyModelAliasWithResult(keyAuth, tc.requested))
-			})
-		})
+				t.Run(
+					"credential OAuth", func(t *testing.T) {
+						check(t, manager.applyOAuthModelAliasWithResult(oauth, tc.requested))
+					},
+				)
+				manager.SetConfig(
+					&internalconfig.Config{
+						CodexKey: []internalconfig.CodexKey{
+							{
+								APIKey: "fixture-exact-alias",
+								Models: []internalconfig.CodexModel{
+									{Name: "base-upstream", Alias: "public"},
+									{Name: "low-upstream", Alias: "public(low)", ForceMapping: true},
+								},
+							},
+						},
+					},
+				)
+				keyAuth := &Auth{
+					ID: "exact-alias-key", Provider: "codex", Attributes: map[string]string{
+						"auth_kind": "apikey", "api_key": "fixture-exact-alias",
+					},
+				}
+				if _, err := manager.Register(t.Context(), keyAuth); err != nil {
+					t.Fatal(err)
+				}
+				t.Run(
+					"API key lookup", func(t *testing.T) {
+						if resolved := manager.lookupAPIKeyUpstreamModel(
+							keyAuth.ID, tc.requested,
+						); resolved != tc.upstream {
+							t.Fatalf("lookup model = %q, want %q", resolved, tc.upstream)
+						}
+					},
+				)
+				t.Run(
+					"API key result", func(t *testing.T) {
+						check(t, manager.resolveAPIKeyModelAliasWithResult(keyAuth, tc.requested))
+					},
+				)
+			},
+		)
 	}
 }

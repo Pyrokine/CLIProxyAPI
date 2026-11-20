@@ -12,6 +12,9 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// AuthSelectionModelMetadataKey 指定仅用于凭据选择的模型
+const AuthSelectionModelMetadataKey = "auth_selection_model"
+
 // ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
 const ReasoningEffortMetadataKey = "reasoning_effort"
 
@@ -78,6 +81,8 @@ const (
 	DisallowFreeAuthMetadataKey = "disallow_free_auth"
 	// RequireResponsesContinuationMetadataKey restricts selection to credentials with native Responses continuation.
 	RequireResponsesContinuationMetadataKey = "require_responses_continuation"
+	// RequireAPIKeyAuthMetadataKey restricts public API-only media requests to API-key credentials.
+	RequireAPIKeyAuthMetadataKey = "require_api_key_auth"
 )
 
 // DispatchPhase identifies the furthest externally observable request boundary.
@@ -475,6 +480,16 @@ type Options struct {
 	WebSocketResponseObserver WebSocketResponseObserver
 	// ProxyURL overrides credential and global proxies for this execution only.
 	ProxyURL string
+}
+
+// EnsureMetadata initializes and returns Metadata, ensuring it is non-nil.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (o *Options) EnsureMetadata() map[string]any {
+	if o.Metadata == nil {
+		o.Metadata = make(map[string]any)
+	}
+	return o.Metadata
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.

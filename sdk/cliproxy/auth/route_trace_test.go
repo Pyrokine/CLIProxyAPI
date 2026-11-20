@@ -298,7 +298,14 @@ func routeTraceTestAuthIndex(t *testing.T, manager *Manager, authID string) stri
 	if !ok || auth == nil || auth.Index == "" {
 		t.Fatalf("registered auth %q has no runtime index", authID)
 	}
-	return auth.Index
+	if len(auth.Index) == 16 {
+		return auth.Index
+	}
+	// Diagnostic events use an opaque index for externally assigned legacy identities.
+	traceAuth := auth.Clone()
+	traceAuth.Index = ""
+	traceAuth.indexAssigned = false
+	return traceAuth.EnsureIndex()
 }
 
 func requireRouteTraceActionOrder(
@@ -679,6 +686,106 @@ func TestManagerRouteTraceCancellationRecordsTerminalAttempt(t *testing.T) {
 	}
 }
 
+func TestManagerRouteTracePreservesTimeoutOriginAndStreamPhase(t *testing.T) {
+	for _, sample := range []struct {
+		name, code string
+		err        error
+		status     int
+	}{
+		{
+			"upstream request timeout", "request_timeout",
+			routeTraceTestError{status: 408, message: "upstream upload timed out"}, 408,
+		},
+		{
+			"upstream gateway timeout", "upstream_error",
+			routeTraceTestError{status: 504, message: "upstream gateway timed out"}, 504,
+		},
+		{
+			"reverse proxy timeout", "upstream_error",
+			routeTraceTestError{status: 524, message: "reverse proxy timed out"}, 524,
+		},
+		{"client cancellation", "context_canceled", fmt.Errorf("client stopped: %w", context.Canceled), 0},
+		{"CPA deadline", "deadline_exceeded", fmt.Errorf("execution deadline: %w", context.DeadlineExceeded), 0},
+	} {
+		for _, mode := range []string{"execute", "stream setup", "stream payload"} {
+			t.Run(
+				sample.name+"/"+mode, func(t *testing.T) {
+					const provider, model = "timeout-origin-provider", "timeout-origin-model"
+					executor := &routeTraceTestExecutor{
+						provider: provider,
+						executeFn: func(*Auth) (cliproxyexecutor.Response, error) {
+							return cliproxyexecutor.Response{}, sample.err
+						},
+						streamFn: func(*Auth) (*cliproxyexecutor.StreamResult, error) {
+							if mode == "stream setup" {
+								return nil, sample.err
+							}
+							chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+							chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("first payload")}
+							chunks <- cliproxyexecutor.StreamChunk{Err: sample.err}
+							close(chunks)
+							return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+						},
+					}
+					manager := NewManager(nil, &FillFirstSelector{}, nil)
+					manager.SetRetryConfig(0, 0, 0)
+					manager.RegisterExecutor(executor)
+					registerRouteTraceTestAuths(
+						t,
+						manager,
+						provider,
+						model,
+						&Auth{ID: t.Name(), Provider: provider},
+					)
+					recorder := &routeTraceTestRecorder{}
+					opts := routeTraceTestOptions(recorder.Add)
+					var failure error
+					if mode == "execute" {
+						_, failure = manager.Execute(
+							t.Context(), []string{provider}, cliproxyexecutor.Request{Model: model}, opts,
+						)
+					} else {
+						opts.Stream = true
+						var stream *cliproxyexecutor.StreamResult
+						stream, failure = manager.ExecuteStream(
+							t.Context(), []string{provider}, cliproxyexecutor.Request{Model: model}, opts,
+						)
+						if failure == nil {
+							for chunk := range stream.Chunks {
+								if chunk.Err != nil {
+									failure = chunk.Err
+								}
+							}
+						}
+					}
+					if !errors.Is(failure, sample.err) {
+						t.Fatalf("request lost original timeout cause: %v", failure)
+					}
+					events := recorder.Events()
+					failed := findRouteTraceEvent(t, events, "attempt.failed", 1)
+					if failed.HTTPStatus != sample.status || failed.ResultCode != sample.code ||
+						!failed.FinalTarget {
+						t.Fatalf("timeout origin changed: %+v", failed)
+					}
+					streamStarted := false
+					for _, event := range events {
+						if event.Action == "attempt.stream_started" {
+							streamStarted = true
+						}
+						if event.Action == "attempt.completed" ||
+							event.RetryDirective == cliproxyexecutor.RetryDirectiveNextAuth {
+							t.Fatalf("ambiguous timeout published success or replay permission: %+v", event)
+						}
+					}
+					if streamStarted != (mode == "stream payload") {
+						t.Fatalf("stream phase changed: started=%t mode=%s", streamStarted, mode)
+					}
+				},
+			)
+		}
+	}
+}
+
 func TestManagerRouteTraceRetryAfterAndAttemptOrder(t *testing.T) {
 	const (
 		provider = "route-trace-retry-provider"
@@ -958,14 +1065,21 @@ func TestManagerRouteTraceCallbackDoesNotChangeExecution(t *testing.T) {
 				for index, mode := range []string{"none", "noop", "panic", "saturated"} {
 					t.Run(
 						mode, func(t *testing.T) {
-							got := runRouteTraceCallbackEquivalenceScenario(t, mode, test.succeed, test.pinSelected)
+							got := runRouteTraceCallbackEquivalenceScenario(
+								t,
+								mode,
+								test.succeed,
+								test.pinSelected,
+							)
 							if index == 0 {
 								baseline = got
 								return
 							}
 							if !reflect.DeepEqual(got, baseline) {
 								t.Fatalf(
-									"execution differs from no-trace baseline:\n got: %#v\nwant: %#v", got, baseline,
+									"execution differs from no-trace baseline:\n got: %#v\nwant: %#v",
+									got,
+									baseline,
 								)
 							}
 						},
@@ -1157,7 +1271,8 @@ func TestManagerRouteTraceCallbackDoesNotChangeStreamExecution(t *testing.T) {
 							}
 							if !reflect.DeepEqual(got, baseline) {
 								t.Fatalf(
-									"stream execution differs from no-trace baseline:\n got: %#v\nwant: %#v", got,
+									"stream execution differs from no-trace baseline:\n got: %#v\nwant: %#v",
+									got,
 									baseline,
 								)
 							}
@@ -1183,8 +1298,9 @@ func TestManagerRouteTraceRecordsRealStreamTerminal(t *testing.T) {
 					t.Fatalf("stream started event = %+v", started)
 				}
 				for _, event := range streamEvents.beforeConsume {
-					if event.Attempt == 1 && (event.Action == "attempt.completed" || event.Action == "attempt.failed" ||
-						event.Action == "result.recorded") {
+					if event.Attempt == 1 &&
+						(event.Action == "attempt.completed" || event.Action == "attempt.failed" ||
+							event.Action == "result.recorded") {
 						t.Fatalf("terminal event published before stream consumption: %+v", event)
 					}
 				}
@@ -1197,7 +1313,11 @@ func TestManagerRouteTraceRecordsRealStreamTerminal(t *testing.T) {
 					}
 				} else {
 					completed := findRouteTraceEvent(t, events, "attempt.completed", 1)
-					if completed.ResultCode != "success" || completed.HTTPStatus != http.StatusOK || !completed.FinalTarget {
+					if completed.ResultCode !=
+						"success" ||
+						completed.HTTPStatus !=
+							http.StatusOK ||
+						!completed.FinalTarget {
 						t.Fatalf("stream completed event = %+v", completed)
 					}
 				}
@@ -1375,71 +1495,74 @@ func TestManagerRouteTraceStreamBootstrapUnknownOutcomeStopsReplay(t *testing.T)
 }
 
 func TestManagerRouteTraceCooldownWait(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const (
-			provider = "route-trace-cooldown-provider"
-			model    = "route-trace-cooldown-model"
-		)
-		var executeCount int
-		executor := &routeTraceTestExecutor{
-			provider: provider,
-			executeFn: func(auth *Auth) (cliproxyexecutor.Response, error) {
-				executeCount++
-				if executeCount == 1 {
-					return cliproxyexecutor.Response{}, routeTraceTestError{
-						status:     http.StatusTooManyRequests,
-						retryAfter: 5 * time.Millisecond,
-						message:    "private cooldown detail",
+	synctest.Test(
+		t, func(t *testing.T) {
+			const (
+				provider = "route-trace-cooldown-provider"
+				model    = "route-trace-cooldown-model"
+			)
+			var executeCount int
+			executor := &routeTraceTestExecutor{
+				provider: provider,
+				executeFn: func(auth *Auth) (cliproxyexecutor.Response, error) {
+					executeCount++
+					if executeCount == 1 {
+						return cliproxyexecutor.Response{}, routeTraceTestError{
+							status:     http.StatusTooManyRequests,
+							retryAfter: 5 * time.Millisecond,
+							message:    "private cooldown detail",
+						}
 					}
-				}
-				return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
-			},
-		}
-		manager := NewManager(nil, &RoundRobinSelector{}, nil)
-		manager.SetRetryConfig(1, 2*minQuotaCooldownFloor, 0)
-		manager.RegisterExecutor(executor)
-		registerRouteTraceTestAuths(
-			t,
-			manager,
-			provider,
-			model,
-			&Auth{ID: "route-trace-cooldown-auth", Provider: provider},
-		)
-		recorder := &routeTraceTestRecorder{}
+					return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+				},
+			}
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			manager.SetRetryConfig(1, 2*minQuotaCooldownFloor, 0)
+			manager.RegisterExecutor(executor)
+			registerRouteTraceTestAuths(
+				t,
+				manager,
+				provider,
+				model,
+				&Auth{ID: "route-trace-cooldown-auth", Provider: provider},
+			)
+			recorder := &routeTraceTestRecorder{}
 
-		response, errExecute := manager.Execute(
-			context.Background(),
-			[]string{provider},
-			cliproxyexecutor.Request{Model: model},
-			routeTraceTestOptions(recorder.Add),
-		)
-		if errExecute != nil {
-			t.Fatalf("Execute() error = %v", errExecute)
-		}
-		if got := string(response.Payload); got != "route-trace-cooldown-auth" {
-			t.Fatalf("response payload = %q", got)
-		}
-		if got := executor.ExecuteCalls(); !reflect.DeepEqual(
-			got,
-			[]string{"route-trace-cooldown-auth", "route-trace-cooldown-auth"},
-		) {
-			t.Fatalf("execute calls = %v", got)
-		}
+			response, errExecute := manager.Execute(
+				context.Background(),
+				[]string{provider},
+				cliproxyexecutor.Request{Model: model},
+				routeTraceTestOptions(recorder.Add),
+			)
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+			if got := string(response.Payload); got != "route-trace-cooldown-auth" {
+				t.Fatalf("response payload = %q", got)
+			}
+			if got := executor.ExecuteCalls(); !reflect.DeepEqual(
+				got,
+				[]string{"route-trace-cooldown-auth", "route-trace-cooldown-auth"},
+			) {
+				t.Fatalf("execute calls = %v", got)
+			}
 
-		events := recorder.Events()
-		cooldownWait := findRouteTraceEvent(t, events, "cooldown.wait", 2)
-		if cooldownWait.ResultCode != "rate_limited" || cooldownWait.HTTPStatus != http.StatusTooManyRequests {
-			t.Fatalf("cooldown wait event = %+v", cooldownWait)
-		}
-		if cooldownWait.RetryAfterMS != minQuotaCooldownFloor.Milliseconds() {
-			t.Fatalf("cooldown retry_after_ms = %d", cooldownWait.RetryAfterMS)
-		}
-		findRouteTraceEvent(t, events, "cooldown.completed", 2)
-		completed := findRouteTraceEvent(t, events, "attempt.completed", 3)
-		if !completed.FinalTarget {
-			t.Fatalf("completed event = %+v", completed)
-		}
-	})
+			events := recorder.Events()
+			cooldownWait := findRouteTraceEvent(t, events, "cooldown.wait", 2)
+			if cooldownWait.ResultCode != "rate_limited" ||
+				cooldownWait.HTTPStatus != http.StatusTooManyRequests {
+				t.Fatalf("cooldown wait event = %+v", cooldownWait)
+			}
+			if cooldownWait.RetryAfterMS != minQuotaCooldownFloor.Milliseconds() {
+				t.Fatalf("cooldown retry_after_ms = %d", cooldownWait.RetryAfterMS)
+			}
+			findRouteTraceEvent(t, events, "cooldown.completed", 2)
+			completed := findRouteTraceEvent(t, events, "attempt.completed", 3)
+			if !completed.FinalTarget {
+				t.Fatalf("completed event = %+v", completed)
+			}
+		},
+	)
 }
 
 func TestManagerRouteTraceAllCandidatesExcluded(t *testing.T) {

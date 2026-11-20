@@ -21,10 +21,12 @@ type requestStopError struct {
 	error
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e requestStopError) Unwrap() error {
 	return e.error
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e requestStopError) IsRequestStop() bool {
 	return true
 }
@@ -34,6 +36,7 @@ type requestRuleDispositionError struct {
 	disposition cliproxyexecutor.ExecutionDisposition
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *requestRuleDispositionError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -73,6 +76,7 @@ func wrapRequestStopError(err error) error {
 	return requestStopError{error: err}
 }
 
+// noinspection GoTypeAssertionOnErrors
 func unwrapRequestScopedActionError(err error) error {
 	for err != nil {
 		switch typed := err.(type) {
@@ -152,8 +156,16 @@ func extractRequestScopedErrorRules(
 		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 	}
+	if compatName == "" {
+		switch {
+		case strings.HasPrefix(provider, "openai-compatible-"):
+			compatName = strings.TrimPrefix(provider, "openai-compatible-")
+		case strings.HasPrefix(provider, "openai-compatibility:"):
+			compatName = strings.TrimPrefix(provider, "openai-compatibility:")
+		}
+	}
 	if providerKey != "" || compatName != "" || provider == "openai-compatibility" {
-		if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
+		if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider, auth); entry != nil {
 			return entry.RequestScopedErrors
 		}
 	}

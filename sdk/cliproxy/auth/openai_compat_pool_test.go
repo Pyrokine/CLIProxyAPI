@@ -16,6 +16,8 @@ type openAICompatPoolExecutor struct {
 
 	mu                sync.Mutex
 	executeModels     []string
+	executeAuthIDs    []string
+	executePayloads   map[string][]byte
 	countModels       []string
 	streamModels      []string
 	executeErrors     map[string]error
@@ -27,20 +29,22 @@ type openAICompatPoolExecutor struct {
 func (e *openAICompatPoolExecutor) Identifier() string { return e.id }
 
 func (e *openAICompatPoolExecutor) Execute(
-	ctx context.Context,
+	_ context.Context,
 	auth *Auth,
 	req cliproxyexecutor.Request,
-	opts cliproxyexecutor.Options,
+	_ cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
-	_ = ctx
-	_ = auth
-	_ = opts
 	e.mu.Lock()
 	e.executeModels = append(e.executeModels, req.Model)
+	e.executeAuthIDs = append(e.executeAuthIDs, auth.ID)
 	err := e.executeErrors[req.Model]
+	payload, configured := e.executePayloads[req.Model]
 	e.mu.Unlock()
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
+	}
+	if configured {
+		return cliproxyexecutor.Response{Payload: append([]byte(nil), payload...)}, nil
 	}
 	return cliproxyexecutor.Response{Payload: []byte(req.Model)}, nil
 }
@@ -207,10 +211,7 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testi
 	}
 }
 
-// TestManagerExecute_OpenAICompatAliasResolvesToFirstModel verifies that the alias
-// always resolves to the first matching model in the config. The pool rotation feature
-// was removed during refactoring; applyAPIKeyModelAlias always returns the first match.
-func TestManagerExecute_OpenAICompatAliasResolvesToFirstModel(t *testing.T) {
+func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
 	m := newOpenAICompatPoolTestManager(
@@ -233,8 +234,7 @@ func TestManagerExecute_OpenAICompatAliasResolvesToFirstModel(t *testing.T) {
 	}
 
 	got := executor.ExecuteModels()
-	// All calls resolve to the first matching model (no rotation)
-	want := []string{"qwen3.5-plus", "qwen3.5-plus", "qwen3.5-plus"}
+	want := []string{"qwen3.5-plus", "glm-5", "qwen3.5-plus"}
 	if len(got) != len(want) {
 		t.Fatalf("execute calls = %v, want %v", got, want)
 	}
@@ -271,9 +271,7 @@ func TestManagerExecute_OpenAICompatAliasPoolStopsOnBadRequest(t *testing.T) {
 	}
 }
 
-// TestManagerExecute_OpenAICompatAliasRetryableErrorStopsWithSingleAuth verifies
-// that a retryable error (429) with a single auth stops after exhausting the auth.
-func TestManagerExecute_OpenAICompatAliasRetryableErrorStopsWithSingleAuth(t *testing.T) {
+func TestManagerExecute_OpenAICompatAliasRetryableErrorUsesNextTarget(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{
 		id: "pool",
@@ -290,22 +288,22 @@ func TestManagerExecute_OpenAICompatAliasRetryableErrorStopsWithSingleAuth(t *te
 		}, executor,
 	)
 
-	_, err := m.Execute(
+	response, err := m.Execute(
 		context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
 	)
-	if err == nil {
-		t.Fatal("expected error for quota-exceeded model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(response.Payload) != "glm-5" {
+		t.Fatalf("quota rejection response=%s error=%v, want glm-5", response.Payload, err)
 	}
 	got := executor.ExecuteModels()
-	// Only one auth, so only one attempt with the first resolved model
-	if len(got) != 1 || got[0] != "qwen3.5-plus" {
-		t.Fatalf("execute calls = %v, want [qwen3.5-plus]", got)
+	if len(got) != 2 || got[0] != "qwen3.5-plus" || got[1] != "glm-5" {
+		t.Fatalf("execute calls = %v, want [qwen3.5-plus glm-5]", got)
 	}
 }
 
-// TestManagerExecuteStream_OpenAICompatAliasResolvesToFirstModel verifies stream
-// also always uses the first matching model.
-func TestManagerExecuteStream_OpenAICompatAliasResolvesToFirstModel(t *testing.T) {
+func TestManagerExecuteStream_OpenAICompatAliasPoolUsesSelectedModel(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
 	m := newOpenAICompatPoolTestManager(
@@ -380,9 +378,7 @@ func TestManagerExecuteStream_OpenAICompatAliasStopsOnInvalidRequest(t *testing.
 	}
 }
 
-// TestManagerExecuteCount_OpenAICompatAliasResolvesToFirstModel verifies count
-// also always uses the first matching model.
-func TestManagerExecuteCount_OpenAICompatAliasResolvesToFirstModel(t *testing.T) {
+func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
 	m := newOpenAICompatPoolTestManager(
@@ -405,7 +401,7 @@ func TestManagerExecuteCount_OpenAICompatAliasResolvesToFirstModel(t *testing.T)
 	}
 
 	got := executor.CountModels()
-	want := []string{"qwen3.5-plus", "qwen3.5-plus"}
+	want := []string{"qwen3.5-plus", "glm-5"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("count call %d model = %q, want %q", i, got[i], want[i])

@@ -6,7 +6,7 @@ type downstreamWebsocketContextKey struct{}
 type requireUpstreamWebsocketContextKey struct{}
 type streamDeliveryAcknowledgementContextKey struct{}
 
-// WithDownstreamWebsocket marks the current request as coming from a downstream websocket connection.
+// WithDownstreamWebsocket marks the current request as coming from a downstream WebSocket connection.
 func WithDownstreamWebsocket(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -14,7 +14,7 @@ func WithDownstreamWebsocket(ctx context.Context) context.Context {
 	return context.WithValue(ctx, downstreamWebsocketContextKey{}, true)
 }
 
-// DownstreamWebsocket reports whether the current request originates from a downstream websocket connection.
+// DownstreamWebsocket reports whether the current request originates from a downstream WebSocket connection.
 func DownstreamWebsocket(ctx context.Context) bool {
 	if ctx == nil {
 		return false
@@ -24,7 +24,8 @@ func DownstreamWebsocket(ctx context.Context) bool {
 	return ok && enabled
 }
 
-// WithRequiredUpstreamWebsocket marks a request whose incremental context is valid only on the current upstream websocket.
+// WithRequiredUpstreamWebsocket marks a request whose incremental context is valid only on the current upstream
+// WebSocket.
 func WithRequiredUpstreamWebsocket(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -50,7 +51,8 @@ func WithStreamDeliveryAcknowledgement(ctx context.Context) context.Context {
 	return context.WithValue(ctx, streamDeliveryAcknowledgementContextKey{}, true)
 }
 
-// WithoutStreamDeliveryAcknowledgement prevents nested executions from inheriting the caller's transport acknowledgment.
+// WithoutStreamDeliveryAcknowledgement prevents nested executions from inheriting the caller's transport
+// acknowledgment.
 func WithoutStreamDeliveryAcknowledgement(ctx context.Context) context.Context {
 	if ctx == nil {
 		return context.Background()

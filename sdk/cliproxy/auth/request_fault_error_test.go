@@ -45,40 +45,44 @@ func TestRequestScopedErrorSDKHelpersAndStructuredRawMessage(t *testing.T) {
 			wantCooldown: true,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			manager := NewManager(nil, nil, nil)
-			auth := &Auth{
-				ID:       fmt.Sprintf("request-helper-auth-%d", index),
-				Provider: "request-helper-provider",
-				Status:   StatusActive,
-			}
-			if _, err := manager.Register(context.Background(), auth); err != nil {
-				t.Fatalf("register auth: %v", err)
-			}
-			manager.MarkResult(context.Background(), Result{
-				AuthID:   auth.ID,
-				Provider: auth.Provider,
-				Model:    "request-helper-model",
-				Error:    test.err,
-			})
-			updated, ok := manager.GetByID(auth.ID)
-			if !ok || updated == nil {
-				t.Fatal("updated auth missing")
-			}
-			if updated.Unavailable != test.wantCooldown {
-				t.Fatalf("auth unavailable = %t, want %t: %#v", updated.Unavailable, test.wantCooldown, updated)
-			}
-			state := updated.ModelStates["request-helper-model"]
-			if test.wantCooldown {
-				if updated.NextRetryAfter.IsZero() {
-					t.Fatalf("authentication failure credential state = %#v", updated)
+		t.Run(
+			test.name, func(t *testing.T) {
+				manager := NewManager(nil, nil, nil)
+				auth := &Auth{
+					ID:       fmt.Sprintf("request-helper-auth-%d", index),
+					Provider: "request-helper-provider",
+					Status:   StatusActive,
 				}
-				if state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
-					t.Fatalf("credential failure created model state = %#v", state)
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatalf("register auth: %v", err)
 				}
-			} else if state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
-				t.Fatalf("request fault model state = %#v", state)
-			}
-		})
+				manager.MarkResult(
+					context.Background(), Result{
+						AuthID:   auth.ID,
+						Provider: auth.Provider,
+						Model:    "request-helper-model",
+						Error:    test.err,
+					},
+				)
+				updated, ok := manager.GetByID(auth.ID)
+				if !ok || updated == nil {
+					t.Fatal("updated auth missing")
+				}
+				if updated.Unavailable != test.wantCooldown {
+					t.Fatalf("auth unavailable = %t, want %t: %#v", updated.Unavailable, test.wantCooldown, updated)
+				}
+				state := updated.ModelStates["request-helper-model"]
+				if test.wantCooldown {
+					if updated.NextRetryAfter.IsZero() {
+						t.Fatalf("authentication failure credential state = %#v", updated)
+					}
+					if state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+						t.Fatalf("credential failure created model state = %#v", state)
+					}
+				} else if state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+					t.Fatalf("request fault model state = %#v", state)
+				}
+			},
+		)
 	}
 }

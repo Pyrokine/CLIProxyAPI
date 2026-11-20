@@ -35,34 +35,44 @@ func TestExtractCanonicalTurnsProtocols(t *testing.T) {
 			roles:   []string{"system", "user"},
 		},
 		{
-			name:    "claude reasoning ignored",
-			format:  sdktranslator.FormatClaude,
-			payload: `{"system":"sys","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"secret"},{"type":"text","text":"answer"}]},{"role":"user","content":"hello"}]}`,
-			roles:   []string{"system", "assistant", "user"},
+			name:   "claude reasoning ignored",
+			format: sdktranslator.FormatClaude,
+			payload: `{"system":"sys","messages":[{"role":"assistant","content":[{"type":"th` +
+				`inking","thinking":"secret"},{"type":"text","text":"answer"}]},{"role"` +
+				`:"user","content":"hello"}]}`,
+			roles: []string{"system", "assistant", "user"},
 		},
 		{
-			name:    "responses",
-			format:  sdktranslator.FormatOpenAIResponse,
-			payload: `{"instructions":"sys","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`,
-			roles:   []string{"system", "user"},
+			name:   "responses",
+			format: sdktranslator.FormatOpenAIResponse,
+			payload: `{"instructions":"sys","input":[{"type":"message","role":"user",` +
+				`"content":[{"type":"input_text","text":` +
+				`"hello"}]}]}`,
+			roles: []string{"system", "user"},
 		},
 		{
-			name:    "codex responses",
-			format:  sdktranslator.FormatCodex,
-			payload: `{"instructions":"sys","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`,
-			roles:   []string{"system", "user"},
+			name:   "codex responses",
+			format: sdktranslator.FormatCodex,
+			payload: `{"instructions":"sys","input":[{"type":"message","role":"user",` +
+				`"content":[{"type":"input_text","text":` +
+				`"hello"}]}]}`,
+			roles: []string{"system", "user"},
 		},
 		{
-			name:    "gemini",
-			format:  sdktranslator.FormatGemini,
-			payload: `{"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
-			roles:   []string{"system", "user"},
+			name:   "gemini",
+			format: sdktranslator.FormatGemini,
+			payload: `{"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"role":` +
+				`"user","parts":[{"text":` +
+				`"hello"}]}]}`,
+			roles: []string{"system", "user"},
 		},
 		{
-			name:    "antigravity nested gemini",
-			format:  sdktranslator.FormatAntigravity,
-			payload: `{"request":{"systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`,
-			roles:   []string{"system", "user"},
+			name:   "antigravity nested gemini",
+			format: sdktranslator.FormatAntigravity,
+			payload: `{"request":{"systemInstruction":{"parts":[{"text":"sys"}]},"contents":` +
+				`[{"role":"user","parts":[{"text":` +
+				`"hello"}]}]}}`,
+			roles: []string{"system", "user"},
 		},
 		{
 			name:    "interactions",
@@ -73,18 +83,20 @@ func TestExtractCanonicalTurnsProtocols(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			turns := ExtractCanonicalTurns(test.format, []byte(test.payload))
-			if len(turns) != len(test.roles) {
-				t.Fatalf("turn count = %d, want %d: %+v", len(turns), len(test.roles), turns)
-			}
-			for index, role := range test.roles {
-				if turns[index].Role != role {
-					t.Fatalf("turn[%d].Role = %q, want %q", index, turns[index].Role, role)
+		t.Run(
+			test.name, func(t *testing.T) {
+				t.Parallel()
+				turns := ExtractCanonicalTurns(test.format, []byte(test.payload))
+				if len(turns) != len(test.roles) {
+					t.Fatalf("turn count = %d, want %d: %+v", len(turns), len(test.roles), turns)
 				}
-			}
-		})
+				for index, role := range test.roles {
+					if turns[index].Role != role {
+						t.Fatalf("turn[%d].Role = %q, want %q", index, turns[index].Role, role)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -93,11 +105,13 @@ func TestCanonicalReasoningAndParallelToolsAreStable(t *testing.T) {
 
 	firstReasoning := ExtractCanonicalTurns(
 		sdktranslator.FormatClaude,
-		[]byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"secret-a"},{"type":"text","text":"answer"}]}]}`),
+		[]byte((`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"secret-a"},{"type"` +
+			`:"text","text":"answer"}]}]}`)),
 	)
 	secondReasoning := ExtractCanonicalTurns(
 		sdktranslator.FormatClaude,
-		[]byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"secret-b"},{"type":"text","text":"answer"}]}]}`),
+		[]byte((`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"secret-b"},{"type"` +
+			`:"text","text":"answer"}]}]}`)),
 	)
 	if len(firstReasoning) != 1 || len(secondReasoning) != 1 ||
 		FastTurnFingerprint(firstReasoning[0]) != FastTurnFingerprint(secondReasoning[0]) {
@@ -106,11 +120,15 @@ func TestCanonicalReasoningAndParallelToolsAreStable(t *testing.T) {
 
 	firstTools := ExtractCanonicalTurns(
 		sdktranslator.FormatOpenAI,
-		[]byte(`{"messages":[{"role":"assistant","tool_calls":[{"id":"b","type":"function","function":{"name":"beta","arguments":"{}"}},{"id":"a","type":"function","function":{"name":"alpha","arguments":"{}"}}]}]}`),
+		[]byte((`{"messages":[{"role":"assistant","tool_calls":[{"id":"b","type":"function","function":{"name"` +
+			`:"beta","arguments":"{}"}},{"id":"a","type":"function","function":{"name":"alpha","arguments":"{` +
+			`}"}}]}]}`)),
 	)
 	secondTools := ExtractCanonicalTurns(
 		sdktranslator.FormatOpenAI,
-		[]byte(`{"messages":[{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"alpha","arguments":"{}"}},{"id":"b","type":"function","function":{"name":"beta","arguments":"{}"}}]}]}`),
+		[]byte((`{"messages":[{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name"` +
+			`:"alpha","arguments":"{}"}},{"id":"b","type":"function","function":{"name":"beta","arguments":"{` +
+			`}"}}]}]}`)),
 	)
 	if len(firstTools) != 1 || len(secondTools) != 1 ||
 		FastTurnFingerprint(firstTools[0]) != FastTurnFingerprint(secondTools[0]) {
@@ -148,8 +166,14 @@ func TestCanonicalBoundsAndFullDigest(t *testing.T) {
 	base := strings.Repeat("a", largePartThreshold+8000)
 	changed := []byte(base)
 	changed[5000] = 'b'
-	first := FastTurnFingerprint(CanonicalTurn{Role: "user", Parts: []CanonicalPart{{Kind: "text", Value: base}}})
-	second := FastTurnFingerprint(CanonicalTurn{Role: "user", Parts: []CanonicalPart{{Kind: "text", Value: string(changed)}}})
+	first := FastTurnFingerprint(
+		CanonicalTurn{Role: "user", Parts: []CanonicalPart{{Kind: "text", Value: base}}},
+	)
+	second := FastTurnFingerprint(
+		CanonicalTurn{
+			Role: "user", Parts: []CanonicalPart{{Kind: "text", Value: string(changed)}},
+		},
+	)
 	if first == second {
 		t.Fatal("large parts with the same sparse sample collided")
 	}
@@ -168,7 +192,8 @@ func TestMerklePrefixMatcherRollingPrefixAndForkLineage(t *testing.T) {
 
 	firstFork := testTurns("1", "2", "3", "4", "5", "6", "7", "B")
 	match, ok := matcher.Match(namespace, firstFork)
-	if !ok || !match.IsFork || match.PrefixLength != 7 || match.ParentSessionID == "" || match.SessionID == root.SessionID {
+	if !ok || !match.IsFork || match.PrefixLength != 7 || match.ParentSessionID == "" ||
+		match.SessionID == root.SessionID {
 		t.Fatalf("first fork match = %+v, ok=%v", match, ok)
 	}
 	boundFork := matcher.BindWithResult(namespace, firstFork, "auth-root")
@@ -177,9 +202,11 @@ func TestMerklePrefixMatcherRollingPrefixAndForkLineage(t *testing.T) {
 	}
 
 	nestedFork := testTurns("1", "2", "3", "4", "5", "6", "7", "B", "nested")
-	linear := append(testTurns("1", "2", "3", "4", "5", "6", "7", "B"), CanonicalTurn{
-		Role: "assistant", Parts: []CanonicalPart{{Kind: "text", Value: "continued"}},
-	})
+	linear := append(
+		testTurns("1", "2", "3", "4", "5", "6", "7", "B"), CanonicalTurn{
+			Role: "assistant", Parts: []CanonicalPart{{Kind: "text", Value: "continued"}},
+		},
+	)
 	linearMatch, ok := matcher.Match(namespace, linear)
 	if !ok || linearMatch.IsFork || linearMatch.SessionID != boundFork.SessionID {
 		t.Fatalf("linear continuation = %+v, ok=%v", linearMatch, ok)
@@ -196,10 +223,12 @@ func TestMerklePrefixMatcherRejectsSystemOnlyTrajectory(t *testing.T) {
 	t.Parallel()
 
 	matcher := NewMerklePrefixMatcher(time.Hour)
-	systemOnly := []CanonicalTurn{{
-		Role:  "system",
-		Parts: []CanonicalPart{{Kind: "text", Value: "shared instructions"}},
-	}}
+	systemOnly := []CanonicalTurn{
+		{
+			Role:  "system",
+			Parts: []CanonicalPart{{Kind: "text", Value: "shared instructions"}},
+		},
+	}
 	if result := matcher.BindWithResult("lcp:v1::test::model::caller", systemOnly, "auth-a"); result.SessionID != "" {
 		t.Fatalf("system-only trajectory bound session %q", result.SessionID)
 	}
@@ -236,7 +265,11 @@ func TestMerklePrefixMatcherLateResultsDoNotChangeReboundBinding(t *testing.T) {
 	initial := matcher.BindWithResult(namespace, turns, "auth-old")
 	rebound := matcher.BindWithResult(namespace, turns, "auth-new")
 	if rebound.AccessNumber <= initial.AccessNumber {
-		t.Fatalf("generation did not advance: initial=%d rebound=%d", initial.AccessNumber, rebound.AccessNumber)
+		t.Fatalf(
+			"generation did not advance: initial=%d rebound=%d",
+			initial.AccessNumber,
+			rebound.AccessNumber,
+		)
 	}
 	fingerprints, minimum := matcher.Prepare(turns)
 	if matcher.TouchFingerprints(namespace, fingerprints, minimum, "auth-old") {
@@ -272,15 +305,17 @@ func TestMerklePrefixMatcherGenerationSurvivesClear(t *testing.T) {
 func TestMerklePrefixMatcherEvictsToConfiguredBounds(t *testing.T) {
 	t.Parallel()
 
-	matcher := NewMerklePrefixMatcherWithConfig(MerklePrefixMatcherConfig{
-		TTL:         time.Hour,
-		MaxTurns:    4,
-		MaxGroups:   3,
-		MaxPrefixes: 6,
-	})
+	matcher := NewMerklePrefixMatcherWithConfig(
+		MerklePrefixMatcherConfig{
+			TTL:         time.Hour,
+			MaxTurns:    4,
+			MaxGroups:   3,
+			MaxPrefixes: 6,
+		},
+	)
 	namespace := "lcp:v1::bounded::model::caller"
 	sequences := make([][]CanonicalTurn, 0, 5)
-	for index := 0; index < 5; index++ {
+	for index := range 5 {
 		turns := testTurns(fmt.Sprintf("root-%d", index), "second", "third")
 		sequences = append(sequences, turns)
 		matcher.BindWithResult(namespace, turns, fmt.Sprintf("auth-%d", index))
@@ -308,25 +343,33 @@ func TestMerklePrefixMatcherEvictsToConfiguredBounds(t *testing.T) {
 func TestMerklePrefixMatcherConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
-	matcher := NewMerklePrefixMatcherWithConfig(MerklePrefixMatcherConfig{
-		TTL:         time.Hour,
-		MaxTurns:    32,
-		MaxGroups:   64,
-		MaxPrefixes: 512,
-	})
+	matcher := NewMerklePrefixMatcherWithConfig(
+		MerklePrefixMatcherConfig{
+			TTL:         time.Hour,
+			MaxTurns:    32,
+			MaxGroups:   64,
+			MaxPrefixes: 512,
+		},
+	)
 	var workers sync.WaitGroup
-	for worker := 0; worker < 16; worker++ {
+	for worker := range 16 {
 		workers.Add(1)
 		go func(worker int) {
 			defer workers.Done()
-			for iteration := 0; iteration < 200; iteration++ {
+			for iteration := range 200 {
 				namespace := fmt.Sprintf("namespace-%d", worker%4)
-				turns := testTurns("root", fmt.Sprintf("worker-%d", worker), fmt.Sprintf("iteration-%d", iteration))
+				turns := testTurns(
+					"root",
+					fmt.Sprintf("worker-%d", worker),
+					fmt.Sprintf("iteration-%d", iteration),
+				)
 				result := matcher.BindWithResult(namespace, turns, fmt.Sprintf("auth-%d", worker%3))
 				matcher.Match(namespace, turns)
 				fingerprints, minimum := matcher.Prepare(turns)
 				matcher.TouchFingerprints(namespace, fingerprints, minimum, fmt.Sprintf("auth-%d", worker%3))
-				matcher.RemoveFingerprintsBefore(namespace, fingerprints, fmt.Sprintf("auth-%d", worker%3), result.AccessNumber-1)
+				matcher.RemoveFingerprintsBefore(
+					namespace, fingerprints, fmt.Sprintf("auth-%d", worker%3), result.AccessNumber-1,
+				)
 			}
 		}(worker)
 	}

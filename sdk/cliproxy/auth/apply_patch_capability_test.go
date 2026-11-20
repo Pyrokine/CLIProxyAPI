@@ -41,16 +41,20 @@ func TestManagerApplyPatchRequiresAPIKeyExecutorView(t *testing.T) {
 		{name: "missing view"},
 		{name: "no contract view", view: &opaquePatchExecutor{}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manager := NewManager(nil, nil, nil)
-			manager.RegisterExecutor(&scopedPatchCapabilityExecutor{
-				patchCapabilityExecutor: &patchCapabilityExecutor{provider: "scoped", supported: true},
-				view:                    tc.view,
-			})
-			if got := manager.SupportsApplyPatchForProviders([]string{"scoped"}); got != tc.want {
-				t.Fatalf("scoped capability = %t, want %t", got, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				manager := NewManager(nil, nil, nil)
+				manager.RegisterExecutor(
+					&scopedPatchCapabilityExecutor{
+						patchCapabilityExecutor: &patchCapabilityExecutor{provider: "scoped", supported: true},
+						view:                    tc.view,
+					},
+				)
+				if got := manager.SupportsApplyPatchForProviders([]string{"scoped"}); got != tc.want {
+					t.Fatalf("scoped capability = %t, want %t", got, tc.want)
+				}
+			},
+		)
 	}
 }
 
@@ -76,11 +80,13 @@ func TestManagerSupportsApplyPatchForProviders(t *testing.T) {
 		{name: "empty member", providers: []string{"fixture-provider", " "}},
 		{name: "nil receiver", providers: []string{"nil-provider"}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := manager.SupportsApplyPatchForProviders(tc.providers); got != tc.want {
-				t.Fatalf("capability(%q) = %t, want %t", tc.providers, got, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				if got := manager.SupportsApplyPatchForProviders(tc.providers); got != tc.want {
+					t.Fatalf("capability(%q) = %t, want %t", tc.providers, got, tc.want)
+				}
+			},
+		)
 	}
 	var absent *Manager
 	if absent.SupportsApplyPatchForProviders([]string{"fixture-provider"}) {

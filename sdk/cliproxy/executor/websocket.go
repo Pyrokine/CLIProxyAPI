@@ -6,11 +6,15 @@ import (
 )
 
 // UpstreamWebsocketReplayRequiredError indicates that an incremental request
-// cannot safely continue because its upstream websocket is no longer reusable.
+// cannot safely continue because its upstream WebSocket is no longer reusable.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type UpstreamWebsocketReplayRequiredError struct{}
 
 func (*UpstreamWebsocketReplayRequiredError) Error() string {
-	return `{"error":{"message":"upstream transport requires full HTTP replay","type":"server_error","code":"upstream_http_replay_required","status":426}}`
+	return `{"error":{"message":"upstream transport requires full HTTP replay","ty` +
+		`pe":"server_error","code":"upstream_http_replay_required","status":426` +
+		`}}`
 }
 
 func (*UpstreamWebsocketReplayRequiredError) StatusCode() int {

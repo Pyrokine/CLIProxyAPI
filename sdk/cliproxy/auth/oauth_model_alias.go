@@ -33,6 +33,8 @@ type oauthModelAliasTable struct {
 }
 
 // OAuthModelAliasResult carries the upstream model and optional response rewrite target.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type OAuthModelAliasResult struct {
 	UpstreamModel string
 	ForceMapping  bool
@@ -94,6 +96,7 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]config.OAuthModelAlias
 		table = &oauthModelAliasTable{}
 	}
 	m.oauthModelAlias.Store(table)
+	m.RefreshSchedulerAll()
 }
 
 // SetOAuthModelAliasesAttribute stores per-credential OAuth model aliases used by model routing.
@@ -221,6 +224,35 @@ func resolveModelAliasResultFromConfigModels(
 	return OAuthModelAliasResult{}
 }
 
+func resolveModelAliasPoolFromConfigModels(requestedModel string, models []modelAliasEntry) []OAuthModelAliasResult {
+	_, candidates := modelAliasLookupCandidates(requestedModel)
+	for _, candidate := range candidates {
+		var pool []OAuthModelAliasResult
+		seen := make(map[string]struct{})
+		for _, model := range models {
+			if strings.TrimSpace(model.GetName()) == "" || !strings.EqualFold(
+				strings.TrimSpace(model.GetAlias()), candidate,
+			) {
+				continue
+			}
+			result := resolveModelAliasResultFromConfigModels(requestedModel, []modelAliasEntry{model})
+			if result.UpstreamModel == "" {
+				result.UpstreamModel = requestedModel
+			}
+			key := strings.ToLower(result.UpstreamModel)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			pool = append(pool, result)
+		}
+		if len(pool) > 0 {
+			return pool
+		}
+	}
+	return nil
+}
+
 // resolveOAuthUpstreamModel resolves the upstream model name from OAuth model alias.
 // If an alias exists, returns the original (upstream) model name that corresponds
 // to the requested alias.
@@ -237,7 +269,9 @@ func (m *Manager) resolveOAuthModelAliasWithResult(auth *Auth, requestedModel st
 	if channel == "" {
 		return OAuthModelAliasResult{}
 	}
-	if result := resolveUpstreamModelFromAliases(OAuthModelAliasesFromAttributes(auth.Attributes), requestedModel); result.UpstreamModel != "" {
+	if result := resolveUpstreamModelFromAliases(
+		OAuthModelAliasesFromAttributes(auth.Attributes), requestedModel,
+	); result.UpstreamModel != "" {
 		return result
 	}
 	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, channel)
@@ -365,8 +399,8 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 	}
 	switch provider {
 	case "gemini":
-		// gemini provider uses gemini-api-key config, not oauth-model-alias.
-		// OAuth-based gemini auth is converted to "gemini-cli" by the synthesizer.
+		// Gemini provider uses gemini-api-key config, not oauth-model-alias.
+		// OAuth-based Gemini auth is converted to "gemini-cli" by the synthesizer.
 		return ""
 	case "vertex":
 		return "vertex"

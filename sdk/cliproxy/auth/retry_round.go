@@ -23,6 +23,7 @@ type retryRoundState struct {
 	homeWait                            time.Duration
 	hasHomeWait                         bool
 	homeStopped                         bool
+	upstreamErr                         error
 }
 
 func retryRoundFromContext(ctx context.Context) *retryRoundState {
@@ -33,6 +34,51 @@ func retryRoundFromContext(ctx context.Context) *retryRoundState {
 	return state
 }
 
+func (s *retryRoundState) observeUpstreamError(err error, disposition cliproxyexecutor.ExecutionDisposition) {
+	if s != nil && err != nil && disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseNotSent {
+		s.upstreamErr = err
+	}
+}
+
+func (s *retryRoundState) preferredError(err error) error {
+	if s == nil || err == nil || s.upstreamErr == nil || errors.Is(err, s.upstreamErr) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		isRequestStopError(err) || isRequestScopedError(err) || isRequestInvalidError(err) {
+		return err
+	}
+	disposition := executionDispositionForError(err, cliproxyexecutor.DispatchPhaseNotSent)
+	_, typed := errors.AsType[cliproxyexecutor.ExecutionDispositionError](err)
+	current, _ := errors.AsType[*Error](err)
+	if typed && disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseNotSent &&
+		(current == nil || current.executionState().DispatchPhase != "") {
+		return err
+	}
+	// 返回上游原因，重放许可和当前等待时间仍由最后一次失败决定
+	disposition.DispatchPhase = cliproxyexecutor.DispatchPhaseNotSent
+	var preferred error
+	if statusCodeFromError(s.upstreamErr) == 0 && current != nil {
+		preferred = &errorWithCause{
+			base: errorForResultWithDisposition(err, disposition, 0), cause: s.upstreamErr,
+		}
+	} else {
+		upstream := errorForResultWithDisposition(s.upstreamErr, disposition, 0)
+		upstream.executionState().cause = s.upstreamErr
+		preferred = upstream
+	}
+	if IsTerminalAuthError(err) {
+		preferred = NewTerminalAuthError(errorForResultWithDisposition(err, disposition, 0), preferred)
+	}
+	if remote, ok := errors.AsType[*homeDispatchRetryAfterError](err); ok {
+		copyRemote := *remote
+		copyRemote.cause = preferred
+		return &copyRemote
+	}
+	if retryAfter := retryAfterFromError(err); retryAfter != nil {
+		return &homeDispatchRetryAfterError{cause: preferred, retryAfter: *retryAfter}
+	}
+	return preferred
+}
+
 func effectiveRequestRetryLimit(auth *Auth, fallback int) int {
 	if value, present := auth.RequestRetryOverride(); present {
 		return value
@@ -40,9 +86,17 @@ func effectiveRequestRetryLimit(auth *Auth, fallback int) int {
 	return max(fallback, 0)
 }
 
-func (s *retryRoundState) observeHomeLimit(value *int, auth *Auth) {
+func (s *retryRoundState) observeHomeLimit(value *int, auth *Auth, pinned bool) {
 	if s == nil {
 		return
+	}
+	if pinned && auth != nil {
+		if override, present := auth.RequestRetryOverride(); present {
+			if value != nil {
+				override = min(override, max(*value, 0))
+			}
+			value = &override
+		}
 	}
 	if value != nil {
 		s.homeLimit, s.homeAuthority = max(*value, 0), true
@@ -54,6 +108,7 @@ func (s *retryRoundState) observeHomeLimit(value *int, auth *Auth) {
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const ExcludedAuthIDsMetadataKey = "excluded_auth_ids"
 
 func excludedAuthIDs(opts cliproxyexecutor.Options) map[string]struct{} {
@@ -90,7 +145,9 @@ func excludedAuthIDs(opts cliproxyexecutor.Options) map[string]struct{} {
 
 func homeDispatchConstraints(ctx context.Context, opts cliproxyexecutor.Options) home.AuthDispatchConstraints {
 	excluded := excludedAuthIDs(opts)
-	constraints := home.AuthDispatchConstraints{PinnedAuthID: pinnedAuthIDFromMetadata(opts.Metadata), CredentialPolicy: credentialPolicyFromContext(ctx)}
+	constraints := home.AuthDispatchConstraints{
+		PinnedAuthID: pinnedAuthIDFromMetadata(opts.Metadata), CredentialPolicy: credentialPolicyFromContext(ctx),
+	}
 	if state := retryRoundFromContext(ctx); state != nil {
 		constraints.RetryRound = state.round
 		for id := range state.attempted {
@@ -105,7 +162,10 @@ func homeDispatchConstraints(ctx context.Context, opts cliproxyexecutor.Options)
 }
 
 type homeConstraintsDispatcher interface {
-	RPopAuthWithConstraints(context.Context, string, string, http.Header, int, home.AuthDispatchConstraints) ([]byte, error)
+	RPopAuthWithConstraints(context.Context, string, string, http.Header, int, home.AuthDispatchConstraints) (
+		[]byte,
+		error,
+	)
 }
 
 type homeDispatchRetryAfterError struct {
@@ -114,17 +174,20 @@ type homeDispatchRetryAfterError struct {
 	retryAfter   time.Duration
 }
 
-func (e *homeDispatchRetryAfterError) Error() string              { return e.cause.Error() }
-func (e *homeDispatchRetryAfterError) Unwrap() error              { return e.cause }
+func (e *homeDispatchRetryAfterError) Error() string { return e.cause.Error() }
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (e *homeDispatchRetryAfterError) Unwrap() error { return e.cause }
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *homeDispatchRetryAfterError) RetryAfter() *time.Duration { return &e.retryAfter }
 
 func (s *retryRoundState) observeHomeError(err error) {
 	if s == nil {
 		return
 	}
-	var remote *homeDispatchRetryAfterError
-	if errors.As(err, &remote) {
-		s.observeHomeLimit(remote.requestRetry, nil)
+	if remote, ok := errors.AsType[*homeDispatchRetryAfterError](err); ok {
+		s.observeHomeLimit(remote.requestRetry, nil, false)
 		if isHomeCooldownError(err) {
 			s.homeWait, s.hasHomeWait = remote.retryAfter, true
 		}
@@ -147,7 +210,19 @@ func retryRoundStateEligible(auth *Auth, model string, now time.Time) (time.Time
 		if err == nil {
 			return quota
 		}
-		return retryDirectiveAllowsCooldownRetry(executionDispositionForError(err, cliproxyexecutor.DispatchPhaseMaybeSent))
+		if err.executionState().DispatchPhase == "" && err.executionState().Outcome == "" &&
+			err.executionState().RetryDirective == "" &&
+			err.executionState().EffectScope == "" {
+			switch err.HTTPStatus {
+			case http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusNotFound:
+				return false
+			}
+		}
+		return retryDirectiveAllowsCooldownRetry(
+			executionDispositionForError(
+				err, cliproxyexecutor.DispatchPhaseMaybeSent,
+			),
+		)
 	}
 	if auth.Unavailable && auth.NextRetryAfter.After(now) {
 		return next, eligible(auth.LastError, auth.Quota.Exceeded)

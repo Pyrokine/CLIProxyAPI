@@ -5,26 +5,40 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
+	"weak"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 // ErrorCodeRequestScoped identifies failures tied to the current request.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const ErrorCodeRequestScoped = "request_scoped"
 
 const requestScopedErrorCode = ErrorCodeRequestScoped
 
 // ErrorCodeConnectionLifecycle marks connection or session lifecycle failures.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const ErrorCodeConnectionLifecycle = "connection_lifecycle"
 
 const connectionLifecycleErrorCode = ErrorCodeConnectionLifecycle
 
-const transientTransportErrorCode = "transient_transport"
+// ErrorCodeTransientTransport 标识传输失败，重试仍按实际发送阶段和执行结果判断
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+const ErrorCodeTransientTransport = "transient_transport"
+
+const transientTransportErrorCode = ErrorCodeTransientTransport
 
 // ErrorCodeForceCooldown marks failures that must apply cooldown state.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const ErrorCodeForceCooldown = "force_cooldown"
 
 // Error describes an authentication related failure in a provider-agnostic format.
@@ -37,20 +51,97 @@ type Error struct {
 	Retryable bool `json:"retryable"`
 	// HTTPStatus optionally records an HTTP-like status code for the error.
 	HTTPStatus int `json:"http_status,omitempty"`
-	// DispatchPhase identifies the furthest known request boundary.
-	DispatchPhase cliproxyexecutor.DispatchPhase `json:"dispatch_phase,omitempty"`
-	// Outcome identifies the known upstream processing result.
-	Outcome cliproxyexecutor.ExecutionOutcome `json:"outcome,omitempty"`
-	// RetryDirective records the safe retry transition.
-	RetryDirective cliproxyexecutor.RetryDirective `json:"retry_directive,omitempty"`
-	// EffectScope identifies the narrowest state affected by the failure.
-	EffectScope cliproxyexecutor.StateEffectScope `json:"effect_scope,omitempty"`
-	// EffectKey identifies the exact model, quota family, group, or provider.
-	EffectKey string `json:"effect_key,omitempty"`
-	// StateGeneration binds this error to the state version it created.
-	StateGeneration uint64 `json:"state_generation,omitempty"`
+}
 
-	cause error
+type errorState struct {
+	DispatchPhase   cliproxyexecutor.DispatchPhase    `json:"dispatch_phase,omitempty"`
+	Outcome         cliproxyexecutor.ExecutionOutcome `json:"outcome,omitempty"`
+	RetryDirective  cliproxyexecutor.RetryDirective   `json:"retry_directive,omitempty"`
+	EffectScope     cliproxyexecutor.StateEffectScope `json:"effect_scope,omitempty"`
+	EffectKey       string                            `json:"effect_key,omitempty"`
+	StateGeneration uint64                            `json:"state_generation,omitempty"`
+	cause           error
+}
+
+var errorStates sync.Map
+
+// executionState 的弱引用索引保留公开四字段布局，错误回收后删除其附加状态
+func (e *Error) executionState() *errorState {
+	key := weak.Make(e)
+	if stored, ok := errorStates.Load(key); ok {
+		runtime.KeepAlive(e)
+		return stored.(*errorState)
+	}
+	state := &errorState{}
+	stored, loaded := errorStates.LoadOrStore(key, state)
+	if !loaded {
+		runtime.AddCleanup(e, func(key weak.Pointer[Error]) { errorStates.Delete(key) }, key)
+	}
+	runtime.KeepAlive(e)
+	return stored.(*errorState)
+}
+
+func errorWithState(base *Error, state errorState) *Error {
+	*base.executionState() = state
+	return base
+}
+
+// WithExecutionDisposition 设置当前错误的执行边界、作用范围和状态代际
+func (e *Error) WithExecutionDisposition(
+	disposition cliproxyexecutor.ExecutionDisposition,
+	generation uint64,
+) *Error {
+	if e == nil {
+		return nil
+	}
+	state := e.executionState()
+	state.DispatchPhase, state.Outcome, state.RetryDirective = disposition.DispatchPhase,
+		disposition.Outcome, disposition.RetryDirective
+	state.EffectScope, state.EffectKey, state.StateGeneration = disposition.EffectScope,
+		disposition.EffectKey, generation
+	return e
+}
+
+// Clone 复制公开字段、执行状态和原错误原因
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (e *Error) Clone() *Error {
+	return cloneError(e)
+}
+
+// ExecutionStateGeneration 返回此错误绑定的状态代际
+func (e *Error) ExecutionStateGeneration() uint64 {
+	if e == nil {
+		return 0
+	}
+	return e.executionState().StateGeneration
+}
+
+func (e *Error) MarshalJSON() ([]byte, error) {
+	if e == nil {
+		return []byte("null"), nil
+	}
+	type baseError Error
+	return json.Marshal(
+		struct {
+			*baseError
+			*errorState
+		}{(*baseError)(e), e.executionState()},
+	)
+}
+
+func (e *Error) UnmarshalJSON(data []byte) error {
+	type baseError Error
+	value := struct {
+		baseError
+		errorState
+	}{baseError(*e), *e.executionState()}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*e = Error(value.baseError)
+	*e.executionState() = value.errorState
+	return nil
 }
 
 // Error implements the error interface.
@@ -65,11 +156,13 @@ func (e *Error) Error() string {
 }
 
 // Unwrap preserves the original upstream error for status, body, and retry metadata.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *Error) Unwrap() error {
 	if e == nil {
 		return nil
 	}
-	return e.cause
+	return e.executionState().cause
 }
 
 // StatusCode implements optional status accessor for manager decision-making.
@@ -87,6 +180,8 @@ func (e *Error) IsRequestScoped() bool {
 }
 
 // MarkRequestScoped marks the error as tied to the current request.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *Error) MarkRequestScoped() *Error {
 	if e != nil {
 		e.Code = ErrorCodeRequestScoped
@@ -103,18 +198,24 @@ func NewRequestScopedError(message string, httpStatus int) *Error {
 	}
 }
 
+// ExplicitExecutionDisposition 返回调用方已设置的执行语义
+func (e *Error) ExplicitExecutionDisposition() cliproxyexecutor.ExecutionDisposition {
+	if e == nil {
+		return cliproxyexecutor.ExecutionDisposition{}
+	}
+	state := e.executionState()
+	return cliproxyexecutor.ExecutionDisposition{
+		DispatchPhase: state.DispatchPhase, Outcome: state.Outcome, RetryDirective: state.RetryDirective,
+		EffectScope: state.EffectScope, EffectKey: state.EffectKey,
+	}
+}
+
 // ExecutionDisposition exposes the persisted replay and state-effect semantics.
 func (e *Error) ExecutionDisposition() cliproxyexecutor.ExecutionDisposition {
 	if e == nil {
 		return cliproxyexecutor.ExecutionDisposition{}
 	}
-	disposition := cliproxyexecutor.ExecutionDisposition{
-		DispatchPhase:  e.DispatchPhase,
-		Outcome:        e.Outcome,
-		RetryDirective: e.RetryDirective,
-		EffectScope:    e.EffectScope,
-		EffectKey:      e.EffectKey,
-	}
+	disposition := e.ExplicitExecutionDisposition()
 	if disposition.Outcome == "" && e.HTTPStatus != 0 {
 		fallback := cliproxyexecutor.HTTPStatusDisposition(e.HTTPStatus, false)
 		if disposition.DispatchPhase != "" {
@@ -154,6 +255,7 @@ func (e *errorWithCause) Error() string {
 	return fmt.Sprintf("%s (last upstream error: %s)", baseText, summary)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *errorWithCause) Unwrap() error {
 	if e == nil {
 		return nil
@@ -161,6 +263,7 @@ func (e *errorWithCause) Unwrap() error {
 	return e.cause
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *errorWithCause) As(target any) bool {
 	if e == nil {
 		return false
@@ -172,6 +275,7 @@ func (e *errorWithCause) As(target any) bool {
 	return false
 }
 
+//goland:noinspection GoTypeAssertionOnErrors,GoUnnecessarilyExportedIdentifiers
 func (e *errorWithCause) Is(target error) bool {
 	if e == nil {
 		return target == nil
@@ -208,6 +312,7 @@ func (e *errorWithCause) IsRequestScoped() bool {
 	return e != nil && e.base != nil && e.base.IsRequestScoped()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *errorWithCause) MarkRequestScoped() *Error {
 	if e == nil || e.base == nil {
 		return nil
@@ -229,6 +334,29 @@ func (e *errorWithCause) MarshalJSON() ([]byte, error) {
 	return json.Marshal(e.base)
 }
 
+type terminalAuthError struct {
+	*errorWithCause
+}
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (e *terminalAuthError) IsTerminalAuth() bool {
+	return e != nil
+}
+
+// IsTerminalAuthError 识别错误链中需要重新认证的上游凭据失败
+func IsTerminalAuthError(err error) bool {
+	var terminal interface{ IsTerminalAuth() bool }
+	return errors.As(err, &terminal) && terminal != nil && terminal.IsTerminalAuth()
+}
+
+// NewTerminalAuthError 保留认证错误及其原因，并标记上游凭据需要重新认证
+func NewTerminalAuthError(err *Error, cause error) error {
+	if err == nil {
+		return nil
+	}
+	return &terminalAuthError{errorWithCause: &errorWithCause{base: err, cause: cause}}
+}
+
 type authUnavailableError struct {
 	*errorWithCause
 	retryAfter time.Duration
@@ -247,6 +375,18 @@ func newAuthUnavailableErrorWithCause(next, now time.Time, cause error) error {
 	}
 }
 
+//goland:noinspection GoTypeAssertionOnErrors,GoUnnecessarilyExportedIdentifiers
+func (e *authUnavailableError) Is(target error) bool {
+	if e == nil {
+		return target == nil
+	}
+	if other, ok := target.(*authUnavailableError); ok && other != nil {
+		return e.errorWithCause != nil && other.errorWithCause != nil && e.base == other.base
+	}
+	return e.errorWithCause.Is(target)
+}
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *authUnavailableError) RetryAfter() *time.Duration {
 	if e == nil || e.retryAfter <= 0 {
 		return nil
@@ -255,7 +395,31 @@ func (e *authUnavailableError) RetryAfter() *time.Duration {
 	return &value
 }
 
+// WithAuthError 更新错误描述，并保留本地恢复提示和原上游原因
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (e *authUnavailableError) WithAuthError(base *Error) error {
+	if e == nil {
+		return base
+	}
+	return &authUnavailableError{
+		errorWithCause: &errorWithCause{base: base, cause: e.cause},
+		retryAfter:     e.retryAfter,
+	}
+}
+
+// Headers 返回本地计算的恢复提示
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (e *authUnavailableError) Headers() http.Header {
+	if e == nil {
+		return nil
+	}
+	return safeRetryAfterHeader(e.retryAfter)
+}
+
 // WithCause wraps an auth error with the upstream cause used to exhaust selection.
+// noinspection GoDirectComparisonOfErrors
 func WithCause(err *Error, cause error) error {
 	if err == nil {
 		return nil

@@ -23,7 +23,8 @@ func TestMerklePrefixMatcherCompactionContinuationAndFork(t *testing.T) {
 		t.Fatalf("compaction match = %+v, ok=%v; root=%+v", match, ok, root)
 	}
 	bound := matcher.BindWithResult(namespace, compacted, "auth-a")
-	if !bound.IsCompaction || bound.IsFork || bound.NodeKind != "compaction" || bound.SessionID != match.SessionID ||
+	if !bound.IsCompaction || bound.IsFork || bound.NodeKind != "compaction" ||
+		bound.SessionID != match.SessionID ||
 		bound.ParentSessionID != root.SessionID {
 		t.Fatalf("compaction bind = %+v, match=%+v", bound, match)
 	}
@@ -64,19 +65,41 @@ func TestMerklePrefixMatcherHomeCompletionPreservesNewerSelection(t *testing.T) 
 	matcher := NewMerklePrefixMatcher(time.Hour)
 	const namespace = "lcp:v1::provider::model::caller"
 	parentFingerprints, minimum, tails, envDigest := matcher.PrepareExt(testTurns("one", "two", "three"))
-	first := matcher.BindFingerprintsWithContext(namespace, parentFingerprints, tails, envDigest, minimum, "auth-a")
-	continuedFingerprints, nextMinimum, nextTails, nextEnv := matcher.PrepareExt(testTurns("one", "two", "three", "four"))
-	second := matcher.BindFingerprintsWithContext(namespace, continuedFingerprints, nextTails, nextEnv, nextMinimum, "auth-b")
+	first := matcher.BindFingerprintsWithContext(
+		namespace,
+		parentFingerprints,
+		tails,
+		envDigest,
+		minimum,
+		"auth-a",
+	)
+	continuedFingerprints, nextMinimum, nextTails, nextEnv := matcher.PrepareExt(
+		testTurns(
+			"one", "two", "three", "four",
+		),
+	)
+	second := matcher.BindFingerprintsWithContext(
+		namespace, continuedFingerprints, nextTails, nextEnv, nextMinimum, "auth-b",
+	)
 	if second.SessionID != first.SessionID {
 		t.Fatalf("continued session = %+v, first = %+v", second, first)
 	}
-	if matcher.CompleteSessionSelection(namespace, parentFingerprints, first.SessionID, "auth-a", first.AccessNumber) {
+	if matcher.CompleteSessionSelection(
+		namespace,
+		parentFingerprints,
+		first.SessionID,
+		"auth-a",
+		first.AccessNumber,
+	) {
 		t.Fatal("stale completion displaced the newer Home selection")
 	}
-	if !matcher.CompleteSessionSelection(namespace, continuedFingerprints, second.SessionID, "auth-b", second.AccessNumber) {
+	if !matcher.CompleteSessionSelection(
+		namespace, continuedFingerprints, second.SessionID, "auth-b", second.AccessNumber,
+	) {
 		t.Fatal("current Home selection was not completed")
 	}
-	if authIDs, _, found := matcher.LookupSession(first.SessionID); !found || len(authIDs) != 1 || authIDs[0] != "auth-b" {
+	if authIDs, _, found := matcher.LookupSession(first.SessionID); !found || len(authIDs) != 1 ||
+		authIDs[0] != "auth-b" {
 		t.Fatalf("completed session bindings = %v, found = %t", authIDs, found)
 	}
 }
@@ -95,11 +118,22 @@ func TestMerklePrefixMatcherCompactionSlidingWindowAndSystemIsolation(t *testing
 	}
 	root := matcher.BindWithResult(namespace, parent, "auth-a")
 	truncated := append([]CanonicalTurn{{Role: "developer", Parts: parent[0].Parts}}, parent[3:]...)
-	truncated = append(truncated, CanonicalTurn{Role: "user", Parts: []CanonicalPart{{Kind: "text", Value: "five"}}})
-	if match, ok := matcher.Match(namespace, truncated); !ok || !match.IsCompaction || match.ParentSessionID != root.SessionID {
+	truncated = append(
+		truncated,
+		CanonicalTurn{Role: "user", Parts: []CanonicalPart{{Kind: "text", Value: "five"}}},
+	)
+	if match, ok := matcher.Match(
+		namespace, truncated,
+	); !ok || !match.IsCompaction || match.ParentSessionID != root.SessionID {
 		t.Fatalf("truncated continuation = %+v, ok=%v", match, ok)
 	}
-	otherSystem := append([]CanonicalTurn{{Role: "developer", Parts: []CanonicalPart{{Kind: "text", Value: "instruction B"}}}}, truncated[1:]...)
+	otherSystem := append(
+		[]CanonicalTurn{
+			{
+				Role: "developer", Parts: []CanonicalPart{{Kind: "text", Value: "instruction B"}},
+			},
+		}, truncated[1:]...,
+	)
 	if match, ok := matcher.Match(namespace, otherSystem); ok {
 		t.Fatalf("different developer instruction matched: %+v", match)
 	}
@@ -127,8 +161,10 @@ func TestMerklePrefixMatcherCompactionPrefersCurrentAuthForSameSession(t *testin
 	matcher := NewMerklePrefixMatcher(time.Hour)
 	const namespace = "lcp:v1::provider::model::caller"
 	original := matcher.BindWithResult(namespace, testTurns("a", "b", "shared-one", "shared-two"), "auth-old")
-	extended := matcher.BindWithResult(namespace,
-		testTurns("a", "b", "shared-one", "shared-two", "extra", "shared-one", "shared-two"), "auth-new")
+	extended := matcher.BindWithResult(
+		namespace,
+		testTurns("a", "b", "shared-one", "shared-two", "extra", "shared-one", "shared-two"), "auth-new",
+	)
 	if extended.SessionID != original.SessionID {
 		t.Fatalf("linear extension changed session: original=%+v extended=%+v", original, extended)
 	}
@@ -171,7 +207,10 @@ func TestMerklePrefixMatcherCompactionTouchUpdatesEnvironment(t *testing.T) {
 	}
 	parent := testTurns(items...)
 	root := matcher.BindWithResult(namespace, parent, "auth-a")
-	updated := append(parent, CanonicalTurn{Role: "developer", Parts: []CanonicalPart{{Kind: "text", Value: "late instruction"}}})
+	updated := append(
+		parent,
+		CanonicalTurn{Role: "developer", Parts: []CanonicalPart{{Kind: "text", Value: "late instruction"}}},
+	)
 	updated = append(updated, testTurns("new turn", "response")...)
 	if !matcher.Touch(namespace, updated, "auth-a") {
 		t.Fatal("touch did not update long conversation")
@@ -212,25 +251,32 @@ func TestMerklePrefixMatcherCompactionBucketOverflowAndRemoval(t *testing.T) {
 	const namespace = "lcp:v1::provider::model::caller"
 	other := make([]CanonicalTurn, 0)
 	for index := range maxTailsPerKey {
-		turns := append([]CanonicalTurn{{Role: "system", Parts: []CanonicalPart{{Kind: "text", Value: "other"}}}},
-			testTurns(fmt.Sprintf("unrelated-%d", index), "different", "same-tail-a", "same-tail-b")...)
+		turns := append(
+			[]CanonicalTurn{{Role: "system", Parts: []CanonicalPart{{Kind: "text", Value: "other"}}}},
+			testTurns(fmt.Sprintf("unrelated-%d", index), "different", "same-tail-a", "same-tail-b")...,
+		)
 		matcher.BindWithResult(namespace, turns, fmt.Sprintf("auth-%d", index))
 		if index == 0 {
 			other = turns
 		}
 	}
-	target := append([]CanonicalTurn{{Role: "system", Parts: []CanonicalPart{{Kind: "text", Value: "target"}}}},
-		testTurns("target-start", "different", "same-tail-a", "same-tail-b")...)
+	target := append(
+		[]CanonicalTurn{{Role: "system", Parts: []CanonicalPart{{Kind: "text", Value: "target"}}}},
+		testTurns("target-start", "different", "same-tail-a", "same-tail-b")...,
+	)
 	matcher.BindWithResult(namespace, target, "target-auth")
-	candidate := append([]CanonicalTurn{{Role: "system", Parts: []CanonicalPart{{Kind: "text", Value: "target"}}}},
-		testTurns("summary", "same-tail-a", "same-tail-b", "new")...)
+	candidate := append(
+		[]CanonicalTurn{{Role: "system", Parts: []CanonicalPart{{Kind: "text", Value: "target"}}}},
+		testTurns("summary", "same-tail-a", "same-tail-b", "new")...,
+	)
 	if match, ok := matcher.Match(namespace, candidate); ok {
 		t.Fatalf("overfull shared-tail bucket selected a credential: %+v", match)
 	}
 	if !matcher.Remove(namespace, other, "auth-0") {
 		t.Fatal("failed to remove one group from the shared-tail bucket")
 	}
-	if match, ok := matcher.Match(namespace, candidate); !ok || !match.IsCompaction || match.AuthID != "target-auth" {
+	if match, ok := matcher.Match(namespace, candidate); !ok || !match.IsCompaction ||
+		match.AuthID != "target-auth" {
 		t.Fatalf("compaction after bucket removal = %+v, ok=%v", match, ok)
 	}
 }
@@ -264,18 +310,25 @@ func TestExtractSessionInfoLCPCompactionAndFork(t *testing.T) {
 		{name: "compaction", compaction: true, wantKind: "compaction"},
 		{name: "fork", compaction: false, wantKind: "fork"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			metadata := map[string]any{
-				cliproxyexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:child",
-				cliproxyexecutor.ParentSessionIDMetadataKey:      "lcp:v1:parent",
-				cliproxyexecutor.IsCompactionMetadataKey:         test.compaction,
-			}
-			info, ok := ExtractSessionInfo(http.Header{}, nil, metadata)
-			if !ok || info.SessionID != "lcp:v1:child" || info.ParentSessionID != "lcp:v1:parent" ||
-				info.IsCompaction != test.compaction || info.IsFork == test.compaction || info.NodeKind != test.wantKind {
-				t.Fatalf("LCP session info = %+v, ok=%v", info, ok)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				metadata := map[string]any{
+					cliproxyexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:child",
+					cliproxyexecutor.ParentSessionIDMetadataKey:      "lcp:v1:parent",
+					cliproxyexecutor.IsCompactionMetadataKey:         test.compaction,
+				}
+				info, ok := ExtractSessionInfo(http.Header{}, nil, metadata)
+				if !ok || info.SessionID != "lcp:v1:child" || info.ParentSessionID != "lcp:v1:parent" ||
+					info.IsCompaction !=
+						test.compaction ||
+					info.IsFork ==
+						test.compaction ||
+					info.NodeKind !=
+						test.wantKind {
+					t.Fatalf("LCP session info = %+v, ok=%v", info, ok)
+				}
+			},
+		)
 	}
 }
 
@@ -285,19 +338,33 @@ func TestMerklePrefixMatcherCompactionPreservesPrefix(t *testing.T) {
 		name   string
 		prefix []CanonicalTurn
 	}{
-		{name: "system", prefix: []CanonicalTurn{{Role: "system", Parts: []CanonicalPart{{Kind: "text", Value: "instruction"}}}}},
+		{
+			name:   "system",
+			prefix: []CanonicalTurn{{Role: "system", Parts: []CanonicalPart{{Kind: "text", Value: "instruction"}}}},
+		},
 		{name: "user", prefix: testTurns("first")},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			matcher := NewMerklePrefixMatcher(time.Hour)
-			parent := append(append([]CanonicalTurn(nil), test.prefix...), testTurns("second", "third", "fourth")...)
-			root := matcher.BindWithResult("lcp:v1:prefix", parent, "auth-a")
-			compacted := append(append([]CanonicalTurn(nil), test.prefix...), testTurns("summary", "third", "fourth", "fifth")...)
-			match, ok := matcher.Match("lcp:v1:prefix", compacted)
-			if !ok || !match.IsCompaction || match.IsFork || match.ParentSessionID != root.SessionID || match.AuthID != "auth-a" {
-				t.Fatalf("compaction preserving %s prefix = %+v, ok=%v", test.name, match, ok)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				matcher := NewMerklePrefixMatcher(time.Hour)
+				parent := append(
+					append([]CanonicalTurn(nil), test.prefix...), testTurns("second", "third", "fourth")...,
+				)
+				root := matcher.BindWithResult("lcp:v1:prefix", parent, "auth-a")
+				compacted := append(
+					append(
+						[]CanonicalTurn(nil),
+						test.prefix...,
+					),
+					testTurns("summary", "third", "fourth", "fifth")...,
+				)
+				match, ok := matcher.Match("lcp:v1:prefix", compacted)
+				if !ok || !match.IsCompaction || match.IsFork || match.ParentSessionID != root.SessionID ||
+					match.AuthID != "auth-a" {
+					t.Fatalf("compaction preserving %s prefix = %+v, ok=%v", test.name, match, ok)
+				}
+			},
+		)
 	}
 }
 

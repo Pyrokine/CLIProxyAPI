@@ -12,8 +12,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func warnLogUpstreamFailure(ctx context.Context, auth *Auth, provider, model string, started time.Time, err error, phase cliproxyexecutor.DispatchPhase) {
-	if err == nil || errors.Is(err, context.Canceled) || isRequestInvalidError(err) || !log.IsLevelEnabled(log.WarnLevel) {
+func warnLogUpstreamFailure(
+	ctx context.Context,
+	auth *Auth,
+	provider, model string,
+	started time.Time,
+	err error,
+	phase cliproxyexecutor.DispatchPhase,
+) {
+	if err == nil || errors.Is(
+		err, context.Canceled,
+	) || isRequestInvalidError(err) || !log.IsLevelEnabled(log.WarnLevel) {
 		return
 	}
 	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {

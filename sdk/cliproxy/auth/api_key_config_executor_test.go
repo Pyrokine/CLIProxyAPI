@@ -33,26 +33,33 @@ func TestAPIKeyExecutionUsesScopedExecutor(t *testing.T) {
 		{name: "API key", kind: AuthKindAPIKey, want: true},
 		{name: "OAuth", kind: AuthKindOAuth, want: false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manager := NewManager(nil, nil, nil)
-			calls := make([]bool, 0, 1)
-			manager.RegisterExecutor(&scopedAPIKeyTestExecutor{calls: &calls})
-			auth := &Auth{
-				ID: "api-key-executor-" + tc.kind, Provider: "test", Status: StatusActive,
-				Attributes: map[string]string{AttributeAuthKind: tc.kind, AttributeAPIKey: "configured-key"},
-			}
-			if _, err := manager.Register(context.Background(), auth); err != nil {
-				t.Fatal(err)
-			}
-			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "scoped-model"}})
-			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
-			if _, err := manager.Execute(context.Background(), []string{"test"}, cliproxyexecutor.Request{Model: "scoped-model"}, cliproxyexecutor.Options{}); err != nil {
-				t.Fatal(err)
-			}
-			if len(calls) != 1 || calls[0] != tc.want {
-				t.Fatalf("executor view used = %v, want %v", calls, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				manager := NewManager(nil, nil, nil)
+				calls := make([]bool, 0, 1)
+				manager.RegisterExecutor(&scopedAPIKeyTestExecutor{calls: &calls})
+				auth := &Auth{
+					ID: "api-key-executor-" + tc.kind, Provider: "test", Status: StatusActive,
+					Attributes: map[string]string{AttributeAuthKind: tc.kind, AttributeAPIKey: "configured-key"},
+				}
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+				registry.GetGlobalRegistry().RegisterClient(
+					auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "scoped-model"}},
+				)
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				if _, err := manager.Execute(
+					context.Background(), []string{"test"}, cliproxyexecutor.Request{Model: "scoped-model"},
+					cliproxyexecutor.Options{},
+				); err != nil {
+					t.Fatal(err)
+				}
+				if len(calls) != 1 || calls[0] != tc.want {
+					t.Fatalf("executor view used = %v, want %v", calls, tc.want)
+				}
+			},
+		)
 	}
 }
 
@@ -61,7 +68,9 @@ func TestHomeAPIKeyAttemptUsesScopedExecutor(t *testing.T) {
 	calls := make([]bool, 0, 1)
 	original := &scopedAPIKeyTestExecutor{calls: &calls}
 	selection := &HomeDispatchSelection{Provider: "test", Executor: original}
-	auth := &Auth{ID: "home-api-key", Provider: "test", Attributes: map[string]string{AttributeAuthKind: AuthKindAPIKey}}
+	auth := &Auth{
+		ID: "home-api-key", Provider: "test", Attributes: map[string]string{AttributeAuthKind: AuthKindAPIKey},
+	}
 	attempt, err := manager.prepareHomeAttempt(
 		context.Background(), selection, auth,
 		cliproxyexecutor.Request{Model: "scoped-model"}, cliproxyexecutor.Options{}, "scoped-model",

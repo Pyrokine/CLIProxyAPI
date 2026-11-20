@@ -26,7 +26,9 @@ const (
 
 var (
 	legacyClaudeSessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
-	canonicalUUIDPattern       = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	canonicalUUIDPattern       = regexp.MustCompile(
+		`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
+	)
 )
 
 // CandidateSessionPrefixes lists protocol-specific prefixes accepted by affinity lookup.
@@ -73,8 +75,8 @@ func NormalizeToCanonicalUUID(rawID string) string {
 	for {
 		stripped := false
 		for _, prefix := range knownSessionPrefixes {
-			if strings.HasPrefix(clean, prefix) {
-				clean = strings.TrimSpace(strings.TrimPrefix(clean, prefix))
+			if after, ok := strings.CutPrefix(clean, prefix); ok {
+				clean = strings.TrimSpace(after)
 				stripped = true
 				break
 			}
@@ -118,6 +120,8 @@ func NormalizeExplicitID(raw string) string {
 }
 
 // ClaudeMetadataIdentities extracts session, parent, and agent identities from Claude metadata.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func ClaudeMetadataIdentities(payload []byte) (sessionID, parentSessionID, agentID string) {
 	if len(payload) == 0 {
 		return "", "", ""
@@ -174,6 +178,8 @@ func ClaudeMetadataSessionID(payload []byte) string {
 }
 
 // ClaudeMetadataParentSessionID extracts the explicit Claude Code parent session.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func ClaudeMetadataParentSessionID(payload []byte) string {
 	_, parentSessionID, _ := ClaudeMetadataIdentities(payload)
 	return parentSessionID
@@ -287,7 +293,10 @@ func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (
 	return req, opts
 }
 
-func retainExecutionMetadata(requestMetadata, optionMetadata map[string]any, executionID string) (map[string]any, map[string]any) {
+func retainExecutionMetadata(requestMetadata, optionMetadata map[string]any, executionID string) (
+	map[string]any,
+	map[string]any,
+) {
 	if executionID == "" {
 		return metadataWithoutKey(requestMetadata, cliproxyexecutor.ExecutionSessionMetadataKey),
 			metadataWithoutKey(optionMetadata, cliproxyexecutor.ExecutionSessionMetadataKey)
@@ -321,7 +330,8 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 		"X-Claude-Code-Session-Id", "X-Claude-Code-Agent-Id", "X-Claude-Code-Parent-Agent-Id",
 		"Session-Id", "Session_id", "Thread-Id", "Thread_id", "X-Codex-Turn-Metadata", "X-Openai-Subagent",
 		"X-Http-Session-Id", "X-Session-ID", "X-Session-Affinity", "X-Slot-Session-Id",
-		"X-Task-ID", "X-Task-Id", "X-Conversation-Id", "X-Thread-Id", "X-Client-Request-Id",
+		"X-Task-ID", "X-Task-Id", "X-Task_ID", "X-Conversation-Id", "X-Thread-Id", "X-Client-Request-Id",
+		"X-Amp-Thread-Id",
 		"X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-Session-Affinity",
 		"X-Parent-ID", "X-Parent-Id", "X-Parent-Task-ID", "X-Parent-Task-Id",
 		"X-Parent-Conversation-Id", "X-Parent-Thread-Id", "X-Parent-Slot-Session-Id",
@@ -396,12 +406,16 @@ func ExplicitHeaderValue(headers map[string][]string, name string) string {
 }
 
 // DeriveID builds a stable identity from leading instructions and the first complete user input.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func DeriveID(format sdktranslator.Format, payload []byte, callerScope string) string {
 	if len(payload) == 0 {
 		return ""
 	}
 	var body map[string]any
-	if errUnmarshal := json.Unmarshal(payload, &body); errUnmarshal != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if !json.Valid(payload) || decoder.Decode(&body) != nil {
 		return ""
 	}
 
@@ -410,7 +424,9 @@ func DeriveID(format sdktranslator.Format, payload []byte, callerScope string) s
 		Format:      format.String(),
 		CallerScope: strings.TrimSpace(callerScope),
 	}
-	if sourceFormatEqual(format, sdktranslator.FormatGemini) || sourceFormatEqual(format, sdktranslator.FormatAntigravity) {
+	if sourceFormatEqual(format, sdktranslator.FormatGemini) || sourceFormatEqual(
+		format, sdktranslator.FormatAntigravity,
+	) {
 		resourceBody := body
 		if nested, ok := body["request"].(map[string]any); ok {
 			resourceBody = nested
@@ -419,7 +435,9 @@ func DeriveID(format sdktranslator.Format, payload []byte, callerScope string) s
 	}
 
 	switch {
-	case sourceFormatEqual(format, sdktranslator.FormatGemini), sourceFormatEqual(format, sdktranslator.FormatAntigravity):
+	case sourceFormatEqual(format, sdktranslator.FormatGemini), sourceFormatEqual(
+		format, sdktranslator.FormatAntigravity,
+	):
 		root.Instructions, root.User = geminiRoot(body)
 	case sourceFormatEqual(format, sdktranslator.FormatInteractions):
 		root.Instructions, root.User = interactionsRoot(body)
@@ -538,7 +556,8 @@ func interactionsRoot(body map[string]any) ([]string, []canonicalPart) {
 		}
 		role := normalizedString(step["role"])
 		stepType := normalizedString(step["type"])
-		if role == "system" || role == "developer" || stepType == "system_instruction" || stepType == "developer_instruction" {
+		if role == "system" || role == "developer" || stepType == "system_instruction" ||
+			stepType == "developer_instruction" {
 			instructions = appendInstruction(instructions, contentValue(step))
 			continue
 		}

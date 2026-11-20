@@ -7,6 +7,66 @@ import (
 	"time"
 )
 
+func TestSessionCachePublicDefaultTTLKeepsThirtyMinutes(t *testing.T) {
+	for _, constructor := range []struct {
+		name string
+		new  func(time.Duration) *SessionCache
+	}{
+		{name: "default capacity", new: NewSessionCache},
+		{
+			name: "explicit capacity",
+			new:  func(ttl time.Duration) *SessionCache { return NewSessionCacheWithCapacity(ttl, 4) },
+		},
+	} {
+		for _, ttl := range []time.Duration{0, -time.Nanosecond, 20 * time.Minute, time.Hour} {
+			t.Run(
+				constructor.name+"/"+ttl.String(), func(t *testing.T) {
+					cache := constructor.new(ttl)
+					defer cache.Stop()
+					want := ttl
+					if want <= 0 {
+						want = 30 * time.Minute
+					}
+					before := time.Now()
+					cache.Set("synthetic-session", "synthetic-auth")
+					after := time.Now()
+					cache.mu.RLock()
+					entry := cache.entries["synthetic-session"]
+					cache.mu.RUnlock()
+					if cache.ttl != want || entry.expiresAt.Before(before.Add(want)) ||
+						entry.expiresAt.After(after.Add(want)) {
+						t.Fatalf("ttl=%v expiry=%v, want %v within Set interval", cache.ttl, entry.expiresAt, want)
+					}
+					if _, found := cache.Get("synthetic-session"); !found {
+						t.Fatal("newly stored binding is unavailable")
+					}
+					cache.mu.Lock()
+					entry.expiresAt = entry.expiresAt.Add(-31 * time.Minute)
+					cache.entries["synthetic-session"] = entry
+					cache.groups["synthetic-session"] = entry
+					cache.mu.Unlock()
+					if _, found := cache.Get("synthetic-session"); found != (want > 31*time.Minute) {
+						t.Fatalf("binding availability after 31 minutes = %v, ttl=%v", found, want)
+					}
+				},
+			)
+		}
+	}
+}
+
+func TestSessionAffinityInternalDefaultRemainsOneHour(t *testing.T) {
+	for _, selector := range []*SessionAffinitySelector{
+		NewSessionAffinitySelector(nil),
+		NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{}),
+	} {
+		if selector.cache.ttl != time.Hour {
+			selector.Stop()
+			t.Fatalf("internal selector cache ttl=%v, want one hour", selector.cache.ttl)
+		}
+		selector.Stop()
+	}
+}
+
 func TestSessionCacheSetGetAndInvalidate(t *testing.T) {
 	cache := NewSessionCache(time.Hour)
 	defer cache.Stop()
@@ -109,12 +169,12 @@ func TestSessionCacheConcurrentAccessAndStop(t *testing.T) {
 
 	cache := NewSessionCacheWithCapacity(time.Hour, 128)
 	var workers sync.WaitGroup
-	for worker := 0; worker < 12; worker++ {
+	for worker := range 12 {
 		workers.Add(1)
 		go func(worker int) {
 			defer workers.Done()
 			authID := fmt.Sprintf("auth-%d", worker)
-			for iteration := 0; iteration < 300; iteration++ {
+			for iteration := range 300 {
 				key := fmt.Sprintf("session-%d-%d", worker, iteration)
 				cache.Set(key, authID)
 				cache.GetAndRefresh(key)
@@ -125,12 +185,12 @@ func TestSessionCacheConcurrentAccessAndStop(t *testing.T) {
 			}
 		}(worker)
 	}
-	for index := 0; index < 8; index++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			cache.Stop()
-		}()
+	for range 8 {
+		workers.Go(
+			func() {
+				cache.Stop()
+			},
+		)
 	}
 	workers.Wait()
 	if cache.Len() > 128 {

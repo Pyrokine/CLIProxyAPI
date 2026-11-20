@@ -31,13 +31,15 @@ type SessionCache struct {
 	stopOnce         sync.Once
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func NewSessionCache(ttl time.Duration) *SessionCache {
 	return NewSessionCacheWithCapacity(ttl, defaultMaxSessionEntries)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCache {
 	if ttl <= 0 {
-		ttl = time.Hour
+		ttl = 30 * time.Minute
 	}
 	if maxEntries <= 0 {
 		maxEntries = defaultMaxSessionEntries
@@ -71,10 +73,7 @@ func (c *SessionCache) ensureInitializedLocked() {
 }
 
 func (c *SessionCache) cleanupLoop() {
-	interval := c.ttl / 2
-	if interval < time.Millisecond {
-		interval = time.Millisecond
-	}
+	interval := max(c.ttl/2, time.Millisecond)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -107,14 +106,18 @@ func (c *SessionCache) Stop() {
 	if c == nil {
 		return
 	}
-	c.stopOnce.Do(func() {
-		if c.stopCh != nil {
-			close(c.stopCh)
-		}
-	})
+	c.stopOnce.Do(
+		func() {
+			if c.stopCh != nil {
+				close(c.stopCh)
+			}
+		},
+	)
 }
 
 // Get returns a live binding without refreshing its TTL or LRU position.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *SessionCache) Get(sessionID string) (string, bool) {
 	if c == nil {
 		return "", false
@@ -150,6 +153,8 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 }
 
 // GetAndRefresh returns a live binding and refreshes the whole alias group.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	if c == nil {
 		return "", false
@@ -180,6 +185,8 @@ func (c *SessionCache) Set(sessionID, authID string) {
 }
 
 // SetAliases binds all identifiers as one atomic alias group.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	if c == nil {
 		return
@@ -314,9 +321,11 @@ func compactSessionAliases(aliases []string) []string {
 }
 
 func compactHomeSessionAliases(aliases []string) []string {
-	return compactSessionAliasesWith(aliases, func(alias string) bool {
-		return strings.HasPrefix(alias, "pck:")
-	})
+	return compactSessionAliasesWith(
+		aliases, func(alias string) bool {
+			return strings.HasPrefix(alias, "pck:")
+		},
+	)
 }
 
 func compactSessionAliasesWith(aliases []string, isPromptCacheAlias func(string) bool) []string {
@@ -361,6 +370,8 @@ func equalSessionAliases(left, right []string) bool {
 }
 
 // Touch refreshes an alias group only while it remains bound to expectedAuthID.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 	if c == nil {
 		return false
@@ -384,6 +395,8 @@ func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 }
 
 // CompareAndDelete removes only the named alias when it still belongs to expectedAuthID.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 	if c == nil {
 		return false
@@ -415,6 +428,8 @@ func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 }
 
 // Invalidate removes only the named alias while preserving the rest of its group.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *SessionCache) Invalidate(sessionID string) {
 	if c == nil {
 		return
@@ -443,6 +458,7 @@ func (c *SessionCache) Invalidate(sessionID string) {
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *SessionCache) InvalidateAuth(authID string) {
 	if c == nil {
 		return
@@ -462,6 +478,8 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 }
 
 // Len returns the number of tracked aliases.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *SessionCache) Len() int {
 	if c == nil {
 		return 0

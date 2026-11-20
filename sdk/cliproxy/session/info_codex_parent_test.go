@@ -23,25 +23,29 @@ func TestExtractSessionInfoCodexCanonicalAgentParent(t *testing.T) {
 			payload: `{"parent_session_id":"body-parent"}`, wantParent: "codex:body-parent",
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			headers := http.Header{
-				"Session-Id":        []string{"sess-main-999"},
-				"X-Openai-Subagent": []string{"collab_spawn"},
-				"X-Codex-Turn-Metadata": []string{
-					`{"session_id":"sess-main-999","agent_name":"/root/worker","subagent_kind":"thread_spawn"}`,
-				},
-			}
-			if tc.thread != "" {
-				headers.Set("Thread-Id", tc.thread)
-			}
-			if tc.parentThread != "" {
-				headers.Set("X-Codex-Parent-Thread-Id", tc.parentThread)
-			}
-			info, ok := ExtractSessionInfo(headers, []byte(tc.payload), nil)
-			if !ok || info.SessionID != "codex:sess-main-999:agent:worker" ||
-				info.ParentSessionID != tc.wantParent || info.AgentName != "worker" || !info.IsSubagent {
-				t.Fatalf("session info = %#v, %t; want canonical worker child and parent %q", info, ok, tc.wantParent)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				headers := http.Header{
+					"Session-Id":        []string{"sess-main-999"},
+					"X-Openai-Subagent": []string{"collab_spawn"},
+					"X-Codex-Turn-Metadata": []string{
+						`{"session_id":"sess-main-999","agent_name":"/root/worker","subagent_kind":"thread_spawn"}`,
+					},
+				}
+				if tc.thread != "" {
+					headers.Set("Thread-Id", tc.thread)
+				}
+				if tc.parentThread != "" {
+					headers.Set("X-Codex-Parent-Thread-Id", tc.parentThread)
+				}
+				info, ok := ExtractSessionInfo(headers, []byte(tc.payload), nil)
+				if !ok || info.SessionID != "codex:sess-main-999:agent:worker" ||
+					info.ParentSessionID != tc.wantParent || info.AgentName != "worker" || !info.IsSubagent {
+					t.Fatalf(
+						"session info = %#v, %t; want canonical worker child and parent %q", info, ok, tc.wantParent,
+					)
+				}
+			},
+		)
 	}
 }

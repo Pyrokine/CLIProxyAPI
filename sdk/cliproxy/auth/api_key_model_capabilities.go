@@ -40,7 +40,8 @@ func ResolvedModelInfo(req cliproxyexecutor.Request) (*registry.ModelInfo, bool)
 	if modelInfo, ok := req.Metadata[resolvedHomeModelInfoMetadataKey].(*registry.ModelInfo); ok && modelInfo != nil {
 		return modelInfo, true
 	}
-	if modelInfo, ok := req.Metadata[resolvedCodexOAuthModelInfoMetadataKey].(*registry.ModelInfo); ok && modelInfo != nil {
+	if modelInfo, ok := req.Metadata[resolvedCodexOAuthModelInfoMetadataKey].(*registry.ModelInfo); ok &&
+		modelInfo != nil {
 		return modelInfo, true
 	}
 	if modelInfo, ok := req.Metadata[resolvedOAuthModelInfoMetadataKey].(*registry.ModelInfo); ok && modelInfo != nil {
@@ -98,7 +99,9 @@ func homeAPIKeyModelOptions(auth *Auth, model, routeModel string) (internalconfi
 				if name == "" {
 					name = alias
 				}
-				if strings.EqualFold(name, candidate) && (strings.EqualFold(alias, route) || strings.EqualFold(name, route)) {
+				if strings.EqualFold(name, candidate) && (strings.EqualFold(alias, route) || strings.EqualFold(
+					name, route,
+				)) {
 					return configured, true
 				}
 			}
@@ -156,20 +159,99 @@ func attachResolvedHomeModelInfo(
 	if !ok {
 		local, ok = req.Metadata[resolvedCodexOAuthModelInfoMetadataKey].(*registry.ModelInfo)
 	}
-	sameModel := ok && local != nil && strings.EqualFold(
-		strings.TrimSpace(thinking.ParseSuffix(local.ID).ModelName),
-		strings.TrimSpace(thinking.ParseSuffix(selected.ID).ModelName),
-	)
 	if support != nil {
 		selected.SupportConfigurationUpdate = *support
 	} else {
-		selected.SupportConfigurationUpdate = sameModel && local.SupportConfigurationUpdate
+		selected.SupportConfigurationUpdate = ok && local != nil && strings.EqualFold(
+			strings.TrimSpace(thinking.ParseSuffix(local.ID).ModelName),
+			strings.TrimSpace(thinking.ParseSuffix(selected.ID).ModelName),
+		) && local.SupportConfigurationUpdate
 	}
 	if configured {
 		selected.IsCompat = options.IsCompat
 	}
 	metadata[resolvedHomeModelInfoMetadataKey] = &selected
 	return req
+}
+
+func (m *Manager) configuredPoolModelInfo(auth *Auth, routeModel, upstreamModel string) (*registry.ModelInfo, bool) {
+	if auth == nil || m.HomeEnabled() {
+		return nil, false
+	}
+	if kind, _ := auth.AccountInfo(); !strings.EqualFold(kind, "api_key") {
+		return nil, false
+	}
+	requested := rewriteModelForAuth(routeModel, auth)
+	models := m.apiKeyModelAliasEntries(auth)
+	pool := resolveModelAliasPoolFromConfigModels(requested, models)
+	if len(pool) < 2 {
+		return nil, false
+	}
+	_, candidates := modelAliasLookupCandidates(requested)
+	for _, candidate := range candidates {
+		for _, model := range models {
+			if !strings.EqualFold(strings.TrimSpace(model.GetAlias()), candidate) ||
+				!strings.EqualFold(
+					thinking.PreserveRequestModelDecorations(model.GetName(), requested), upstreamModel,
+				) {
+				continue
+			}
+			base := strings.TrimSpace(thinking.ParseSuffix(upstreamModel).ModelName)
+			info := registry.LookupStaticModelInfo(base)
+			if info == nil {
+				info = &registry.ModelInfo{}
+			}
+			info.ID, info.CatalogName, info.UserDefined = base, strings.TrimSpace(model.GetName()), false
+			if configured, ok := model.(interface {
+				GetThinking() *registry.ThinkingSupport
+				GetMaxContextLength() int
+				GetIsCompat() bool
+			}); ok {
+				info.IsCompat = configured.GetIsCompat()
+				if limit := configured.GetMaxContextLength(); limit > 0 {
+					info.ContextLength, info.MaxContextLength = limit, limit
+				}
+				if support := configured.GetThinking(); support != nil {
+					cloned := *support
+					cloned.Levels = append([]string(nil), support.Levels...)
+					info.Thinking = &cloned
+				}
+			}
+			if configured, ok := model.(internalconfig.CodexModel); ok {
+				info.SupportConfigurationUpdate = configured.SupportConfigurationUpdate
+			}
+			if configured, ok := model.(internalconfig.OpenAICompatibilityModel); ok {
+				if configured.Image {
+					info.Type = registry.OpenAIImageModelType
+				}
+				info.SupportedInputModalities = append([]string(nil), configured.InputModalities...)
+				info.SupportedOutputModalities = append([]string(nil), configured.OutputModalities...)
+			}
+			return info, true
+		}
+	}
+	return nil, false
+}
+
+func (m *Manager) executionModelSupportsContext1M(auth *Auth, routeModel, upstreamModel string) bool {
+	if info, configured := m.configuredPoolModelInfo(auth, routeModel, upstreamModel); configured {
+		return ModelSupportsContext1M(info)
+	}
+	return authSupportsContext1MModel(auth, upstreamModel)
+}
+
+func (m *Manager) attachExecutionModelInfo(
+	req cliproxyexecutor.Request,
+	auth *Auth,
+	routeModel string,
+) (cliproxyexecutor.Request, error) {
+	if info, configured := m.configuredPoolModelInfo(auth, routeModel, req.Model); configured {
+		if thinking.HasContext1MTag(routeModel) && !ModelSupportsContext1M(info) {
+			return req, context1MModelSupportError(routeModel)
+		}
+		return attachResolvedModelInfo(req, resolvedAPIKeyModelInfoMetadataKey, info), nil
+	}
+	return attachResolvedAPIKeyModelInfo(req, auth, routeModel, req.Model)
 }
 
 func attachResolvedAPIKeyModelInfo(
@@ -180,7 +262,7 @@ func attachResolvedAPIKeyModelInfo(
 ) (cliproxyexecutor.Request, error) {
 	if thinking.HasContext1MTag(routeModel) {
 		modelInfo := authModelInfo(auth, routeModel)
-		if !modelInfoSupportsContext1M(modelInfo) {
+		if !ModelSupportsContext1M(modelInfo) {
 			return req, context1MModelSupportError(routeModel)
 		}
 		if configuredAPIKeyModelAuth(auth) {
@@ -190,30 +272,34 @@ func attachResolvedAPIKeyModelInfo(
 			}
 			return attachResolvedModelInfo(req, resolvedAPIKeyModelInfoMetadataKey, resolved), nil
 		}
-		if auth != nil && auth.AuthKind() == AuthKindOAuth && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		if auth != nil && auth.AuthKind() == AuthKindOAuth && strings.EqualFold(
+			strings.TrimSpace(auth.Provider), "codex",
+		) {
 			resolved, ok := lookupCodexOAuthModelInfo(auth, upstreamModel)
-			if !ok || !modelInfoSupportsContext1M(resolved) {
+			if !ok || !ModelSupportsContext1M(resolved) {
 				return req, context1MModelSupportError(routeModel)
 			}
 			return attachResolvedModelInfo(req, resolvedCodexOAuthModelInfoMetadataKey, resolved), nil
 		}
 	}
-	if modelInfo, ok := lookupAPIKeyModelInfo(auth, routeModel, upstreamModel); ok {
-		return attachResolvedModelInfo(req, resolvedAPIKeyModelInfoMetadataKey, modelInfo), nil
-	}
-	if modelInfo, ok := lookupCodexOAuthModelInfo(auth, upstreamModel); ok {
-		return attachResolvedModelInfo(req, resolvedCodexOAuthModelInfoMetadataKey, modelInfo), nil
-	}
-	if auth != nil && auth.AuthKind() == AuthKindOAuth {
-		switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
-		case "vertex", "gemini-cli", "aistudio":
-			info := authModelInfo(auth, routeModel)
-			if info == nil {
-				info = authModelInfo(auth, rewriteModelForAuth(routeModel, auth))
-			}
-			if info != nil && info.NativeCapabilities != nil && info.NativeCapabilities.WebSearch != nil {
-				if resolved, ok := resolveConfiguredAPIKeyModelInfo(info, upstreamModel); ok {
-					return attachResolvedModelInfo(req, resolvedOAuthModelInfoMetadataKey, resolved), nil
+	if auth != nil {
+		if modelInfo, ok := lookupAPIKeyModelInfo(auth, routeModel, upstreamModel); ok {
+			return attachResolvedModelInfo(req, resolvedAPIKeyModelInfoMetadataKey, modelInfo), nil
+		}
+		if modelInfo, ok := lookupCodexOAuthModelInfo(auth, upstreamModel); ok {
+			return attachResolvedModelInfo(req, resolvedCodexOAuthModelInfoMetadataKey, modelInfo), nil
+		}
+		if auth.AuthKind() == AuthKindOAuth {
+			switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+			case "vertex", "gemini-cli", "aistudio":
+				info := authModelInfo(auth, routeModel)
+				if info == nil {
+					info = authModelInfo(auth, rewriteModelForAuth(routeModel, auth))
+				}
+				if info != nil && info.NativeCapabilities != nil && info.NativeCapabilities.WebSearch != nil {
+					if resolved, ok := resolveConfiguredAPIKeyModelInfo(info, upstreamModel); ok {
+						return attachResolvedModelInfo(req, resolvedOAuthModelInfoMetadataKey, resolved), nil
+					}
 				}
 			}
 		}
@@ -247,8 +333,56 @@ func attachResolvedModelInfo(
 	return req
 }
 
+// BindFinalModelContext binds and checks a changed target for requests that require a 1M context.
+func BindFinalModelContext(
+	req cliproxyexecutor.Request,
+	auth *Auth,
+	requestedModel, finalModel string,
+) (cliproxyexecutor.Request, error) {
+	if !thinking.HasContext1MTag(requestedModel) {
+		return req, nil
+	}
+	finalModel = strings.TrimSpace(thinking.ParseSuffix(finalModel).ModelName)
+	selected, bound := ResolvedModelInfo(req)
+	if bound && strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(selected.ID).ModelName), finalModel) {
+		if ModelSupportsContext1M(selected) {
+			return req, nil
+		}
+		return req, context1MModelSupportError(requestedModel)
+	}
+	if !bound && finalModel != "" && strings.EqualFold(
+		strings.TrimSpace(thinking.ParseSuffix(req.Model).ModelName), finalModel,
+	) {
+		return req, nil
+	}
+	if auth == nil || strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]) != "" {
+		return req, context1MModelSupportError(requestedModel)
+	}
+	if auth.AuthKind() == AuthKindOAuth && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		if info, ok := lookupCodexOAuthModelInfo(auth, finalModel); ok && ModelSupportsContext1M(info) {
+			return attachResolvedModelInfo(req, resolvedCodexOAuthModelInfoMetadataKey, info), nil
+		}
+		return req, context1MModelSupportError(requestedModel)
+	}
+	for _, info := range registry.GetGlobalRegistry().GetModelsForClient(auth.ID) {
+		if !ModelSupportsContext1M(info) || !configuredModelMatchesUpstream(info, finalModel) {
+			continue
+		}
+		info.ID = finalModel
+		info.UserDefined = false
+		key := resolvedAPIKeyModelInfoMetadataKey
+		if auth.AuthKind() == AuthKindOAuth {
+			key = resolvedOAuthModelInfoMetadataKey
+		}
+		return attachResolvedModelInfo(req, key, info), nil
+	}
+	return req, context1MModelSupportError(requestedModel)
+}
+
 func lookupCodexOAuthModelInfo(auth *Auth, upstreamModel string) (*registry.ModelInfo, bool) {
-	if auth == nil || auth.AuthKind() != AuthKindOAuth || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+	if auth == nil || auth.AuthKind() != AuthKindOAuth || !strings.EqualFold(
+		strings.TrimSpace(auth.Provider), "codex",
+	) {
 		return nil, false
 	}
 	var models []*registry.ModelInfo
@@ -286,7 +420,7 @@ func authSupportsContext1MModel(auth *Auth, model string) bool {
 	if auth == nil || !thinking.HasContext1MTag(model) {
 		return auth != nil
 	}
-	return modelInfoSupportsContext1M(authModelInfo(auth, model))
+	return ModelSupportsContext1M(authModelInfo(auth, model))
 }
 
 func authModelInfo(auth *Auth, model string) *registry.ModelInfo {
@@ -297,20 +431,30 @@ func authModelInfo(auth *Auth, model string) *registry.ModelInfo {
 	if modelKey == "" {
 		return nil
 	}
-	return registry.GetGlobalRegistry().GetModelInfoForClient(auth.ID, modelKey)
+	reg := registry.GetGlobalRegistry()
+	if info := reg.GetModelInfoForClient(auth.ID, modelKey); info != nil {
+		return info
+	}
+	for _, info := range reg.GetModelsForClient(auth.ID) {
+		if configuredModelMatchesUpstream(info, modelKey) {
+			return info
+		}
+	}
+	return nil
 }
 
-func modelInfoSupportsContext1M(modelInfo *registry.ModelInfo) bool {
+// ModelSupportsContext1M reports whether either advertised context limit supports one million tokens.
+func ModelSupportsContext1M(modelInfo *registry.ModelInfo) bool {
 	return modelInfo != nil &&
 		max(modelInfo.ContextLength, modelInfo.MaxContextLength) >= context1MMinimumTokens
 }
 
-func context1MSelectionPredicate(model string) func(*Auth) bool {
+func (m *Manager) context1MSelectionPredicate(model string) func(*Auth) bool {
 	if !thinking.HasContext1MTag(model) {
 		return nil
 	}
 	return func(auth *Auth) bool {
-		return authSupportsContext1MModel(auth, model)
+		return m.executionModelSupportsContext1M(auth, model, m.ResolveExecutionModel(auth, model))
 	}
 }
 

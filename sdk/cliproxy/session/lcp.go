@@ -33,8 +33,10 @@ const (
 
 var (
 	iso8601Pattern = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b`)
-	uuidPattern    = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b`)
-	thinkPattern   = regexp.MustCompile(`(?is)\s*<(?:think|thinking)>.*?</(?:think|thinking)>\s*`)
+	uuidPattern    = regexp.MustCompile(
+		`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b`,
+	)
+	thinkPattern = regexp.MustCompile(`(?is)\s*<(?:think|thinking)>.*?</(?:think|thinking)>\s*`)
 )
 
 // CanonicalPart is a bounded protocol-independent conversation part.
@@ -54,6 +56,8 @@ type CanonicalTurn struct {
 }
 
 // FastTurnFingerprint returns a deterministic bounded fingerprint for one turn.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func FastTurnFingerprint(turn CanonicalTurn) string {
 	turn = normalizeCanonicalTurn(turn)
 	hash := sha256.New()
@@ -114,7 +118,8 @@ func inferCanonicalFormat(root gjson.Result) sdktranslator.Format {
 	if request := root.Get("request"); request.Exists() && !root.Get("contents").Exists() {
 		root = request
 	}
-	if root.Get("contents").IsArray() || root.Get("systemInstruction").Exists() || root.Get("system_instruction").Exists() {
+	if root.Get("contents").IsArray() || root.Get("systemInstruction").Exists() ||
+		root.Get("system_instruction").Exists() {
 		return sdktranslator.FormatGemini
 	}
 	if root.Get("instructions").Exists() {
@@ -144,27 +149,29 @@ func appendMessagesTurns(turns *[]CanonicalTurn, root gjson.Result, includeTopLe
 			appendTurn(turns, "system", canonicalPartsFromJSON(system))
 		}
 	}
-	root.Get("messages").ForEach(func(_, message gjson.Result) bool {
-		if !hasCanonicalTurnCapacity(turns) {
-			return false
-		}
-		role := canonicalRole(message.Get("role").String())
-		if role == "" {
-			role = "unknown"
-		}
-		content := message.Get("content")
-		parts := canonicalPartsFromJSON(content)
-		for _, key := range []string{"tool_calls", "tool_call", "function_call", "tool_use"} {
-			if value := message.Get(key); value.Exists() {
-				parts = append(parts, canonicalPartsFromJSON(value)...)
+	root.Get("messages").ForEach(
+		func(_, message gjson.Result) bool {
+			if !hasCanonicalTurnCapacity(turns) {
+				return false
 			}
-		}
-		if len(parts) == 0 && !content.Exists() {
-			parts = canonicalPartsFromJSON(message)
-		}
-		appendTurn(turns, role, parts)
-		return true
-	})
+			role := canonicalRole(message.Get("role").String())
+			if role == "" {
+				role = "unknown"
+			}
+			content := message.Get("content")
+			parts := canonicalPartsFromJSON(content)
+			for _, key := range []string{"tool_calls", "tool_call", "function_call", "tool_use"} {
+				if value := message.Get(key); value.Exists() {
+					parts = append(parts, canonicalPartsFromJSON(value)...)
+				}
+			}
+			if len(parts) == 0 && !content.Exists() {
+				parts = canonicalPartsFromJSON(message)
+			}
+			appendTurn(turns, role, parts)
+			return true
+		},
+	)
 }
 
 func appendResponsesTurns(turns *[]CanonicalTurn, root gjson.Result) {
@@ -179,34 +186,36 @@ func appendResponsesTurns(turns *[]CanonicalTurn, root gjson.Result) {
 		appendTurn(turns, "user", canonicalPartsFromJSON(input))
 		return
 	}
-	input.ForEach(func(_, item gjson.Result) bool {
-		if !hasCanonicalTurnCapacity(turns) {
-			return false
-		}
-		kind := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
-		if kind == "reasoning" || kind == "response.output_text" {
+	input.ForEach(
+		func(_, item gjson.Result) bool {
+			if !hasCanonicalTurnCapacity(turns) {
+				return false
+			}
+			kind := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+			if kind == "reasoning" || kind == "response.output_text" {
+				return true
+			}
+			role := canonicalRole(item.Get("role").String())
+			switch {
+			case role != "":
+			case strings.Contains(kind, "function_call_output") || strings.Contains(kind, "tool_result"):
+				role = "tool"
+			case strings.Contains(kind, "function_call") || strings.Contains(kind, "tool_call"):
+				role = "assistant"
+			case strings.Contains(kind, "compaction"):
+				role = "system"
+			default:
+				role = "unknown"
+			}
+			content := item.Get("content")
+			parts := canonicalPartsFromJSON(content)
+			if len(parts) == 0 && !content.Exists() {
+				parts = canonicalPartsFromJSON(item)
+			}
+			appendTurn(turns, role, parts)
 			return true
-		}
-		role := canonicalRole(item.Get("role").String())
-		switch {
-		case role != "":
-		case strings.Contains(kind, "function_call_output") || strings.Contains(kind, "tool_result"):
-			role = "tool"
-		case strings.Contains(kind, "function_call") || strings.Contains(kind, "tool_call"):
-			role = "assistant"
-		case strings.Contains(kind, "compaction"):
-			role = "system"
-		default:
-			role = "unknown"
-		}
-		content := item.Get("content")
-		parts := canonicalPartsFromJSON(content)
-		if len(parts) == 0 && !content.Exists() {
-			parts = canonicalPartsFromJSON(item)
-		}
-		appendTurn(turns, role, parts)
-		return true
-	})
+		},
+	)
 }
 
 func appendGeminiTurns(turns *[]CanonicalTurn, root gjson.Result) {
@@ -225,22 +234,24 @@ func appendGeminiTurns(turns *[]CanonicalTurn, root gjson.Result) {
 	} else if system := root.Get("system_instruction"); system.Exists() {
 		appendTurn(turns, "system", canonicalPartsFromJSON(system))
 	}
-	root.Get("contents").ForEach(func(_, content gjson.Result) bool {
-		if !hasCanonicalTurnCapacity(turns) {
-			return false
-		}
-		role := canonicalRole(content.Get("role").String())
-		if role == "" {
-			role = "unknown"
-		}
-		contentParts := content.Get("parts")
-		parts := canonicalPartsFromJSON(contentParts)
-		if len(parts) == 0 && !contentParts.Exists() {
-			parts = canonicalPartsFromJSON(content)
-		}
-		appendTurn(turns, role, parts)
-		return true
-	})
+	root.Get("contents").ForEach(
+		func(_, content gjson.Result) bool {
+			if !hasCanonicalTurnCapacity(turns) {
+				return false
+			}
+			role := canonicalRole(content.Get("role").String())
+			if role == "" {
+				role = "unknown"
+			}
+			contentParts := content.Get("parts")
+			parts := canonicalPartsFromJSON(contentParts)
+			if len(parts) == 0 && !contentParts.Exists() {
+				parts = canonicalPartsFromJSON(content)
+			}
+			appendTurn(turns, role, parts)
+			return true
+		},
+	)
 }
 
 func appendInteractionTurns(turns *[]CanonicalTurn, root gjson.Result) {
@@ -257,9 +268,11 @@ func appendInteractionValue(turns *[]CanonicalTurn, value gjson.Result, inherite
 		return hasCanonicalTurnCapacity(turns)
 	}
 	if value.Type == gjson.JSON && value.IsArray() {
-		value.ForEach(func(_, child gjson.Result) bool {
-			return appendInteractionValue(turns, child, inheritedRole)
-		})
+		value.ForEach(
+			func(_, child gjson.Result) bool {
+				return appendInteractionValue(turns, child, inheritedRole)
+			},
+		)
 		return hasCanonicalTurnCapacity(turns)
 	}
 	if value.Type != gjson.JSON {
@@ -271,9 +284,11 @@ func appendInteractionValue(turns *[]CanonicalTurn, value gjson.Result, inherite
 		if role == "" {
 			role = inheritedRole
 		}
-		steps.ForEach(func(_, child gjson.Result) bool {
-			return appendInteractionValue(turns, child, role)
-		})
+		steps.ForEach(
+			func(_, child gjson.Result) bool {
+				return appendInteractionValue(turns, child, role)
+			},
+		)
 		return hasCanonicalTurnCapacity(turns)
 	}
 	kind := strings.ToLower(strings.TrimSpace(value.Get("type").String()))
@@ -335,14 +350,16 @@ func canonicalPartsFromJSON(value gjson.Result) []CanonicalPart {
 		if value.IsArray() {
 			parts := make([]CanonicalPart, 0, maxCanonicalPartsPerTurn+1)
 			dropped := 0
-			value.ForEach(func(_, child gjson.Result) bool {
-				if len(parts) >= maxCanonicalPartsPerTurn {
-					dropped++
+			value.ForEach(
+				func(_, child gjson.Result) bool {
+					if len(parts) >= maxCanonicalPartsPerTurn {
+						dropped++
+						return true
+					}
+					parts = limitCanonicalParts(parts, canonicalPartsFromJSON(child))
 					return true
-				}
-				parts = limitCanonicalParts(parts, canonicalPartsFromJSON(child))
-				return true
-			})
+				},
+			)
 			return limitCanonicalPartsCount(parts, dropped)
 		}
 		if text := value.Get("text"); text.Type == gjson.String {
@@ -409,7 +426,9 @@ func canonicalJSONPart(kind string, value gjson.Result) CanonicalPart {
 		}
 	}
 	var decoded any
-	if json.Unmarshal([]byte(raw), &decoded) == nil {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if json.Valid([]byte(raw)) && decoder.Decode(&decoded) == nil {
 		if encoded, err := json.Marshal(decoded); err == nil {
 			raw = string(encoded)
 		}
@@ -447,16 +466,20 @@ func limitCanonicalPartsCount(parts []CanonicalPart, dropped int) []CanonicalPar
 	if dropped <= 0 {
 		return parts
 	}
-	if len(parts) > 0 && parts[len(parts)-1].Kind == "value" && strings.HasPrefix(parts[len(parts)-1].Value, "<truncated:") {
+	if len(parts) > 0 && parts[len(parts)-1].Kind == "value" && strings.HasPrefix(
+		parts[len(parts)-1].Value, "<truncated:",
+	) {
 		parts[len(parts)-1].OriginalSize += dropped
 		parts[len(parts)-1].Value = "<truncated:" + strconv.Itoa(parts[len(parts)-1].OriginalSize) + " parts>"
 		return parts
 	}
-	return append(parts, CanonicalPart{
-		Kind:         "value",
-		Value:        "<truncated:" + strconv.Itoa(dropped) + " parts>",
-		OriginalSize: dropped,
-	})
+	return append(
+		parts, CanonicalPart{
+			Kind:         "value",
+			Value:        "<truncated:" + strconv.Itoa(dropped) + " parts>",
+			OriginalSize: dropped,
+		},
+	)
 }
 
 func isReasoningJSONPart(value gjson.Result) bool {
@@ -563,12 +586,14 @@ func normalizeCanonicalTurn(turn CanonicalTurn) CanonicalTurn {
 		}
 	}
 	if len(toolParts) > 1 {
-		sort.SliceStable(toolParts, func(i, j int) bool {
-			if toolParts[i].Value != toolParts[j].Value {
-				return toolParts[i].Value < toolParts[j].Value
-			}
-			return toolParts[i].Digest < toolParts[j].Digest
-		})
+		sort.SliceStable(
+			toolParts, func(i, j int) bool {
+				if toolParts[i].Value != toolParts[j].Value {
+					return toolParts[i].Value < toolParts[j].Value
+				}
+				return toolParts[i].Digest < toolParts[j].Digest
+			},
+		)
 		for index, partIndex := range indexes {
 			parts[partIndex] = toolParts[index]
 		}
@@ -604,6 +629,8 @@ func formatEqual(left, right sdktranslator.Format) bool {
 }
 
 // MerklePrefixMatch describes the longest active rolling-prefix match.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type MerklePrefixMatch struct {
 	AuthID          string
 	SessionID       string
@@ -616,6 +643,8 @@ type MerklePrefixMatch struct {
 }
 
 // MerklePrefixBindResult describes identities produced while binding one trajectory.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type MerklePrefixBindResult struct {
 	SessionID       string
 	ParentSessionID string
@@ -718,6 +747,7 @@ func (matcher *MerklePrefixMatcher) now() time.Time {
 	return time.Now()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (matcher *MerklePrefixMatcher) Prepare(turns []CanonicalTurn) ([]string, int) {
 	if matcher == nil {
 		return nil, 0
@@ -730,10 +760,20 @@ func (matcher *MerklePrefixMatcher) PrepareExt(turns []CanonicalTurn) ([]string,
 	if matcher == nil {
 		return nil, 0, nil, ""
 	}
-	return matcher.fingerprints(turns), minimumAffinityPrefixLength(turns), tailFingerprints(turns), EnvironmentDigest(turns)
+	return matcher.fingerprints(
+			turns,
+		), minimumAffinityPrefixLength(
+			turns,
+		), tailFingerprints(
+			turns,
+		), EnvironmentDigest(
+			turns,
+		)
 }
 
 // EnvironmentDigest isolates compaction candidates with different system or developer instructions.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func EnvironmentDigest(turns []CanonicalTurn) string {
 	hash := sha256.New()
 	hasSystem := false
@@ -784,13 +824,15 @@ func (matcher *MerklePrefixMatcher) Match(namespace string, turns []CanonicalTur
 	return matcher.MatchFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (matcher *MerklePrefixMatcher) MatchFingerprints(
 	namespace string,
 	fingerprints []string,
 	minimum int,
 ) (MerklePrefixMatch, bool) {
 	return matcher.MatchFingerprintsWithContext(
-		namespace, fingerprints, extractTailFingerprints(fingerprints), fallbackEnvironmentDigest(fingerprints, minimum), minimum,
+		namespace, fingerprints, extractTailFingerprints(fingerprints),
+		fallbackEnvironmentDigest(fingerprints, minimum), minimum,
 	)
 }
 
@@ -850,15 +892,26 @@ func (matcher *MerklePrefixMatcher) Bind(namespace string, turns []CanonicalTurn
 	return matcher.BindWithResult(namespace, turns, authID).SessionID
 }
 
-func (matcher *MerklePrefixMatcher) BindWithResult(namespace string, turns []CanonicalTurn, authID string) MerklePrefixBindResult {
+func (matcher *MerklePrefixMatcher) BindWithResult(
+	namespace string,
+	turns []CanonicalTurn,
+	authID string,
+) MerklePrefixBindResult {
 	fingerprints, minimum, tails, envDigest := matcher.PrepareExt(turns)
 	return matcher.BindFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum, authID)
 }
 
-func (matcher *MerklePrefixMatcher) BindFingerprints(namespace string, fingerprints []string, minimum int, authID string) string {
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (matcher *MerklePrefixMatcher) BindFingerprints(
+	namespace string,
+	fingerprints []string,
+	minimum int,
+	authID string,
+) string {
 	return matcher.BindFingerprintsWithResult(namespace, fingerprints, minimum, authID).SessionID
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (matcher *MerklePrefixMatcher) BindFingerprintsWithResult(
 	namespace string,
 	fingerprints []string,
@@ -866,7 +919,8 @@ func (matcher *MerklePrefixMatcher) BindFingerprintsWithResult(
 	authID string,
 ) MerklePrefixBindResult {
 	return matcher.BindFingerprintsWithContext(
-		namespace, fingerprints, extractTailFingerprints(fingerprints), fallbackEnvironmentDigest(fingerprints, minimum), minimum, authID,
+		namespace, fingerprints, extractTailFingerprints(fingerprints),
+		fallbackEnvironmentDigest(fingerprints, minimum), minimum, authID,
 	)
 }
 
@@ -890,18 +944,29 @@ func (matcher *MerklePrefixMatcher) BindFingerprintsWithContext(
 	matcher.mu.Lock()
 	defer matcher.mu.Unlock()
 	matcher.prepareLocked()
-	return matcher.bindLocked(namespace, fingerprints, tails, envDigest, minimum, strings.TrimSpace(authID), matcher.now())
+	return matcher.bindLocked(
+		namespace, fingerprints, tails, envDigest, minimum, strings.TrimSpace(authID), matcher.now(),
+	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (matcher *MerklePrefixMatcher) Touch(namespace string, turns []CanonicalTurn, authID string) bool {
 	fingerprints, minimum, tails, envDigest := matcher.PrepareExt(turns)
 	return matcher.TouchFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum, authID)
 }
 
 // TouchFingerprints refreshes or extends a trajectory only for the expected auth.
-func (matcher *MerklePrefixMatcher) TouchFingerprints(namespace string, fingerprints []string, minimum int, authID string) bool {
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (matcher *MerklePrefixMatcher) TouchFingerprints(
+	namespace string,
+	fingerprints []string,
+	minimum int,
+	authID string,
+) bool {
 	return matcher.TouchFingerprintsWithContext(
-		namespace, fingerprints, extractTailFingerprints(fingerprints), fallbackEnvironmentDigest(fingerprints, minimum), minimum, authID,
+		namespace, fingerprints, extractTailFingerprints(fingerprints),
+		fallbackEnvironmentDigest(fingerprints, minimum), minimum, authID,
 	)
 }
 
@@ -925,7 +990,9 @@ func (matcher *MerklePrefixMatcher) TouchFingerprintsWithContext(
 	matcher.mu.Lock()
 	defer matcher.mu.Unlock()
 	matcher.prepareLocked()
-	return matcher.touchLocked(namespace, fingerprints, tails, envDigest, minimum, strings.TrimSpace(authID), matcher.now())
+	return matcher.touchLocked(
+		namespace, fingerprints, tails, envDigest, minimum, strings.TrimSpace(authID), matcher.now(),
+	)
 }
 
 // CompleteSessionSelection assigns a Home-selected auth to the session only while its selection is current.
@@ -975,11 +1042,13 @@ func (matcher *MerklePrefixMatcher) CompleteSessionSelection(
 	return true
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (matcher *MerklePrefixMatcher) Remove(namespace string, turns []CanonicalTurn, authID string) bool {
 	fingerprints, _ := matcher.Prepare(turns)
 	return matcher.RemoveFingerprints(namespace, fingerprints, authID)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (matcher *MerklePrefixMatcher) RemoveFingerprints(namespace string, fingerprints []string, authID string) bool {
 	return matcher.RemoveFingerprintsBefore(namespace, fingerprints, authID, 0)
 }
@@ -1456,7 +1525,9 @@ func (matcher *MerklePrefixMatcher) matchCompactionLocked(
 	for _, candidate := range candidates {
 		ancestor := false
 		for _, other := range candidates {
-			if candidate.sessionID != other.sessionID && isAncestorLCPSession(groups, candidate.sessionID, other.sessionID) {
+			if candidate.sessionID != other.sessionID && isAncestorLCPSession(
+				groups, candidate.sessionID, other.sessionID,
+			) {
 				ancestor = true
 				break
 			}
@@ -1494,7 +1565,9 @@ func calculateCompactionOverlap(candidate, parent []string, candidateEnd int) in
 	return overlap
 }
 
-func isCompactionOverlap(candidateLength, candidateTailLength, candidateEnd, parentLength, overlap, minimum, prefixLength int) bool {
+func isCompactionOverlap(
+	candidateLength, candidateTailLength, candidateEnd, parentLength, overlap, minimum, prefixLength int,
+) bool {
 	candidateStart := candidateEnd - overlap + 1
 	parentStart := parentLength - overlap
 	allowedStart := max(minimum, prefixLength+1)
@@ -1532,7 +1605,9 @@ func isAncestorLCPSession(groups *lcpNamespace, ancestorID, descendantID string)
 }
 
 func newLCPCompactionSessionID(namespace, parentSessionID, key string) string {
-	sum := sha256.Sum256([]byte("cli-proxy-api:lcp-compaction-session:v1\x00" + namespace + "\x00" + parentSessionID + "\x00" + key))
+	sum := sha256.Sum256(
+		[]byte("cli-proxy-api:lcp-compaction-session:v1\x00" + namespace + "\x00" + parentSessionID + "\x00" + key),
+	)
 	return "lcp:v1:" + hex.EncodeToString(sum[:])
 }
 
@@ -1540,7 +1615,9 @@ func newestMatchingGroup(bucket map[string]*lcpGroup, fingerprints []string, now
 	var best *lcpGroup
 	for _, group := range bucket {
 		if group == nil || !now.Before(group.expiresAt) || group.minPrefixLength > len(fingerprints) ||
-			len(group.fingerprints) < len(fingerprints) || !equalStrings(group.fingerprints[:len(fingerprints)], fingerprints) {
+			len(group.fingerprints) < len(fingerprints) || !equalStrings(
+			group.fingerprints[:len(fingerprints)], fingerprints,
+		) {
 			continue
 		}
 		if best == nil || len(group.fingerprints) > len(best.fingerprints) ||

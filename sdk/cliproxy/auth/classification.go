@@ -3,7 +3,8 @@ package auth
 import "strings"
 
 // These names are retained for compatibility with the public SDK API.
-// noinspection GoNameStartsWithPackageName
+//
+//goland:noinspection GoNameStartsWithPackageName,GoUnnecessarilyExportedIdentifiers
 const (
 	AuthKindAPIKey = "apikey"
 	AuthKindOAuth  = "oauth"
@@ -39,6 +40,11 @@ func (a *Auth) AuthKind() string {
 		return kind
 	}
 	if authAttribute(a, AttributeAPIKey) != "" || authMetadataString(a, AttributeAPIKey) != "" {
+		return AuthKindAPIKey
+	}
+	if a.AuthSourceKind() == AuthSourceConfig && (authAttribute(a, "compat_name") != "" || authAttribute(
+		a, "provider_key",
+	) != "") {
 		return AuthKindAPIKey
 	}
 	if authHasOAuthMetadata(a) {

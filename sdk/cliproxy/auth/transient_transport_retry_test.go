@@ -19,40 +19,52 @@ func TestTransientTransportErrorRetriesWithoutCooldown(t *testing.T) {
 	}{
 		{
 			name: "dial refused",
-			err: &url.Error{Op: "Post", URL: "https://example.invalid", Err: &net.OpError{
-				Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED,
-			}},
+			err: &url.Error{
+				Op: "Post", URL: "https://example.invalid", Err: &net.OpError{
+					Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED,
+				},
+			},
 		},
 		{
 			name: "temporary dns",
-			err: &url.Error{Op: "Post", URL: "https://example.invalid", Err: &net.DNSError{
-				Err: "temporary lookup failure", Name: "example.invalid", IsTemporary: true,
-			}},
+			err: &url.Error{
+				Op: "Post", URL: "https://example.invalid", Err: &net.DNSError{
+					Err: "temporary lookup failure", Name: "example.invalid", IsTemporary: true,
+				},
+			},
 		},
 		{
 			name: "tls handshake timeout",
-			err: &url.Error{Op: "Post", URL: "https://example.invalid", Err: errors.New("net/http: TLS handshake timeout")},
+			err: &url.Error{
+				Op: "Post", URL: "https://example.invalid", Err: errors.New("net/http: TLS handshake timeout"),
+			},
 		},
 	}
 	for _, test := range tests {
 		for _, kind := range []string{"execute", "count", "stream"} {
-			t.Run(test.name+"/"+kind, func(t *testing.T) {
-				manager := NewManager(nil, &FillFirstSelector{}, nil)
-				executor := &roundExecutor{failure: test.err}
-				manager.RegisterExecutor(executor)
-				manager.SetRetryConfig(1, 0, 1)
-				if _, err := manager.Register(context.Background(), &Auth{ID: "transport", Provider: "test", Status: StatusActive}); err != nil {
-					t.Fatal(err)
-				}
-				registerReservationContextModels(t, "test", "round-model", "transport")
-				if err := invokeRetryRound(manager, kind, apiKeyReservationTestContext(), coreexecutor.Options{}); err == nil {
-					t.Fatal("expected terminal transport error")
-				}
-				if len(executor.calls) != 2 {
-					t.Fatalf("transport attempts = %d, want two with request-retry=1", len(executor.calls))
-				}
-				assertNoCooldown(t, manager, "transport", "round-model")
-			})
+			t.Run(
+				test.name+"/"+kind, func(t *testing.T) {
+					manager := NewManager(nil, &FillFirstSelector{}, nil)
+					executor := &roundExecutor{failure: test.err}
+					manager.RegisterExecutor(executor)
+					manager.SetRetryConfig(1, 0, 1)
+					if _, err := manager.Register(
+						context.Background(), &Auth{ID: "transport", Provider: "test", Status: StatusActive},
+					); err != nil {
+						t.Fatal(err)
+					}
+					registerReservationContextModels(t, "test", "round-model", "transport")
+					if err := invokeRetryRound(
+						manager, kind, apiKeyReservationTestContext(), coreexecutor.Options{},
+					); err == nil {
+						t.Fatal("expected terminal transport error")
+					}
+					if len(executor.calls) != 2 {
+						t.Fatalf("transport attempts = %d, want two with request-retry=1", len(executor.calls))
+					}
+					assertNoCooldown(t, manager, "transport", "round-model")
+				},
+			)
 		}
 	}
 }
@@ -62,10 +74,12 @@ func TestTransientTransportErrorRejectsUnknownOutcomes(t *testing.T) {
 	cases := []error{
 		context.Canceled,
 		context.DeadlineExceeded,
-		&url.Error{Op: "Post", Err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}},
-		&Error{Message: "already sent", DispatchPhase: coreexecutor.DispatchPhaseMaybeSent,
-			Outcome: coreexecutor.ExecutionOutcomeUnknown, cause: dial},
-		&statusBearingError{status: http.StatusTooManyRequests, msg: "dial tcp: connection refused"},
+		&url.Error{Op: "Post", Err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}}, errorWithState(
+			&Error{Message: "already sent"}, errorState{
+				DispatchPhase: coreexecutor.DispatchPhaseMaybeSent,
+				Outcome:       coreexecutor.ExecutionOutcomeUnknown, cause: dial,
+			},
+		), &statusBearingError{status: http.StatusTooManyRequests, msg: "dial tcp: connection refused"},
 	}
 	for _, err := range cases {
 		if isTransientTransportError(err) {

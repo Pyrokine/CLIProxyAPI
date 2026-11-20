@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"encoding/json"
 	"slices"
 
 	log "github.com/sirupsen/logrus"
@@ -20,7 +21,6 @@ func rewriteModelInResponse(data []byte, targetModel string) []byte {
 	for _, path := range modelFieldPaths {
 		if gjson.GetBytes(data, path).Exists() {
 			data, _ = sjson.SetBytes(data, path, targetModel)
-			log.Debugf("response rewriter: rewrote model at path %s to %s", path, targetModel)
 		}
 	}
 	return data
@@ -30,9 +30,11 @@ func rewriteSSEPayloadLines(payload []byte, targetModel string) []byte {
 	if targetModel == "" || len(payload) == 0 {
 		return payload
 	}
-	return rewriteSSEPayloadLinesWith(payload, func(data []byte) []byte {
-		return rewriteModelInResponse(data, targetModel)
-	})
+	return rewriteSSEPayloadLinesWith(
+		payload, func(data []byte) []byte {
+			return rewriteModelInResponse(data, targetModel)
+		},
+	)
 }
 
 func rewriteSSEPayloadLinesWith(payload []byte, rewrite func([]byte) []byte) []byte {
@@ -68,6 +70,8 @@ type StreamRewriter struct {
 }
 
 // NewStreamRewriter creates a new stream rewriter.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func NewStreamRewriter(options StreamRewriteOptions) *StreamRewriter {
 	return &StreamRewriter{options: options}
 }
@@ -93,7 +97,9 @@ func (r *StreamRewriter) rewriteModel(data []byte) []byte {
 				r.loggedPaths = make(map[string]struct{})
 			}
 			r.loggedPaths[path] = struct{}{}
-			log.Debugf("response rewriter: stream started, rewrote model at path %s to %s", path, r.options.RewriteModel)
+			log.Debugf(
+				"response rewriter: stream started, rewrote model at path %s to %s", path, r.options.RewriteModel,
+			)
 		}
 	}
 	if rewrote {
@@ -118,16 +124,29 @@ func (r *StreamRewriter) logFinishedOnce() {
 }
 
 // RewriteChunk rewrites model names in a single SSE chunk.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	if r.options.RewriteModel == "" {
 		return chunk
 	}
 
 	if len(r.pendingBuf) > 0 {
+		if lastLine := r.pendingBuf[bytes.LastIndexByte(r.pendingBuf, '\n')+1:]; bytes.HasPrefix(
+			lastLine,
+			[]byte("event:"),
+		) &&
+			bytes.HasPrefix(chunk, []byte("data:")) {
+			r.pendingBuf = append(r.pendingBuf, '\n')
+		}
 		chunk = append(r.pendingBuf, chunk...)
 		r.pendingBuf = nil
 	}
 
+	if len(chunk) > maxPendingBufSize {
+		return chunk
+	}
+	chunk = normalizeGluedSSEEvents(chunk)
 	if len(chunk) > maxPendingBufSize {
 		return chunk
 	}
@@ -138,10 +157,6 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 	}
 
 	lastDoubleNewline := bytes.LastIndex(chunk, []byte("\n\n"))
-	lastNewline := -1
-	if len(chunk) > 0 && chunk[len(chunk)-1] == '\n' {
-		lastNewline = len(chunk) - 1
-	}
 
 	var processChunk []byte
 	if lastDoubleNewline >= 0 {
@@ -152,7 +167,7 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 		} else {
 			processChunk = chunk
 		}
-	} else if lastNewline >= 0 && gjson.ValidBytes(extractLastDataPayload(chunk)) {
+	} else if gjson.ValidBytes(extractLastDataPayload(chunk)) {
 		processChunk = chunk
 	} else if len(bytes.TrimSpace(chunk)) == 0 {
 		return chunk
@@ -238,7 +253,53 @@ func extractSSEDataLine(line []byte) (prefix []byte, jsonData []byte, ok bool) {
 	return nil, nil, false
 }
 
+func normalizeGluedSSEEvents(chunk []byte) []byte {
+	if !bytes.Contains(chunk, []byte("}event:")) && !bytes.Contains(chunk, []byte("}data:")) &&
+		!bytes.Contains(chunk, []byte("}\r\nevent:")) {
+		return chunk
+	}
+	var normalized []byte
+	copied := 0
+	for offset := 0; offset < len(chunk); {
+		if _, payload, found := extractSSEDataLine(chunk[offset:]); found {
+			decoder := json.NewDecoder(bytes.NewReader(payload))
+			var data json.RawMessage
+			if errDecode := decoder.Decode(&data); errDecode == nil && len(data) > 0 && data[0] == '{' {
+				end := len(chunk) - len(payload) + int(decoder.InputOffset())
+				separator := ""
+				switch {
+				case bytes.HasPrefix(chunk[end:], []byte("event:")):
+					separator = "\n\n"
+				case bytes.HasPrefix(chunk[end:], []byte("data:")):
+					separator = "\n"
+				case bytes.HasPrefix(chunk[end:], []byte("\r\nevent:")):
+					end += 2
+					separator = "\r\n"
+				}
+				if separator != "" {
+					normalized = append(normalized, chunk[copied:end]...)
+					normalized = append(normalized, separator...)
+					copied = end
+					offset = end
+					continue
+				}
+			}
+		}
+		newline := bytes.IndexByte(chunk[offset:], '\n')
+		if newline < 0 {
+			break
+		}
+		offset += newline + 1
+	}
+	if normalized == nil {
+		return chunk
+	}
+	return append(normalized, chunk[copied:]...)
+}
+
 // Finish flushes any buffered partial SSE data at the end of a stream.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *StreamRewriter) Finish() []byte {
 	if r == nil {
 		return nil

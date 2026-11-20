@@ -58,7 +58,8 @@ func TestExtractSessionInfoNestedProtocols(t *testing.T) {
 				"Thread-Id":         {"child-thread"},
 				"X-Openai-Subagent": {"collab_spawn"},
 				"X-Codex-Turn-Metadata": {
-					`{"session_id":"root","thread_id":"child-thread","agent_name":"/root/reviewer","parent_thread_id":"root","subagent_kind":"thread_spawn"}`,
+					`{"session_id":"root","thread_id":"child-thread","agent_name":"/root/re` +
+						`viewer","parent_thread_id":"root","subagent_kind":"thread_spawn"}`,
 				},
 			},
 			wantID:     "codex:root:agent:reviewer",
@@ -88,19 +89,27 @@ func TestExtractSessionInfoNestedProtocols(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			info, ok := ExtractSessionInfo(test.headers, []byte(test.payload), nil)
-			if !ok {
-				t.Fatal("ExtractSessionInfo() returned no identity")
-			}
-			if info.SessionID != test.wantID || info.ParentSessionID != test.wantParent {
-				t.Fatalf("identity = (%q, %q), want (%q, %q)", info.SessionID, info.ParentSessionID, test.wantID, test.wantParent)
-			}
-			if info.IsFork != test.wantFork || info.IsSubagent != test.wantSub {
-				t.Fatalf("flags = fork:%v subagent:%v, want fork:%v subagent:%v", info.IsFork, info.IsSubagent, test.wantFork, test.wantSub)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				t.Parallel()
+				info, ok := ExtractSessionInfo(test.headers, []byte(test.payload), nil)
+				if !ok {
+					t.Fatal("ExtractSessionInfo() returned no identity")
+				}
+				if info.SessionID != test.wantID || info.ParentSessionID != test.wantParent {
+					t.Fatalf(
+						"identity = (%q, %q), want (%q, %q)", info.SessionID, info.ParentSessionID, test.wantID,
+						test.wantParent,
+					)
+				}
+				if info.IsFork != test.wantFork || info.IsSubagent != test.wantSub {
+					t.Fatalf(
+						"flags = fork:%v subagent:%v, want fork:%v subagent:%v", info.IsFork, info.IsSubagent,
+						test.wantFork, test.wantSub,
+					)
+				}
+			},
+		)
 	}
 }
 

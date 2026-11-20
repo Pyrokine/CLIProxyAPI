@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -162,27 +163,35 @@ func TestMatchRequestScopedErrorAction(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			auth := &Auth{Metadata: map[string]any{"request_scoped_errors": test.rules}}
-			action, matched := matchRequestScopedErrorAction(auth, test.err, nil)
-			if action != test.action || matched != test.match {
-				t.Fatalf("match = (%q, %t), want (%q, %t)", action, matched, test.action, test.match)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				auth := &Auth{Metadata: map[string]any{"request_scoped_errors": test.rules}}
+				action, matched := matchRequestScopedErrorAction(auth, test.err, nil)
+				if action != test.action || matched != test.match {
+					t.Fatalf("match = (%q, %t), want (%q, %t)", action, matched, test.action, test.match)
+				}
+			},
+		)
 	}
 }
 
 func TestExtractRequestScopedErrorRulesPrecedenceAndSources(t *testing.T) {
-	canonical := []internalconfig.RequestScopedErrorRule{{Status: 400, Match: []string{"canonical"}, Action: "stop"}}
+	canonical := []internalconfig.RequestScopedErrorRule{
+		{Status: 400, Match: []string{"canonical"}, Action: "stop"},
+	}
 	legacy := []any{map[string]any{"status": float64(400), "match": []any{"legacy"}, "action": "continue"}}
-	auth := &Auth{Metadata: map[string]any{
-		"request_scoped_errors": canonical,
-		"request-scoped-errors": legacy,
-	}}
+	auth := &Auth{
+		Metadata: map[string]any{
+			"request_scoped_errors": canonical,
+			"request-scoped-errors": legacy,
+		},
+	}
 	if rules := extractRequestScopedErrorRules(auth, nil); len(rules) != 1 || rules[0].Match[0] != "canonical" {
 		t.Fatalf("canonical metadata precedence rules = %#v", rules)
 	}
-	if rules := extractRequestScopedErrorRules(&Auth{Metadata: map[string]any{"request-scoped-errors": legacy}}, nil); len(rules) != 1 || rules[0].Match[0] != "legacy" || rules[0].Action != "continue" {
+	if rules := extractRequestScopedErrorRules(
+		&Auth{Metadata: map[string]any{"request-scoped-errors": legacy}}, nil,
+	); len(rules) != 1 || rules[0].Match[0] != "legacy" || rules[0].Action != "continue" {
 		t.Fatalf("legacy metadata rules = %#v", rules)
 	}
 
@@ -191,18 +200,26 @@ func TestExtractRequestScopedErrorRulesPrecedenceAndSources(t *testing.T) {
 		GeminiKey:       []internalconfig.GeminiKey{{APIKey: "g", RequestScopedErrors: rule}},
 		InteractionsKey: []internalconfig.GeminiKey{{APIKey: "i", RequestScopedErrors: rule}},
 		ClaudeKey:       []internalconfig.ClaudeKey{{APIKey: "c", RequestScopedErrors: rule}},
-		CodexKey: []internalconfig.CodexKey{{
-			APIKey: "x", BaseURL: "https://api.openai.com/v1", RequestScopedErrors: rule,
-		}},
-		XAIKey: []internalconfig.CodexKey{{
-			APIKey: "a", BaseURL: "https://api.x.ai/v1", RequestScopedErrors: rule,
-		}},
-		MetaKey: []internalconfig.MetaKey{{
-			APIKey: "m", BaseURL: "https://api.meta.ai/v1", RequestScopedErrors: rule,
-		}},
-		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
-			Name: "compat", BaseURL: "https://example.test", RequestScopedErrors: rule,
-		}},
+		CodexKey: []internalconfig.CodexKey{
+			{
+				APIKey: "x", BaseURL: "https://api.openai.com/v1", RequestScopedErrors: rule,
+			},
+		},
+		XAIKey: []internalconfig.CodexKey{
+			{
+				APIKey: "a", BaseURL: "https://api.x.ai/v1", RequestScopedErrors: rule,
+			},
+		},
+		MetaKey: []internalconfig.MetaKey{
+			{
+				APIKey: "m", BaseURL: "https://api.meta.ai/v1", RequestScopedErrors: rule,
+			},
+		},
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "compat", BaseURL: "https://example.test", RequestScopedErrors: rule,
+			},
+		},
 		OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
 			"vertex": {{Status: 400, Match: []string{"oauth"}, Action: "continue"}},
 			"meta":   {{Status: 400, Match: []string{"meta-oauth"}, Action: "stop"}},
@@ -215,17 +232,43 @@ func TestExtractRequestScopedErrorRulesPrecedenceAndSources(t *testing.T) {
 		{name: "gemini", auth: &Auth{Provider: "gemini", Attributes: map[string]string{"api_key": "g"}}},
 		{name: "interactions", auth: &Auth{Provider: "interactions", Attributes: map[string]string{"api_key": "i"}}},
 		{name: "claude", auth: &Auth{Provider: "claude", Attributes: map[string]string{"api_key": "c"}}},
-		{name: "codex", auth: &Auth{Provider: "codex", Attributes: map[string]string{"api_key": "x", "base_url": "https://api.openai.com/v1"}}},
-		{name: "xai", auth: &Auth{Provider: "xai", Attributes: map[string]string{"api_key": "a", "base_url": "https://api.x.ai/v1"}}},
-		{name: "meta", auth: &Auth{Provider: "meta", Attributes: map[string]string{"api_key": "m", "base_url": "https://api.meta.ai/v1"}}},
-		{name: "openai compatibility", auth: &Auth{Provider: "compat", Attributes: map[string]string{AttributeConfigIndex: "0", "provider_key": "compat", "compat_name": "compat"}}},
+		{
+			name: "codex", auth: &Auth{
+				Provider: "codex", Attributes: map[string]string{
+					"api_key": "x", "base_url": "https://" +
+						"api.openai.com/" +
+						"v1",
+				},
+			},
+		},
+		{
+			name: "xai", auth: &Auth{
+				Provider: "xai", Attributes: map[string]string{"api_key": "a", "base_url": "https://api.x.ai/v1"},
+			},
+		},
+		{
+			name: "meta", auth: &Auth{
+				Provider: "meta", Attributes: map[string]string{"api_key": "m", "base_url": "https://api.meta.ai/v1"},
+			},
+		},
+		{
+			name: "openai compatibility", auth: &Auth{
+				Provider: "compat",
+				Attributes: map[string]string{
+					AttributeConfigIndex: "0", "provider_key": "compat",
+					"compat_name": "compat",
+				},
+			},
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			rules := extractRequestScopedErrorRules(test.auth, cfg)
-			if len(rules) != 1 || rules[0].Match[0] != "config" {
-				t.Fatalf("config rules = %#v", rules)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				rules := extractRequestScopedErrorRules(test.auth, cfg)
+				if len(rules) != 1 || rules[0].Match[0] != "config" {
+					t.Fatalf("config rules = %#v", rules)
+				}
+			},
+		)
 	}
 
 	oauth := &Auth{Provider: " Vertex ", Attributes: map[string]string{"auth_kind": "oauth"}}
@@ -233,7 +276,8 @@ func TestExtractRequestScopedErrorRulesPrecedenceAndSources(t *testing.T) {
 		t.Fatalf("OAuth rules = %#v", rules)
 	}
 	metaOAuth := &Auth{Provider: "meta", Attributes: map[string]string{"auth_kind": "oauth", "api_key": "m"}}
-	if rules := extractRequestScopedErrorRules(metaOAuth, cfg); len(rules) != 1 || rules[0].Match[0] != "meta-oauth" {
+	if rules := extractRequestScopedErrorRules(metaOAuth, cfg); len(rules) != 1 ||
+		rules[0].Match[0] != "meta-oauth" {
 		t.Fatalf("Meta OAuth rules = %#v", rules)
 	}
 	apiKey := &Auth{Provider: "vertex", Attributes: map[string]string{"auth_kind": "apikey"}}
@@ -242,6 +286,7 @@ func TestExtractRequestScopedErrorRulesPrecedenceAndSources(t *testing.T) {
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestApplyRequestScopedErrorRuleActionMatrix(t *testing.T) {
 	const model = "model-a"
 	auth := &Auth{
@@ -268,54 +313,121 @@ func TestApplyRequestScopedErrorRuleActionMatrix(t *testing.T) {
 		wantGeneration uint64
 		forceCooldown  bool
 	}{
-		{name: "stop", action: RequestScopedActionStop, disposition: base, wantStop: true, wantRetry: cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeRequest},
-		{name: "continue", action: RequestScopedActionContinue, disposition: base, wantRetry: cliproxyexecutor.RetryDirectiveNextAuth, wantScope: cliproxyexecutor.StateEffectScopeRequest},
-		{name: "stop and cooldown", action: RequestScopedActionStopAndCooldown, disposition: requestScopedDispositionWithScope(base, cliproxyexecutor.StateEffectScopeRequest), wantStop: true, wantRetry: cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeExactModel, wantKey: "model-a", wantGeneration: 7, forceCooldown: true},
-		{name: "continue and cooldown", action: RequestScopedActionContinueAndCooldown, disposition: requestScopedDispositionWithScope(base, cliproxyexecutor.StateEffectScopeRequest), wantRetry: cliproxyexecutor.RetryDirectiveNextAuth, wantScope: cliproxyexecutor.StateEffectScopeExactModel, wantKey: "model-a", wantGeneration: 7, forceCooldown: true},
-		{name: "continue unknown", action: RequestScopedActionContinue, disposition: requestScopedDispositionWithOutcome(base, cliproxyexecutor.ExecutionOutcomeUnknown), wantRetry: cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeRequest},
-		{name: "continue processed failure", action: RequestScopedActionContinue, disposition: requestScopedDispositionWithOutcome(base, cliproxyexecutor.ExecutionOutcomeFailed), wantRetry: cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeRequest},
-		{name: "continue downstream committed", action: RequestScopedActionContinue, disposition: requestScopedDispositionWithPhase(base, cliproxyexecutor.DispatchPhaseDownstreamCommitted), wantRetry: cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeRequest},
-		{name: "continue preserves retry after", action: RequestScopedActionContinue, disposition: requestScopedDispositionWithRetry(base, cliproxyexecutor.RetryDirectiveRetryAfter), wantRetry: cliproxyexecutor.RetryDirectiveRetryAfter, wantScope: cliproxyexecutor.StateEffectScopeRequest},
-		{name: "forced credential cooldown", action: RequestScopedActionStopAndCooldown, disposition: base, wantStop: true, wantRetry: cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeCredential, wantKey: auth.ID, wantGeneration: 5, forceCooldown: true},
+		{
+			name: "stop", action: RequestScopedActionStop, disposition: base, wantStop: true,
+			wantRetry: cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeRequest,
+		},
+		{
+			name: "continue", action: RequestScopedActionContinue, disposition: base,
+			wantRetry: cliproxyexecutor.RetryDirectiveNextAuth, wantScope: cliproxyexecutor.StateEffectScopeRequest,
+		},
+		{
+			name: "stop and cooldown", action: RequestScopedActionStopAndCooldown,
+			disposition: requestScopedDispositionWithScope(base, cliproxyexecutor.StateEffectScopeRequest),
+			wantStop:    true, wantRetry: cliproxyexecutor.RetryDirectiveNoRetry,
+			wantScope: cliproxyexecutor.StateEffectScopeExactModel, wantKey: "model-a", wantGeneration: 7,
+			forceCooldown: true,
+		},
+		{
+			name: "continue and cooldown", action: RequestScopedActionContinueAndCooldown,
+			disposition: requestScopedDispositionWithScope(base, cliproxyexecutor.StateEffectScopeRequest),
+			wantRetry:   cliproxyexecutor.RetryDirectiveNextAuth,
+			wantScope:   cliproxyexecutor.StateEffectScopeExactModel,
+			wantKey:     "model-a", wantGeneration: 7, forceCooldown: true,
+		},
+		{
+			name: "continue unknown", action: RequestScopedActionContinue,
+			disposition: requestScopedDispositionWithOutcome(base, cliproxyexecutor.ExecutionOutcomeUnknown),
+			wantRetry:   cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeRequest,
+		},
+		{
+			name: "continue processed failure", action: RequestScopedActionContinue,
+			disposition: requestScopedDispositionWithOutcome(base, cliproxyexecutor.ExecutionOutcomeFailed),
+			wantRetry:   cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeRequest,
+		},
+		{
+			name: "continue downstream committed", action: RequestScopedActionContinue,
+			disposition: requestScopedDispositionWithPhase(
+				base,
+				cliproxyexecutor.DispatchPhaseDownstreamCommitted,
+			),
+			wantRetry: cliproxyexecutor.RetryDirectiveNoRetry, wantScope: cliproxyexecutor.StateEffectScopeRequest,
+		},
+		{
+			name: "continue preserves retry after", action: RequestScopedActionContinue,
+			disposition: requestScopedDispositionWithRetry(base, cliproxyexecutor.RetryDirectiveRetryAfter),
+			wantRetry:   cliproxyexecutor.RetryDirectiveRetryAfter, wantScope: cliproxyexecutor.StateEffectScopeRequest,
+		},
+		{
+			name: "forced credential cooldown", action: RequestScopedActionStopAndCooldown, disposition: base,
+			wantStop: true, wantRetry: cliproxyexecutor.RetryDirectiveNoRetry,
+			wantScope: cliproxyexecutor.StateEffectScopeCredential, wantKey: auth.ID, wantGeneration: 5,
+			forceCooldown: true,
+		},
 	}
 
 	manager := NewManager(nil, nil, nil)
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			auth.Metadata = map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
-				Status: 400, Match: []string{"matched"}, Action: test.action,
-			}}}
-			upstream := &requestScopedTestError{status: 400, message: "matched"}
-			result := Result{
-				AuthID: auth.ID, AuthGeneration: auth.Generation, Provider: auth.Provider, Model: model,
-				ModelQuotaEpoch: 23, StateGeneration: 99, Disposition: test.disposition,
-				Error: errorForResultWithDisposition(upstream, test.disposition, 99),
-			}
-			decision := manager.applyRequestScopedErrorRule(auth, upstream, &result)
-			if !decision.matched || decision.action != test.action || decision.stop != test.wantStop {
-				t.Fatalf("decision = %#v", decision)
-			}
-			if result.Disposition.RetryDirective != test.wantRetry || result.Disposition.EffectScope != test.wantScope ||
-				result.Disposition.EffectKey != test.wantKey || result.StateGeneration != test.wantGeneration {
-				t.Fatalf("result disposition = %+v, generation = %d", result.Disposition, result.StateGeneration)
-			}
-			if result.Disposition.DispatchPhase != test.disposition.DispatchPhase || result.Disposition.Outcome != test.disposition.Outcome {
-				t.Fatalf("phase/outcome changed: %+v -> %+v", test.disposition, result.Disposition)
-			}
-			if result.AuthGeneration != 17 || result.ModelQuotaEpoch != 23 {
-				t.Fatalf("auth generation or quota epoch changed: %+v", result)
-			}
-			if test.forceCooldown != isForceCooldownResult(result) {
-				t.Fatalf("force cooldown = %t, result error = %#v", isForceCooldownResult(result), result.Error)
-			}
-			if unwrapped := unwrapRequestScopedActionError(decision.err); unwrapped != upstream {
-				t.Fatalf("public error = %T/%v, want original", unwrapped, unwrapped)
-			}
-			if result.Error == nil || result.Error.RetryDirective != test.wantRetry || result.Error.EffectScope != test.wantScope ||
-				result.Error.EffectKey != test.wantKey || result.Error.StateGeneration != test.wantGeneration {
-				t.Fatalf("result error disposition = %#v", result.Error)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				auth.Metadata = map[string]any{
+					"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+						{
+							Status: 400, Match: []string{"matched"}, Action: test.action,
+						},
+					},
+				}
+				upstream := &requestScopedTestError{status: 400, message: "matched"}
+				result := Result{
+					AuthID: auth.ID, AuthGeneration: auth.Generation, Provider: auth.Provider, Model: model,
+					ModelQuotaEpoch: 23, StateGeneration: 99, Disposition: test.disposition,
+					Error: errorForResultWithDisposition(upstream, test.disposition, 99),
+				}
+				decision := manager.applyRequestScopedErrorRule(auth, upstream, &result)
+				if !decision.matched || decision.action != test.action || decision.stop != test.wantStop {
+					t.Fatalf("decision = %#v", decision)
+				}
+				if result.Disposition.RetryDirective !=
+					test.wantRetry ||
+					result.Disposition.EffectScope !=
+						test.wantScope ||
+					result.Disposition.EffectKey != test.wantKey ||
+					result.StateGeneration != test.wantGeneration {
+					t.Fatalf(
+						"result disposition = %+v, generation = %d",
+						result.Disposition,
+						result.StateGeneration,
+					)
+				}
+				if result.Disposition.DispatchPhase != test.disposition.DispatchPhase ||
+					result.Disposition.Outcome != test.disposition.Outcome {
+					t.Fatalf("phase/outcome changed: %+v -> %+v", test.disposition, result.Disposition)
+				}
+				if result.AuthGeneration != 17 || result.ModelQuotaEpoch != 23 {
+					t.Fatalf("auth generation or quota epoch changed: %+v", result)
+				}
+				if test.forceCooldown != isForceCooldownResult(result) {
+					t.Fatalf(
+						"force cooldown = %t, result error = %#v",
+						isForceCooldownResult(result),
+						result.Error,
+					)
+				}
+				if unwrapped := unwrapRequestScopedActionError(decision.err); unwrapped != upstream {
+					t.Fatalf("public error = %T/%v, want original", unwrapped, unwrapped)
+				}
+				if result.Error ==
+					nil ||
+					result.Error.executionState().RetryDirective !=
+						test.wantRetry ||
+					result.Error.executionState().EffectScope !=
+						test.wantScope ||
+					result.Error.executionState().EffectKey != test.wantKey ||
+					result.Error.executionState().StateGeneration != test.wantGeneration {
+					t.Fatalf("result error disposition = %#v", result.Error)
+				}
+			},
+		)
 	}
 }
 
@@ -352,6 +464,7 @@ func requestScopedDispositionWithRetry(
 	return disposition
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestRequestScopedErrorActionsLocalExecution(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -365,7 +478,10 @@ func TestRequestScopedErrorActionsLocalExecution(t *testing.T) {
 		wantCooldown bool
 	}{
 		{name: "stop", action: RequestScopedActionStop, status: 400, wantCalls: 1},
-		{name: "stop and cooldown", action: RequestScopedActionStopAndCooldown, status: 400, wantCalls: 1, wantCooldown: true},
+		{
+			name: "stop and cooldown", action: RequestScopedActionStopAndCooldown, status: 400, wantCalls: 1,
+			wantCooldown: true,
+		},
 		{name: "continue", action: RequestScopedActionContinue, status: 400, wantCalls: 2, wantSuccess: true},
 		{
 			name: "continue compact request fault", action: RequestScopedActionContinue,
@@ -379,82 +495,107 @@ func TestRequestScopedErrorActionsLocalExecution(t *testing.T) {
 			name: "continue and cooldown", action: RequestScopedActionContinueAndCooldown,
 			status: 400, wantCalls: 2, wantSuccess: true, wantCooldown: true,
 		},
-		{name: "continue unknown is not replayed", action: RequestScopedActionContinue, status: 500, wantCalls: 1},
-		{name: "continue processed failure is not replayed", action: RequestScopedActionContinue, status: 400, outcome: cliproxyexecutor.ExecutionOutcomeFailed, wantCalls: 1},
-		{name: "continue downstream committed is not replayed", action: RequestScopedActionContinue, status: 400, outcome: cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing, phase: cliproxyexecutor.DispatchPhaseDownstreamCommitted, wantCalls: 1},
+		{
+			name:      "continue unknown is not replayed",
+			action:    RequestScopedActionContinue,
+			status:    500,
+			wantCalls: 1,
+		},
+		{
+			name: "continue processed failure is not replayed", action: RequestScopedActionContinue, status: 400,
+			outcome: cliproxyexecutor.ExecutionOutcomeFailed, wantCalls: 1,
+		},
+		{
+			name: "continue downstream committed is not replayed", action: RequestScopedActionContinue, status: 400,
+			outcome: cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing,
+			phase:   cliproxyexecutor.DispatchPhaseDownstreamCommitted, wantCalls: 1,
+		},
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			const provider = "request-rule-provider"
-			const model = "request-rule-model"
-			firstError := &requestScopedTestError{status: test.status, message: "matched"}
-			var upstream error = firstError
-			if test.outcome != "" || test.phase != "" {
-				disposition := cliproxyexecutor.HTTPStatusDisposition(test.status, false)
-				if test.outcome != "" {
-					disposition.Outcome = test.outcome
+		t.Run(
+			test.name, func(t *testing.T) {
+				const provider = "request-rule-provider"
+				const model = "request-rule-model"
+				firstError := &requestScopedTestError{status: test.status, message: "matched"}
+				var upstream error = firstError
+				if test.outcome != "" || test.phase != "" {
+					disposition := cliproxyexecutor.HTTPStatusDisposition(test.status, false)
+					if test.outcome != "" {
+						disposition.Outcome = test.outcome
+					}
+					if test.phase != "" {
+						disposition.DispatchPhase = test.phase
+					}
+					upstream = &requestScopedDispositionError{
+						requestScopedTestError: firstError, disposition: disposition,
+					}
 				}
-				if test.phase != "" {
-					disposition.DispatchPhase = test.phase
+				executor := &requestScopedTestExecutor{provider: provider}
+				executor.execute = func(auth *Auth) (cliproxyexecutor.Response, error) {
+					if auth.ID == "first" {
+						return cliproxyexecutor.Response{}, upstream
+					}
+					return cliproxyexecutor.Response{Payload: []byte("success")}, nil
 				}
-				upstream = &requestScopedDispositionError{requestScopedTestError: firstError, disposition: disposition}
-			}
-			executor := &requestScopedTestExecutor{provider: provider}
-			executor.execute = func(auth *Auth) (cliproxyexecutor.Response, error) {
-				if auth.ID == "first" {
-					return cliproxyexecutor.Response{}, upstream
-				}
-				return cliproxyexecutor.Response{Payload: []byte("success")}, nil
-			}
-			manager := NewManager(nil, &RoundRobinSelector{}, nil)
-			manager.SetRetryConfig(2, 30*time.Second, 0)
-			manager.RegisterExecutor(executor)
-			registerRequestScopedTestAuth(t, manager, &Auth{
-				ID: "first", Provider: provider, Status: StatusActive,
-				Attributes: map[string]string{"priority": "10"},
-				Metadata: map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
-					Status: test.status, Match: []string{"matched"}, Action: test.action,
-				}}},
-			}, model)
-			registerRequestScopedTestAuth(t, manager, &Auth{
-				ID: "second", Provider: provider, Status: StatusActive,
-				Attributes: map[string]string{"priority": "5"},
-			}, model)
+				manager := NewManager(nil, &RoundRobinSelector{}, nil)
+				manager.SetRetryConfig(2, 30*time.Second, 0)
+				manager.RegisterExecutor(executor)
+				registerRequestScopedTestAuth(
+					t, manager, &Auth{
+						ID: "first", Provider: provider, Status: StatusActive,
+						Attributes: map[string]string{"priority": "10"},
+						Metadata: map[string]any{
+							"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+								{
+									Status: test.status, Match: []string{"matched"}, Action: test.action,
+								},
+							},
+						},
+					}, model,
+				)
+				registerRequestScopedTestAuth(
+					t, manager, &Auth{
+						ID: "second", Provider: provider, Status: StatusActive,
+						Attributes: map[string]string{"priority": "5"},
+					}, model,
+				)
 
-			response, err := manager.Execute(
-				context.Background(),
-				[]string{provider},
-				cliproxyexecutor.Request{Model: model},
-				cliproxyexecutor.Options{Alt: test.alt},
-			)
-			if test.wantSuccess {
-				if err != nil || string(response.Payload) != "success" {
-					t.Fatalf("Execute() response = %q, error = %v", response.Payload, err)
-				}
-			} else {
-				if upstream != firstError {
-					if err != upstream {
-						t.Fatalf("Execute() error = %T/%v, want original disposition error", err, err)
+				response, err := manager.Execute(
+					context.Background(),
+					[]string{provider},
+					cliproxyexecutor.Request{Model: model},
+					cliproxyexecutor.Options{Alt: test.alt},
+				)
+				if test.wantSuccess {
+					if err != nil || string(response.Payload) != "success" {
+						t.Fatalf("Execute() response = %q, error = %v", response.Payload, err)
 					}
 				} else {
-					var got *requestScopedTestError
-					if !errors.As(err, &got) || got != firstError {
-						t.Fatalf("Execute() error = %T/%v, want original upstream error", err, err)
+					if upstream != firstError {
+						if err != upstream {
+							t.Fatalf("Execute() error = %T/%v, want original disposition error", err, err)
+						}
+					} else {
+						var got *requestScopedTestError
+						if !errors.As(err, &got) || got != firstError {
+							t.Fatalf("Execute() error = %T/%v, want original upstream error", err, err)
+						}
+					}
+					if isRequestStopError(err) {
+						t.Fatalf("public error leaked request stop marker: %T/%v", err, err)
 					}
 				}
-				if isRequestStopError(err) {
-					t.Fatalf("public error leaked request stop marker: %T/%v", err, err)
+				if calls := executor.calls.Load(); calls != test.wantCalls {
+					t.Fatalf("Execute() calls = %d, want %d", calls, test.wantCalls)
 				}
-			}
-			if calls := executor.calls.Load(); calls != test.wantCalls {
-				t.Fatalf("Execute() calls = %d, want %d", calls, test.wantCalls)
-			}
-			assertRequestScopedCooldown(t, manager, "first", model, test.wantCooldown)
-		})
+				assertRequestScopedCooldown(t, manager, "first", model, test.wantCooldown)
+			},
+		)
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestRequestScopedErrorStopSuppressesOuterRetry(t *testing.T) {
 	const provider = "request-rule-retry"
 	const model = "request-rule-model"
@@ -467,14 +608,25 @@ func TestRequestScopedErrorStopSuppressesOuterRetry(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetRetryConfig(3, time.Second, 1)
 	manager.RegisterExecutor(executor)
-	registerRequestScopedTestAuth(t, manager, &Auth{
-		ID: "only", Provider: provider, Status: StatusActive,
-		Metadata: map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
-			Status: 429, Match: []string{"matched"}, Action: RequestScopedActionStop,
-		}}},
-	}, model)
+	registerRequestScopedTestAuth(
+		t, manager, &Auth{
+			ID: "only", Provider: provider, Status: StatusActive,
+			Metadata: map[string]any{
+				"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+					{
+						Status: 429, Match: []string{"matched"}, Action: RequestScopedActionStop,
+					},
+				},
+			},
+		}, model,
+	)
 
-	_, err := manager.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	_, err := manager.Execute(
+		context.Background(),
+		[]string{provider},
+		cliproxyexecutor.Request{Model: model},
+		cliproxyexecutor.Options{},
+	)
 	if err != upstream {
 		t.Fatalf("Execute() error = %T/%v, want original", err, err)
 	}
@@ -483,6 +635,7 @@ func TestRequestScopedErrorStopSuppressesOuterRetry(t *testing.T) {
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestRequestScopedErrorCountTokensForceCooldownOverridesNeutral404(t *testing.T) {
 	const provider = "request-rule-count"
 	const model = "request-rule-model"
@@ -493,17 +646,27 @@ func TestRequestScopedErrorCountTokensForceCooldownOverridesNeutral404(t *testin
 	}
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
-	registerRequestScopedTestAuth(t, manager, &Auth{
-		ID: "count", Provider: provider, Status: StatusActive,
-		Metadata: map[string]any{
-			"disable_cooling": true,
-			"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
-				Status: 404, Match: []string{"count-endpoint-missing"}, Action: RequestScopedActionStopAndCooldown,
-			}},
-		},
-	}, model)
+	registerRequestScopedTestAuth(
+		t, manager, &Auth{
+			ID: "count", Provider: provider, Status: StatusActive,
+			Metadata: map[string]any{
+				"disable_cooling": true,
+				"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+					{
+						Status: 404, Match: []string{"count-endpoint-missing"},
+						Action: RequestScopedActionStopAndCooldown,
+					},
+				},
+			},
+		}, model,
+	)
 
-	_, err := manager.ExecuteCount(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	_, err := manager.ExecuteCount(
+		context.Background(),
+		[]string{provider},
+		cliproxyexecutor.Request{Model: model},
+		cliproxyexecutor.Options{},
+	)
 	if err != upstream {
 		t.Fatalf("ExecuteCount() error = %T/%v, want original", err, err)
 	}
@@ -513,136 +676,186 @@ func TestRequestScopedErrorCountTokensForceCooldownOverridesNeutral404(t *testin
 	assertRequestScopedCooldown(t, manager, "count", model, true)
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestRequestScopedErrorStreamBootstrapAndSubsequentChunk(t *testing.T) {
-	t.Run("bootstrap continue redispatches safely", func(t *testing.T) {
-		const provider = "request-rule-stream-continue"
-		const model = "request-rule-model"
-		upstream := &requestScopedTestError{status: 400, message: "bootstrap-matched"}
-		executor := &requestScopedTestExecutor{provider: provider}
-		executor.stream = func(auth *Auth) (*cliproxyexecutor.StreamResult, error) {
-			chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-			if auth.ID == "first" {
+	t.Run(
+		"bootstrap continue redispatches safely", func(t *testing.T) {
+			const provider = "request-rule-stream-continue"
+			const model = "request-rule-model"
+			upstream := &requestScopedTestError{status: 400, message: "bootstrap-matched"}
+			executor := &requestScopedTestExecutor{provider: provider}
+			executor.stream = func(auth *Auth) (*cliproxyexecutor.StreamResult, error) {
+				chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+				if auth.ID == "first" {
+					chunks <- cliproxyexecutor.StreamChunk{Err: upstream}
+				} else {
+					chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("success")}
+				}
+				close(chunks)
+				return &cliproxyexecutor.StreamResult{
+					Headers: http.Header{"X-Test": {"value"}},
+					Chunks:  chunks,
+				}, nil
+			}
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			manager.RegisterExecutor(executor)
+			registerRequestScopedTestAuth(
+				t, manager, &Auth{
+					ID: "first", Provider: provider, Status: StatusActive,
+					Attributes: map[string]string{"priority": "10"},
+					Metadata: map[string]any{
+						"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+							{
+								Status: 400, Match: []string{"bootstrap-matched"}, Action: RequestScopedActionContinue,
+							},
+						},
+					},
+				}, model,
+			)
+			registerRequestScopedTestAuth(
+				t, manager, &Auth{
+					ID: "second", Provider: provider, Status: StatusActive,
+					Attributes: map[string]string{"priority": "5"},
+				}, model,
+			)
+
+			result, err := manager.ExecuteStream(
+				context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model},
+				cliproxyexecutor.Options{Stream: true},
+			)
+			if err != nil {
+				t.Fatalf("ExecuteStream() error = %v", err)
+			}
+			var payload []byte
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream chunk error = %v", chunk.Err)
+				}
+				payload = append(payload, chunk.Payload...)
+			}
+			if string(payload) != "success" || executor.streamCalls.Load() != 2 {
+				t.Fatalf("stream payload = %q, calls = %d", payload, executor.streamCalls.Load())
+			}
+			assertRequestScopedCooldown(t, manager, "first", model, false)
+		},
+	)
+
+	t.Run(
+		"bootstrap stop preserves headers and public error", func(t *testing.T) {
+			const provider = "request-rule-stream-stop"
+			const model = "request-rule-model"
+			upstream := &requestScopedTestError{status: 400, message: "bootstrap-stop"}
+			executor := &requestScopedTestExecutor{provider: provider}
+			executor.stream = func(*Auth) (*cliproxyexecutor.StreamResult, error) {
+				chunks := make(chan cliproxyexecutor.StreamChunk, 1)
 				chunks <- cliproxyexecutor.StreamChunk{Err: upstream}
-			} else {
-				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("success")}
+				close(chunks)
+				return &cliproxyexecutor.StreamResult{
+					Headers: http.Header{"X-Test": {"value"}},
+					Chunks:  chunks,
+				}, nil
 			}
-			close(chunks)
-			return &cliproxyexecutor.StreamResult{Headers: http.Header{"X-Test": {"value"}}, Chunks: chunks}, nil
-		}
-		manager := NewManager(nil, &RoundRobinSelector{}, nil)
-		manager.RegisterExecutor(executor)
-		registerRequestScopedTestAuth(t, manager, &Auth{
-			ID: "first", Provider: provider, Status: StatusActive, Attributes: map[string]string{"priority": "10"},
-			Metadata: map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
-				Status: 400, Match: []string{"bootstrap-matched"}, Action: RequestScopedActionContinue,
-			}}},
-		}, model)
-		registerRequestScopedTestAuth(t, manager, &Auth{
-			ID: "second", Provider: provider, Status: StatusActive, Attributes: map[string]string{"priority": "5"},
-		}, model)
+			manager := NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			registerRequestScopedTestAuth(
+				t, manager, &Auth{
+					ID: "only", Provider: provider, Status: StatusActive,
+					Metadata: map[string]any{
+						"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+							{
+								Status: 400, Match: []string{"bootstrap-stop"},
+								Action: RequestScopedActionStopAndCooldown,
+							},
+						},
+					},
+				}, model,
+			)
 
-		result, err := manager.ExecuteStream(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
-		if err != nil {
-			t.Fatalf("ExecuteStream() error = %v", err)
-		}
-		var payload []byte
-		for chunk := range result.Chunks {
-			if chunk.Err != nil {
-				t.Fatalf("stream chunk error = %v", chunk.Err)
+			result, err := manager.ExecuteStream(
+				context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model},
+				cliproxyexecutor.Options{Stream: true},
+			)
+			if err != nil {
+				t.Fatalf("ExecuteStream() returned bootstrap error outside stream: %v", err)
 			}
-			payload = append(payload, chunk.Payload...)
-		}
-		if string(payload) != "success" || executor.streamCalls.Load() != 2 {
-			t.Fatalf("stream payload = %q, calls = %d", payload, executor.streamCalls.Load())
-		}
-		assertRequestScopedCooldown(t, manager, "first", model, false)
-	})
-
-	t.Run("bootstrap stop preserves headers and public error", func(t *testing.T) {
-		const provider = "request-rule-stream-stop"
-		const model = "request-rule-model"
-		upstream := &requestScopedTestError{status: 400, message: "bootstrap-stop"}
-		executor := &requestScopedTestExecutor{provider: provider}
-		executor.stream = func(*Auth) (*cliproxyexecutor.StreamResult, error) {
-			chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-			chunks <- cliproxyexecutor.StreamChunk{Err: upstream}
-			close(chunks)
-			return &cliproxyexecutor.StreamResult{Headers: http.Header{"X-Test": {"value"}}, Chunks: chunks}, nil
-		}
-		manager := NewManager(nil, nil, nil)
-		manager.RegisterExecutor(executor)
-		registerRequestScopedTestAuth(t, manager, &Auth{
-			ID: "only", Provider: provider, Status: StatusActive,
-			Metadata: map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
-				Status: 400, Match: []string{"bootstrap-stop"}, Action: RequestScopedActionStopAndCooldown,
-			}}},
-		}, model)
-
-		result, err := manager.ExecuteStream(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
-		if err != nil {
-			t.Fatalf("ExecuteStream() returned bootstrap error outside stream: %v", err)
-		}
-		if result == nil || result.Headers.Get("X-Test") != "value" {
-			t.Fatalf("stream result headers = %#v", result)
-		}
-		var delivered error
-		for chunk := range result.Chunks {
-			if chunk.Err != nil {
-				delivered = chunk.Err
+			if result == nil || result.Headers.Get("X-Test") != "value" {
+				t.Fatalf("stream result headers = %#v", result)
 			}
-		}
-		var got *requestScopedTestError
-		if !errors.As(delivered, &got) || got != upstream || isRequestStopError(delivered) {
-			t.Fatalf("delivered error = %T/%v, want original without action marker", delivered, delivered)
-		}
-		if executor.streamCalls.Load() != 1 {
-			t.Fatalf("stream calls = %d, want 1", executor.streamCalls.Load())
-		}
-		assertRequestScopedCooldown(t, manager, "only", model, true)
-	})
-
-	t.Run("subsequent chunk changes state without redispatch", func(t *testing.T) {
-		const provider = "request-rule-stream-chunk"
-		const model = "request-rule-model"
-		upstream := &requestScopedTestError{status: 400, message: "chunk-matched"}
-		executor := &requestScopedTestExecutor{provider: provider}
-		executor.stream = func(*Auth) (*cliproxyexecutor.StreamResult, error) {
-			chunks := make(chan cliproxyexecutor.StreamChunk, 2)
-			chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("started")}
-			chunks <- cliproxyexecutor.StreamChunk{Err: upstream}
-			close(chunks)
-			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
-		}
-		manager := NewManager(nil, &RoundRobinSelector{}, nil)
-		manager.RegisterExecutor(executor)
-		registerRequestScopedTestAuth(t, manager, &Auth{
-			ID: "first", Provider: provider, Status: StatusActive, Attributes: map[string]string{"priority": "10"},
-			Metadata: map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
-				Status: 400, Match: []string{"chunk-matched"}, Action: RequestScopedActionContinueAndCooldown,
-			}}},
-		}, model)
-		registerRequestScopedTestAuth(t, manager, &Auth{
-			ID: "second", Provider: provider, Status: StatusActive, Attributes: map[string]string{"priority": "5"},
-		}, model)
-
-		result, err := manager.ExecuteStream(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
-		if err != nil {
-			t.Fatalf("ExecuteStream() error = %v", err)
-		}
-		var delivered error
-		for chunk := range result.Chunks {
-			if chunk.Err != nil {
-				delivered = chunk.Err
+			var delivered error
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					delivered = chunk.Err
+				}
 			}
-		}
-		if delivered != upstream {
-			t.Fatalf("delivered chunk error = %T/%v, want original", delivered, delivered)
-		}
-		if executor.streamCalls.Load() != 1 {
-			t.Fatalf("stream calls = %d, want no redispatch", executor.streamCalls.Load())
-		}
-		assertRequestScopedCooldown(t, manager, "first", model, true)
-	})
+			var got *requestScopedTestError
+			if !errors.As(delivered, &got) || got != upstream || isRequestStopError(delivered) {
+				t.Fatalf("delivered error = %T/%v, want original without action marker", delivered, delivered)
+			}
+			if executor.streamCalls.Load() != 1 {
+				t.Fatalf("stream calls = %d, want 1", executor.streamCalls.Load())
+			}
+			assertRequestScopedCooldown(t, manager, "only", model, true)
+		},
+	)
+
+	t.Run(
+		"subsequent chunk changes state without redispatch", func(t *testing.T) {
+			const provider = "request-rule-stream-chunk"
+			const model = "request-rule-model"
+			upstream := &requestScopedTestError{status: 400, message: "chunk-matched"}
+			executor := &requestScopedTestExecutor{provider: provider}
+			executor.stream = func(*Auth) (*cliproxyexecutor.StreamResult, error) {
+				chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("started")}
+				chunks <- cliproxyexecutor.StreamChunk{Err: upstream}
+				close(chunks)
+				return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+			}
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			manager.RegisterExecutor(executor)
+			registerRequestScopedTestAuth(
+				t, manager, &Auth{
+					ID: "first", Provider: provider, Status: StatusActive,
+					Attributes: map[string]string{"priority": "10"},
+					Metadata: map[string]any{
+						"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+							{
+								Status: 400, Match: []string{"chunk-matched"},
+								Action: RequestScopedActionContinueAndCooldown,
+							},
+						},
+					},
+				}, model,
+			)
+			registerRequestScopedTestAuth(
+				t, manager, &Auth{
+					ID: "second", Provider: provider, Status: StatusActive,
+					Attributes: map[string]string{"priority": "5"},
+				}, model,
+			)
+
+			result, err := manager.ExecuteStream(
+				context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model},
+				cliproxyexecutor.Options{Stream: true},
+			)
+			if err != nil {
+				t.Fatalf("ExecuteStream() error = %v", err)
+			}
+			var delivered error
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					delivered = chunk.Err
+				}
+			}
+			if delivered != upstream {
+				t.Fatalf("delivered chunk error = %T/%v, want original", delivered, delivered)
+			}
+			if executor.streamCalls.Load() != 1 {
+				t.Fatalf("stream calls = %d, want no redispatch", executor.streamCalls.Load())
+			}
+			assertRequestScopedCooldown(t, manager, "first", model, true)
+		},
+	)
 }
 
 func TestRequestScopedErrorForceCooldownOverridesDisableCooling(t *testing.T) {
@@ -656,55 +869,81 @@ func TestRequestScopedErrorForceCooldownOverridesDisableCooling(t *testing.T) {
 		{name: "credential", provider: "claude", metadata: map[string]any{"disable_cooling": true}},
 		{
 			name: "provider", provider: "compat",
-			config: &internalconfig.Config{OpenAICompatibility: []internalconfig.OpenAICompatibility{{
-				Name: "compat", BaseURL: "https://example.test", DisableCooling: new(true),
-			}}},
+			config: &internalconfig.Config{
+				OpenAICompatibility: []internalconfig.OpenAICompatibility{
+					{
+						Name: "compat", BaseURL: "https://example.test", DisableCooling: new(true),
+					},
+				},
+			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			const model = "force-model"
-			metadata := make(map[string]any, len(test.metadata)+1)
-			for key, value := range test.metadata {
-				metadata[key] = value
-			}
-			metadata["request_scoped_errors"] = []internalconfig.RequestScopedErrorRule{{
-				Status: 500, Match: []string{"force"}, Action: RequestScopedActionStopAndCooldown,
-			}}
-			auth := &Auth{ID: "force-auth", Provider: test.provider, Status: StatusActive, Metadata: metadata}
-			if test.name == "provider" {
-				auth.Attributes = map[string]string{"provider_key": "compat", "compat_name": "compat"}
-			}
-			manager, current := newExecutionOutcomeTestManager(t, auth)
-			manager.SetConfig(test.config)
-			upstream := &requestScopedTestError{status: 500, message: "force"}
-			result := executionResult(current, current.Provider, model, upstream, cliproxyexecutor.DispatchPhaseMaybeSent)
-			manager.applyRequestScopedErrorRule(current, upstream, &result)
-			before := time.Now()
-			manager.MarkResult(context.Background(), result)
-			updated := getExecutionOutcomeTestAuth(t, manager, current.ID)
-			state := updated.ModelStates[model]
-			if state == nil || !state.Unavailable || state.NextRetryAfter.Before(before.Add(59*time.Second)) ||
-				state.NextRetryAfter.After(before.Add(61*time.Second)) {
-				t.Fatalf("forced cooldown state = %#v", state)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				const model = "force-model"
+				metadata := make(map[string]any, len(test.metadata)+1)
+				maps.Copy(metadata, test.metadata)
+				metadata["request_scoped_errors"] = []internalconfig.RequestScopedErrorRule{
+					{
+						Status: 500, Match: []string{"force"}, Action: RequestScopedActionStopAndCooldown,
+					},
+				}
+				auth := &Auth{
+					ID:       "force-auth",
+					Provider: test.provider,
+					Status:   StatusActive,
+					Metadata: metadata,
+				}
+				if test.name == "provider" {
+					auth.Attributes = map[string]string{"provider_key": "compat", "compat_name": "compat"}
+				}
+				manager, current := newExecutionOutcomeTestManager(t, auth)
+				manager.SetConfig(test.config)
+				upstream := &requestScopedTestError{status: 500, message: "force"}
+				result := executionResult(
+					current, current.Provider, model, upstream, cliproxyexecutor.DispatchPhaseMaybeSent,
+				)
+				manager.applyRequestScopedErrorRule(current, upstream, &result)
+				before := time.Now()
+				manager.MarkResult(context.Background(), result)
+				updated := getExecutionOutcomeTestAuth(t, manager, current.ID)
+				state := updated.ModelStates[model]
+				if state == nil || !state.Unavailable ||
+					state.NextRetryAfter.Before(before.Add(59*time.Second)) ||
+					state.NextRetryAfter.After(before.Add(61*time.Second)) {
+					t.Fatalf("forced cooldown state = %#v", state)
+				}
+			},
+		)
 	}
 }
 
 func TestRequestScopedErrorForceCooldownKeepsLaterDeadline(t *testing.T) {
 	const model = "deadline-model"
 	later := time.Now().Add(2 * time.Hour).Round(0)
-	manager, current := newExecutionOutcomeTestManager(t, &Auth{
-		ID: "deadline-auth", Provider: "claude", Status: StatusActive,
-		Metadata: map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
-			Status: 500, Match: []string{"force"}, Action: RequestScopedActionStopAndCooldown,
-		}}},
-		ModelStates: map[string]*ModelState{
-			model: {Status: StatusError, Unavailable: true, NextRetryAfter: later, Generation: 4},
+	manager, current := newExecutionOutcomeTestManager(
+		t, &Auth{
+			ID: "deadline-auth", Provider: "claude", Status: StatusActive,
+			Metadata: map[string]any{
+				"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+					{
+						Status: 500, Match: []string{"force"}, Action: RequestScopedActionStopAndCooldown,
+					},
+				},
+			},
+			ModelStates: map[string]*ModelState{
+				model: {Status: StatusError, Unavailable: true, NextRetryAfter: later, Generation: 4},
+			},
 		},
-	})
+	)
 	upstream := &requestScopedTestError{status: 500, message: "force"}
-	result := executionResult(current, current.Provider, model, upstream, cliproxyexecutor.DispatchPhaseMaybeSent)
+	result := executionResult(
+		current,
+		current.Provider,
+		model,
+		upstream,
+		cliproxyexecutor.DispatchPhaseMaybeSent,
+	)
 	manager.applyRequestScopedErrorRule(current, upstream, &result)
 	manager.MarkResult(context.Background(), result)
 
@@ -717,9 +956,15 @@ func TestRequestScopedErrorForceCooldownKeepsLaterDeadline(t *testing.T) {
 func TestRequestScopedErrorRetryAfterSurvivesActionWrapper(t *testing.T) {
 	retryAfter := 3 * time.Second
 	upstream := &requestScopedTestError{status: 429, message: "rate", retryAfter: &retryAfter}
-	auth := &Auth{Metadata: map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
-		Status: 429, Match: []string{"rate"}, Action: RequestScopedActionStop,
-	}}}}
+	auth := &Auth{
+		Metadata: map[string]any{
+			"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+				{
+					Status: 429, Match: []string{"rate"}, Action: RequestScopedActionStop,
+				},
+			},
+		},
+	}
 	result := executionResult(auth, "claude", "model", upstream, cliproxyexecutor.DispatchPhaseMaybeSent)
 	decision := NewManager(nil, nil, nil).applyRequestScopedErrorRule(auth, upstream, &result)
 	got := retryAfterFromError(decision.err)

@@ -18,7 +18,9 @@ type c09RequestScopedStatusError struct {
 }
 
 func (e c09RequestScopedStatusError) Error() string {
-	return `{"error":{"message":"upstream websocket message too big","type":"invalid_request_error","code":"message_too_big"}}`
+	return `{"error":{"message":"upstream websocket message too big","type":` +
+		`"invalid_request_error","code":` +
+		`"message_too_big"}}`
 }
 
 func (e c09RequestScopedStatusError) StatusCode() int {
@@ -103,7 +105,8 @@ func TestC09RequestScopedMessageTooBigStopsCredentialFallback(t *testing.T) {
 					if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: provider}); err != nil {
 						t.Fatalf("Register(%s) error = %v", id, err)
 					}
-					registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: model}})
+					registry.GetGlobalRegistry().
+						RegisterClient(id, provider, []*registry.ModelInfo{{ID: model}})
 					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
 				}
 
@@ -169,7 +172,8 @@ func TestC09RequestScopedResultDoesNotChangeAuthAvailability(t *testing.T) {
 	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
 		t.Fatalf("auth availability changed after request-scoped result: %+v", updated)
 	}
-	if state := updated.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+	if state := updated.ModelStates[model]; state != nil &&
+		(state.Unavailable || !state.NextRetryAfter.IsZero()) {
 		t.Fatalf("model state changed after request-scoped result: %+v", state)
 	}
 
@@ -197,21 +201,27 @@ func TestC09ExplicitSessionBoundariesBeforeAffinity(t *testing.T) {
 		{name: "oversized header", headers: http.Header{"X-Session-ID": {oversized}}},
 		{name: "control body", body: []byte(`{"prompt_cache_key":"tenant\n"}`)},
 		{name: "oversized body", body: []byte(`{"session_id":"` + oversized + `"}`)},
-		{name: "control metadata", metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "tenant\n"}},
-		{name: "oversized metadata", metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: oversized}},
+		{
+			name:     "control metadata",
+			metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "tenant\n"},
+		},
+		{
+			name:     "oversized metadata",
+			metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: oversized},
+		},
 	}
 	for _, test := range tests {
 		t.Run(
 			test.name, func(t *testing.T) {
-				if got := ExtractSessionID(test.headers, test.body, test.metadata); got != "" {
-					t.Fatalf("ExtractSessionID() = %q, want empty", got)
+				if got := CanonicalSessionID(test.headers, test.body, test.metadata); got != "" {
+					t.Fatalf("CanonicalSessionID() = %q, want empty", got)
 				}
 			},
 		)
 	}
 
 	headers := http.Header{"X-Session-ID": {"tenant\n", "valid-session"}}
-	if got := ExtractSessionID(headers, nil, nil); got != "valid-session" {
-		t.Fatalf("ExtractSessionID() = %q, want later valid value", got)
+	if got := CanonicalSessionID(headers, nil, nil); got != "header:valid-session" {
+		t.Fatalf("CanonicalSessionID() = %q, want later valid value", got)
 	}
 }

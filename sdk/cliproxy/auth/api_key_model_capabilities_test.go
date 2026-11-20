@@ -110,67 +110,80 @@ func TestAttachResolvedAPIKeyModelInfoRejectsDifferentUpstream(t *testing.T) {
 func TestPostAuthModelRewriteDoesNotBindPreviousModelCapabilities(t *testing.T) {
 	const originalModel = "configured-upstream"
 	for _, mode := range []string{"execute", "count", "stream"} {
-		t.Run(mode, func(t *testing.T) {
-			authID := "model-rewrite-" + mode
-			models := registry.GetGlobalRegistry()
-			models.RegisterClient(authID, "test", []*registry.ModelInfo{{
-				ID: originalModel, Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
-			}})
-			t.Cleanup(func() { models.UnregisterClient(authID) })
-			manager := NewManager(nil, nil, nil)
-			executor := &homeCapabilityCaptureExecutor{}
-			manager.RegisterExecutor(executor)
-			if _, err := manager.Register(context.Background(), &Auth{
-				ID: authID, Provider: "test", Status: StatusActive,
-				Attributes: map[string]string{"api_key": "fixture-key"},
-			}); err != nil {
-				t.Fatal(err)
-			}
-			manager.RefreshSchedulerEntry(authID)
-			execute := func(opts cliproxyexecutor.Options) error {
-				request := cliproxyexecutor.Request{Model: originalModel, Payload: []byte(`{}`)}
-				switch mode {
-				case "execute":
-					_, err := manager.Execute(context.Background(), []string{"test"}, request, opts)
-					return err
-				case "count":
-					_, err := manager.ExecuteCount(context.Background(), []string{"test"}, request, opts)
-					return err
-				default:
-					stream, err := manager.ExecuteStream(context.Background(), []string{"test"}, request, opts)
-					if err != nil {
-						return err
-					}
-					for chunk := range stream.Chunks {
-						if chunk.Err != nil {
-							return chunk.Err
-						}
-					}
-					return nil
+		t.Run(
+			mode, func(t *testing.T) {
+				authID := "model-rewrite-" + mode
+				models := registry.GetGlobalRegistry()
+				models.RegisterClient(
+					authID, "test", []*registry.ModelInfo{
+						{
+							ID: originalModel, Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+						},
+					},
+				)
+				t.Cleanup(func() { models.UnregisterClient(authID) })
+				manager := NewManager(nil, nil, nil)
+				executor := &homeCapabilityCaptureExecutor{}
+				manager.RegisterExecutor(executor)
+				if _, err := manager.Register(
+					context.Background(), &Auth{
+						ID: authID, Provider: "test", Status: StatusActive,
+						Attributes: map[string]string{"api_key": "fixture-key"},
+					},
+				); err != nil {
+					t.Fatal(err)
 				}
-			}
-			if err := execute(cliproxyexecutor.Options{}); err != nil || len(executor.requests) != 1 {
-				t.Fatalf("unmodified execution: requests=%d, error=%v", len(executor.requests), err)
-			}
-			if info, ok := ResolvedAPIKeyModelInfo(executor.requests[0]); !ok || info.ID != originalModel {
-				t.Fatalf("original model capability = (%+v, %t)", info, ok)
-			}
-			executor.requests = nil
-			opts := cliproxyexecutor.Options{
-				RequestAfterAuthInterceptor: func(_ context.Context, in cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
-					in.Request.Model = "different-upstream"
-					return cliproxyexecutor.RequestAfterAuthInterceptResponse{Handled: true, Request: in.Request, Options: in.Options}
-				},
-			}
-			if err := execute(opts); err != nil || len(executor.requests) != 1 {
-				t.Fatalf("rewritten execution: requests=%d, error=%v", len(executor.requests), err)
-			}
-			if req := executor.requests[0]; req.Model != "different-upstream" {
-				t.Fatalf("intercepted model = %q", req.Model)
-			} else if info, ok := ResolvedAPIKeyModelInfo(req); ok || info != nil {
-				t.Fatalf("previous model capability leaked to different upstream: %+v", info)
-			}
-		})
+				manager.RefreshSchedulerEntry(authID)
+				execute := func(opts cliproxyexecutor.Options) error {
+					request := cliproxyexecutor.Request{Model: originalModel, Payload: []byte(`{}`)}
+					switch mode {
+					case "execute":
+						_, err := manager.Execute(context.Background(), []string{"test"}, request, opts)
+						return err
+					case "count":
+						_, err := manager.ExecuteCount(context.Background(), []string{"test"}, request, opts)
+						return err
+					default:
+						stream, err := manager.ExecuteStream(context.Background(), []string{"test"}, request, opts)
+						if err != nil {
+							return err
+						}
+						for chunk := range stream.Chunks {
+							if chunk.Err != nil {
+								return chunk.Err
+							}
+						}
+						return nil
+					}
+				}
+				if err := execute(cliproxyexecutor.Options{}); err != nil || len(executor.requests) != 1 {
+					t.Fatalf("unmodified execution: requests=%d, error=%v", len(executor.requests), err)
+				}
+				if info, ok := ResolvedAPIKeyModelInfo(executor.requests[0]); !ok || info.ID != originalModel {
+					t.Fatalf("original model capability = (%+v, %t)", info, ok)
+				}
+				executor.requests = nil
+				opts := cliproxyexecutor.Options{
+					RequestAfterAuthInterceptor: func(
+						_ context.Context,
+						in cliproxyexecutor.RequestAfterAuthInterceptRequest,
+					) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+						in.Request.Model = "different-upstream"
+						return cliproxyexecutor.RequestAfterAuthInterceptResponse{
+							Handled: true, Request: in.Request, Options: in.Options,
+						}
+					},
+				}
+				if err := execute(opts); err != nil || len(executor.requests) != 1 {
+					t.Fatalf("rewritten execution: requests=%d, error=%v", len(executor.requests), err)
+				}
+				if req := executor.requests[0]; req.Model != "different-upstream" {
+					t.Fatalf("intercepted model = %q", req.Model)
+				} else if info, ok := ResolvedAPIKeyModelInfo(req); ok || info != nil {
+					t.Fatalf("previous model capability leaked to different upstream: %+v", info)
+				}
+			},
+		)
 	}
 }
 
@@ -252,14 +265,18 @@ func TestAttachResolvedAPIKeyModelInfoPreservesExplicitNativeFalse(t *testing.T)
 	const authID = "native-capability-false"
 	webSearch := false
 	modelRegistry := registry.GetGlobalRegistry()
-	modelRegistry.RegisterClient(authID, "claude", []*registry.ModelInfo{{
-		ID:          "native-alias",
-		CatalogName: "native-upstream",
-		NativeCapabilities: &registry.NativeCapabilities{
-			WebSearch: &webSearch,
+	modelRegistry.RegisterClient(
+		authID, "claude", []*registry.ModelInfo{
+			{
+				ID:          "native-alias",
+				CatalogName: "native-upstream",
+				NativeCapabilities: &registry.NativeCapabilities{
+					WebSearch: &webSearch,
+				},
+				UserDefined: true,
+			},
 		},
-		UserDefined: true,
-	}})
+	)
 	t.Cleanup(func() { modelRegistry.UnregisterClient(authID) })
 
 	webSearch = true
@@ -296,15 +313,21 @@ func TestAttachResolvedAPIKeyModelInfoKeepsCodexConfigurationUpdatePerCredential
 		{id: "codex-support-update", support: true},
 		{id: "codex-no-update", support: false},
 	} {
-		registryClient.RegisterClient(tc.id, "codex", []*registry.ModelInfo{{
-			ID:                         "tenant/public-model",
-			CatalogName:                model,
-			SupportConfigurationUpdate: tc.support,
-			Thinking:                   &registry.ThinkingSupport{Levels: []string{"high"}},
-			UserDefined:                true,
-		}})
+		registryClient.RegisterClient(
+			tc.id, "codex", []*registry.ModelInfo{
+				{
+					ID:                         "tenant/public-model",
+					CatalogName:                model,
+					SupportConfigurationUpdate: tc.support,
+					Thinking:                   &registry.ThinkingSupport{Levels: []string{"high"}},
+					UserDefined:                true,
+				},
+			},
+		)
 		t.Cleanup(func() { registryClient.UnregisterClient(tc.id) })
-		auth := &Auth{ID: tc.id, Provider: "codex", Prefix: "tenant", Attributes: map[string]string{"api_key": "test-key"}}
+		auth := &Auth{
+			ID: tc.id, Provider: "codex", Prefix: "tenant", Attributes: map[string]string{"api_key": "test-key"},
+		}
 		req, err := attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, auth, "tenant/public-model", model)
 		if err != nil {
 			t.Fatalf("attach %s model: %v", tc.id, err)
@@ -313,7 +336,9 @@ func TestAttachResolvedAPIKeyModelInfoKeepsCodexConfigurationUpdatePerCredential
 		if !ok || info == nil || info.SupportConfigurationUpdate != tc.support || info.ID != model {
 			t.Fatalf("%s model capability = (%+v, %v), want support=%v", tc.id, info, ok, tc.support)
 		}
-		mismatched, err := attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, auth, "tenant/public-model", "other-upstream")
+		mismatched, err := attachResolvedAPIKeyModelInfo(
+			cliproxyexecutor.Request{}, auth, "tenant/public-model", "other-upstream",
+		)
 		if err != nil {
 			t.Fatalf("attach mismatched %s model: %v", tc.id, err)
 		}
@@ -334,40 +359,46 @@ func TestCodexOAuthModelInfoUsesSelectedPlanAndUpstream(t *testing.T) {
 		{name: "default is free", upstream: "gpt-6-astra"},
 		{name: "unknown upstream", plan: "pro", upstream: "unlisted-model"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			original := cliproxyexecutor.Request{Metadata: map[string]any{"request": "kept"}}
-			auth := &Auth{
-				Provider:   "codex",
-				Attributes: map[string]string{"auth_kind": "oauth", "plan_type": tc.plan},
-			}
-			req, err := attachResolvedAPIKeyModelInfo(original, auth, "tenant/public-alias", tc.upstream)
-			if err != nil {
-				t.Fatal(err)
-			}
-			info, ok := ResolvedModelInfo(req)
-			if ok != tc.wantBound || (ok && (info == nil || info.ID != strings.TrimSuffix(tc.upstream, "(high)") || !info.SupportConfigurationUpdate)) {
-				t.Fatalf("selected model info = (%+v, %t), want bound=%t", info, ok, tc.wantBound)
-			}
-			if keyInfo, keyOK := ResolvedAPIKeyModelInfo(req); keyOK || keyInfo != nil {
-				t.Fatalf("OAuth obtained API-key model info: %+v", keyInfo)
-			}
-			if req.Metadata["request"] != "kept" {
-				t.Fatal("unrelated request metadata lost")
-			}
-			if _, leaked := original.Metadata[resolvedCodexOAuthModelInfoMetadataKey]; leaked {
-				t.Fatal("selected capability mutated original request metadata")
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				original := cliproxyexecutor.Request{Metadata: map[string]any{"request": "kept"}}
+				auth := &Auth{
+					Provider:   "codex",
+					Attributes: map[string]string{"auth_kind": "oauth", "plan_type": tc.plan},
+				}
+				req, err := attachResolvedAPIKeyModelInfo(original, auth, "tenant/public-alias", tc.upstream)
+				if err != nil {
+					t.Fatal(err)
+				}
+				info, ok := ResolvedModelInfo(req)
+				if ok != tc.wantBound || (ok && (info == nil || info.ID != strings.TrimSuffix(
+					tc.upstream, "(high)",
+				) || !info.SupportConfigurationUpdate)) {
+					t.Fatalf("selected model info = (%+v, %t), want bound=%t", info, ok, tc.wantBound)
+				}
+				if keyInfo, keyOK := ResolvedAPIKeyModelInfo(req); keyOK || keyInfo != nil {
+					t.Fatalf("OAuth obtained API-key model info: %+v", keyInfo)
+				}
+				if req.Metadata["request"] != "kept" {
+					t.Fatal("unrelated request metadata lost")
+				}
+				if _, leaked := original.Metadata[resolvedCodexOAuthModelInfoMetadataKey]; leaked {
+					t.Fatal("selected capability mutated original request metadata")
+				}
+			},
+		)
 	}
 }
 
 func TestCodexOAuthModelInfoRejectsUnsupportedContext1M(t *testing.T) {
 	const authID = "codex-oauth-context-1m"
 	models := registry.GetGlobalRegistry()
-	models.RegisterClient(authID, "codex", []*registry.ModelInfo{
-		{ID: "gpt-6-luna", ContextLength: context1MMinimumTokens},
-		{ID: "gpt-6-astra", ContextLength: context1MMinimumTokens},
-	})
+	models.RegisterClient(
+		authID, "codex", []*registry.ModelInfo{
+			{ID: "gpt-6-luna", ContextLength: context1MMinimumTokens},
+			{ID: "gpt-6-astra", ContextLength: context1MMinimumTokens},
+		},
+	)
 	t.Cleanup(func() { models.UnregisterClient(authID) })
 
 	for _, tc := range []struct {
@@ -377,92 +408,118 @@ func TestCodexOAuthModelInfoRejectsUnsupportedContext1M(t *testing.T) {
 		{name: "pro model", plan: "pro", route: "gpt-6-astra[1m]", upstream: "gpt-6-astra[1m]"},
 		{name: "intercepted model", plan: "free", route: "gpt-6-luna[1m]", upstream: "unlisted-model[1m]"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := attachResolvedAPIKeyModelInfo(
-				cliproxyexecutor.Request{},
-				&Auth{ID: authID, Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth", "plan_type": tc.plan}},
-				tc.route, tc.upstream,
-			)
-			requireContext1MModelSupportError(t, err)
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				_, err := attachResolvedAPIKeyModelInfo(
+					cliproxyexecutor.Request{},
+					&Auth{
+						ID: authID, Provider: "codex",
+						Attributes: map[string]string{"auth_kind": "oauth", "plan_type": tc.plan},
+					},
+					tc.route, tc.upstream,
+				)
+				requireContext1MModelSupportError(t, err)
+			},
+		)
 	}
 }
 
 func TestCodexOAuthModelInfoFollowsExecutionModel(t *testing.T) {
 	for _, mode := range []string{"execute", "count", "stream"} {
-		t.Run(mode, func(t *testing.T) {
-			authID := "codex-oauth-selected-" + mode
-			models := registry.GetGlobalRegistry()
-			models.RegisterClient(authID, "codex", registry.GetCodexFreeModels())
-			t.Cleanup(func() { models.UnregisterClient(authID) })
-			manager := NewManager(nil, nil, nil)
-			executor := &homeCapabilityCaptureExecutor{roundExecutor: roundExecutor{provider: "codex"}}
-			manager.RegisterExecutor(executor)
-			if _, err := manager.Register(context.Background(), &Auth{
-				ID: authID, Provider: "codex", Status: StatusActive,
-				Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "free"},
-				Metadata:   map[string]any{"access_token": "fixture-token"},
-			}); err != nil {
-				t.Fatal(err)
-			}
-			manager.RefreshSchedulerEntry(authID)
-			execute := func(opts cliproxyexecutor.Options) error {
-				request := cliproxyexecutor.Request{Model: "gpt-6-luna", Payload: []byte(`{}`)}
-				switch mode {
-				case "execute":
-					_, err := manager.Execute(context.Background(), []string{"codex"}, request, opts)
-					return err
-				case "count":
-					_, err := manager.ExecuteCount(context.Background(), []string{"codex"}, request, opts)
-					return err
-				default:
-					stream, err := manager.ExecuteStream(context.Background(), []string{"codex"}, request, opts)
-					if err != nil {
-						return err
-					}
-					for chunk := range stream.Chunks {
-						if chunk.Err != nil {
-							return chunk.Err
-						}
-					}
-					return nil
+		t.Run(
+			mode, func(t *testing.T) {
+				authID := "codex-oauth-selected-" + mode
+				models := registry.GetGlobalRegistry()
+				models.RegisterClient(authID, "codex", registry.GetCodexFreeModels())
+				t.Cleanup(func() { models.UnregisterClient(authID) })
+				manager := NewManager(nil, nil, nil)
+				executor := &homeCapabilityCaptureExecutor{provider: "codex"}
+				manager.RegisterExecutor(executor)
+				if _, err := manager.Register(
+					context.Background(), &Auth{
+						ID: authID, Provider: "codex", Status: StatusActive,
+						Attributes: map[string]string{
+							"auth_kind": "oauth", "plan_type": "free", "api_key": "synthetic-retained-key",
+						},
+						Metadata: map[string]any{
+							"access_token": "fixture-token", "email": "synthetic@example.invalid",
+						},
+					},
+				); err != nil {
+					t.Fatal(err)
 				}
-			}
-			if err := execute(cliproxyexecutor.Options{}); err != nil || len(executor.requests) != 1 {
-				t.Fatalf("original execution: requests=%d, error=%v", len(executor.requests), err)
-			}
-			if info, ok := ResolvedModelInfo(executor.requests[0]); !ok || info == nil || info.ID != "gpt-6-luna" || !info.SupportConfigurationUpdate {
-				t.Fatalf("selected OAuth model = (%+v, %t)", info, ok)
-			}
-			executor.requests = nil
-			opts := cliproxyexecutor.Options{
-				RequestAfterAuthInterceptor: func(_ context.Context, in cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
-					in.Request.Model = "gpt-6-astra"
-					return cliproxyexecutor.RequestAfterAuthInterceptResponse{Handled: true, Request: in.Request, Options: in.Options}
-				},
-			}
-			if err := execute(opts); err != nil || len(executor.requests) != 1 {
-				t.Fatalf("rewritten execution: requests=%d, error=%v", len(executor.requests), err)
-			}
-			if req := executor.requests[0]; req.Model != "gpt-6-astra" {
-				t.Fatalf("intercepted model = %q", req.Model)
-			} else if info, ok := ResolvedModelInfo(req); ok || info != nil {
-				t.Fatalf("free credential inherited original model capability: %+v", info)
-			}
-		})
+				manager.RefreshSchedulerEntry(authID)
+				execute := func(opts cliproxyexecutor.Options) error {
+					request := cliproxyexecutor.Request{Model: "gpt-6-luna", Payload: []byte(`{}`)}
+					switch mode {
+					case "execute":
+						_, err := manager.Execute(context.Background(), []string{"codex"}, request, opts)
+						return err
+					case "count":
+						_, err := manager.ExecuteCount(context.Background(), []string{"codex"}, request, opts)
+						return err
+					default:
+						stream, err := manager.ExecuteStream(context.Background(), []string{"codex"}, request, opts)
+						if err != nil {
+							return err
+						}
+						for chunk := range stream.Chunks {
+							if chunk.Err != nil {
+								return chunk.Err
+							}
+						}
+						return nil
+					}
+				}
+				if err := execute(cliproxyexecutor.Options{}); err != nil || len(executor.requests) != 1 {
+					t.Fatalf("original execution: requests=%d, error=%v", len(executor.requests), err)
+				}
+				if info, ok := ResolvedModelInfo(executor.requests[0]); !ok || info == nil || info.ID != "gpt-6-luna" ||
+					!info.SupportConfigurationUpdate {
+					t.Fatalf("selected OAuth model = (%+v, %t)", info, ok)
+				}
+				executor.requests = nil
+				opts := cliproxyexecutor.Options{
+					RequestAfterAuthInterceptor: func(
+						_ context.Context,
+						in cliproxyexecutor.RequestAfterAuthInterceptRequest,
+					) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+						in.Request.Model = "gpt-6-astra"
+						return cliproxyexecutor.RequestAfterAuthInterceptResponse{
+							Handled: true, Request: in.Request, Options: in.Options,
+						}
+					},
+				}
+				if err := execute(opts); err != nil || len(executor.requests) != 1 {
+					t.Fatalf("rewritten execution: requests=%d, error=%v", len(executor.requests), err)
+				}
+				if req := executor.requests[0]; req.Model != "gpt-6-astra" {
+					t.Fatalf("intercepted model = %q", req.Model)
+				} else if info, ok := ResolvedModelInfo(req); ok || info != nil {
+					t.Fatalf("free credential inherited original model capability: %+v", info)
+				}
+			},
+		)
 	}
 }
 
 func TestCodexOAuthModelInfoClearsStaleSelection(t *testing.T) {
 	const authID = "codex-model-info-isolation"
 	models := registry.GetGlobalRegistry()
-	models.RegisterClient(authID, "codex", []*registry.ModelInfo{{
-		ID: "tenant/public-alias", CatalogName: "gpt-6-luna", Thinking: &registry.ThinkingSupport{Levels: []string{"low"}},
-	}})
+	models.RegisterClient(
+		authID, "codex", []*registry.ModelInfo{
+			{
+				ID: "tenant/public-alias", CatalogName: "gpt-6-luna",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low"}},
+			},
+		},
+	)
 	t.Cleanup(func() { models.UnregisterClient(authID) })
 
 	oauth := &Auth{Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "free"}}
-	key := &Auth{ID: authID, Provider: "codex", Prefix: "tenant", Attributes: map[string]string{"api_key": "fixture-key"}}
+	key := &Auth{
+		ID: authID, Provider: "codex", Prefix: "tenant", Attributes: map[string]string{"api_key": "fixture-key"},
+	}
 	req, err := attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, oauth, "tenant/public-alias", "gpt-6-luna")
 	if err != nil {
 		t.Fatal(err)
@@ -471,7 +528,8 @@ func TestCodexOAuthModelInfoClearsStaleSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info, ok := ResolvedModelInfo(req); !ok || info == nil || info.SupportConfigurationUpdate || info.Thinking == nil {
+	if info, ok := ResolvedModelInfo(req); !ok || info == nil || info.SupportConfigurationUpdate ||
+		info.Thinking == nil {
 		t.Fatalf("API key inherited OAuth capability: %+v", info)
 	}
 	if _, leaked := req.Metadata[resolvedCodexOAuthModelInfoMetadataKey]; leaked {
@@ -513,17 +571,21 @@ func TestHomeModelInfoUsesCodexOAuthOnlyForMatchingUpstream(t *testing.T) {
 		{name: "different upstream", upstream: "gpt-6-astra"},
 		{name: "Home disables support", upstream: "gpt-6-luna", explicit: new(bool)},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			info := &registry.ModelInfo{ID: tc.upstream}
-			request := attachResolvedHomeModelInfo(original, nil, tc.upstream, info, tc.explicit)
-			selected, ok := ResolvedModelInfo(request)
-			if !ok || selected == nil || selected.SupportConfigurationUpdate != tc.wantSupport || info.SupportConfigurationUpdate {
-				t.Fatalf("Home selected model = (%+v, %t), source=%+v", selected, ok, info)
-			}
-			if oauthInfo, ok := ResolvedModelInfo(original); !ok || oauthInfo == nil || !oauthInfo.SupportConfigurationUpdate {
-				t.Fatalf("source OAuth capability was changed: %+v", oauthInfo)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				info := &registry.ModelInfo{ID: tc.upstream}
+				request := attachResolvedHomeModelInfo(original, nil, tc.upstream, info, tc.explicit)
+				selected, ok := ResolvedModelInfo(request)
+				if !ok || selected == nil || selected.SupportConfigurationUpdate != tc.wantSupport ||
+					info.SupportConfigurationUpdate {
+					t.Fatalf("Home selected model = (%+v, %t), source=%+v", selected, ok, info)
+				}
+				if oauthInfo, ok := ResolvedModelInfo(original); !ok || oauthInfo == nil ||
+					!oauthInfo.SupportConfigurationUpdate {
+					t.Fatalf("source OAuth capability was changed: %+v", oauthInfo)
+				}
+			},
+		)
 	}
 }
 
@@ -565,7 +627,7 @@ func TestAttachResolvedAPIKeyModelInfoUsesValidatedContext1MSnapshot(t *testing.
 		t.Fatalf("attach context snapshot: %v", err)
 	}
 	modelInfo, ok := ResolvedAPIKeyModelInfo(req)
-	if !ok || !modelInfoSupportsContext1M(modelInfo) || modelInfo.ID != "context-upstream" {
+	if !ok || !ModelSupportsContext1M(modelInfo) || modelInfo.ID != "context-upstream" {
 		t.Fatalf("resolved model info = (%+v, %t), want validated 1M upstream snapshot", modelInfo, ok)
 	}
 }

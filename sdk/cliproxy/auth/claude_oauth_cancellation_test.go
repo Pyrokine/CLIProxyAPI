@@ -37,7 +37,10 @@ func (e *claudeOAuthCancellationTestExecutor) ShouldPrepareRequestAuth(*Auth) bo
 	return e.prepareFn != nil
 }
 
-func (e *claudeOAuthCancellationTestExecutor) PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error) {
+func (e *claudeOAuthCancellationTestExecutor) PrepareRequestAuth(
+	ctx context.Context,
+	auth *Auth,
+) (*Auth, error) {
 	e.prepareCalls.Add(1)
 	return e.prepareFn(ctx, auth)
 }
@@ -238,7 +241,10 @@ func TestClaudeOAuthPrepareCancellationStopsFallbackWithoutRecordingFailure(t *t
 				if got := executor.prepareCalls.Load(); got != 1 {
 					t.Fatalf("PrepareRequestAuth calls = %d, want 1 without credential fallback", got)
 				}
-				if calls := executor.executeCalls.Load() + executor.countCalls.Load() + executor.streamCalls.Load(); calls != 0 {
+				if calls := executor.executeCalls.Load() +
+					executor.countCalls.Load() +
+					executor.streamCalls.Load(); calls !=
+					0 {
 					t.Fatalf("executor calls = %d, want 0", calls)
 				}
 				if results := hook.snapshot(); len(results) != 0 {
@@ -318,7 +324,11 @@ func TestClaudeOAuthRefreshCancellationStopsWithoutCooldown(t *testing.T) {
 				model, ids := registerClaudeOAuthCancellationTestAuths(t, manager, 1)
 				registered, _ := manager.GetByID(ids[0])
 				if !authHasRefreshCredential(registered) || !isUnauthorizedError(unauthorized) {
-					t.Fatalf("refresh preconditions missing: auth=%+v unauthorized=%v", registered, unauthorized)
+					t.Fatalf(
+						"refresh preconditions missing: auth=%+v unauthorized=%v",
+						registered,
+						unauthorized,
+					)
 				}
 
 				errExecute := test.run(ctx, manager, model)
@@ -328,13 +338,38 @@ func TestClaudeOAuthRefreshCancellationStopsWithoutCooldown(t *testing.T) {
 				if got := executor.refreshCalls.Load(); got != 1 {
 					t.Fatalf("Refresh calls = %d, want 1", got)
 				}
-				if calls := executor.executeCalls.Load() + executor.countCalls.Load() + executor.streamCalls.Load(); calls != 1 {
+				if calls := executor.executeCalls.Load() +
+					executor.countCalls.Load() +
+					executor.streamCalls.Load(); calls !=
+					1 {
 					t.Fatalf("upstream calls = %d, want 1", calls)
 				}
 				if results := hook.snapshot(); len(results) != 0 {
 					t.Fatalf("recorded results = %+v, want none", results)
 				}
-				assertClaudeOAuthCancellationAuthsAvailable(t, manager, ids, model)
+				manager.mu.RLock()
+				stored := manager.auths[ids[0]].Clone()
+				manager.mu.RUnlock()
+				if stored == nil || stored.Unavailable || stored.Disabled || stored.Status == StatusError ||
+					!stored.NextRetryAfter.IsZero() ||
+					!stored.NextRefreshAfter.IsZero() ||
+					stored.LastError !=
+						nil ||
+					stored.Quota.Exceeded {
+					t.Fatalf("refresh cancellation published failure state: %+v", stored)
+				}
+				if state := stored.ModelStates[model]; state != nil &&
+					(state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded) {
+					t.Fatalf("refresh cancellation changed model state: %+v", state)
+				}
+				visible, found := manager.GetByID(ids[0])
+				if !found || !visible.hasRejectedAccessToken() || !visible.Unavailable ||
+					visible.Status != StatusError {
+					t.Fatal("public snapshot lost the upstream token rejection")
+				}
+				if blocked, _, _ := isAuthBlockedForModel(visible, model, time.Now()); !blocked {
+					t.Fatal("canceled refresh made the rejected token selectable")
+				}
 			},
 		)
 	}

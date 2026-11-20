@@ -60,17 +60,26 @@ func TestStreamRewriterFinishFlushesCodexResponsesEventChunk(t *testing.T) {
 	}
 }
 
+func TestStreamRewriterCompleteEventDoesNotWaitForFinish(t *testing.T) {
+	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "public-model"})
+	fragment := "event: response.created\n" + `data: {"type":"response.created","response":{"model":"upstream-model"}}`
+	got := string(rewriter.RewriteChunk([]byte(fragment)))
+	if strings.Count(got, "event: response.created") != 1 ||
+		strings.Count(got, `"model":"public-model"`) != 1 {
+		t.Fatalf("complete event = %q, want immediate rewritten fragment", got)
+	}
+	if tail := rewriter.Finish(); len(tail) != 0 {
+		t.Fatalf("flush after complete fragment = %q, want empty", tail)
+	}
+}
+
 func TestStreamRewriterFinishFlushesSinglePendingEvent(t *testing.T) {
 	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "public-model"})
-	partial := "event: response.created\n" + `data: {"type":"response.created","response":{"model":"upstream-model"}}`
-	if output := rewriter.RewriteChunk([]byte(partial)); len(output) != 0 {
-		t.Fatalf("partial event = %q, want buffered", output)
+	if got := rewriter.RewriteChunk([]byte("event: response.created")); len(got) != 0 {
+		t.Fatalf("partial event header = %q, want buffered", got)
 	}
-	got := string(rewriter.Finish())
-	if strings.Count(got, "event: response.created") != 1 ||
-		strings.Count(got, `"model":"public-model"`) != 1 ||
-		!strings.HasSuffix(got, "\n\n") {
-		t.Fatalf("flushed event = %q, want one rewritten SSE event", got)
+	if got := string(rewriter.Finish()); got != "event: response.created\n\n" {
+		t.Fatalf("flushed event header = %q", got)
 	}
 	if again := rewriter.Finish(); len(again) != 0 {
 		t.Fatalf("second flush = %q, want empty", again)
@@ -138,7 +147,12 @@ func TestRewriteForceMappedStreamChunkCodexLineChunksDoNotDuplicateBufferedEvent
 }
 
 func TestRewriteModelInResponseAntigravityModelVersion(t *testing.T) {
-	payload := []byte(`{"response":{"modelVersion":"gemini-3-flash","candidates":[{"content":{"role":"model","parts":[{"text":"AGYMSG"}]}}]}}`)
+	//goland:noinspection SpellCheckingInspection
+	payload := []byte(
+		(`{"response":{"modelVersion":"gemini-3-flash","candidates":[{"content":` +
+			`{"role":"model","parts":[{"text":` +
+			`"AGYMSG"}]}}]}}`),
+	)
 	got := string(rewriteModelInResponse(payload, "claude-haiku-4-5-20251001"))
 	if !strings.Contains(got, `"modelVersion":"claude-haiku-4-5-20251001"`) {
 		t.Fatalf("rewritten payload = %q, want alias modelVersion", got)
@@ -149,6 +163,7 @@ func TestRewriteModelInResponseAntigravityModelVersion(t *testing.T) {
 }
 
 func TestStreamRewriterRewriteChunkLiveDerivedProviderChunks(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	cases := []struct {
 		name         string
 		rewriteModel string
@@ -159,13 +174,24 @@ func TestStreamRewriterRewriteChunkLiveDerivedProviderChunks(t *testing.T) {
 			name:         "kimi_chat_stream",
 			rewriteModel: "k2.5",
 			upstream:     "kimi-k2.5",
-			chunk:        `data:{"id":"chatcmpl-live","object":"chat.completion.chunk","created":1782272323,"model":"kimi-k2.5","choices":[{"index":0,"delta":{"content":"KCHATS"},"finish_reason":null}]}` + "\n\n",
+			chunk: (`data:{"id":"chatcmpl-live","object":"chat.completion.chunk","created":` +
+				`1782272323,"model":"kimi-k2.5","choices":[{"index":0,"delta":{"content` +
+				`":"KCHATS"},"finish_reason":null}]}`) + "\n\n",
 		},
 		{
 			name:         "kimi_messages_stream",
 			rewriteModel: "k2.5",
 			upstream:     "kimi-k2.5",
-			chunk:        "event:message_start\n" + `data:{"type":"message_start","message":{"model":"kimi-k2.5"}}` + "\n\n",
+			chunk: "event:message_start\n" +
+				(`data:{"type":"message_start","message":{"model":` +
+					`"kimi-k2.5"}}`) +
+				"\n\n",
+		},
+		{
+			name:         "xai_messages_stream",
+			rewriteModel: "grok-latest",
+			upstream:     "grok-4.3",
+			chunk:        `data: {"type":"message_start","message":{"model":"grok-4.3"}}` + "\n\n",
 		},
 	}
 	for _, tc := range cases {
@@ -202,21 +228,34 @@ func TestStreamRewriterTracksPathsAndLogsCompletionOnce(t *testing.T) {
 	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "public-model"})
 	chunk := []byte(`data: {"model":"upstream-model","response":{"model":"upstream-model"}}` + "\n\n")
 	for range 2 {
-		if rewritten := rewriter.RewriteChunk(chunk); !strings.Contains(string(rewritten), `"model":"public-model"`) {
+		if rewritten := rewriter.RewriteChunk(chunk); !strings.Contains(
+			string(rewritten),
+			`"model":"public-model"`,
+		) {
 			t.Fatalf("rewritten event = %q", rewritten)
 		}
 	}
 	if rewriter.rewrittenEvents != 2 || len(rewriter.loggedPaths) != 2 || rewriter.finishedLogged {
-		t.Fatalf("stream rewrite state before completion: events=%d paths=%v completed=%t",
-			rewriter.rewrittenEvents, rewriter.loggedPaths, rewriter.finishedLogged)
+		t.Fatalf(
+			"stream rewrite state before completion: events=%d paths=%v completed=%t",
+			rewriter.rewrittenEvents, rewriter.loggedPaths, rewriter.finishedLogged,
+		)
 	}
 	rewriter.RewriteChunk([]byte("data: [DONE]\n\n"))
 	if !rewriter.finishedLogged || rewriter.rewrittenEvents != 2 {
-		t.Fatalf("stream completion state: events=%d completed=%t", rewriter.rewrittenEvents, rewriter.finishedLogged)
+		t.Fatalf(
+			"stream completion state: events=%d completed=%t",
+			rewriter.rewrittenEvents,
+			rewriter.finishedLogged,
+		)
 	}
 	rewriter.Finish()
 	if !rewriter.finishedLogged || rewriter.rewrittenEvents != 2 {
-		t.Fatalf("repeated completion state: events=%d completed=%t", rewriter.rewrittenEvents, rewriter.finishedLogged)
+		t.Fatalf(
+			"repeated completion state: events=%d completed=%t",
+			rewriter.rewrittenEvents,
+			rewriter.finishedLogged,
+		)
 	}
 }
 
