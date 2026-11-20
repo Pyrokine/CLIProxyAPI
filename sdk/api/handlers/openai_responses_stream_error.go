@@ -199,5 +199,6 @@ func BuildOpenAIResponsesStreamFailedChunk(status int, errText string, sequenceN
 		return data
 	}
 
-	return []byte(`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","error":{"type":"server_error","code":"internal_server_error","message":"internal error"}}}`)
+	return []byte((`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","error":{"` +
+		`type":"server_error","code":"internal_server_error","message":"internal error"}}}`))
 }

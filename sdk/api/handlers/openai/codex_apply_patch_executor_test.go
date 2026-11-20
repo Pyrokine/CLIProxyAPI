@@ -35,7 +35,8 @@ func TestCodexClientCatalogConsumesXAIExecutorPatchCapability(t *testing.T) {
 			t.Fatalf("catalog status=%d body=%s", writer.Code, writer.Body.String())
 		}
 		capability := entry.Get("apply_patch_tool_type")
-		if !capability.Exists() || (enabled && capability.String() != "freeform") || (!enabled && capability.Type != gjson.Null) {
+		if !capability.Exists() || (enabled && capability.String() != "freeform") ||
+			(!enabled && capability.Type != gjson.Null) {
 			t.Fatalf("enabled=%t capability=%s", enabled, capability.Raw)
 		}
 	}
@@ -57,31 +58,41 @@ func TestCodexClientCatalogConsumesTranslatedPatchCapabilities(t *testing.T) {
 		executor.NewDevinExecutor(cfg),
 		executor.NewKimiExecutor(cfg),
 	} {
-		t.Run(exec.Identifier(), func(t *testing.T) {
-			manager := coreauth.NewManager(nil, nil, nil)
-			manager.RegisterExecutor(exec)
-			models := registry.GetGlobalRegistry()
-			modelID := "offline-patch-" + exec.Identifier()
-			models.RegisterClient(t.Name(), exec.Identifier(), []*registry.ModelInfo{{ID: modelID, Object: "model", DisplayName: modelID, SupportedInputModalities: []string{"text"}, SupportedOutputModalities: []string{"text"}}})
-			t.Cleanup(func() { models.UnregisterClient(t.Name()) })
-			for _, enabled := range []bool{false, true, false} {
-				clientCfg := &sdkconfig.SDKConfig{}
-				clientCfg.Client.Codex.EnableApplyPatch = enabled
-				handler := openai.NewAPIHandler(handlers.NewBaseAPIHandlers(clientCfg, manager))
-				writer := httptest.NewRecorder()
-				ctx, _ := gin.CreateTestContext(writer)
-				ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models?client_version=cpa", nil)
-				handler.OpenAIModels(ctx)
-				entry := gjson.Get(writer.Body.String(), `models.#(slug=="`+modelID+`")`)
-				if writer.Code != http.StatusOK || !entry.Exists() {
-					t.Fatalf("catalog status=%d body=%s", writer.Code, writer.Body.String())
+		t.Run(
+			exec.Identifier(), func(t *testing.T) {
+				manager := coreauth.NewManager(nil, nil, nil)
+				manager.RegisterExecutor(exec)
+				models := registry.GetGlobalRegistry()
+				modelID := "offline-patch-" + exec.Identifier()
+				models.RegisterClient(
+					t.Name(), exec.Identifier(), []*registry.ModelInfo{
+						{
+							ID: modelID, Object: "model", DisplayName: modelID,
+							SupportedInputModalities: []string{"text"}, SupportedOutputModalities: []string{"text"},
+						},
+					},
+				)
+				t.Cleanup(func() { models.UnregisterClient(t.Name()) })
+				for _, enabled := range []bool{false, true, false} {
+					clientCfg := &sdkconfig.SDKConfig{}
+					clientCfg.Client.Codex.EnableApplyPatch = enabled
+					handler := openai.NewAPIHandler(handlers.NewBaseAPIHandlers(clientCfg, manager))
+					writer := httptest.NewRecorder()
+					ctx, _ := gin.CreateTestContext(writer)
+					ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models?client_version=cpa", nil)
+					handler.OpenAIModels(ctx)
+					entry := gjson.Get(writer.Body.String(), `models.#(slug=="`+modelID+`")`)
+					if writer.Code != http.StatusOK || !entry.Exists() {
+						t.Fatalf("catalog status=%d body=%s", writer.Code, writer.Body.String())
+					}
+					capability := entry.Get("apply_patch_tool_type")
+					wantFreeform := enabled && exec.Identifier() != "kimi"
+					if !capability.Exists() || (wantFreeform && capability.String() != "freeform") ||
+						(!wantFreeform && capability.Type != gjson.Null) {
+						t.Fatalf("enabled=%t capability=%s", enabled, capability.Raw)
+					}
 				}
-				capability := entry.Get("apply_patch_tool_type")
-				wantFreeform := enabled && exec.Identifier() != "kimi"
-				if !capability.Exists() || (wantFreeform && capability.String() != "freeform") || (!wantFreeform && capability.Type != gjson.Null) {
-					t.Fatalf("enabled=%t capability=%s", enabled, capability.Raw)
-				}
-			}
-		})
+			},
+		)
 	}
 }

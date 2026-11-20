@@ -10,11 +10,17 @@ import (
 
 func TestRequestInterceptorsDoNotExposeOriginalPayloadToMutatingHost(t *testing.T) {
 	host := &lifecycleTestHost{
-		interceptRequestBeforeAuth: func(_ context.Context, request pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+		interceptRequestBeforeAuth: func(
+			_ context.Context,
+			request pluginapi.RequestInterceptRequest,
+		) pluginapi.RequestInterceptResponse {
 			request.Body[0] = 'X'
 			return pluginapi.RequestInterceptResponse{}
 		},
-		interceptRequestAfterAuth: func(_ context.Context, request pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+		interceptRequestAfterAuth: func(
+			_ context.Context,
+			request pluginapi.RequestInterceptRequest,
+		) pluginapi.RequestInterceptResponse {
 			request.Body[0] = 'X'
 			return pluginapi.RequestInterceptResponse{}
 		},
@@ -22,7 +28,8 @@ func TestRequestInterceptorsDoNotExposeOriginalPayloadToMutatingHost(t *testing.
 	handler := &BaseAPIHandler{PluginHost: host}
 	beforeBody := []byte("original")
 	before, _, errMsg := handler.applyRequestInterceptorsBeforeAuth(
-		context.Background(), "openai", "model", coreexecutor.Request{Payload: beforeBody}, coreexecutor.Options{}, nil, "",
+		context.Background(), "openai", "model", coreexecutor.Request{Payload: beforeBody}, coreexecutor.Options{}, nil,
+		"",
 	)
 	if errMsg != nil || string(beforeBody) != "original" || string(before.Payload) != "original" {
 		t.Fatalf("before-auth body = %q, request = %q, error = %v", beforeBody, before.Payload, errMsg)

@@ -65,27 +65,31 @@ func TestForwardStreamDeliveryFailures(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			c, state := newStreamOutcomeTestContext(t)
-			failure := errors.New(test.name)
-			c.Writer = test.writer(c, failure)
-			data := make(chan []byte, 1)
-			data <- []byte("event: message\n\n")
-			close(data)
-			keepAlive := time.Duration(0)
-			var canceledWith error
-			NewBaseAPIHandlers(nil, nil).ForwardStream(c, c.Writer, func(err error) { canceledWith = err }, data, nil,
-				StreamForwardOptions{
-					KeepAliveInterval: &keepAlive,
-					WriteChunkError:   func(chunk []byte) error { return WriteStreamBytes(c.Writer, chunk) },
-				})
-			if !errors.Is(canceledWith, failure) {
-				t.Fatalf("cancel error = %v, want %v", canceledWith, failure)
-			}
-			if outcome := state.Snapshot(); !outcome.Failed || outcome.Reason != failure.Error() {
-				t.Fatalf("request outcome = %+v, want stream delivery failure", outcome)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				c, state := newStreamOutcomeTestContext(t)
+				failure := errors.New(test.name)
+				c.Writer = test.writer(c, failure)
+				data := make(chan []byte, 1)
+				data <- []byte("event: message\n\n")
+				close(data)
+				keepAlive := time.Duration(0)
+				var canceledWith error
+				NewBaseAPIHandlers(nil, nil).ForwardStream(
+					c, c.Writer, func(err error) { canceledWith = err }, data, nil,
+					StreamForwardOptions{
+						KeepAliveInterval: &keepAlive,
+						WriteChunkError:   func(chunk []byte) error { return WriteStreamBytes(c.Writer, chunk) },
+					},
+				)
+				if !errors.Is(canceledWith, failure) {
+					t.Fatalf("cancel error = %v, want %v", canceledWith, failure)
+				}
+				if outcome := state.Snapshot(); !outcome.Failed || outcome.Reason != failure.Error() {
+					t.Fatalf("request outcome = %+v, want stream delivery failure", outcome)
+				}
+			},
+		)
 	}
 }
 
@@ -122,7 +126,8 @@ func TestForwardStreamHeartbeatWriteFailureCancelsWithoutFlush(t *testing.T) {
 		t.Fatalf("writer writes=%d flushes=%d, want one write and no flush", writer.writes, writer.flushes)
 	}
 	outcome := state.Snapshot()
-	if !outcome.Failed || outcome.Kind != internallogging.RequestOutcomeStreamError || outcome.Reason != wantErr.Error() {
+	if !outcome.Failed || outcome.Kind != internallogging.RequestOutcomeStreamError ||
+		outcome.Reason != wantErr.Error() {
 		t.Fatalf("request outcome = %+v, want heartbeat stream failure", outcome)
 	}
 }

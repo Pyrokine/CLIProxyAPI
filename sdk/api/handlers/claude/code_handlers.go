@@ -466,7 +466,7 @@ func (h *CodeAPIHandler) forwardClaudeStreamingResponse(
 		case started := <-startChan:
 			dataChan := started.data
 			errChan := started.errs
-			for {
+			for dataChan != nil || errChan != nil {
 				select {
 				case <-c.Request.Context().Done():
 					cancel(c.Request.Context().Err())
@@ -502,18 +502,8 @@ func (h *CodeAPIHandler) forwardClaudeStreamingResponse(
 					return
 				case chunk, ok := <-dataChan:
 					if !ok {
-						sendSSEHeaders(started.headers)
-						h.forwardClaudeStreamChunksWithLifecycle(
-							c,
-							flusher,
-							func(err error) { cancel(err) },
-							dataChan,
-							errChan,
-							streamLifecycle,
-							heartbeatTelemetry,
-							keepAliveInterval,
-						)
-						return
+						dataChan = nil
+						continue
 					}
 					sendSSEHeaders(started.headers)
 					h.forwardClaudeStreamChunksWithLifecycle(
@@ -524,6 +514,12 @@ func (h *CodeAPIHandler) forwardClaudeStreamingResponse(
 					return
 				}
 			}
+			sendSSEHeaders(started.headers)
+			h.forwardClaudeStreamChunksWithLifecycle(
+				c, flusher, func(err error) { cancel(err) }, started.data, started.errs, streamLifecycle,
+				heartbeatTelemetry, keepAliveInterval,
+			)
+			return
 		}
 	}
 }
@@ -618,15 +614,19 @@ func (h *CodeAPIHandler) forwardClaudeStreamWithLifecycle(
 		telemetry = &claudeHeartbeatTelemetry{}
 		defer telemetry.summary(c)
 	}
+	var finalWriteErr error
 	h.ForwardStream(
 		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 			KeepAliveInterval: &keepAliveInterval,
+			WriteDone: func() {
+				finalWriteErr = handlers.WriteStreamBytes(c.Writer, lifecycle.observe(nil, true))
+			},
+			DoneError: func() error { return finalWriteErr },
 			WriteChunkError: func(chunk []byte) error {
 				if len(chunk) == 0 || lifecycle.terminalSeen {
 					return nil
 				}
-				lifecycle.observe(chunk)
-				return handlers.WriteStreamBytes(c.Writer, chunk)
+				return handlers.WriteStreamBytes(c.Writer, lifecycle.observe(chunk, false))
 			},
 			WriteKeepAlive: func() handlers.KeepAliveWriteResult {
 				if lifecycle.terminalSeen {
@@ -684,8 +684,7 @@ func (h *CodeAPIHandler) forwardClaudeStreamChunksWithLifecycle(
 				if len(chunk) == 0 || lifecycle.terminalSeen {
 					return nil
 				}
-				lifecycle.observe(chunk)
-				return handlers.WriteStreamBytes(c.Writer, chunk)
+				return handlers.WriteStreamBytes(c.Writer, lifecycle.observe(chunk, false))
 			},
 			WriteKeepAlive: func() handlers.KeepAliveWriteResult {
 				if lifecycle.terminalSeen {
@@ -735,8 +734,9 @@ func (h *CodeAPIHandler) claudeStreamErrorEvents(
 	if errMsg == nil {
 		return nil
 	}
+	pending := lifecycle.observe(nil, true)
 	errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
-	return lifecycle.finalizeError(errorBytes)
+	return append(pending, lifecycle.finalizeError(errorBytes)...)
 }
 
 func (h *CodeAPIHandler) claudeStreamTerminalEvents(
@@ -745,11 +745,12 @@ func (h *CodeAPIHandler) claudeStreamTerminalEvents(
 	if lifecycle == nil {
 		return nil, errors.New("claude stream lifecycle is unavailable")
 	}
+	pending := lifecycle.observe(nil, true)
 	if lifecycle.terminalSeen {
-		return nil, nil
+		return pending, nil
 	}
 	if lifecycle.messageDeltaSeen {
-		return lifecycle.finalizeError(nil), nil
+		return append(pending, lifecycle.finalizeError(nil)...), nil
 	}
 	protocolErr := errors.New("claude stream ended before message_stop")
 	errorBytes, _ := json.Marshal(
@@ -760,7 +761,7 @@ func (h *CodeAPIHandler) claudeStreamTerminalEvents(
 			},
 		),
 	)
-	return lifecycle.finalizeError(errorBytes), protocolErr
+	return append(pending, lifecycle.finalizeError(errorBytes)...), protocolErr
 }
 
 type claudeStreamLifecycle struct {
@@ -775,35 +776,93 @@ func newClaudeStreamLifecycle() *claudeStreamLifecycle {
 	return &claudeStreamLifecycle{openBlocks: make(map[int]bool)}
 }
 
-func (lifecycle *claudeStreamLifecycle) observe(chunk []byte) {
-	if lifecycle == nil || len(chunk) == 0 {
-		return
+func (lifecycle *claudeStreamLifecycle) observe(chunk []byte, final bool) []byte {
+	if lifecycle == nil || lifecycle.terminalSeen {
+		return nil
 	}
-	lifecycle.pending = append(lifecycle.pending, bytes.ReplaceAll(chunk, []byte("\r\n"), []byte("\n"))...)
-	for {
-		separator := bytes.Index(lifecycle.pending, []byte("\n\n"))
-		if separator < 0 {
-			return
+	lifecycle.pending = append(lifecycle.pending, chunk...)
+	consumed := 0
+	var output []byte
+	for consumed < len(lifecycle.pending) {
+		length := claudeSSEFrameLen(lifecycle.pending[consumed:], final)
+		if length == 0 {
+			break
 		}
-		block := lifecycle.pending[:separator]
-		lifecycle.pending = lifecycle.pending[separator+2:]
-		lifecycle.observeBlock(block)
-	}
-}
-
-func (lifecycle *claudeStreamLifecycle) observeBlock(block []byte) {
-	var data []byte
-	for line := range bytes.SplitSeq(block, []byte("\n")) {
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[len("data: "):])
+		frame := lifecycle.pending[consumed : consumed+length]
+		if prefix := lifecycle.observeBlock(frame); len(prefix) > 0 {
+			if output == nil {
+				output = append(output, lifecycle.pending[:consumed]...)
+			}
+			output = append(output, prefix...)
+		}
+		if output != nil {
+			output = append(output, frame...)
+		}
+		consumed += length
+		if lifecycle.terminalSeen {
 			break
 		}
 	}
-	if !gjson.ValidBytes(data) {
-		return
+	if output == nil {
+		output = lifecycle.pending[:consumed]
 	}
-	payload := gjson.ParseBytes(data)
-	switch payload.Get("type").String() {
+	if lifecycle.terminalSeen || consumed == len(lifecycle.pending) {
+		lifecycle.pending = nil
+	} else {
+		lifecycle.pending = lifecycle.pending[consumed:]
+	}
+	return output
+}
+
+func claudeSSEFrameLen(data []byte, final bool) int {
+	lineStart := 0
+	for index := 0; index < len(data); {
+		if data[index] != '\r' && data[index] != '\n' {
+			index++
+			continue
+		}
+		end := index + 1
+		if data[index] == '\r' {
+			if end == len(data) && !final {
+				return 0
+			}
+			if end < len(data) && data[end] == '\n' {
+				end++
+			}
+		}
+		if index == lineStart {
+			return end
+		}
+		lineStart = end
+		index = end
+	}
+	return 0
+}
+
+func (lifecycle *claudeStreamLifecycle) observeBlock(block []byte) []byte {
+	lines := bytes.ReplaceAll(block, []byte("\r\n"), []byte("\n"))
+	lines = bytes.ReplaceAll(lines, []byte("\r"), []byte("\n"))
+	var data [][]byte
+	var event string
+	for line := range bytes.SplitSeq(lines, []byte("\n")) {
+		field, value, _ := bytes.Cut(line, []byte(":"))
+		value = bytes.TrimPrefix(value, []byte(" "))
+		switch string(field) {
+		case "data":
+			data = append(data, value)
+		case "event":
+			event = string(value)
+		}
+	}
+	body := bytes.Join(data, []byte("\n"))
+	payload := gjson.ParseBytes(body)
+	if event == "" {
+		event = payload.Get("type").String()
+	}
+	if !gjson.ValidBytes(body) && event != "message_stop" && event != "error" {
+		return nil
+	}
+	switch event {
 	case "content_block_start":
 		index := int(payload.Get("index").Int())
 		if !lifecycle.openBlocks[index] {
@@ -814,16 +873,15 @@ func (lifecycle *claudeStreamLifecycle) observeBlock(block []byte) {
 		delete(lifecycle.openBlocks, int(payload.Get("index").Int()))
 	case "message_delta":
 		lifecycle.messageDeltaSeen = true
+		return lifecycle.closeBlocks(nil)
 	case "message_stop", "error":
 		lifecycle.terminalSeen = true
+		return lifecycle.closeBlocks(nil)
 	}
+	return nil
 }
 
-func (lifecycle *claudeStreamLifecycle) finalizeError(errorBytes []byte) []byte {
-	if lifecycle == nil || lifecycle.terminalSeen {
-		return nil
-	}
-	output := make([]byte, 0, len(errorBytes)+128)
+func (lifecycle *claudeStreamLifecycle) closeBlocks(output []byte) []byte {
 	for _, index := range lifecycle.blockOrder {
 		if !lifecycle.openBlocks[index] {
 			continue
@@ -835,6 +893,15 @@ func (lifecycle *claudeStreamLifecycle) finalizeError(errorBytes []byte) []byte 
 		)
 		delete(lifecycle.openBlocks, index)
 	}
+	lifecycle.blockOrder = nil
+	return output
+}
+
+func (lifecycle *claudeStreamLifecycle) finalizeError(errorBytes []byte) []byte {
+	if lifecycle == nil || lifecycle.terminalSeen {
+		return nil
+	}
+	output := lifecycle.closeBlocks(make([]byte, 0, len(errorBytes)+128))
 	if lifecycle.messageDeltaSeen {
 		output = append(output, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"...)
 	} else {
@@ -845,9 +912,28 @@ func (lifecycle *claudeStreamLifecycle) finalizeError(errorBytes []byte) []byte 
 }
 
 type claudeErrorDetail struct {
-	Type    string              `json:"type"`
-	Message string              `json:"message"`
-	Details *claudeErrorDetails `json:"details,omitempty"`
+	Type           string              `json:"type"`
+	Message        string              `json:"message"`
+	Details        *claudeErrorDetails `json:"details,omitempty"`
+	upstreamFields map[string]gjson.Result
+}
+
+func (detail claudeErrorDetail) MarshalJSON() ([]byte, error) {
+	type normalized claudeErrorDetail
+	body, err := json.Marshal(normalized(detail))
+	if err != nil || len(detail.upstreamFields) == 0 {
+		return body, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, err
+	}
+	for key, value := range detail.upstreamFields {
+		if _, exists := fields[key]; !exists {
+			fields[key] = json.RawMessage(value.Raw)
+		}
+	}
+	return json.Marshal(fields)
 }
 
 type claudeErrorDetails struct {
@@ -870,16 +956,24 @@ func (h *CodeAPIHandler) toClaudeError(msg *handlers.ErrorMessage) claudeErrorRe
 			message = http.StatusText(status)
 		}
 		if msg.Error != nil {
-			if text := strings.TrimSpace(claudeErrorText(msg.Error)); text != "" {
+			var text string
+			if coreauth.IsTerminalAuthError(msg.Error) {
+				text = string(handlers.BuildErrorResponseBodyWithError(status, "", msg.Error))
+			} else {
+				text = claudeErrorText(msg.Error)
+			}
+			if text = strings.TrimSpace(text); text != "" {
 				message = text
 			}
 		}
 	}
 
 	errType := claudeErrorTypeFromStatus(status)
+	var upstreamFields map[string]gjson.Result
 	if json.Valid([]byte(message)) {
 		payload := gjson.Parse(message)
 		if errPayload := payload.Get("error"); errPayload.IsObject() {
+			upstreamFields = errPayload.Map()
 			if value := strings.TrimSpace(errPayload.Get("type").String()); value != "" {
 				errType = value
 			}
@@ -898,7 +992,11 @@ func (h *CodeAPIHandler) toClaudeError(msg *handlers.ErrorMessage) claudeErrorRe
 		}
 	}
 
-	response := claudeErrorResponse{Type: "error", Error: claudeErrorDetail{Type: errType, Message: message}}
+	response := claudeErrorResponse{
+		Type: "error", Error: claudeErrorDetail{
+			Type: errType, Message: message, upstreamFields: upstreamFields,
+		},
+	}
 	if clienterror.IsClaudeThreadNotFound(status, originalError) {
 		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
 	}
@@ -914,10 +1012,13 @@ func claudeErrorText(err error) string {
 }
 
 // WriteErrorResponse writes a Claude-compatible error response.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *CodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *handlers.ErrorMessage) {
 	_ = h.WriteErrorResponseWithError(c, msg)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *CodeAPIHandler) WriteErrorResponseWithError(c *gin.Context, msg *handlers.ErrorMessage) error {
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
@@ -927,10 +1028,14 @@ func (h *CodeAPIHandler) WriteErrorResponseWithError(c *gin.Context, msg *handle
 		if !clienterror.IsClaudeThreadNotFound(status, errors.New(string(msg.Body))) {
 			return h.BaseAPIHandler.WriteErrorResponseWithError(c, msg)
 		}
-		body, err := json.Marshal(h.toClaudeError(&handlers.ErrorMessage{
-			StatusCode: status,
-			Error:      errors.New(string(msg.Body)),
-		}))
+		body, err := json.Marshal(
+			h.toClaudeError(
+				&handlers.ErrorMessage{
+					StatusCode: status,
+					Error:      errors.New(string(msg.Body)),
+				},
+			),
+		)
 		if err != nil {
 			return err
 		}
@@ -955,14 +1060,17 @@ func (h *CodeAPIHandler) WriteErrorResponseWithError(c *gin.Context, msg *handle
 	return h.BaseAPIHandler.WriteErrorResponseWithError(c, &encoded)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *CodeAPIHandler) WriteAcknowledgedStreamError(
 	c *gin.Context,
 	flusher http.Flusher,
 	msg *handlers.ErrorMessage,
 ) error {
-	err := handlers.DeliverStreamResponse(c.Writer, flusher, func() error {
-		return h.WriteErrorResponseWithError(c, msg)
-	})
+	err := handlers.DeliverStreamResponse(
+		c.Writer, flusher, func() error {
+			return h.WriteErrorResponseWithError(c, msg)
+		},
+	)
 	handlers.AcknowledgeStreamError(msg, err)
 	return err
 }

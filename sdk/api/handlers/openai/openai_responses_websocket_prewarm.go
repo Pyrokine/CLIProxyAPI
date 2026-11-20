@@ -107,7 +107,8 @@ func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, e
 	createdAt := time.Now().Unix()
 	modelName := strings.TrimSpace(gjson.GetBytes(requestJSON, "model").String())
 
-	createdPayload := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
+	createdPayload := []byte((`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"` +
+		`response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`))
 	var errSet error
 	createdPayload, errSet = sjson.SetBytes(createdPayload, "response.id", responseID)
 	if errSet != nil {
@@ -124,7 +125,10 @@ func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, e
 		}
 	}
 
-	donePayload := []byte(`{"type":"response.done","sequence_number":1,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}}`)
+	donePayload := []byte((`{"type":"response.done","sequence_number":1,"response":{"id":"","object":"` +
+		`response","created_at":0,"status":"completed","background":false,"error":null,"output":[],"usage":{"` +
+		`input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details"` +
+		`:{"reasoning_tokens":0},"total_tokens":0}}}`))
 	donePayload, errSet = sjson.SetBytes(donePayload, "response.id", responseID)
 	if errSet != nil {
 		return nil, errSet

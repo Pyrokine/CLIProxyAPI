@@ -5,14 +5,17 @@ import codexmodels "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/codex/mod
 type codexClientProvidersForModelFunc = codexmodels.ProvidersForModelFunc
 type codexClientWebSearchCapabilityForModelFunc = codexmodels.WebSearchCapabilityForModelFunc
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func CodexClientModelsResponse(models []map[string]any) map[string]any {
 	return codexmodels.BuildResponse(models, nil, false)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func CodexClientModelsResponseWithMultiAgentV2(models []map[string]any, enabled bool) map[string]any {
 	return codexmodels.BuildResponse(models, nil, enabled)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func CodexClientModelsResponseForClient(models []map[string]any, clientVersion string, enabled bool) map[string]any {
 	return codexmodels.BuildResponseForClient(models, nil, enabled, clientVersion)
 }

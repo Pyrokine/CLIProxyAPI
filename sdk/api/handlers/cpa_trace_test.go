@@ -60,16 +60,20 @@ func TestWriteErrorResponseEmitsSafeRetryAfterWithoutPassthrough(t *testing.T) {
 	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 
 	handler := NewBaseAPIHandlers(&config.SDKConfig{}, nil)
-	handler.WriteErrorResponse(ginCtx, &ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error: fmt.Errorf("auth selection: %w", coreauth.NewHomeConcurrencyBusyError(
-			"credential concurrency limit exceeded", 1500*time.Millisecond,
-		)),
-		Addon: http.Header{
-			"Retry-After":    {"999"},
-			"X-Upstream-Key": {"must-not-leak"},
+	handler.WriteErrorResponse(
+		ginCtx, &ErrorMessage{
+			StatusCode: http.StatusTooManyRequests,
+			Error: fmt.Errorf(
+				"auth selection: %w", coreauth.NewHomeConcurrencyBusyError(
+					"credential concurrency limit exceeded", 1500*time.Millisecond,
+				),
+			),
+			Addon: http.Header{
+				"Retry-After":    {"999"},
+				"X-Upstream-Key": {"must-not-leak"},
+			},
 		},
-	})
+	)
 
 	if got := recorder.Header().Get("Retry-After"); got != "2" {
 		t.Fatalf("Retry-After = %q, want 2", got)

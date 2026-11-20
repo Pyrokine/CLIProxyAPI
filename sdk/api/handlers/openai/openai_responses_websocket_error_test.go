@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -168,7 +169,10 @@ func TestMarkResponsesWebsocketTransportFailure(t *testing.T) {
 				outcome := state.Snapshot()
 				if outcome.Failed != test.wantFailed || outcome.Kind != test.wantOutcome && test.wantFailed {
 					t.Fatalf(
-						"request outcome = %+v, want failed=%t kind=%q", outcome, test.wantFailed, test.wantOutcome,
+						"request outcome = %+v, want failed=%t kind=%q",
+						outcome,
+						test.wantFailed,
+						test.wantOutcome,
 					)
 				}
 			},
@@ -229,8 +233,8 @@ func TestForwardResponsesWebsocketExposesOnlyClientFaults(t *testing.T) {
 		t.Run(
 			test.name, func(t *testing.T) {
 				payloads, result, _ := runResponsesWebsocketForwardError(t, nil, test.errMsg)
-				if got := len(payloads); got != boolToInt(test.wantExposed) {
-					t.Fatalf("text payload count = %d, want %d", got, boolToInt(test.wantExposed))
+				if got := len(payloads); got != 1 {
+					t.Fatalf("text payload count = %d, want 1", got)
 				}
 				if !errors.Is(result.forward, websocket.ErrCloseSent) {
 					t.Fatalf("forward error = %v, want %v", result.forward, websocket.ErrCloseSent)
@@ -238,15 +242,17 @@ func TestForwardResponsesWebsocketExposesOnlyClientFaults(t *testing.T) {
 				if result.errMsg == nil {
 					t.Fatal("forward error message = nil")
 				}
-				if test.wantExposed {
-					if got := gjson.GetBytes(payloads[0], "type").String(); got != wsEventTypeError {
-						t.Fatalf("payload type = %q, want %q: %s", got, wsEventTypeError, payloads[0])
+				if got := gjson.GetBytes(payloads[0], "type").String(); got != wsEventTypeError {
+					t.Fatalf("payload type = %q, want %q: %s", got, wsEventTypeError, payloads[0])
+				}
+				if test.wantCode != "" {
+					if got := gjson.GetBytes(payloads[0], "error.code").String(); got != test.wantCode {
+						t.Fatalf("error code = %q, want %q: %s", got, test.wantCode, payloads[0])
 					}
-					if test.wantCode != "" {
-						if got := gjson.GetBytes(payloads[0], "error.code").String(); got != test.wantCode {
-							t.Fatalf("error code = %q, want %q: %s", got, test.wantCode, payloads[0])
-						}
-					}
+				}
+				if !test.wantExposed && (strings.Contains(string(payloads[0]), test.errMsg.Error.Error()) ||
+					gjson.GetBytes(payloads[0], "error.message").String() != http.StatusText(http.StatusBadGateway)) {
+					t.Fatalf("expected generic failure without upstream details: %s", payloads[0])
 				}
 			},
 		)
@@ -261,6 +267,7 @@ func TestForwardResponsesWebsocketClassifiesErrorPayloads(t *testing.T) {
 		wantText      bool
 		wantCloseCode int
 		wantAckError  bool
+		wantGeneric   bool
 	}{
 		{
 			name: "context length behind internal error",
@@ -279,7 +286,8 @@ func TestForwardResponsesWebsocketClassifiesErrorPayloads(t *testing.T) {
 			name: "quota",
 			payload: `{"type":"error","status":429,` +
 				`"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"quota"}}`,
-			wantAckError: true,
+			wantText:    true,
+			wantGeneric: true,
 		},
 		{
 			name: "message too big",
@@ -310,7 +318,14 @@ func TestForwardResponsesWebsocketClassifiesErrorPayloads(t *testing.T) {
 				if (result.ackErr != nil) != test.wantAckError {
 					t.Fatalf("ack error = %v, want error %t", result.ackErr, test.wantAckError)
 				}
-				if test.wantText && string(payloads[0]) != test.payload {
+				if test.wantGeneric {
+					if gjson.GetBytes(payloads[0], "status").Int() != http.StatusBadGateway ||
+						gjson.GetBytes(
+							payloads[0], "error.message",
+						).String() != http.StatusText(http.StatusBadGateway) {
+						t.Fatalf("generic terminal payload=%s", payloads[0])
+					}
+				} else if test.wantText && string(payloads[0]) != test.payload {
 					t.Fatalf("terminal payload changed:\n got: %s\nwant: %s", payloads[0], test.payload)
 				}
 				if test.wantCloseCode > 0 {
@@ -339,7 +354,7 @@ func TestForwardResponsesWebsocketValidatesTransportTerminal(t *testing.T) {
 		{
 			name:     "response completed",
 			payload:  `{"type":"response.completed","response":{"id":"resp_completed","output":[]}}`,
-			wantType: wsEventTypeDone,
+			wantType: wsEventTypeCompleted,
 		},
 		{
 			name:     "response done",
@@ -523,6 +538,100 @@ func TestResponsesWebsocketErrorStatusMapsContextErrors(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketErrorsPreserveOriginalJSONNumbers(t *testing.T) {
+	for _, test := range []struct {
+		name, body, errorJSON string
+	}{
+		{
+			name: "large integers",
+			body: `{"error":{"sequence":9007199254740993,"negative":-9007199254740993,` +
+				`"unsigned":18446744073709551615}}`,
+			errorJSON: `{"sequence":9007199254740993,"negative":-9007199254740993,"unsigned":18446744073709551615}`,
+		},
+		{
+			name: "fractions and nested extensions",
+			body: ` { "error": {"fraction":0.12345678901234567890123456789,"exponent":2.0` +
+				`0000000000000001e+10,"zero":-0.0,"detail":{"values":[9007199254740995,` +
+				`true,false,null],"text":"9007199254740993"}} } `,
+			errorJSON: `{"fraction":0.12345678901234567890123456789,"exponent":2.0000000000000` +
+				`0001e+10,"zero":-0.0,"detail":{"values":[9007199254740995,true,false,n` +
+				`ull],"text":"9007199254740993"}}`,
+		},
+		{
+			name:      "exponents outside float64 range",
+			body:      `{"error":{"large":1e400,"small":1e-400}}`,
+			errorJSON: `{"large":1e400,"small":1e-400}`,
+		},
+		{
+			name:      "whole error object",
+			body:      `{"big":9007199254740993,"fraction":0.10000000000000000001,"message":"invalid input"}`,
+			errorJSON: `{"big":9007199254740993,"fraction":0.10000000000000000001,"message":"invalid input"}`,
+		},
+		{
+			name:      "array error node",
+			body:      `{"error":[9007199254740993,0.10000000000000000001,true,null]}`,
+			errorJSON: `[9007199254740993,0.10000000000000000001,true,null]`,
+		},
+		{name: "null error", body: `{"error":null}`, errorJSON: `null`},
+		{name: "boolean error", body: `{"error":false}`, errorJSON: `false`},
+		{name: "string error", body: `{"error":"invalid input"}`, errorJSON: `"invalid input"`},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				const headerKey = `X.Trace.*\Field`
+				msg := &handlers.ErrorMessage{
+					StatusCode: http.StatusBadRequest,
+					Error:      errors.New(test.body),
+					Addon:      http.Header{headerKey: {"first", "second"}, "Empty": nil},
+				}
+				for _, consumer := range []string{"payload", "stream terminal"} {
+					t.Run(
+						consumer, func(t *testing.T) {
+							var payload []byte
+							if consumer == "payload" {
+								var err error
+								payload, err = buildResponsesWebsocketErrorPayload(msg)
+								if err != nil {
+									t.Fatal(err)
+								}
+							} else {
+								frames, result, readErr := runResponsesWebsocketForwardError(t, nil, msg)
+								if len(frames) != 1 || result.errMsg != msg || !errors.Is(
+									result.forward, websocket.ErrCloseSent,
+								) || readErr == nil {
+									t.Fatalf("frames=%q, result=%+v, read error=%v", frames, result, readErr)
+								}
+								payload = frames[0]
+							}
+							var got struct {
+								Type    string            `json:"type"`
+								Status  int               `json:"status"`
+								Error   json.RawMessage   `json:"error"`
+								Headers map[string]string `json:"headers"`
+							}
+							if err := json.Unmarshal(payload, &got); err != nil {
+								t.Fatal(err)
+							}
+							if string(got.Error) != test.errorJSON {
+								t.Fatalf("error JSON=%s, want exact %s", got.Error, test.errorJSON)
+							}
+							if got.Type != wsEventTypeError || got.Status != http.StatusBadRequest ||
+								len(got.Headers) != 1 ||
+								got.Headers[headerKey] != "first" {
+								t.Fatalf("error envelope changed: %s", payload)
+							}
+							if msg.Error.Error() != test.body || len(msg.Addon[headerKey]) != 2 ||
+								msg.Addon[headerKey][0] != "first" {
+								t.Fatal("error construction changed the caller's input")
+							}
+						},
+					)
+				}
+			},
+		)
+	}
+}
+
 func TestResponsesWebsocketPinnedAuthUsesSharedErrorStatus(t *testing.T) {
 	if shouldReleaseResponsesWebsocketPinnedAuth(&handlers.ErrorMessage{Error: context.Canceled}) {
 		t.Fatal("context cancellation released pinned auth")
@@ -565,18 +674,26 @@ func TestResponsesWebsocketCloseReasonPreservesValidUTF8(t *testing.T) {
 		{"invalid_short", "a\xff\xfeb", "a��b"},
 		{"invalid_long", strings.Repeat("\xff", 200), strings.Repeat("�", 41)},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, _, err := runResponsesWebsocketForwardError(t, nil, &handlers.ErrorMessage{
-				StatusCode: http.StatusRequestEntityTooLarge,
-				Error:      &websocket.CloseError{Code: websocket.CloseMessageTooBig, Text: test.reason},
-			})
-			var closed *websocket.CloseError
-			if !errors.As(err, &closed) || closed.Code != websocket.CloseMessageTooBig {
-				t.Fatalf("websocket close = %v, want code 1009", err)
-			}
-			if !utf8.ValidString(closed.Text) || closed.Text != test.want || len(closed.Text) > wsCloseReasonMaxBytes {
-				t.Fatalf("close reason = %q, want %q", closed.Text, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				_, _, err := runResponsesWebsocketForwardError(
+					t, nil, &handlers.ErrorMessage{
+						StatusCode: http.StatusRequestEntityTooLarge,
+						Error: &websocket.CloseError{
+							Code: websocket.CloseMessageTooBig,
+							Text: test.reason,
+						},
+					},
+				)
+				var closed *websocket.CloseError
+				if !errors.As(err, &closed) || closed.Code != websocket.CloseMessageTooBig {
+					t.Fatalf("websocket close = %v, want code 1009", err)
+				}
+				if !utf8.ValidString(closed.Text) || closed.Text != test.want ||
+					len(closed.Text) > wsCloseReasonMaxBytes {
+					t.Fatalf("close reason = %q, want %q", closed.Text, test.want)
+				}
+			},
+		)
 	}
 }

@@ -26,8 +26,9 @@ type compiledAPIKeyPolicy struct {
 }
 
 type apiKeyReservationLifecycle struct {
-	store coreusage.APIKeyReservationStore
-	id    string
+	store        coreusage.APIKeyReservationStore
+	id           string
+	unknownUsage bool
 }
 
 func (h *BaseAPIHandler) prepareAPIKeyExecution(
@@ -43,6 +44,23 @@ func (h *BaseAPIHandler) prepareAPIKeyExecution(
 	*apiKeyReservationLifecycle,
 	*ErrorMessage,
 ) {
+	selectionModel := ""
+	if ctx != nil {
+		selectionModel, _ = ctx.Value(protocolAuthSelectionModelContextKey{}).(string)
+	}
+	return h.prepareAPIKeyTarget(
+		ctx, handlerType, requestedModel, executionID,
+		func(model string) ([]string, string, *ErrorMessage) {
+			return h.getRequestDetailsWithOptions(model, allowImageModel, selectionModel)
+		},
+	)
+}
+
+func (h *BaseAPIHandler) prepareAPIKeyTarget(
+	ctx context.Context,
+	handlerType, requestedModel, executionID string,
+	resolve func(string) ([]string, string, *ErrorMessage),
+) (context.Context, []string, string, *apiKeyReservationLifecycle, *ErrorMessage) {
 	ctx = coreusage.WithExecutionID(ctx, executionID)
 	rawAPIKey := apiKeyFromContext(ctx)
 	identity := coreusage.APIKeyIdentityFromContext(ctx)
@@ -72,7 +90,7 @@ func (h *BaseAPIHandler) prepareAPIKeyExecution(
 		}
 	}
 
-	providers, canonicalModel, errMsg := h.getRequestDetailsWithOptions(mappedModel, allowImageModel)
+	providers, canonicalModel, errMsg := resolve(mappedModel)
 	if errMsg != nil {
 		if mapped {
 			return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusServiceUnavailable, time.Time{})
@@ -86,6 +104,10 @@ func (h *BaseAPIHandler) prepareAPIKeyExecution(
 		}
 	}
 	if hasRule {
+		if canonicalModel == "" &&
+			(len(rule.BlockedModels) > 0 || len(rule.CanonicalModels) > 0 || len(rule.ModelMappings) > 0) {
+			return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusForbidden, time.Time{})
+		}
 		if h.apiKeyBlocksModel(rawAPIKey, requestedModel) || h.apiKeyBlocksModel(rawAPIKey, mappedModel) ||
 			h.apiKeyBlocksModel(rawAPIKey, canonicalModel) {
 			return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusForbidden, time.Time{})
@@ -145,7 +167,13 @@ func (h *BaseAPIHandler) prepareAPIKeyExecution(
 		return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusServiceUnavailable, time.Time{})
 	}
 	ctx = coreusage.WithAPIKeyReservation(ctx, reservation.ID)
-	return ctx, providers, canonicalModel, &apiKeyReservationLifecycle{store: store, id: reservation.ID}, nil
+	unknownUsage := false
+	for _, limit := range compiled.limits {
+		unknownUsage = unknownUsage || limit.Tokens > 0 || limit.CostMicro > 0
+	}
+	return ctx, providers, canonicalModel, &apiKeyReservationLifecycle{
+		store: store, id: reservation.ID, unknownUsage: unknownUsage,
+	}, nil
 }
 
 func compileAPIKeyPolicy(rule internalconfig.APIKeyRule) (compiledAPIKeyPolicy, error) {

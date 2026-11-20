@@ -20,10 +20,12 @@ func TestSummaryIntentTranslation(t *testing.T) {
 		wantExists bool
 	}{
 		{
-			name:       "Chat effort enables Gemini summary",
-			from:       sdktranslator.FormatOpenAI,
-			to:         sdktranslator.FormatGemini,
-			body:       `{"model":"gemini-mixed-model","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`,
+			name: "Chat effort enables Gemini summary",
+			from: sdktranslator.FormatOpenAI,
+			to:   sdktranslator.FormatGemini,
+			body: `{"model":"gemini-mixed-model","reasoning_effort":"high","messages":` +
+				`[{"role":"user","content":` +
+				`"hi"}]}`,
 			path:       "generationConfig.thinkingConfig.includeThoughts",
 			want:       "true",
 			wantExists: true,
@@ -36,10 +38,11 @@ func TestSummaryIntentTranslation(t *testing.T) {
 			path: "thinking.display",
 		},
 		{
-			name:       "Chat explicit summary enables Claude display",
-			from:       sdktranslator.FormatOpenAI,
-			to:         sdktranslator.FormatClaude,
-			body:       `{"model":"claude-sonnet-5","reasoning_effort":"high","reasoning":{"summary":"auto"},"messages":[{"role":"user","content":"hi"}]}`,
+			name: "Chat explicit summary enables Claude display",
+			from: sdktranslator.FormatOpenAI,
+			to:   sdktranslator.FormatClaude,
+			body: `{"model":"claude-sonnet-5","reasoning_effort":"high","reasoning":{"summary":"auto"},"` +
+				`messages":[{"role":"user","content":"hi"}]}`,
 			path:       "thinking.display",
 			want:       "summarized",
 			wantExists: true,
@@ -52,19 +55,23 @@ func TestSummaryIntentTranslation(t *testing.T) {
 			path: "generationConfig.thinkingConfig.includeThoughts",
 		},
 		{
-			name:       "Responses summary enables Gemini summary",
-			from:       sdktranslator.FormatOpenAIResponse,
-			to:         sdktranslator.FormatGemini,
-			body:       `{"model":"gemini-mixed-model","reasoning":{"effort":"high","summary":"detailed"},"input":"hi"}`,
+			name: "Responses summary enables Gemini summary",
+			from: sdktranslator.FormatOpenAIResponse,
+			to:   sdktranslator.FormatGemini,
+			body: `{"model":"gemini-mixed-model","reasoning":{"effort":"high","summary":` +
+				`"detailed"},"input":` +
+				`"hi"}`,
 			path:       "generationConfig.thinkingConfig.includeThoughts",
 			want:       "true",
 			wantExists: true,
 		},
 		{
-			name:       "Claude omitted display disables Gemini summary",
-			from:       sdktranslator.FormatClaude,
-			to:         sdktranslator.FormatGemini,
-			body:       `{"model":"gemini-mixed-model","thinking":{"type":"adaptive","display":"omitted"},"output_config":{"effort":"high"},"messages":[{"role":"user","content":"hi"}]}`,
+			name: "Claude omitted display disables Gemini summary",
+			from: sdktranslator.FormatClaude,
+			to:   sdktranslator.FormatGemini,
+			body: `{"model":"gemini-mixed-model","thinking":{"type":"adaptive","display":` +
+				`"omitted"},"output_config":{"effort":"high"},"messages":[{"role":"user` +
+				`","content":"hi"}]}`,
 			path:       "generationConfig.thinkingConfig.includeThoughts",
 			want:       "false",
 			wantExists: true,
@@ -77,10 +84,12 @@ func TestSummaryIntentTranslation(t *testing.T) {
 			path: "request.generationConfig.thinkingConfig.includeThoughts",
 		},
 		{
-			name:       "Interactions summary enables Antigravity summary",
-			from:       sdktranslator.FormatInteractions,
-			to:         sdktranslator.FormatAntigravity,
-			body:       `{"model":"antigravity-budget-model","reasoning":{"effort":"high","summary":"auto"},"input":"hi"}`,
+			name: "Interactions summary enables Antigravity summary",
+			from: sdktranslator.FormatInteractions,
+			to:   sdktranslator.FormatAntigravity,
+			body: `{"model":"antigravity-budget-model","reasoning":{"effort":"high",` +
+				`"summary":"auto"},"input":` +
+				`"hi"}`,
 			path:       "request.generationConfig.thinkingConfig.includeThoughts",
 			want:       "true",
 			wantExists: true,
@@ -89,14 +98,17 @@ func TestSummaryIntentTranslation(t *testing.T) {
 			name: "Gemini effort leaves Codex summary absent",
 			from: sdktranslator.FormatGemini,
 			to:   sdktranslator.FormatCodex,
-			body: `{"model":"level-model","generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			body: `{"model":"level-model","generationConfig":{"thinkingConfig":{"thinking` +
+				`Level":"high"}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			path: "reasoning.summary",
 		},
 		{
-			name:       "Gemini summary enables Codex summary",
-			from:       sdktranslator.FormatGemini,
-			to:         sdktranslator.FormatCodex,
-			body:       `{"model":"level-model","generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			name: "Gemini summary enables Codex summary",
+			from: sdktranslator.FormatGemini,
+			to:   sdktranslator.FormatCodex,
+			body: `{"model":"level-model","generationConfig":{"thinkingConfig":{"thinking` +
+				`Level":"high","includeThoughts":true}},"contents":[{"role":"user","par` +
+				`ts":[{"text":"hi"}]}]}`,
 			path:       "reasoning.summary",
 			want:       "auto",
 			wantExists: true,
@@ -109,7 +121,13 @@ func TestSummaryIntentTranslation(t *testing.T) {
 				out := sdktranslator.TranslateRequest(test.from, test.to, "", []byte(test.body), true)
 				result := gjson.GetBytes(out, test.path)
 				if result.Exists() != test.wantExists {
-					t.Fatalf("%s exists = %v, want %v; body=%s", test.path, result.Exists(), test.wantExists, out)
+					t.Fatalf(
+						"%s exists = %v, want %v; body=%s",
+						test.path,
+						result.Exists(),
+						test.wantExists,
+						out,
+					)
 				}
 				if test.wantExists && result.String() != test.want {
 					t.Fatalf("%s = %q, want %q; body=%s", test.path, result.String(), test.want, out)
@@ -135,7 +153,13 @@ func TestInvalidInteractionsSummaryDoesNotWriteTargetControl(t *testing.T) {
 	} {
 		t.Run(
 			test.name, func(t *testing.T) {
-				out := sdktranslator.TranslateRequest(sdktranslator.FormatInteractions, test.to, "model", body, false)
+				out := sdktranslator.TranslateRequest(
+					sdktranslator.FormatInteractions,
+					test.to,
+					"model",
+					body,
+					false,
+				)
 				if result := gjson.GetBytes(out, test.path); result.Exists() {
 					t.Fatalf("invalid Interactions summary wrote %s=%s; body=%s", test.path, result.Raw, out)
 				}

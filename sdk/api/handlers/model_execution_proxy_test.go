@@ -15,7 +15,12 @@ func TestExecuteModelRequestProxyReachesExecutorAndClearsInheritedOverride(t *te
 	var captured []string
 	provider := &lifecycleCaptureExecutor{
 		provider: "openai",
-		execute: func(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+		execute: func(
+			ctx context.Context,
+			_ *coreauth.Auth,
+			_ coreexecutor.Request,
+			opts coreexecutor.Options,
+		) (coreexecutor.Response, error) {
 			captured = append(captured, opts.ProxyURL, coreexecutor.RequestProxyURL(ctx))
 			return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 		},
@@ -23,10 +28,12 @@ func TestExecuteModelRequestProxyReachesExecutorAndClearsInheritedOverride(t *te
 	handler := newLifecycleHandler(t, model, provider)
 	ctx := coreexecutor.WithRequestProxyURL(context.Background(), "http://inherited.example:8080")
 	for _, reqProxy := range []string{"http://127.0.0.1:8080", ""} {
-		response, err := handler.ExecuteModel(ctx, ModelExecutionRequest{
-			EntryProtocol: constant.OpenAI, Model: model, ProxyURL: reqProxy,
-			Body: []byte(`{"model":"request-proxy-model"}`),
-		})
+		response, err := handler.ExecuteModel(
+			ctx, ModelExecutionRequest{
+				EntryProtocol: constant.OpenAI, Model: model, ProxyURL: reqProxy,
+				Body: []byte(`{"model":"request-proxy-model"}`),
+			},
+		)
 		if err != nil || response.StatusCode != http.StatusOK {
 			t.Fatalf("ExecuteModel proxy=%q response=%#v error=%#v", reqProxy, response, err)
 		}
@@ -42,7 +49,12 @@ func TestExecuteModelStreamRequestProxyReachesExecutor(t *testing.T) {
 	var captured []string
 	provider := &lifecycleCaptureExecutor{
 		provider: "openai",
-		stream: func(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+		stream: func(
+			ctx context.Context,
+			_ *coreauth.Auth,
+			_ coreexecutor.Request,
+			opts coreexecutor.Options,
+		) (*coreexecutor.StreamResult, error) {
 			captured = append(captured, opts.ProxyURL, coreexecutor.RequestProxyURL(ctx))
 			chunks := make(chan coreexecutor.StreamChunk, 1)
 			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\\n\\n")}
@@ -51,10 +63,12 @@ func TestExecuteModelStreamRequestProxyReachesExecutor(t *testing.T) {
 		},
 	}
 	handler := newLifecycleHandler(t, model, provider)
-	stream, err := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
-		EntryProtocol: constant.OpenAI, Model: model, Stream: true,
-		ProxyURL: "socks5://127.0.0.1:1080", Body: []byte(`{"model":"request-proxy-stream-model"}`),
-	})
+	stream, err := handler.ExecuteModelStream(
+		context.Background(), ModelExecutionRequest{
+			EntryProtocol: constant.OpenAI, Model: model, Stream: true,
+			ProxyURL: "socks5://127.0.0.1:1080", Body: []byte(`{"model":"request-proxy-stream-model"}`),
+		},
+	)
 	if err != nil || stream.StatusCode != http.StatusOK {
 		t.Fatalf("ExecuteModelStream result=%#v error=%#v", stream, err)
 	}

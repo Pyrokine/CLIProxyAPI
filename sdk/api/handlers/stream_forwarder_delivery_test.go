@@ -60,17 +60,17 @@ func (w *deliveryResponseWriter) FlushError() error {
 func newDeliveryForwardContext(t *testing.T, writer *deliveryResponseWriter) *gin.Context {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	context, _ := gin.CreateTestContext(httptest.NewRecorder())
-	writer.ResponseWriter = context.Writer
-	context.Writer = writer
-	context.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	return context
+	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	writer.ResponseWriter = ginContext.Writer
+	ginContext.Writer = writer
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	return ginContext
 }
 
 func TestForwardStreamChunksAcknowledgesAfterWriteAndFlush(t *testing.T) {
 	events := make([]string, 0, 6)
 	writer := &deliveryResponseWriter{events: &events}
-	context := newDeliveryForwardContext(t, writer)
+	ginContext := newDeliveryForwardContext(t, writer)
 	data := make(chan coreexecutor.StreamChunk, 2)
 	data <- coreexecutor.StreamChunk{
 		Payload: []byte("payload"),
@@ -94,17 +94,17 @@ func TestForwardStreamChunksAcknowledgesAfterWriteAndFlush(t *testing.T) {
 	var canceledWith error
 
 	NewBaseAPIHandlers(nil, nil).ForwardStreamChunks(
-		context,
-		context.Writer,
+		ginContext,
+		ginContext.Writer,
 		func(err error) { canceledWith = err },
 		data,
 		nil,
 		StreamChunkForwardOptions{
 			WriteChunk: func(chunk []byte) error {
-				return WriteStreamBytes(context.Writer, chunk)
+				return WriteStreamBytes(ginContext.Writer, chunk)
 			},
 			WriteDone: func() error {
-				return WriteStreamBytes(context.Writer, []byte("done"))
+				return WriteStreamBytes(ginContext.Writer, []byte("done"))
 			},
 		},
 	)
@@ -121,7 +121,7 @@ func TestForwardStreamChunksAcknowledgesAfterWriteAndFlush(t *testing.T) {
 func TestForwardStreamChunksWaitsForTerminalChannelCloseBeforeCancel(t *testing.T) {
 	events := make([]string, 0, 2)
 	writer := &deliveryResponseWriter{events: &events}
-	context := newDeliveryForwardContext(t, writer)
+	ginContext := newDeliveryForwardContext(t, writer)
 	data := make(chan coreexecutor.StreamChunk, 1)
 	acknowledged := make(chan error, 1)
 	data <- coreexecutor.StreamChunk{
@@ -134,8 +134,8 @@ func TestForwardStreamChunksWaitsForTerminalChannelCloseBeforeCancel(t *testing.
 	done := make(chan struct{})
 	go func() {
 		NewBaseAPIHandlers(nil, nil).ForwardStreamChunks(
-			context,
-			context.Writer,
+			ginContext,
+			ginContext.Writer,
 			func(err error) { canceled <- err },
 			data,
 			nil,
@@ -177,26 +177,26 @@ func TestForwardStreamChunksWaitsForTerminalChannelCloseBeforeCancel(t *testing.
 func TestForwardStreamChunksRejectsCloseWithoutRequiredTerminal(t *testing.T) {
 	events := make([]string, 0, 3)
 	writer := &deliveryResponseWriter{events: &events}
-	context := newDeliveryForwardContext(t, writer)
+	ginContext := newDeliveryForwardContext(t, writer)
 	data := make(chan coreexecutor.StreamChunk)
 	close(data)
 	var canceledWith error
 	writeDoneCalled := false
 
 	NewBaseAPIHandlers(nil, nil).ForwardStreamChunks(
-		context,
-		context.Writer,
+		ginContext,
+		ginContext.Writer,
 		func(err error) { canceledWith = err },
 		data,
 		nil,
 		StreamChunkForwardOptions{
 			RequireTerminal: true,
 			WriteTerminalError: func(*ErrorMessage) error {
-				return WriteStreamBytes(context.Writer, []byte("error"))
+				return WriteStreamBytes(ginContext.Writer, []byte("error"))
 			},
 			WriteDone: func() error {
 				writeDoneCalled = true
-				return WriteStreamBytes(context.Writer, []byte("done"))
+				return WriteStreamBytes(ginContext.Writer, []byte("done"))
 			},
 		},
 	)
@@ -215,7 +215,7 @@ func TestForwardStreamChunksRejectsCloseWithoutRequiredTerminal(t *testing.T) {
 func TestForwardStreamChunksRejectsDataAfterTerminal(t *testing.T) {
 	events := make([]string, 0, 4)
 	writer := &deliveryResponseWriter{events: &events}
-	context := newDeliveryForwardContext(t, writer)
+	ginContext := newDeliveryForwardContext(t, writer)
 	data := make(chan coreexecutor.StreamChunk, 2)
 	var terminalAck error
 	data <- coreexecutor.StreamChunk{
@@ -236,8 +236,8 @@ func TestForwardStreamChunksRejectsDataAfterTerminal(t *testing.T) {
 	writeDoneCalls := 0
 
 	NewBaseAPIHandlers(nil, nil).ForwardStreamChunks(
-		context,
-		context.Writer,
+		ginContext,
+		ginContext.Writer,
 		func(err error) { canceledWith = err },
 		data,
 		nil,
@@ -245,7 +245,7 @@ func TestForwardStreamChunksRejectsDataAfterTerminal(t *testing.T) {
 			RequireTerminal: true,
 			WriteDone: func() error {
 				writeDoneCalls++
-				return WriteStreamBytes(context.Writer, []byte("done"))
+				return WriteStreamBytes(ginContext.Writer, []byte("done"))
 			},
 		},
 	)
@@ -304,7 +304,7 @@ func TestForwardStreamChunksReportsWriteAndFlushFailures(t *testing.T) {
 			test.name, func(t *testing.T) {
 				events := make([]string, 0, 3)
 				writer := test.writer(&events)
-				context := newDeliveryForwardContext(t, writer)
+				ginContext := newDeliveryForwardContext(t, writer)
 				data := make(chan coreexecutor.StreamChunk, 1)
 				var acknowledgedWith error
 				data <- coreexecutor.StreamChunk{
@@ -318,14 +318,14 @@ func TestForwardStreamChunksReportsWriteAndFlushFailures(t *testing.T) {
 				var canceledWith error
 
 				NewBaseAPIHandlers(nil, nil).ForwardStreamChunks(
-					context,
-					context.Writer,
+					ginContext,
+					ginContext.Writer,
 					func(err error) { canceledWith = err },
 					data,
 					nil,
 					StreamChunkForwardOptions{
 						WriteChunk: func(chunk []byte) error {
-							return WriteStreamBytes(context.Writer, chunk)
+							return WriteStreamBytes(ginContext.Writer, chunk)
 						},
 					},
 				)
@@ -347,7 +347,7 @@ func TestForwardStreamChunksReportsWriteAndFlushFailures(t *testing.T) {
 func TestForwardStreamChunksTimesOutBlockedDelivery(t *testing.T) {
 	events := make([]string, 0, 2)
 	writer := &deliveryResponseWriter{events: &events, blockUntilDeadline: true}
-	context := newDeliveryForwardContext(t, writer)
+	ginContext := newDeliveryForwardContext(t, writer)
 	data := make(chan coreexecutor.StreamChunk, 1)
 	var acknowledgedWith error
 	data <- coreexecutor.StreamChunk{
@@ -362,15 +362,15 @@ func TestForwardStreamChunksTimesOutBlockedDelivery(t *testing.T) {
 	var canceledWith error
 
 	NewBaseAPIHandlers(nil, nil).ForwardStreamChunks(
-		context,
-		context.Writer,
+		ginContext,
+		ginContext.Writer,
 		func(err error) { canceledWith = err },
 		data,
 		nil,
 		StreamChunkForwardOptions{
 			DeliveryTimeout: &deliveryTimeout,
 			WriteChunk: func(chunk []byte) error {
-				return WriteStreamBytes(context.Writer, chunk)
+				return WriteStreamBytes(ginContext.Writer, chunk)
 			},
 		},
 	)
@@ -390,7 +390,7 @@ func TestForwardStreamChunksTimesOutBlockedDelivery(t *testing.T) {
 func TestForwardStreamChunksWritesTerminalErrorStatusBeforeFirstBody(t *testing.T) {
 	events := make([]string, 0, 2)
 	writer := &deliveryResponseWriter{events: &events}
-	context := newDeliveryForwardContext(t, writer)
+	ginContext := newDeliveryForwardContext(t, writer)
 	data := make(chan coreexecutor.StreamChunk)
 	close(data)
 	errs := make(chan *ErrorMessage, 1)
@@ -401,19 +401,19 @@ func TestForwardStreamChunksWritesTerminalErrorStatusBeforeFirstBody(t *testing.
 	close(errs)
 
 	NewBaseAPIHandlers(nil, nil).ForwardStreamChunks(
-		context,
-		context.Writer,
+		ginContext,
+		ginContext.Writer,
 		func(error) {},
 		data,
 		errs,
 		StreamChunkForwardOptions{
 			WriteTerminalError: func(*ErrorMessage) error {
-				return WriteStreamBytes(context.Writer, []byte("error"))
+				return WriteStreamBytes(ginContext.Writer, []byte("error"))
 			},
 		},
 	)
 
-	if status := context.Writer.Status(); status != http.StatusTooManyRequests {
+	if status := ginContext.Writer.Status(); status != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", status, http.StatusTooManyRequests)
 	}
 	if !reflect.DeepEqual(events, []string{"write", "flush"}) {
@@ -424,7 +424,7 @@ func TestForwardStreamChunksWritesTerminalErrorStatusBeforeFirstBody(t *testing.
 func TestForwardStreamChunksAcknowledgesTerminalErrorAfterFlush(t *testing.T) {
 	events := make([]string, 0, 3)
 	writer := &deliveryResponseWriter{events: &events}
-	context := newDeliveryForwardContext(t, writer)
+	ginContext := newDeliveryForwardContext(t, writer)
 	upstreamErr := errors.New("upstream failed")
 	errs := make(chan *ErrorMessage, 1)
 	errs <- &ErrorMessage{
@@ -441,14 +441,14 @@ func TestForwardStreamChunksAcknowledgesTerminalErrorAfterFlush(t *testing.T) {
 	var canceledWith error
 
 	NewBaseAPIHandlers(nil, nil).ForwardStreamChunks(
-		context,
-		context.Writer,
+		ginContext,
+		ginContext.Writer,
 		func(err error) { canceledWith = err },
 		make(chan coreexecutor.StreamChunk),
 		errs,
 		StreamChunkForwardOptions{
 			WriteTerminalError: func(*ErrorMessage) error {
-				return WriteStreamBytes(context.Writer, []byte("error"))
+				return WriteStreamBytes(ginContext.Writer, []byte("error"))
 			},
 		},
 	)

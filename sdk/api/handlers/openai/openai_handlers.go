@@ -4,6 +4,8 @@
 // and manages a pool of clients to interact with backend services.
 // The handlers translate constant.OpenAI API requests to the appropriate backend format and
 // convert responses back to constant.OpenAI-compatible format.
+//
+//goland:noinspection GrazieInspection
 package openai
 
 import (
@@ -30,6 +32,7 @@ import (
 // It holds a pool of clients to interact with the backend service.
 type APIHandler struct {
 	*handlers.BaseAPIHandler
+	videoAuthBindings *videoAuthBindingStore
 }
 
 type openAIChatStreamLifecycle struct {
@@ -65,9 +68,13 @@ func (l *openAIChatStreamLifecycle) observe(chunk []byte) error {
 			index := int(choice.Get("index").Int())
 			l.seenChoices[index] = struct{}{}
 			finishReason := choice.Get("finish_reason")
-			if finishReason.Exists() && finishReason.Type != gjson.Null && strings.TrimSpace(finishReason.String()) != "" {
+			if finishReason.Exists() && finishReason.Type != gjson.Null &&
+				strings.TrimSpace(finishReason.String()) != "" {
 				if _, exists := l.finishedChoices[index]; exists {
-					l.err = fmt.Errorf("OpenAI Chat stream emitted duplicate finish_reason for choice %d", index)
+					l.err = fmt.Errorf(
+						"OpenAI Chat stream emitted duplicate finish_reason for choice %d",
+						index,
+					)
 					return false
 				}
 				l.finishedChoices[index] = struct{}{}
@@ -121,7 +128,8 @@ func (l *openAIChatStreamLifecycle) finalize() error {
 //   - *APIHandler: A new constant.OpenAI API handlers instance
 func NewAPIHandler(apiHandlers *handlers.BaseAPIHandler) *APIHandler {
 	return &APIHandler{
-		BaseAPIHandler: apiHandlers,
+		BaseAPIHandler:    apiHandlers,
+		videoAuthBindings: newVideoAuthBindingStore(),
 	}
 }
 
@@ -157,19 +165,25 @@ func (h *APIHandler) OpenAIModels(c *gin.Context) {
 		)
 		body, err := codexmodels.MarshalCompact(payload)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{Error: handlers.ErrorDetail{
-				Message: "Failed to encode model catalog",
-				Type:    "server_error",
-			}})
+			c.JSON(
+				http.StatusInternalServerError, handlers.ErrorResponse{
+					Error: handlers.ErrorDetail{
+						Message: "Failed to encode model catalog",
+						Type:    "server_error",
+					},
+				},
+			)
 			return
 		}
 		h.WriteModelListResponseBody(c, h.HandlerType(), body)
 		return
 	}
-	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
-		"object": "list",
-		"data":   models,
-	})
+	h.WriteModelListResponse(
+		c, h.HandlerType(), gin.H{
+			"object": "list",
+			"data":   models,
+		},
+	)
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.
@@ -201,19 +215,30 @@ func (h *APIHandler) ChatCompletions(c *gin.Context) {
 	// Convert them to Chat Completions so downstream translators preserve tool metadata.
 	if shouldTreatAsResponsesFormat(rawJSON) {
 		modelName := gjson.GetBytes(rawJSON, "model").String()
-		rawJSON, err = sdktranslator.TranslateRequestChecked(c.Request.Context(), sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, modelName, rawJSON, stream)
+		rawJSON, err = sdktranslator.TranslateRequestChecked(
+			c.Request.Context(),
+			sdktranslator.FormatOpenAIResponse,
+			sdktranslator.FormatOpenAI,
+			modelName,
+			rawJSON,
+			stream,
+		)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{
-				Message: err.Error(),
-				Type:    "invalid_request_error",
-			}})
+			c.JSON(
+				http.StatusBadRequest, handlers.ErrorResponse{
+					Error: handlers.ErrorDetail{
+						Message: err.Error(),
+						Type:    "invalid_request_error",
+					},
+				},
+			)
 			return
 		}
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
 	}
 
 	if stream {
-		h.handleStreamingResponse(c, rawJSON)
+		h.handleStreamingResponse(c, rawJSON, h.GetAlt(c), nil)
 	} else {
 		h.handleNonStreamingResponse(c, rawJSON)
 	}
@@ -267,7 +292,8 @@ func (h *APIHandler) Completions(c *gin.Context) {
 
 }
 
-// convertCompletionsRequestToChatCompletions converts constant.OpenAI completions API request to chat completions format.
+// convertCompletionsRequestToChatCompletions converts constant.OpenAI completions API request to chat completions
+// format.
 // This allows the completions endpoint to use the existing chat completions infrastructure.
 //
 // Parameters:
@@ -443,7 +469,8 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 					}
 				}
 				// Also check for finish_reason to ensure we don't skip final chunks
-				if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "" &&
+				if finishReason := choice.Get("finish_reason"); finishReason.Exists() &&
+					finishReason.String() != "" &&
 					finishReason.String() != "null" {
 					hasContent = true
 					return false // Break out of forEach
@@ -524,9 +551,17 @@ func (h *APIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) 
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(
+		cliCtx,
+		h.HandlerType(),
+		modelName,
+		rawJSON,
+		h.GetAlt(c),
+	)
+	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -542,7 +577,12 @@ func (h *APIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) 
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the constant.OpenAI-compatible request
-func (h *APIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *APIHandler) handleStreamingResponse(
+	c *gin.Context,
+	rawJSON []byte,
+	alt string,
+	transform func([]byte) []byte,
+) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(
@@ -558,51 +598,38 @@ func (h *APIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cancelWait := context.WithCancelCause(cliCtx)
+	defer cancelWait(nil)
+	stopKeepAlive := h.startStreamWaitKeepAlive(c, cliCtx, flusher, cancelWait)
+	defer func() { _ = stopKeepAlive() }()
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamChunksWithAuthManager(
-		cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c),
+		cliCtx, h.HandlerType(), modelName, rawJSON, alt,
 	)
 
-	setSSEHeaders := func() {
-		handlers.SetSSEHeaders(c)
+	chunk, errMsg, errInitial := receiveInitialResponsesStreamChunk(cliCtx, dataChan, errChan, nil, nil)
+	if err := stopKeepAlive(); err != nil {
+		cliCancel(err)
+		return
 	}
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				errChan = nil
-				continue
-			}
-			errWrite := h.WriteAcknowledgedStreamError(c, flusher, errMsg)
-			if errWrite != nil {
-				cliCancel(errWrite)
-			} else if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				h.handleStreamResult(
-					c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, nil,
-				)
-				return
-			}
-
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-			h.handleStreamResult(
-				c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, nil, chunk,
-			)
-			return
+	if cliCtx.Err() != nil {
+		cliCancel(context.Cause(cliCtx))
+		return
+	}
+	if errMsg != nil {
+		if errWrite := h.writeInitialStreamError(c, flusher, errMsg); errWrite != nil {
+			cliCancel(errWrite)
+		} else {
+			cliCancel(errMsg.Error)
 		}
+		return
 	}
+	handlers.SetSSEHeaders(c)
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	if errInitial != nil {
+		h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, transform)
+		return
+	}
+	h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, transform, chunk)
 }
 
 // handleCompletionsNonStreamingResponse handles non-streaming completions responses.
@@ -626,7 +653,7 @@ func (h *APIHandler) handleCompletionsNonStreamingResponse(c *gin.Context, rawJS
 	)
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -644,73 +671,8 @@ func (h *APIHandler) handleCompletionsNonStreamingResponse(c *gin.Context, rawJS
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the constant.OpenAI-compatible completions request
 func (h *APIHandler) handleCompletionsStreamingResponse(c *gin.Context, rawJSON []byte) {
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		c.JSON(
-			http.StatusInternalServerError, handlers.ErrorResponse{
-				Error: handlers.ErrorDetail{
-					Message: "Streaming not supported",
-					Type:    "server_error",
-				},
-			},
-		)
-		return
-	}
-
 	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
-	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamChunksWithAuthManager(
-		cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "",
-	)
-
-	setSSEHeaders := func() {
-		handlers.SetSSEHeaders(c)
-	}
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				errChan = nil
-				continue
-			}
-			errWrite := h.WriteAcknowledgedStreamError(c, flusher, errMsg)
-			if errWrite != nil {
-				cliCancel(errWrite)
-			} else if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				h.handleStreamResult(
-					c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, nil,
-				)
-				return
-			}
-
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-			h.handleStreamResult(
-				c,
-				flusher,
-				func(err error) { cliCancel(err) },
-				dataChan,
-				errChan,
-				convertChatCompletionsStreamChunkToCompletions,
-				chunk,
-			)
-			return
-		}
-	}
+	h.handleStreamingResponse(c, chatCompletionsJSON, "", convertChatCompletionsStreamChunkToCompletions)
 }
 
 func (h *APIHandler) handleStreamResult(
@@ -724,6 +686,7 @@ func (h *APIHandler) handleStreamResult(
 ) {
 	lifecycle := newOpenAIChatStreamLifecycle()
 	writeTerminalError := func(errMsg *handlers.ErrorMessage) error {
+		errMsg = sanitizeOpenAIUpstreamError(errMsg)
 		if errMsg == nil {
 			return nil
 		}
@@ -735,7 +698,7 @@ func (h *APIHandler) handleStreamResult(
 		if errMsg.Error != nil && errMsg.Error.Error() != "" {
 			errText = errMsg.Error.Error()
 		}
-		body := handlers.BuildErrorResponseBody(status, errText)
+		body := handlers.BuildErrorResponseBodyWithError(status, errText, errMsg.Error)
 		return handlers.WriteStreamBytes(
 			c.Writer, []byte("data: "), body, []byte("\n\n"),
 		)
@@ -744,14 +707,14 @@ func (h *APIHandler) handleStreamResult(
 		c, flusher, cancel, data, errs, handlers.StreamChunkForwardOptions{
 			RequireTerminal: true,
 			WriteChunk: func(chunk []byte) error {
+				if err := lifecycle.observe(chunk); err != nil {
+					return err
+				}
 				if transform != nil {
 					chunk = transform(chunk)
 				}
 				if len(chunk) == 0 {
 					return nil
-				}
-				if err := lifecycle.observe(chunk); err != nil {
-					return err
 				}
 				return handlers.WriteStreamBytes(
 					c.Writer, []byte("data: "), chunk, []byte("\n\n"),
@@ -760,10 +723,14 @@ func (h *APIHandler) handleStreamResult(
 			WriteTerminalError: writeTerminalError,
 			WriteDone: func() error {
 				if err := lifecycle.finalize(); err != nil {
-					return errors.Join(err, writeTerminalError(&handlers.ErrorMessage{
-						StatusCode: http.StatusBadGateway,
-						Error:      err,
-					}))
+					return errors.Join(
+						err, writeTerminalError(
+							&handlers.ErrorMessage{
+								StatusCode: http.StatusBadGateway,
+								Error:      err,
+							},
+						),
+					)
 				}
 				return handlers.WriteStreamBytes(c.Writer, []byte("data: [DONE]\n\n"))
 			},

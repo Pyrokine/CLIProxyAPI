@@ -16,10 +16,12 @@ import (
 	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -33,6 +35,7 @@ const (
 	defaultOpenAIVideosModel      = "sora-2"
 	defaultXAIVideosModel         = "grok-imagine-video"
 	xaiVideos15Model              = "grok-imagine-video-1.5"
+	xaiVideos15LiteModel          = "grok-imagine-video-1.5-lite"
 	xaiVideos15PreviewModel       = "grok-imagine-video-1.5-preview"
 	xaiVideosHandlerType          = "openai-video"
 	defaultVideosSeconds          = "4"
@@ -47,8 +50,6 @@ const (
 	defaultVideoAuthBindingTTL     = 3 * time.Hour
 	defaultVideoContentHTTPTimeout = 5 * time.Minute
 )
-
-var videoAuthBindings = newVideoAuthBindingStore()
 
 type xaiVideoCreateMetadata struct {
 	Model        string
@@ -147,7 +148,8 @@ func (s *videoAuthBindingStore) evictOverflowLocked() {
 		oldestID := ""
 		var oldest videoAuthBinding
 		for videoID, entry := range s.entries {
-			if oldestID == "" || entry.lastUsed.Before(oldest.lastUsed) || (entry.lastUsed.Equal(oldest.lastUsed) && entry.expiresAt.Before(oldest.expiresAt)) {
+			if oldestID == "" || entry.lastUsed.Before(oldest.lastUsed) ||
+				(entry.lastUsed.Equal(oldest.lastUsed) && entry.expiresAt.Before(oldest.expiresAt)) {
 				oldestID = videoID
 				oldest = entry
 			}
@@ -167,7 +169,8 @@ func videosModelBase(model string) string {
 func isXAIVideosModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
 	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
-	if baseModel != defaultXAIVideosModel && baseModel != xaiVideos15Model && baseModel != xaiVideos15PreviewModel {
+	if baseModel != defaultXAIVideosModel && baseModel != xaiVideos15Model &&
+		baseModel != xaiVideos15PreviewModel && baseModel != xaiVideos15LiteModel {
 		return false
 	}
 
@@ -232,6 +235,8 @@ func canonicalXAIVideosModel(model string) string {
 		return defaultXAIVideosModel
 	case xaiVideos15Model, xaiVideos15PreviewModel:
 		return xaiVideos15Model
+	case xaiVideos15LiteModel:
+		return xaiVideos15LiteModel
 	}
 	return defaultXAIVideosModel
 }
@@ -245,6 +250,8 @@ func routingXAIVideosModel(model string) string {
 		return defaultXAIVideosModel
 	case xaiVideos15Model:
 		return xaiVideos15Model
+	case xaiVideos15LiteModel:
+		return xaiVideos15LiteModel
 	case xaiVideos15PreviewModel:
 		return xaiVideos15PreviewModel
 	}
@@ -343,32 +350,87 @@ func videoIDFromPayload(payload []byte) string {
 	return videoID
 }
 
-func (h *APIHandler) bindVideoAuthIDAndModelFromPayload(payload []byte, authID string, model string) {
-	videoID := videoIDFromPayload(payload)
-	if videoID == "" {
-		return
-	}
-	videoAuthBindings.setWithModel(videoID, authID, routingXAIVideosModel(model), h.videoAuthBindingTTL())
+func (h *APIHandler) bindVideoAuthIDAndModelFromPayload(
+	ctx context.Context,
+	payload []byte,
+	authID, model string,
+) error {
+	return h.bindVideoAuthID(ctx, videoIDFromPayload(payload), authID, model)
 }
 
-func (h *APIHandler) bindVideoAuthID(videoID string, authID string, model string) {
-	videoAuthBindings.setWithModel(videoID, authID, routingXAIVideosModel(model), h.videoAuthBindingTTL())
+func (h *APIHandler) bindVideoAuthID(ctx context.Context, videoID, authID, model string) error {
+	store := h.VideoTaskStoreSnapshot()
+	identity := coreusage.APIKeyIdentityFromContext(ctx)
+	if store == nil || identity == "" || videoID == "" || authID == "" {
+		return fmt.Errorf("video ownership cannot be recorded")
+	}
+	task := handlers.VideoTask{
+		ID: videoID, Provider: "xai", OwnerIdentity: identity, AuthID: authID, Model: routingXAIVideosModel(model),
+	}
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := store.SaveVideoTask(persistCtx, task); err != nil {
+		return err
+	}
+	h.videoAuthBindings.setWithModel(identity+"\x00"+videoID, task.AuthID, task.Model, h.videoAuthBindingTTL())
+	return nil
 }
 
-func (h *APIHandler) contextWithVideoAuthBinding(ctx context.Context, videoID string) context.Context {
-	if authID, ok := videoAuthBindings.get(videoID); ok {
-		return handlers.WithPinnedAuthID(ctx, authID)
+func (h *APIHandler) videoTaskStorage(c *gin.Context) (handlers.VideoTaskStore, string, bool) {
+	identity := coreusage.APIKeyIdentityFromContext(c.Request.Context())
+	if identity == "" {
+		h.WriteErrorResponse(
+			c, &handlers.ErrorMessage{
+				StatusCode: http.StatusUnauthorized, Error: fmt.Errorf("video authentication is required"),
+			},
+		)
+		return nil, "", false
 	}
-	return ctx
+	store := h.VideoTaskStoreSnapshot()
+	if store == nil {
+		writeVideoTaskStorageError(h, c, fmt.Errorf("video ownership storage is unavailable"))
+		return nil, "", false
+	}
+	if err := store.CheckVideoTaskStorage(c.Request.Context()); err != nil {
+		writeVideoTaskStorageError(h, c, err)
+		return nil, "", false
+	}
+	return store, identity, true
 }
 
-func (h *APIHandler) modelWithVideoAuthBinding(videoID string, fallbackModel string) string {
-	if binding, ok := videoAuthBindings.getBinding(videoID); ok {
-		if model := strings.TrimSpace(binding.model); model != "" {
-			return model
-		}
+func writeVideoTaskStorageError(h *APIHandler, c *gin.Context, err error) {
+	log.WithError(err).Error("video ownership operation failed")
+	h.WriteErrorResponse(
+		c, &handlers.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("video ownership service unavailable"),
+		},
+	)
+}
+
+func (h *APIHandler) loadVideoTask(c *gin.Context, videoID string) (handlers.VideoTask, bool) {
+	store, identity, ok := h.videoTaskStorage(c)
+	if !ok {
+		return handlers.VideoTask{}, false
 	}
-	return fallbackModel
+	cacheKey := identity + "\x00" + videoID
+	if binding, found := h.videoAuthBindings.getBinding(cacheKey); found {
+		return handlers.VideoTask{
+			ID: videoID, Provider: "xai", OwnerIdentity: identity, AuthID: binding.authID, Model: binding.model,
+		}, true
+	}
+	task, found, err := store.LoadVideoTask(c.Request.Context(), "xai", videoID)
+	if err != nil {
+		writeVideoTaskStorageError(h, c, err)
+		return handlers.VideoTask{}, false
+	}
+	if !found || task.OwnerIdentity != identity {
+		h.WriteErrorResponse(
+			c, &handlers.ErrorMessage{StatusCode: http.StatusNotFound, Error: fmt.Errorf("video not found")},
+		)
+		return handlers.VideoTask{}, false
+	}
+	h.videoAuthBindings.setWithModel(cacheKey, task.AuthID, task.Model, h.videoAuthBindingTTL())
+	return task, true
 }
 
 func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideoCreateMetadata, error) {
@@ -398,15 +460,25 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 		return nil, xaiVideoCreateMetadata{}, err
 	}
 	referenceImages := collectXAIVideoReferenceImages(rawJSON)
-	if len(referenceImages) > maxXAIVideoReferences {
+	videoModel := canonicalXAIVideosModel(model)
+	maxReferences := maxXAIVideoReferences
+	if videoModel == xaiVideos15Model {
+		maxReferences = 14
+	}
+	if videoModel == xaiVideos15LiteModel && len(referenceImages) > 0 {
+		return nil, xaiVideoCreateMetadata{}, fmt.Errorf("use a single image input for %s", videoModel)
+	}
+	if len(referenceImages) > maxReferences {
 		return nil, xaiVideoCreateMetadata{}, fmt.Errorf(
-			"reference_images supports at most %d images on xAI", maxXAIVideoReferences,
+			"reference_images supports at most %d images on xAI", maxReferences,
 		)
+	}
+	if resolution == "1080p" && videoModel == defaultXAIVideosModel {
+		return nil, xaiVideoCreateMetadata{}, fmt.Errorf("1080p requires Grok Imagine Video 1.5 or 1.5 Lite")
 	}
 	if imageURL != "" && len(referenceImages) > 0 {
 		return nil, xaiVideoCreateMetadata{}, fmt.Errorf("image and reference_images cannot be combined on xAI")
 	}
-	videoModel := canonicalXAIVideosModel(model)
 	req := []byte(`{}`)
 	req, _ = sjson.SetBytes(req, "model", videoModel)
 	req, _ = sjson.SetBytes(req, "prompt", prompt)
@@ -520,6 +592,8 @@ func xaiVideosResolution(raw string, fallback string) string {
 		return "480p"
 	case "720p":
 		return "720p"
+	case "1080p":
+		return "1080p"
 	default:
 		return fallback
 	}
@@ -534,7 +608,9 @@ func xaiVideosInputImageURL(rawJSON []byte) (string, error) {
 			return "", fmt.Errorf("input_reference must provide exactly one of image_url or file_id")
 		}
 		if fileID != "" {
-			return "", fmt.Errorf("input_reference.file_id is not supported for xAI video generation; use input_reference.image_url")
+			return "", fmt.Errorf(
+				"input_reference.file_id is not supported for xAI video generation; use input_reference.image_url",
+			)
 		}
 		if imageURL != "" {
 			return imageURL, nil
@@ -836,6 +912,7 @@ func (h *APIHandler) handleXAIVideosNativePost(c *gin.Context) {
 	h.collectXAIVideosNative(c, rawJSON, routingModel, true)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *APIHandler) XAIVideosRetrieve(c *gin.Context) {
 	requestID := strings.TrimSpace(c.Param("request_id"))
 	if requestID == "" {
@@ -875,23 +952,21 @@ func (h *APIHandler) VideosRetrieve(c *gin.Context) {
 	payload := []byte(`{}`)
 	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
 
+	task, ok := h.loadVideoTask(c, videoID)
+	if !ok {
+		return
+	}
 	c.Header("Content-Type", "application/json")
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	selectedAuthID := ""
-	cliCtx = h.contextWithVideoAuthBinding(cliCtx, videoID)
-	executionModel := h.modelWithVideoAuthBinding(videoID, defaultXAIVideosModel)
-	cliCtx = handlers.WithSelectedAuthIDCallback(
-		cliCtx, func(authID string) {
-			selectedAuthID = authID
-		},
-	)
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
+	cliCtx = handlers.WithPinnedAuthID(cliCtx, task.AuthID)
+	executionModel := task.Model
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(
 		cliCtx, xaiVideosHandlerType, executionModel, payload, "",
 	)
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		if errMsg.Error != nil {
 			cliCancel(errMsg.Error)
 		} else {
@@ -903,12 +978,11 @@ func (h *APIHandler) VideosRetrieve(c *gin.Context) {
 	out, err := buildVideosRetrieveAPIResponseFromXAI(videoID, resp, defaultXAIVideosModel)
 	if err != nil {
 		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		cliCancel(err)
 		return
 	}
 
-	h.bindVideoAuthID(videoID, selectedAuthID, executionModel)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(out)
 	cliCancel(nil)
@@ -949,20 +1023,18 @@ func (h *APIHandler) VideosContent(c *gin.Context) {
 	payload := []byte(`{}`)
 	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
 
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	selectedAuthID := ""
-	cliCtx = h.contextWithVideoAuthBinding(cliCtx, videoID)
-	executionModel := h.modelWithVideoAuthBinding(videoID, defaultXAIVideosModel)
-	cliCtx = handlers.WithSelectedAuthIDCallback(
-		cliCtx, func(authID string) {
-			selectedAuthID = authID
-		},
-	)
+	task, ok := h.loadVideoTask(c, videoID)
+	if !ok {
+		return
+	}
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
+	cliCtx = handlers.WithPinnedAuthID(cliCtx, task.AuthID)
+	executionModel := task.Model
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, _, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, executionModel, payload, "")
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		if errMsg.Error != nil {
 			cliCancel(errMsg.Error)
 		} else {
@@ -971,41 +1043,47 @@ func (h *APIHandler) VideosContent(c *gin.Context) {
 		return
 	}
 
-	h.bindVideoAuthID(videoID, selectedAuthID, executionModel)
 	contentURL, err := xaiVideoContentURLFromPayload(resp)
 	if err != nil {
 		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		cliCancel(err)
 		return
 	}
 
-	if errDownload := h.writeVideoContentFromURL(c, contentURL); errDownload != nil {
+	downloadAuth, found := h.AuthManager.GetByID(task.AuthID)
+	if !found {
+		err := fmt.Errorf("video upstream credential is unavailable")
+		h.WriteErrorResponse(c, &handlers.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: err})
+		cliCancel(err)
+		return
+	}
+	if errDownload := h.writeVideoContentFromURL(c, contentURL, downloadAuth); errDownload != nil {
 		cliCancel(errDownload)
 		return
 	}
 	cliCancel(nil)
 }
 
-func (h *APIHandler) writeVideoContentFromURL(c *gin.Context, contentURL string) error {
+func (h *APIHandler) writeVideoContentFromURL(c *gin.Context, contentURL string, auth *coreauth.Auth) error {
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, contentURL, nil)
 	if err != nil {
 		errMsg := &handlers.ErrorMessage{
 			StatusCode: clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway),
 			Error:      err,
 		}
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		return err
 	}
 
-	httpClient := h.videoContentHTTPClient(c)
+	httpClient := h.videoContentHTTPClient(c, auth)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		errMsg := &handlers.ErrorMessage{
 			StatusCode: clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway),
 			Error:      err,
 		}
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		return err
 	}
 	defer func() {
@@ -1015,7 +1093,7 @@ func (h *APIHandler) writeVideoContentFromURL(c *gin.Context, contentURL string)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errDownloadStatus := videoContentDownloadStatusError(resp)
 		errMsg := &handlers.ErrorMessage{StatusCode: resp.StatusCode, Error: errDownloadStatus}
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		return errDownloadStatus
 	}
 
@@ -1025,6 +1103,11 @@ func (h *APIHandler) writeVideoContentFromURL(c *gin.Context, contentURL string)
 	}
 	c.Status(resp.StatusCode)
 	_, err = io.Copy(c.Writer, resp.Body)
+	if err != nil {
+		clientError := &openAIUpstreamClientError{message: safeOpenAIUpstreamErrorText(err.Error()), cause: err}
+		handlers.MarkStreamRequestFailure(c, clientError)
+		_ = c.Error(clientError).SetType(gin.ErrorTypePrivate)
+	}
 	return err
 }
 
@@ -1050,7 +1133,7 @@ func videoContentDownloadStatusError(resp *http.Response) error {
 	return fmt.Errorf("video content download failed: %s", message)
 }
 
-func (h *APIHandler) videoContentHTTPClient(c *gin.Context) *http.Client {
+func (h *APIHandler) videoContentHTTPClient(c *gin.Context, auth *coreauth.Auth) *http.Client {
 	ctx := context.Background()
 	if c != nil && c.Request != nil {
 		ctx = c.Request.Context()
@@ -1060,32 +1143,13 @@ func (h *APIHandler) videoContentHTTPClient(c *gin.Context) *http.Client {
 		cfg = &sdkconfig.Config{SDKConfig: *h.ConfigSnapshot()}
 	}
 	client := runtimeexecutor.NewProxyAwareHTTPClient(
-		ctx, cfg, h.videoContentDownloadAuth(c), defaultVideoContentHTTPTimeout,
+		ctx, cfg, auth, defaultVideoContentHTTPTimeout,
 	)
 	if client.Transport == nil {
 		client.Transport = http.DefaultTransport
 	}
 	client.Transport = proxyutil.PublicHostTransport(client.Transport)
 	return client
-}
-
-func (h *APIHandler) videoContentDownloadAuth(c *gin.Context) *coreauth.Auth {
-	if h == nil || h.BaseAPIHandler == nil || h.AuthManager == nil || c == nil {
-		return nil
-	}
-	videoID := strings.TrimSpace(c.Param("video_id"))
-	if videoID == "" {
-		return nil
-	}
-	authID, ok := videoAuthBindings.get(videoID)
-	if !ok {
-		return nil
-	}
-	auth, ok := h.AuthManager.GetByID(authID)
-	if !ok {
-		return nil
-	}
-	return auth
 }
 
 func copyVideoContentHeaders(dst http.Header, src http.Header) {
@@ -1101,24 +1165,40 @@ func copyVideoContentHeaders(dst http.Header, src http.Header) {
 func (h *APIHandler) collectXAIVideosNative(c *gin.Context, rawJSON []byte, model string, bindCreatedVideoAuth bool) {
 	c.Header("Content-Type", "application/json")
 
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if _, _, ok := h.videoTaskStorage(c); !ok {
+		return
+	}
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
+	defer cliCancel(nil)
 	selectedAuthID := ""
 	videoID := videoIDFromPayload(rawJSON)
+	if videoID == "" {
+		videoID = strings.TrimSpace(gjson.GetBytes(rawJSON, "video_id").String())
+	}
 	executionModel := model
-	if !bindCreatedVideoAuth {
-		cliCtx = h.contextWithVideoAuthBinding(cliCtx, videoID)
-		executionModel = h.modelWithVideoAuthBinding(videoID, model)
+	if !bindCreatedVideoAuth || videoID != "" {
+		task, ok := h.loadVideoTask(c, videoID)
+		if !ok {
+			return
+		}
+		cliCtx = handlers.WithPinnedAuthID(cliCtx, task.AuthID)
+		if !bindCreatedVideoAuth {
+			executionModel = task.Model
+		}
 	}
 	cliCtx = handlers.WithSelectedAuthIDCallback(
 		cliCtx, func(authID string) {
 			selectedAuthID = authID
 		},
 	)
-	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	stopKeepAlive := func() {}
+	if !bindCreatedVideoAuth {
+		stopKeepAlive = h.StartNonStreamingKeepAlive(c, cliCtx)
+	}
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, executionModel, rawJSON, "")
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		if errMsg.Error != nil {
 			cliCancel(errMsg.Error)
 		} else {
@@ -1128,9 +1208,13 @@ func (h *APIHandler) collectXAIVideosNative(c *gin.Context, rawJSON []byte, mode
 	}
 
 	if bindCreatedVideoAuth {
-		h.bindVideoAuthIDAndModelFromPayload(resp, selectedAuthID, executionModel)
-	} else {
-		h.bindVideoAuthID(videoID, selectedAuthID, executionModel)
+		if err := h.bindVideoAuthIDAndModelFromPayload(
+			c.Request.Context(), resp, selectedAuthID, executionModel,
+		); err != nil {
+			writeVideoTaskStorageError(h, c, err)
+			cliCancel(err)
+			return
+		}
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
@@ -1138,9 +1222,12 @@ func (h *APIHandler) collectXAIVideosNative(c *gin.Context, rawJSON []byte, mode
 }
 
 func (h *APIHandler) collectXAIVideosCreate(c *gin.Context, xaiReq []byte, meta xaiVideoCreateMetadata) {
+	if _, _, ok := h.videoTaskStorage(c); !ok {
+		return
+	}
 	c.Header("Content-Type", "application/json")
 
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
 	selectedAuthID := ""
 	cliCtx = handlers.WithSelectedAuthIDCallback(
 		cliCtx, func(authID string) {
@@ -1151,11 +1238,9 @@ func (h *APIHandler) collectXAIVideosCreate(c *gin.Context, xaiReq []byte, meta 
 	if routingModel == "" {
 		routingModel = routingXAIVideosModel(meta.Model)
 	}
-	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, routingModel, xaiReq, "")
-	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		if errMsg.Error != nil {
 			cliCancel(errMsg.Error)
 		} else {
@@ -1167,12 +1252,16 @@ func (h *APIHandler) collectXAIVideosCreate(c *gin.Context, xaiReq []byte, meta 
 	out, err := buildVideosCreateAPIResponseFromXAI(resp, meta)
 	if err != nil {
 		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		cliCancel(err)
 		return
 	}
 
-	h.bindVideoAuthIDAndModelFromPayload(out, selectedAuthID, routingModel)
+	if err := h.bindVideoAuthIDAndModelFromPayload(c.Request.Context(), out, selectedAuthID, routingModel); err != nil {
+		writeVideoTaskStorageError(h, c, err)
+		cliCancel(err)
+		return
+	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(out)
 	cliCancel(nil)

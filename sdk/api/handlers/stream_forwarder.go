@@ -15,11 +15,13 @@ import (
 var (
 	errStreamClosedBeforeTransportTerminal = errors.New("stream closed before transport terminal")
 	errStreamTransportTerminalTimeout      = errors.New("timed out waiting for stream transport terminal")
-	errStreamChannelCloseTimeout           = errors.New("timed out waiting for stream channel close after transport terminal")
-	errStreamChunkAfterProtocolTerminal    = errors.New("stream chunk received after protocol terminal")
-	errStreamErrorAfterProtocolTerminal    = errors.New("stream error received after protocol terminal")
-	errStreamChunkAfterTransportTerminal   = errors.New("stream chunk received after terminal")
-	errStreamErrorAfterTransportTerminal   = errors.New("stream error received after terminal")
+	errStreamChannelCloseTimeout           = errors.New(
+		"timed out waiting for stream channel close after transport terminal",
+	)
+	errStreamChunkAfterProtocolTerminal  = errors.New("stream chunk received after protocol terminal")
+	errStreamErrorAfterProtocolTerminal  = errors.New("stream error received after protocol terminal")
+	errStreamChunkAfterTransportTerminal = errors.New("stream chunk received after terminal")
+	errStreamErrorAfterTransportTerminal = errors.New("stream error received after terminal")
 )
 
 func MarkStreamRequestFailure(c *gin.Context, err error) {

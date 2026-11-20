@@ -78,6 +78,24 @@ func responsesSSEEventName(frame []byte) string {
 	return event
 }
 
+func replaceResponsesSSEData(frame, payload []byte) []byte {
+	lines := bytes.Split(frame, []byte("\n"))
+	out := make([][]byte, 0, len(lines))
+	wroteData := false
+	for _, line := range lines {
+		trimmed := bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			out = append(out, line)
+			continue
+		}
+		if !wroteData {
+			out = append(out, append([]byte("data: "), payload...))
+			wroteData = true
+		}
+	}
+	return bytes.Join(out, []byte("\n"))
+}
+
 func shouldFilterPrivateResponsesSSEEvent(event string, isCodexClient bool) bool {
 	event = strings.TrimSpace(event)
 	if strings.HasPrefix(event, "responsesapi.") || event == "codex.rate_limits" {

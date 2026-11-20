@@ -3,17 +3,23 @@ package handlers
 import (
 	"context"
 	"fmt"
-	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"net/http"
 	"testing"
+
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 func TestExecuteModelReturnsFilteredHeadersWhenPassthroughDisabled(t *testing.T) {
 	model := "model-execution-internal-headers"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
 	executor := &lifecycleCaptureExecutor{
-		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+		execute: func(
+			ctx context.Context,
+			auth *coreauth.Auth,
+			req coreexecutor.Request,
+			opts coreexecutor.Options,
+		) (coreexecutor.Response, error) {
 			return coreexecutor.Response{
 				Payload: []byte(`{"ok":true}`),
 				Headers: http.Header{
@@ -25,12 +31,14 @@ func TestExecuteModelReturnsFilteredHeadersWhenPassthroughDisabled(t *testing.T)
 	}
 	handler := newLifecycleHandler(t, model, executor)
 
-	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
-		EntryProtocol: "openai",
-		ExitProtocol:  "openai",
-		Model:         model,
-		Body:          requestBody,
-	})
+	resp, errMsg := handler.ExecuteModel(
+		context.Background(), ModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         model,
+			Body:          requestBody,
+		},
+	)
 	if errMsg != nil {
 		t.Fatalf("ExecuteModel() error = %+v", errMsg)
 	}
@@ -42,12 +50,14 @@ func TestExecuteModelReturnsFilteredHeadersWhenPassthroughDisabled(t *testing.T)
 	}
 
 	handler.SetPluginHost(&lifecycleTestHost{})
-	resp, errMsg = handler.ExecuteModel(context.Background(), ModelExecutionRequest{
-		EntryProtocol: "openai",
-		ExitProtocol:  "openai",
-		Model:         model,
-		Body:          requestBody,
-	})
+	resp, errMsg = handler.ExecuteModel(
+		context.Background(), ModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         model,
+			Body:          requestBody,
+		},
+	)
 	if errMsg != nil {
 		t.Fatalf("ExecuteModel() with interceptor error = %+v", errMsg)
 	}
@@ -55,7 +65,9 @@ func TestExecuteModelReturnsFilteredHeadersWhenPassthroughDisabled(t *testing.T)
 		t.Fatalf("intercepted internal headers = %#v", resp.Headers)
 	}
 
-	_, clientHeaders, clientErr := handler.ExecuteWithAuthManager(context.Background(), "openai", model, requestBody, "")
+	_, clientHeaders, clientErr := handler.ExecuteWithAuthManager(
+		context.Background(), "openai", model, requestBody, "",
+	)
 	if clientErr != nil {
 		t.Fatalf("ExecuteWithAuthManager() error = %+v", clientErr)
 	}
@@ -68,7 +80,12 @@ func TestExecuteModelStreamReturnsFilteredHeadersWhenPassthroughDisabled(t *test
 	model := "model-execution-internal-stream-headers"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, model))
 	executor := &lifecycleCaptureExecutor{
-		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+		stream: func(
+			ctx context.Context,
+			auth *coreauth.Auth,
+			req coreexecutor.Request,
+			opts coreexecutor.Options,
+		) (*coreexecutor.StreamResult, error) {
 			chunks := make(chan coreexecutor.StreamChunk, 1)
 			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: ok\n\n")}
 			close(chunks)
@@ -83,13 +100,15 @@ func TestExecuteModelStreamReturnsFilteredHeadersWhenPassthroughDisabled(t *test
 	}
 	handler := newLifecycleHandler(t, model, executor)
 
-	stream, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
-		EntryProtocol: "openai",
-		ExitProtocol:  "openai",
-		Model:         model,
-		Stream:        true,
-		Body:          requestBody,
-	})
+	stream, errMsg := handler.ExecuteModelStream(
+		context.Background(), ModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         model,
+			Stream:        true,
+			Body:          requestBody,
+		},
+	)
 	if errMsg != nil {
 		t.Fatalf("ExecuteModelStream() error = %+v", errMsg)
 	}
@@ -105,7 +124,9 @@ func TestExecuteModelStreamReturnsFilteredHeadersWhenPassthroughDisabled(t *test
 			t.Fatal(chunk.Err)
 		}
 	}
-	data, publicHeaders, errs := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, requestBody, "")
+	data, publicHeaders, errs := handler.ExecuteStreamWithAuthManager(
+		context.Background(), "openai", model, requestBody, "",
+	)
 	for range data {
 	}
 	for errMsg := range errs {

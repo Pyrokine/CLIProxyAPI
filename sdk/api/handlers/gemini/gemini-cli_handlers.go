@@ -2,6 +2,8 @@
 // This package implements handlers that process CLI-specific requests for constant.Gemini API operations,
 // including content generation and streaming content generation endpoints.
 // The handlers restrict access to localhost only and manage communication with the backend service.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (

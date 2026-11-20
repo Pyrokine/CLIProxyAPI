@@ -32,39 +32,51 @@ func TestCodexClientCatalogApplyPatchRouting(t *testing.T) {
 		want      string
 	}{
 		{name: "disabled", providers: []string{"codex"}, support: map[string]bool{"codex": true}},
-		{name: "native", enabled: true, providers: []string{"codex"}, support: map[string]bool{"codex": true}, want: "freeform"},
-		{name: "custom provider", enabled: true, providers: []string{"fixture-provider"}, support: map[string]bool{"fixture-provider": true}, want: "freeform"},
+		{
+			name: "native", enabled: true, providers: []string{"codex"}, support: map[string]bool{"codex": true},
+			want: "freeform",
+		},
+		{
+			name: "custom provider", enabled: true, providers: []string{"fixture-provider"},
+			support: map[string]bool{"fixture-provider": true}, want: "freeform",
+		},
 		{name: "unsupported", enabled: true, providers: []string{"codex"}, support: map[string]bool{"codex": false}},
 		{name: "missing executor", enabled: true, providers: []string{"codex"}},
-		{name: "mixed", enabled: true, providers: []string{"codex", "fixture-provider"}, support: map[string]bool{"codex": true, "fixture-provider": false}},
+		{
+			name: "mixed", enabled: true, providers: []string{"codex", "fixture-provider"},
+			support: map[string]bool{"codex": true, "fixture-provider": false},
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manager := coreauth.NewManager(nil, nil, nil)
-			for provider, supported := range tc.support {
-				manager.RegisterExecutor(&catalogPatchExecutor{provider: provider, supported: supported})
-			}
-			models := registry.GetGlobalRegistry()
-			for _, provider := range tc.providers {
-				id := t.Name() + "/" + provider
-				models.RegisterClient(id, provider, []*registry.ModelInfo{{ID: "gpt-6-sol"}})
-				t.Cleanup(func() { models.UnregisterClient(id) })
-			}
-			cfg := &sdkconfig.SDKConfig{}
-			cfg.Client.Codex.EnableApplyPatch = tc.enabled
-			handler := NewAPIHandler(handlers.NewBaseAPIHandlers(cfg, manager))
-			writer := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(writer)
-			ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models?client_version=cpa", nil)
-			handler.OpenAIModels(ctx)
-			entry := gjson.Get(writer.Body.String(), `models.#(slug=="gpt-6-sol")`)
-			if writer.Code != http.StatusOK || !entry.Exists() {
-				t.Fatalf("catalog status=%d body=%s", writer.Code, writer.Body.String())
-			}
-			capability := entry.Get("apply_patch_tool_type")
-			if !capability.Exists() || capability.String() != tc.want || tc.want == "" && capability.Type != gjson.Null {
-				t.Fatalf("apply_patch = %s, want %q", capability.Raw, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				manager := coreauth.NewManager(nil, nil, nil)
+				for provider, supported := range tc.support {
+					manager.RegisterExecutor(&catalogPatchExecutor{provider: provider, supported: supported})
+				}
+				models := registry.GetGlobalRegistry()
+				for _, provider := range tc.providers {
+					id := t.Name() + "/" + provider
+					models.RegisterClient(id, provider, []*registry.ModelInfo{{ID: "gpt-6-sol"}})
+					t.Cleanup(func() { models.UnregisterClient(id) })
+				}
+				cfg := &sdkconfig.SDKConfig{}
+				cfg.Client.Codex.EnableApplyPatch = tc.enabled
+				handler := NewAPIHandler(handlers.NewBaseAPIHandlers(cfg, manager))
+				writer := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(writer)
+				ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models?client_version=cpa", nil)
+				handler.OpenAIModels(ctx)
+				entry := gjson.Get(writer.Body.String(), `models.#(slug=="gpt-6-sol")`)
+				if writer.Code != http.StatusOK || !entry.Exists() {
+					t.Fatalf("catalog status=%d body=%s", writer.Code, writer.Body.String())
+				}
+				capability := entry.Get("apply_patch_tool_type")
+				if !capability.Exists() || capability.String() != tc.want ||
+					tc.want == "" && capability.Type != gjson.Null {
+					t.Fatalf("apply_patch = %s, want %q", capability.Raw, tc.want)
+				}
+			},
+		)
 	}
 }
 

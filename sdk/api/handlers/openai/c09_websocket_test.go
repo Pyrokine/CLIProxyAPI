@@ -18,7 +18,9 @@ import (
 type c09MessageTooBigStatusError struct{}
 
 func (c09MessageTooBigStatusError) Error() string {
-	return `{"error":{"message":"upstream websocket message too big","type":"invalid_request_error","code":"message_too_big"}}`
+	return `{"error":{"message":"upstream websocket message too big","type":` +
+		`"invalid_request_error","code":` +
+		`"message_too_big"}}`
 }
 
 func (c09MessageTooBigStatusError) StatusCode() int {
@@ -71,10 +73,14 @@ func TestC09WebsocketReplayCloseRequiresTypedSignal(t *testing.T) {
 }
 
 func TestC09LocalCompactionReplacesTranscriptAndOldResponseID(t *testing.T) {
-	lastRequest := []byte(`{"model":"gpt-5.6-sol","stream":true,"instructions":"keep","input":[{"type":"message","id":"old-user","role":"user","content":"old"}]}`)
+	lastRequest := []byte(`{"model":"gpt-5.6-sol","stream":true,"instructions":"keep","input":[{"` +
+		`type":"message","id":"old-user","role":"user","content":"old"}]}`)
 	lastOutput := []byte(`[{"type":"message","id":"old-assistant","role":"assistant","content":"old answer"}]`)
 	raw := []byte(fmt.Sprintf(
-		`{"type":"response.create","input":[{"type":"additional_tools","role":"developer","tools":[]},{"type":"message","id":"compact-summary","role":"user","content":%q},{"type":"message","id":"new-user","role":"user","content":"continue"}]}`,
+		`{"type":"response.create","input":[{"type":"additional_tools","role":"`+
+			`developer","tools":[]},{"type":"message","id":"compact-summary","role"`+
+			`:"user","content":%q},{"type":"message","id":"new-user","role":"user",`+
+			`"content":"continue"}]}`,
 		codexLocalCompactionSummaryPrefix+"\nsummary body",
 	))
 
@@ -106,7 +112,9 @@ func TestC09LocalCompactionReplacesTranscriptAndOldResponseID(t *testing.T) {
 func TestC09TransportSwitchUsesFullTranscriptReplay(t *testing.T) {
 	lastRequest := []byte(`{"model":"gpt-5","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
 	lastOutput := []byte(`[{"type":"message","id":"out-1"}]`)
-	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`)
+	raw := []byte(
+		`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`,
+	)
 
 	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastOutput, false)
 	if errMsg != nil {
@@ -140,9 +148,17 @@ func TestC09ToolCacheTurnPublishesOnlyAfterCommit(t *testing.T) {
 	defer defaultWebsocketToolCallCache.deleteSession(sessionKey)
 
 	turn := newResponsesWebsocketToolCacheTurn(sessionKey)
-	turn.recordRequest([]byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"ok"}]}`))
-	turn.recordResponse([]byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"}]}}`))
-	probe := []byte(`{"input":[{"type":"function_call_output","id":"fco-next","call_id":"call-1","output":"next"}]}`)
+	turn.recordRequest(
+		[]byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"ok"}]}`),
+	)
+	turn.recordResponse(
+		[]byte(`{"type":"response.completed","response":{"output":[{"type":"function_c` +
+			`all","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"}]` +
+			`}}`),
+	)
+	probe := []byte(
+		`{"input":[{"type":"function_call_output","id":"fco-next","call_id":"call-1","output":"next"}]}`,
+	)
 	if count := gjson.GetBytes(
 		repairResponsesWebsocketToolCallsWithoutRecording(sessionKey, probe), "input.#",
 	).Int(); count != 0 {
@@ -162,26 +178,38 @@ func TestC09ToolCacheTurnCommitIsAtomicallyVisible(t *testing.T) {
 	defer releaseResponsesWebsocketToolCaches(sessionKey)
 
 	turn := newResponsesWebsocketToolCacheTurn(sessionKey)
-	turn.recordRequest([]byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-atomic","output":"ok"}]}`))
-	turn.recordResponse([]byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","id":"fc-1","call_id":"call-atomic","name":"lookup","arguments":"{}"}]}}`))
-	probe := []byte(`{"input":[{"type":"function_call_output","id":"fco-next","call_id":"call-atomic","output":"next"}]}`)
+	turn.recordRequest(
+		[]byte(
+			`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-atomic","output":"ok"}]}`,
+		),
+	)
+	turn.recordResponse(
+		[]byte(`{"type":"response.completed","response":{"output":[{"type":"function_c` +
+			`all","id":"fc-1","call_id":"call-atomic","name":"lookup","arguments":"` +
+			`{}"}]}}`),
+	)
+	probe := []byte(
+		`{"input":[{"type":"function_call_output","id":"fco-next","call_id":"call-atomic","output":"next"}]}`,
+	)
 
 	start := make(chan struct{})
 	errs := make(chan string, 16)
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Go(func() {
-			<-start
-			for range 100 {
-				count := gjson.GetBytes(
-					repairResponsesWebsocketToolCallsWithoutRecording(sessionKey, probe), "input.#",
-				).Int()
-				if count != 0 && count != 2 {
-					errs <- fmt.Sprintf("observed partial cache with %d items", count)
-					return
+		wg.Go(
+			func() {
+				<-start
+				for range 100 {
+					count := gjson.GetBytes(
+						repairResponsesWebsocketToolCallsWithoutRecording(sessionKey, probe), "input.#",
+					).Int()
+					if count != 0 && count != 2 {
+						errs <- fmt.Sprintf("observed partial cache with %d items", count)
+						return
+					}
 				}
-			}
-		})
+			},
+		)
 	}
 	close(start)
 	turn.commit()
@@ -215,9 +243,15 @@ func TestResponseCompletedOutputFromPayloadDropsIncompleteCollectedToolCalls(t *
 }
 
 func TestRestoreResponsesWebsocketCompletionOutputReconcilesConflictingToolCall(t *testing.T) {
-	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"msg-1"},{"type":"function_call","call_id":"call-1","name":"exec"}]}}`)
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"typ` +
+		`e":"message","id":"msg-1"},{"type":"function_call","call_id":"call-1",` +
+		`"name":"exec"}]}}`)
 	collector := map[int64][]byte{
-		0: []byte(`{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"exec","input":"pwd","status":"completed"}`),
+		0: []byte(
+			`{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":` +
+				`"exec","input":"pwd","status":` +
+				`"completed"}`,
+		),
 	}
 
 	restored := restoreResponsesWebsocketCompletionOutput(payload, collector, nil)
@@ -236,8 +270,13 @@ func TestRestoreResponsesWebsocketCompletionOutputReconcilesConflictingToolCall(
 		t.Fatalf("reconciled custom tool input = %s, want string pwd", input.Raw)
 	}
 
-	lastRequest := []byte(`{"model":"gpt-test","stream":true,"input":[{"type":"message","id":"user-1","role":"user","content":"run pwd"}]}`)
-	nextRequest := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"}]}`)
+	lastRequest := []byte(
+		`{"model":"gpt-test","stream":true,"input":[{"type":"message","id":` +
+			`"user-1","role":"user","content":"run ` +
+			`pwd"}]}`,
+	)
+	nextRequest := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"t` +
+		`ype":"custom_tool_call_output","call_id":"call-1","output":"ok"}]}`)
 	completedOutput := []byte(gjson.GetBytes(restored, "response.output").Raw)
 	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(
 		nextRequest,
@@ -266,7 +305,9 @@ func TestRestoreResponsesWebsocketCompletionOutputReconcilesConflictingToolCall(
 	}
 
 	cache := newWebsocketToolOutputCache(0, 10)
-	donePayload := []byte(`{"type":"response.output_item.done","item":{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"exec","input":"pwd","status":"completed"}}`)
+	donePayload := []byte(`{"type":"response.output_item.done","item":{"type":"custom_tool_call",` +
+		`"id":"ctc-1","call_id":"call-1","name":"exec","input":"pwd","status":"` +
+		`completed"}}`)
 	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", donePayload)
 	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", restored)
 	cached, ok := cache.get("session-1", "call-1")
@@ -280,7 +321,8 @@ func TestRestoreResponsesWebsocketCompletionOutputReconcilesConflictingToolCall(
 }
 
 func TestRestoreResponsesWebsocketCompletionOutputIgnoresIncompleteCollectedToolCall(t *testing.T) {
-	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","call_id":"call-1","name":"exec"}]}}`)
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"typ` +
+		`e":"function_call","call_id":"call-1","name":"exec"}]}}`)
 	collector := map[int64][]byte{
 		0: []byte(`{"type":"custom_tool_call","call_id":"call-1","name":"exec"}`),
 	}
@@ -292,9 +334,14 @@ func TestRestoreResponsesWebsocketCompletionOutputIgnoresIncompleteCollectedTool
 }
 
 func TestRestoreResponsesWebsocketCompletionOutputPreservesFinalToolCallFields(t *testing.T) {
-	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","call_id":"call-1","name":"exec","provider_extension":"keep"}]}}`)
+	payload := []byte((`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"` +
+		`function_call","call_id":"call-1","name":"exec","provider_extension":"keep"}]}}`))
 	collector := map[int64][]byte{
-		0: []byte(`{"type":"function_call","id":"fc-1","call_id":"call-1","name":"exec","arguments":"{}","status":"completed"}`),
+		0: []byte(
+			`{"type":"function_call","id":"fc-1","call_id":"call-1","name":"exec",` +
+				`"arguments":"{}","status":` +
+				`"completed"}`,
+		),
 	}
 
 	restored := restoreResponsesWebsocketCompletionOutput(payload, collector, nil)
@@ -309,9 +356,15 @@ func TestRestoreResponsesWebsocketCompletionOutputPreservesFinalToolCallFields(t
 }
 
 func TestRestoreResponsesWebsocketCompletionOutputReusesEquivalentFinalToolCall(t *testing.T) {
-	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"exec","arguments":"{}","status":"completed","provider_extension":"keep"}]}}`)
+	payload := []byte((`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"` +
+		`function_call","id":"fc-1","call_id":"call-1","name":"exec","arguments":"{}","status":"completed","` +
+		`provider_extension":"keep"}]}}`))
 	collector := map[int64][]byte{
-		0: []byte(`{"arguments":"{}","name":"exec","call_id":"call-1","id":"fc-1","type":"function_call","status":"completed"}`),
+		0: []byte(
+			`{"arguments":"{}","name":"exec","call_id":"call-1","id":"fc-1","type":` +
+				`"function_call","status":` +
+				`"completed"}`,
+		),
 	}
 
 	restored := restoreResponsesWebsocketCompletionOutput(payload, collector, nil)
@@ -326,7 +379,16 @@ func TestCollectResponsesWebsocketOutputItemIgnoresInvalidOutputIndexes(t *testi
 	}
 	var outputItemsFallback [][]byte
 	for _, outputIndex := range []string{"null", "true", `"0"`, "0.5", "-1", "1e0"} {
-		payload := []byte(`{"type":"response.output_item.done","output_index":` + outputIndex + `,"item":{"type":"function_call","id":"invalid","call_id":"call-1","name":"exec","arguments":"{}"}}`)
+		payload := []byte(
+			`{"type":"response.output_item.done","output_index":` +
+				outputIndex +
+				(`,"item":{"type":` +
+					`"function_call","id":` +
+					`"invalid","call_id":` +
+					`"call-1","name":"exec",` +
+					`"arguments":` +
+					`"{}"}}`),
+		)
 		collectResponsesWebsocketOutputItem(payload, outputItemsByIndex, &outputItemsFallback)
 	}
 

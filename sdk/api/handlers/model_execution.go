@@ -8,8 +8,30 @@ import (
 	"strings"
 
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 )
+
+const (
+	modelExecutionMetadataSourceKey = "source"
+	modelExecutionInternalSource    = "plugin_host_model_callback"
+)
+
+// ProtocolExecutionRequest 描述指定入口和出口协议的请求
+// AuthSelectionModel 只用于选择凭据，Model 保留实际请求模型
+type ProtocolExecutionRequest struct {
+	EntryProtocol      string
+	ExitProtocol       string
+	ForcedProvider     string
+	AuthSelectionModel string
+	Model              string
+	Stream             bool
+	Body               []byte
+	Headers            http.Header
+	Query              url.Values
+	Alt                string
+	Path               string
+}
 
 // ModelExecutionRequest describes an internal model execution request.
 type ModelExecutionRequest struct {
@@ -22,10 +44,12 @@ type ModelExecutionRequest struct {
 	Query                   url.Values
 	Alt                     string
 	SkipInterceptorPluginID string
-	ForcedProvider          string
-	AuthID                  string
-	ProxyURL                string
-	Path                    string
+	// SkipRouterPluginID 兼容旧调用，显式 SkipInterceptorPluginID 优先
+	SkipRouterPluginID string
+	ForcedProvider     string
+	AuthID             string
+	ProxyURL           string
+	Path               string
 }
 
 // ModelExecutionResponse describes a non-streaming internal model execution response.
@@ -68,6 +92,7 @@ func (e *ModelExecutionStreamError) Error() string {
 
 type forcedModelProviderContextKey struct{}
 type modelExecutionPathContextKey struct{}
+type protocolAuthSelectionModelContextKey struct{}
 
 func withModelExecutionPath(ctx context.Context, path string) context.Context {
 	if path == "" {
@@ -113,15 +138,17 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 		return ModelExecutionResponse{}, modelExecutionModeError("invalid request path")
 	}
 	ctx = coreexecutor.WithoutStreamDeliveryAcknowledgement(ctx)
+	ctx = coreusage.WithoutStreamDelivery(ctx)
 	ctx = withModelExecutionPath(ctx, path)
 	ctx = withForcedModelProvider(ctx, req.ForcedProvider)
 	ctx = WithPinnedAuthID(ctx, req.AuthID)
 	ctx = coreexecutor.WithRequestProxyURL(ctx, req.ProxyURL)
+	ctx = context.WithValue(ctx, protocolAuthSelectionModelContextKey{}, "")
 	responseProtocol := modelExecutionResponseProtocol(req.EntryProtocol, req.ExitProtocol)
 	body, headers, errMsg := h.executeNonStream(
 		ctx, req.EntryProtocol, responseProtocol, req.Model, cloneBytes(req.Body), req.Alt,
 		isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol), true,
-		modelExecutionHeaders(ctx, req.Headers), cloneURLValues(req.Query), req.SkipInterceptorPluginID,
+		modelExecutionHeaders(ctx, req.Headers), cloneURLValues(req.Query), modelExecutionSkipPluginID(req),
 		h.AuthManager.Execute,
 	)
 	if errMsg != nil {
@@ -153,15 +180,17 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 		return ModelExecutionStream{}, modelExecutionModeError("invalid request path")
 	}
 	ctx = coreexecutor.WithoutStreamDeliveryAcknowledgement(ctx)
+	ctx = coreusage.WithoutStreamDelivery(ctx)
 	ctx = withModelExecutionPath(ctx, path)
 	ctx = withForcedModelProvider(ctx, req.ForcedProvider)
 	ctx = WithPinnedAuthID(ctx, req.AuthID)
 	ctx = coreexecutor.WithRequestProxyURL(ctx, req.ProxyURL)
+	ctx = context.WithValue(ctx, protocolAuthSelectionModelContextKey{}, "")
 	responseProtocol := modelExecutionResponseProtocol(req.EntryProtocol, req.ExitProtocol)
 	dataChan, headers, errChan := h.executeStreamWithAuthManager(
 		ctx, req.EntryProtocol, responseProtocol, req.Model, cloneBytes(req.Body), req.Alt,
 		isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol), true,
-		modelExecutionHeaders(ctx, req.Headers), cloneURLValues(req.Query), req.SkipInterceptorPluginID,
+		modelExecutionHeaders(ctx, req.Headers), cloneURLValues(req.Query), modelExecutionSkipPluginID(req),
 	)
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {
@@ -172,6 +201,71 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 		Headers:    cloneHeader(headers),
 		Chunks:     chunks,
 	}, nil
+}
+
+// ExecuteProtocolWithAuthManager 通过当前 Manager 执行指定协议的普通请求
+func (h *BaseAPIHandler) ExecuteProtocolWithAuthManager(
+	ctx context.Context,
+	req ProtocolExecutionRequest,
+) (ModelExecutionResponse, *ErrorMessage) {
+	if req.Stream {
+		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteProtocolWithAuthManager requires Stream=false")
+	}
+	ctx, errMsg := protocolExecutionContext(ctx, req)
+	if errMsg != nil {
+		return ModelExecutionResponse{}, errMsg
+	}
+	body, headers, errMsg := h.executeNonStream(
+		ctx, req.EntryProtocol, modelExecutionResponseProtocol(req.EntryProtocol, req.ExitProtocol), req.Model,
+		cloneBytes(req.Body), req.Alt,
+		isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol), false,
+		modelExecutionHeaders(ctx, req.Headers), cloneURLValues(req.Query), "", h.AuthManager.Execute,
+	)
+	if errMsg != nil {
+		return ModelExecutionResponse{}, errMsg
+	}
+	return ModelExecutionResponse{StatusCode: http.StatusOK, Headers: cloneHeader(headers), Body: cloneBytes(body)}, nil
+}
+
+// ExecuteProtocolStreamWithAuthManager 通过当前 Manager 执行指定协议的流式请求
+func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(
+	ctx context.Context,
+	req ProtocolExecutionRequest,
+) (ModelExecutionStream, *ErrorMessage) {
+	if !req.Stream {
+		return ModelExecutionStream{}, modelExecutionModeError(
+			"ExecuteProtocolStreamWithAuthManager requires Stream=true",
+		)
+	}
+	ctx, errMsg := protocolExecutionContext(ctx, req)
+	if errMsg != nil {
+		return ModelExecutionStream{}, errMsg
+	}
+	dataChan, headers, errChan := h.executeStreamWithAuthManager(
+		ctx, req.EntryProtocol, modelExecutionResponseProtocol(req.EntryProtocol, req.ExitProtocol), req.Model,
+		cloneBytes(req.Body), req.Alt,
+		isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol), false,
+		modelExecutionHeaders(ctx, req.Headers), cloneURLValues(req.Query), "",
+	)
+	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
+	if errMsg != nil {
+		return ModelExecutionStream{}, errMsg
+	}
+	return ModelExecutionStream{StatusCode: http.StatusOK, Headers: cloneHeader(headers), Chunks: chunks}, nil
+}
+
+func protocolExecutionContext(ctx context.Context, req ProtocolExecutionRequest) (context.Context, *ErrorMessage) {
+	path := strings.TrimSpace(req.Path)
+	if path != "" && !validModelExecutionPath(path) {
+		return nil, modelExecutionModeError("invalid request path")
+	}
+	ctx = withForcedModelProvider(ctx, req.ForcedProvider)
+	ctx = withModelExecutionPath(ctx, path)
+	ctx = coreexecutor.WithoutStreamDeliveryAcknowledgement(ctx)
+	ctx = coreusage.WithoutStreamDelivery(ctx)
+	return context.WithValue(
+		ctx, protocolAuthSelectionModelContextKey{}, strings.TrimSpace(req.AuthSelectionModel),
+	), nil
 }
 
 func modelExecutionModeError(message string) *ErrorMessage {
@@ -187,6 +281,13 @@ func validateModelExecutionProxy(raw string) *ErrorMessage {
 		return &ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New("invalid proxy_url")}
 	}
 	return nil
+}
+
+func modelExecutionSkipPluginID(req ModelExecutionRequest) string {
+	if req.SkipInterceptorPluginID != "" {
+		return req.SkipInterceptorPluginID
+	}
+	return req.SkipRouterPluginID
 }
 
 func modelExecutionResponseProtocol(entryProtocol, exitProtocol string) string {

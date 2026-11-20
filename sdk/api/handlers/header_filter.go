@@ -37,6 +37,8 @@ var cpaReservedResponseHeaders = map[string]struct{}{
 }
 
 // IsCPAReservedResponseHeader reports whether a downstream response header is managed by CPA.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func IsCPAReservedResponseHeader(name string) bool {
 	_, reserved := cpaReservedResponseHeaders[http.CanonicalHeaderKey(name)]
 	return reserved
@@ -59,6 +61,8 @@ func SetSSEHeaders(c *gin.Context) {
 
 // FilterUpstreamHeaders returns a copy of src with hop-by-hop and security-sensitive
 // headers removed. Returns nil if src is nil or empty after filtering.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func FilterUpstreamHeaders(src http.Header) http.Header {
 	if src == nil {
 		return nil

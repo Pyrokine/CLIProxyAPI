@@ -4,6 +4,8 @@
 // and manages a pool of clients to interact with backend services.
 // The handlers translate OpenAIResponses API requests to the appropriate backend format and
 // convert responses back to OpenAIResponses-compatible format.
+//
+//goland:noinspection GrazieInspection
 package openai
 
 import (
@@ -35,6 +37,11 @@ import (
 type ResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
+
+// OpenAIResponsesAPIHandler 处理 Responses 接口请求
+//
+//goland:noinspection GoNameStartsWithPackageName
+type OpenAIResponsesAPIHandler = ResponsesAPIHandler
 
 var responsesStreamKeepAliveInterval = 15 * time.Second
 
@@ -84,7 +91,9 @@ func (w *responsesStreamFrameWriter) writeFrames(frames [][]byte) {
 				w.err = err
 				return
 			}
-			if payload, hasData, valid := responsesSSEDataPayload(frame); hasData && valid && gjson.GetBytes(payload, "type").String() == "response.failed" {
+			if payload, hasData, valid := responsesSSEDataPayload(frame); hasData && valid && gjson.GetBytes(
+				payload, "type",
+			).String() == "response.failed" {
 				w.failedWritten = true
 			}
 			continue
@@ -138,6 +147,7 @@ func isResponsesTerminalSSEFrame(frame []byte) bool {
 }
 
 func writeResponsesStreamError(c *gin.Context, errMsg *handlers.ErrorMessage) error {
+	errMsg = sanitizeOpenAIUpstreamError(errMsg)
 	if c == nil || c.Writer == nil || errMsg == nil {
 		return nil
 	}
@@ -166,15 +176,12 @@ func writeResponsesStreamTerminalError(c *gin.Context, errMsg *handlers.ErrorMes
 	if shouldExposeResponsesUpstreamError(errMsg) {
 		return writeResponsesStreamError(c, errMsg)
 	}
-	if isCodexResponsesClientRequest(c) {
-		return writeResponsesStreamError(
-			c, &handlers.ErrorMessage{
-				StatusCode: http.StatusBadGateway,
-				Error:      errors.New(http.StatusText(http.StatusBadGateway)),
-			},
-		)
-	}
-	return nil
+	return writeResponsesStreamError(
+		c, &handlers.ErrorMessage{
+			StatusCode: http.StatusBadGateway,
+			Error:      errors.New(http.StatusText(http.StatusBadGateway)),
+		},
+	)
 }
 
 func (h *ResponsesAPIHandler) writeInitialResponsesStreamError(
@@ -183,6 +190,7 @@ func (h *ResponsesAPIHandler) writeInitialResponsesStreamError(
 	setSSEHeaders func(),
 	errMsg *handlers.ErrorMessage,
 ) error {
+	errMsg = sanitizeOpenAIUpstreamError(errMsg)
 	errWrite := handlers.DeliverStreamResponse(
 		c.Writer, flusher, func() error {
 			switch {
@@ -190,7 +198,7 @@ func (h *ResponsesAPIHandler) writeInitialResponsesStreamError(
 				return writeResponsesStreamTerminalError(c, errMsg)
 			case isResponsesEmptyStreamError(errMsg.Error) && !isCodexResponsesClientRequest(c):
 				setSSEHeaders()
-				return handlers.WriteStreamBytes(c.Writer, []byte("\n"))
+				return writeResponsesStreamTerminalError(c, errMsg)
 			default:
 				return h.WriteErrorResponseWithError(c, errMsg)
 			}
@@ -237,6 +245,11 @@ func NewResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *ResponsesAPIH
 	}
 }
 
+// NewOpenAIResponsesAPIHandler 创建 Responses 请求处理器
+func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
+	return NewResponsesAPIHandler(apiHandlers)
+}
+
 func withResponsesContinuationAuthPin(ctx context.Context, rawJSON []byte) context.Context {
 	if strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()) == "" {
 		return ctx
@@ -259,11 +272,15 @@ func (h *ResponsesAPIHandler) Models() []map[string]any {
 // OpenAIResponsesModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAIResponses-compatible format.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *ResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
-	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
-		"object": "list",
-		"data":   h.FilterModelsForCurrentAPIKey(c, h.Models()),
-	})
+	h.WriteModelListResponse(
+		c, h.HandlerType(), gin.H{
+			"object": "list",
+			"data":   h.FilterModelsForCurrentAPIKey(c, h.Models()),
+		},
+	)
 }
 
 func (h *ResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context, payload []byte) []byte {
@@ -369,7 +386,7 @@ func (h *ResponsesAPIHandler) Compact(c *gin.Context) {
 	)
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -396,7 +413,7 @@ func (h *ResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIUpstreamError(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -684,14 +701,38 @@ func (h *ResponsesAPIHandler) forwardResponsesStreamChunksWithMode(
 		}
 		return frameWriter.err
 	}
+	writeProtocolFailure := func(err error) error {
+		if acc.Err() == nil || frameWriter.err != nil || frameWriter.failedWritten || acc.failure != nil {
+			return err
+		}
+		writeErr := writeResponsesStreamTerminalError(
+			c, &handlers.ErrorMessage{
+				StatusCode: http.StatusBadGateway,
+				Error:      err,
+			},
+		)
+		if writeErr == nil {
+			writeErr = handlers.FlushStreamResponse(c.Writer, flusher)
+		}
+		if writeErr == nil {
+			frameWriter.failedWritten = true
+		} else {
+			frameWriter.err = writeErr
+		}
+		return errors.Join(err, writeErr)
+	}
 	keepAliveInterval := responsesStreamKeepAliveInterval
 	h.ForwardStreamChunks(
 		c, flusher, cancel, data, errs, handlers.StreamChunkForwardOptions{
 			KeepAliveInterval: &keepAliveInterval,
 			RequireTerminal:   !deferTerminal,
+			ProtocolTerminal:  func() bool { return !deferTerminal && acc.sawResponsesTerminal },
 			WriteChunk: func(chunk []byte) error {
 				frameWriter.writeFrames(acc.AddChunk(chunk))
-				return doneError()
+				if acc.failure != nil {
+					handlers.MarkStreamRequestFailure(c, acc.failure)
+				}
+				return writeProtocolFailure(doneError())
 			},
 			WriteTerminalError: func(errMsg *handlers.ErrorMessage) error {
 				if errMsg == nil {
@@ -700,9 +741,9 @@ func (h *ResponsesAPIHandler) forwardResponsesStreamChunksWithMode(
 				frameWriter.writeFrames(acc.Flush())
 				frameWriter.discardDeferred()
 				if err := doneError(); err != nil {
-					return err
+					return writeProtocolFailure(err)
 				}
-				if frameWriter.failedWritten {
+				if acc.failure != nil || frameWriter.failedWritten {
 					return nil
 				}
 				return writeResponsesStreamTerminalError(c, errMsg)
@@ -711,7 +752,7 @@ func (h *ResponsesAPIHandler) forwardResponsesStreamChunksWithMode(
 				frameWriter.writeFrames(acc.Finalize())
 				if err := doneError(); err != nil {
 					frameWriter.discardDeferred()
-					return err
+					return writeProtocolFailure(err)
 				}
 				frameWriter.writeDeferred()
 				if err := doneError(); err != nil {
@@ -719,7 +760,7 @@ func (h *ResponsesAPIHandler) forwardResponsesStreamChunksWithMode(
 				}
 				return handlers.WriteStreamBytes(c.Writer, []byte("\n"))
 			},
-			DoneError: doneError,
+			DoneError: func() error { return errors.Join(doneError(), acc.failure) },
 		},
 		initialChunks...,
 	)

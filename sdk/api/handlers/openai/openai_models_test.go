@@ -136,10 +136,14 @@ func TestOpenAIModels_UsesRequestedClientVersion(t *testing.T) {
 	const modelID = "custom-client-version-model"
 	reg := registry.GetGlobalRegistry()
 	clientID := "test-openai-models-client-version"
-	reg.RegisterClient(clientID, "codex", []*registry.ModelInfo{{
-		ID:       modelID,
-		Thinking: &registry.ThinkingSupport{Levels: []string{"high", "max", "ultra"}},
-	}})
+	reg.RegisterClient(
+		clientID, "codex", []*registry.ModelInfo{
+			{
+				ID:       modelID,
+				Thinking: &registry.ThinkingSupport{Levels: []string{"high", "max", "ultra"}},
+			},
+		},
+	)
 	t.Cleanup(func() { reg.UnregisterClient(clientID) })
 
 	handler := NewAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
@@ -150,31 +154,33 @@ func TestOpenAIModels_UsesRequestedClientVersion(t *testing.T) {
 		{version: "0.143.9", want: []string{"high"}},
 		{version: "0.144.0", want: []string{"high", "max", "ultra"}},
 	} {
-		t.Run(test.version, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodGet, "/v1/models?client_version="+test.version, nil)
-			recorder := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(recorder)
-			ctx.Request = request
+		t.Run(
+			test.version, func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, "/v1/models?client_version="+test.version, nil)
+				recorder := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(recorder)
+				ctx.Request = request
 
-			handler.OpenAIModels(ctx)
+				handler.OpenAIModels(ctx)
 
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-			}
-			var response struct {
-				Models []map[string]any `json:"models"`
-			}
-			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-				t.Fatalf("decode response: %v", err)
-			}
-			for _, model := range response.Models {
-				if model["slug"] == modelID {
-					assertCodexSupportedReasoningLevels(t, model, test.want)
-					return
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 				}
-			}
-			t.Fatalf("model %q missing from response", modelID)
-		})
+				var response struct {
+					Models []map[string]any `json:"models"`
+				}
+				if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+					t.Fatalf("decode response: %v", err)
+				}
+				for _, model := range response.Models {
+					if model["slug"] == modelID {
+						assertCodexSupportedReasoningLevels(t, model, test.want)
+						return
+					}
+				}
+				t.Fatalf("model %q missing from response", modelID)
+			},
+		)
 	}
 }
 
@@ -182,9 +188,13 @@ func TestOpenAIModelsCodexCatalogUsesCompactJSON(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	reg := registry.GetGlobalRegistry()
 	clientID := "test-codex-client-compact-json"
-	reg.RegisterClient(clientID, "codex", []*registry.ModelInfo{{
-		ID: "test-codex-compact-json", DisplayName: "Model <tag>&",
-	}})
+	reg.RegisterClient(
+		clientID, "codex", []*registry.ModelInfo{
+			{
+				ID: "test-codex-compact-json", DisplayName: "Model <tag>&",
+			},
+		},
+	)
 	t.Cleanup(func() { reg.UnregisterClient(clientID) })
 
 	handler := NewAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))

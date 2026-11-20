@@ -72,7 +72,9 @@ func TestForwardOpenAIStreamRequiresFinishReasonBeforeDone(t *testing.T) {
 	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	data := make(chan coreexecutor.StreamChunk, 2)
 	data <- coreexecutor.StreamChunk{
-		Payload: []byte(`{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"weather","arguments":"{}"}}]},"finish_reason":null}]}`),
+		Payload: []byte((`{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"` +
+			`call_weather","type":"function","function":{"name":"weather","arguments":"{}"}}]},"` +
+			`finish_reason":null}]}`)),
 	}
 	var terminalAck error
 	data <- coreexecutor.StreamChunk{
@@ -107,7 +109,9 @@ func TestForwardOpenAIStreamRequiresFinishReasonForEveryChoice(t *testing.T) {
 	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	data := make(chan coreexecutor.StreamChunk, 2)
 	data <- coreexecutor.StreamChunk{
-		Payload: []byte(`{"id":"chatcmpl-test","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"},{"index":1,"delta":{"content":"pending"},"finish_reason":null}]}`),
+		Payload: []byte((`{"id":"chatcmpl-test","choices":[{"index":0,"delta":{},"finish_reason"` +
+			`:"tool_calls"},{"index":1,"delta":{"content":"pending"},"finish_reason` +
+			`":null}]}`)),
 	}
 	var terminalAck error
 	data <- coreexecutor.StreamChunk{
@@ -226,7 +230,9 @@ func TestForwardOpenAIStreamPropagatesCancelAndWriteFailure(t *testing.T) {
 			data := make(chan coreexecutor.StreamChunk, 2)
 			var acknowledgedWith error
 			data <- coreexecutor.StreamChunk{
-				Payload: []byte(`{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`),
+				Payload: []byte((`{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":` +
+					`"hello"},"finish_reason":` +
+					`null}]}`)),
 				Acknowledge: func(err error) {
 					acknowledgedWith = err
 				},
@@ -241,7 +247,12 @@ func TestForwardOpenAIStreamPropagatesCancelAndWriteFailure(t *testing.T) {
 			)
 
 			if !errors.Is(acknowledgedWith, writeErr) || !errors.Is(canceledWith, writeErr) {
-				t.Fatalf("acknowledgement/cancel errors = %v/%v, want %v", acknowledgedWith, canceledWith, writeErr)
+				t.Fatalf(
+					"acknowledgement/cancel errors = %v/%v, want %v",
+					acknowledgedWith,
+					canceledWith,
+					writeErr,
+				)
 			}
 		},
 	)
@@ -283,7 +294,8 @@ func TestForwardResponsesStreamPropagatesCancelAndWriteFailure(t *testing.T) {
 			cancelRequest()
 			recorder := httptest.NewRecorder()
 			ginContext, _ := gin.CreateTestContext(recorder)
-			ginContext.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(requestContext)
+			ginContext.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).
+				WithContext(requestContext)
 			var canceledWith error
 			handler := NewResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
 
@@ -334,7 +346,12 @@ func TestForwardResponsesStreamPropagatesCancelAndWriteFailure(t *testing.T) {
 			)
 
 			if !errors.Is(acknowledgedWith, writeErr) || !errors.Is(canceledWith, writeErr) {
-				t.Fatalf("acknowledgement/cancel errors = %v/%v, want %v", acknowledgedWith, canceledWith, writeErr)
+				t.Fatalf(
+					"acknowledgement/cancel errors = %v/%v, want %v",
+					acknowledgedWith,
+					canceledWith,
+					writeErr,
+				)
 			}
 		},
 	)

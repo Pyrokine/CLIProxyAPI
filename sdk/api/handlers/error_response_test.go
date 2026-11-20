@@ -9,7 +9,9 @@ import (
 )
 
 func TestBuildErrorResponseBodyCompactsUpstreamJSONForSSE(t *testing.T) {
-	body := BuildErrorResponseBody(http.StatusBadRequest, "  {\n  \"error\": {\n    \"message\": \"first\\nsecond\"\n  }\n}  ")
+	body := BuildErrorResponseBody(
+		http.StatusBadRequest, "  {\n  \"error\": {\n    \"message\": \"first\\nsecond\"\n  }\n}  ",
+	)
 	if strings.Contains(string(body), "\n") || gjson.GetBytes(body, "error.message").String() != "first\nsecond" {
 		t.Fatalf("upstream error JSON not compacted without changing its payload: %q", body)
 	}

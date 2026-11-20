@@ -26,6 +26,7 @@ import (
 
 const responsesWebsocketLargeTranscriptSize = 1 << 20
 
+// noinspection GoUnusedGlobalVariable
 var responsesWebsocketMergedInputSink []byte
 
 func TestMergeResponsesWebsocketInputCompatibility(t *testing.T) {
@@ -39,11 +40,15 @@ func TestMergeResponsesWebsocketInputCompatibility(t *testing.T) {
 		want               string
 	}{
 		{
-			name:               "paired tool call",
-			lastRequest:        `{"input":[{"type":"message","id":"msg-1"}]}`,
-			lastResponseOutput: `[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"}]`,
-			appendInput:        `[{"type":"function_call_output","id":"out-1","call_id":"call-1","output":"done"}]`,
-			want:               `[{"type":"message","id":"msg-1"},{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"},{"type":"function_call_output","id":"out-1","call_id":"call-1","output":"done"}]`,
+			name:        "paired tool call",
+			lastRequest: `{"input":[{"type":"message","id":"msg-1"}]}`,
+			lastResponseOutput: `[{"type":"function_call","id":"fc-1","call_id":"call-1","name":` +
+				`"lookup","arguments":` +
+				`"{}"}]`,
+			appendInput: `[{"type":"function_call_output","id":"out-1","call_id":"call-1","output":"done"}]`,
+			want: `[{"type":"message","id":"msg-1"},{"type":"function_call","id":"fc-1","` +
+				`call_id":"call-1","name":"lookup","arguments":"{}"},{"type":"function_` +
+				`call_output","id":"out-1","call_id":"call-1","output":"done"}]`,
 		},
 		{
 			name:               "duplicate call keeps first",
@@ -57,7 +62,8 @@ func TestMergeResponsesWebsocketInputCompatibility(t *testing.T) {
 			lastRequest:        `{"input":[{"Type":"function_call","ID":"fc-old","CALL_ID":"call-1"}]}`,
 			lastResponseOutput: `[{"type":"function_call","id":"fc-new","call_id":"call-1"}]`,
 			appendInput:        `[{"type":"function_call_output","id":"out-1","call_id":"call-1","output":"done"}]`,
-			want:               `[{"Type":"function_call","ID":"fc-old","CALL_ID":"call-1"},{"type":"function_call_output","id":"out-1","call_id":"call-1","output":"done"}]`,
+			want: `[{"Type":"function_call","ID":"fc-old","CALL_ID":"call-1"},{"type":"fu` +
+				`nction_call_output","id":"out-1","call_id":"call-1","output":"done"}]`,
 		},
 		{
 			name:               "duplicate input keeps last array",
@@ -71,14 +77,34 @@ func TestMergeResponsesWebsocketInputCompatibility(t *testing.T) {
 			lastRequest:        `{"input":[{"type":"function_call","id":"fc-1","call_id":"kept"}]}`,
 			lastResponseOutput: `[{"type":"function_call","id":"fc-1","call_id":"other"}]`,
 			appendInput:        `[{"type":"function_call_output","call_id":"kept","output":"done"}]`,
-			want:               `[{"type":"function_call","id":"fc-1","call_id":"kept"},{"type":"function_call_output","call_id":"kept","output":"done"}]`,
+			want: `[{"type":"function_call","id":"fc-1","call_id":"kept"},{"type":"function_call_output","` +
+				`call_id":"kept","output":"done"}]`,
 		},
 		{
 			name:               "consumed compaction trigger removed",
 			lastRequest:        `{"input":[{"type":"message","id":"old"},{"type":"compaction_trigger"}]}`,
 			lastResponseOutput: `[{"type":"compaction","id":"cmp-1","encrypted_content":"opaque"}]`,
 			appendInput:        `[{"type":"message","id":"next"}]`,
-			want:               `[{"type":"message","id":"old"},{"type":"compaction","id":"cmp-1","encrypted_content":"opaque"},{"type":"message","id":"next"}]`,
+			want: `[{"type":"message","id":"old"},{"type":"compaction","id":"cmp-1","encrypted_content":"` +
+				`opaque"},{"type":"message","id":"next"}]`,
+		},
+		{
+			name: "new compaction trigger remains after consumed trigger removal",
+			lastRequest: `{"input":[{"type":"message","id":"old"},{"type":"compaction_trigger",` +
+				`"id":"consumed"}]}`,
+			lastResponseOutput: `[{"type":"compaction","id":"cmp-1","encrypted_content":"opaque"}]`,
+			appendInput:        `[{"type":"compaction_trigger","id":"next-trigger"}]`,
+			want: `[{"type":"message","id":"old"},{"type":"compaction","id":"cmp-1","encrypted_content":"` +
+				`opaque"},{"type":"compaction_trigger","id":"next-trigger"}]`,
+		},
+		{
+			name:               "unconsumed trigger remains without full transcript",
+			lastRequest:        `{"input":[{"type":"compaction_trigger","id":"pending"}]}`,
+			lastResponseOutput: `[{"type":"function_call","id":"call","call_id":"call-1"}]`,
+			appendInput:        `[]`,
+			want: `[{"type":"compaction_trigger","id":"pending"},{"type":"function_call",` +
+				`"id":"call","call_id":` +
+				`"call-1"}]`,
 		},
 		{
 			name:               "raw numbers remain exact",
@@ -90,16 +116,18 @@ func TestMergeResponsesWebsocketInputCompatibility(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			got, errMerge := mergeResponsesWebsocketInput(
-				[]byte(test.lastRequest), []byte(test.lastResponseOutput), test.appendInput,
-			)
-			if errMerge != nil {
-				t.Fatalf("mergeResponsesWebsocketInput() error = %v", errMerge)
-			}
-			assertResponsesWebsocketJSONEqual(t, got, test.want)
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				t.Parallel()
+				got, errMerge := mergeResponsesWebsocketInput(
+					[]byte(test.lastRequest), []byte(test.lastResponseOutput), test.appendInput,
+				)
+				if errMerge != nil {
+					t.Fatalf("mergeResponsesWebsocketInput() error = %v", errMerge)
+				}
+				assertResponsesWebsocketJSONEqual(t, got, test.want)
+			},
+		)
 	}
 }
 
@@ -112,19 +140,36 @@ func TestMergeResponsesWebsocketInputErrors(t *testing.T) {
 		appendInput string
 		wantPrefix  string
 	}{
-		{name: "invalid previous request", lastRequest: `{"input":`, appendInput: `[]`, wantPrefix: "invalid previous request input"},
-		{name: "non-array previous input", lastRequest: `{"input":{}}`, appendInput: `[]`, wantPrefix: "invalid previous request input"},
-		{name: "earlier invalid duplicate", lastRequest: `{"input":{},"input":[]}`, appendInput: `[]`, wantPrefix: "invalid previous request input"},
-		{name: "invalid appended input", lastRequest: `{"input":[]}`, appendInput: `[{`, wantPrefix: "invalid request input"},
-		{name: "non-array appended input", lastRequest: `{"input":[]}`, appendInput: `{}`, wantPrefix: "invalid request input"},
+		{
+			name: "invalid previous request", lastRequest: `{"input":`, appendInput: `[]`,
+			wantPrefix: "invalid previous request input",
+		},
+		{
+			name: "non-array previous input", lastRequest: `{"input":{}}`, appendInput: `[]`,
+			wantPrefix: "invalid previous request input",
+		},
+		{
+			name: "earlier invalid duplicate", lastRequest: `{"input":{},"input":[]}`, appendInput: `[]`,
+			wantPrefix: "invalid previous request input",
+		},
+		{
+			name: "invalid appended input", lastRequest: `{"input":[]}`, appendInput: `[{`,
+			wantPrefix: "invalid request input",
+		},
+		{
+			name: "non-array appended input", lastRequest: `{"input":[]}`, appendInput: `{}`,
+			wantPrefix: "invalid request input",
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			_, errMerge := mergeResponsesWebsocketInput([]byte(test.lastRequest), nil, test.appendInput)
-			if errMerge == nil || !strings.HasPrefix(errMerge.Error(), test.wantPrefix+": ") {
-				t.Fatalf("merge error = %v, want prefix %q", errMerge, test.wantPrefix)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				t.Parallel()
+				_, errMerge := mergeResponsesWebsocketInput([]byte(test.lastRequest), nil, test.appendInput)
+				if errMerge == nil || !strings.HasPrefix(errMerge.Error(), test.wantPrefix+": ") {
+					t.Fatalf("merge error = %v, want prefix %q", errMerge, test.wantPrefix)
+				}
+			},
+		)
 	}
 }
 
@@ -154,20 +199,24 @@ func TestMergeResponsesWebsocketInputDetachesSourceBuffers(t *testing.T) {
 func TestMergeResponsesWebsocketInputBoundsLargeTranscriptAllocations(t *testing.T) {
 	lastRequest := []byte(`{"model":"test","input":[{"type":"message","id":"large","content":"` +
 		strings.Repeat("x", responsesWebsocketLargeTranscriptSize) + `"}]}`)
-	lastOutput := []byte(`[{"type":"function_call","id":"call","call_id":"call-1","name":"lookup","arguments":"{}"}]`)
+	lastOutput := []byte(
+		`[{"type":"function_call","id":"call","call_id":"call-1","name":"lookup","arguments":"{}"}]`,
+	)
 	appendInput := `[{"type":"function_call_output","id":"output","call_id":"call-1","output":"done"}]`
 	inputBytes := len(lastRequest) + len(lastOutput) + len(appendInput)
 
-	result := testing.Benchmark(func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			merged, errMerge := mergeResponsesWebsocketInput(lastRequest, lastOutput, appendInput)
-			if errMerge != nil {
-				b.Fatal(errMerge)
+	result := testing.Benchmark(
+		func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				merged, errMerge := mergeResponsesWebsocketInput(lastRequest, lastOutput, appendInput)
+				if errMerge != nil {
+					b.Fatal(errMerge)
+				}
+				responsesWebsocketMergedInputSink = merged
 			}
-			responsesWebsocketMergedInputSink = merged
-		}
-	})
+		},
+	)
 	responsesWebsocketMergedInputSink = nil
 
 	maxAllocatedBytes := int64(inputBytes * 2)
@@ -185,22 +234,29 @@ func TestPrepareResponsesWebsocketFallbackTurnBoundsAllocations(t *testing.T) {
 		if index > 0 {
 			input.WriteByte(',')
 		}
-		fmt.Fprintf(&input, `{"type":"message","id":"msg-%d","content":%q}`, index, content)
+		// strings.Builder.Write always returns the full length and a nil error.
+		_, _ = fmt.Fprintf(&input, `{"type":"message","id":"msg-%d","content":%q}`, index, content)
 	}
 	input.WriteByte(']')
 	payload := []byte(`{"model":"test","input":` + input.String() + `}`)
 
-	result := testing.Benchmark(func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			repaired, turn := prepareResponsesWebsocketFallbackTurn("allocation-session", payload)
-			runtime.KeepAlive(repaired)
-			runtime.KeepAlive(turn)
-		}
-	})
+	result := testing.Benchmark(
+		func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				repaired, turn := prepareResponsesWebsocketFallbackTurn("allocation-session", payload)
+				runtime.KeepAlive(repaired)
+				runtime.KeepAlive(turn)
+			}
+		},
+	)
 
 	maxAllocatedBytes := int64(len(payload) * 8)
-	t.Logf("repair allocated %d bytes per operation for %d input bytes", result.AllocedBytesPerOp(), len(payload))
+	t.Logf(
+		"repair allocated %d bytes per operation for %d input bytes",
+		result.AllocedBytesPerOp(),
+		len(payload),
+	)
 	if result.AllocedBytesPerOp() > maxAllocatedBytes {
 		t.Fatalf("repair allocated %d bytes, want at most %d", result.AllocedBytesPerOp(), maxAllocatedBytes)
 	}
@@ -210,7 +266,9 @@ func TestRepairResponsesWebsocketToolCallsPreservesNamedFunctionOutput(t *testin
 	t.Parallel()
 
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
-	payload := []byte(`{"input":[{"type":"function_call_output","name":"automation_update","output":"heartbeat"},{"type":"custom_tool_call_output","name":"custom","output":"drop"},{"type":"function_call_output","output":"drop"}]}`)
+	payload := []byte((`{"input":[{"type":"function_call_output","name":"automation_update","output":"` +
+		`heartbeat"},{"type":"custom_tool_call_output","name":"custom","output":"drop"},{"type":"` +
+		`function_call_output","output":"drop"}]}`))
 	repaired := repairResponsesWebsocketToolCallsWithCache(cache, "named-output-session", payload)
 	items := gjson.GetBytes(repaired, "input").Array()
 	if len(items) != 1 || items[0].Get("name").String() != "automation_update" {
@@ -221,8 +279,13 @@ func TestRepairResponsesWebsocketToolCallsPreservesNamedFunctionOutput(t *testin
 func TestNormalizeResponsesWebsocketPrewarmFollowupPreservesWarmInput(t *testing.T) {
 	t.Parallel()
 
-	warmup := []byte(`{"model":"test","instructions":"base","input":[{"type":"additional_tools","id":"tools","role":"developer","tools":[]},{"type":"message","id":"base","role":"developer","content":"base"}]}`)
-	followup := []byte(`{"type":"response.create","previous_response_id":"resp_prewarm_test","input":[{"type":"compaction","encrypted_content":"opaque"},{"type":"function_call_output","name":"automation_update","output":"heartbeat"}],"client_metadata":{"keep":"yes"}}`)
+	warmup := []byte(`{"model":"test","instructions":"base","input":[{"type":"additional_too` +
+		`ls","id":"tools","role":"developer","tools":[]},{"type":"message","id"` +
+		`:"base","role":"developer","content":"base"}]}`)
+	followup := []byte(`{"type":"response.create","previous_response_id":"resp_prewarm_test","` +
+		`input":[{"type":"compaction","encrypted_content":"opaque"},{"type":"fu` +
+		`nction_call_output","name":"automation_update","output":"heartbeat"}],` +
+		`"client_metadata":{"keep":"yes"}}`)
 	normalized, next, errMsg := normalizeResponsesWebsocketPrewarmFollowup(followup, warmup)
 	if errMsg != nil {
 		t.Fatalf("normalize prewarm followup: %v", errMsg.Error)
@@ -243,18 +306,49 @@ func TestNormalizeResponsesWebsocketPrewarmFollowupPreservesWarmInput(t *testing
 func TestSyntheticResponsesWebsocketPrewarmPayloads(t *testing.T) {
 	t.Parallel()
 
-	payloads, errPayloads := syntheticResponsesWebsocketPrewarmPayloads([]byte(`{"model":"test"}`))
-	if errPayloads != nil {
-		t.Fatal(errPayloads)
-	}
-	if len(payloads) != 2 || gjson.GetBytes(payloads[0], "type").String() != "response.created" ||
-		gjson.GetBytes(payloads[1], "type").String() != wsEventTypeDone {
-		t.Fatalf("unexpected synthetic prewarm payloads: %q", payloads)
-	}
-	firstID := gjson.GetBytes(payloads[0], "response.id").String()
-	if !strings.HasPrefix(firstID, "resp_prewarm_") ||
-		gjson.GetBytes(payloads[1], "response.id").String() != firstID {
-		t.Fatalf("synthetic prewarm response IDs differ: %q", payloads)
+	for _, sample := range []struct {
+		name, body, model string
+	}{
+		{name: "request model", body: `{"model":"test"}`, model: "test"},
+		{name: "missing model", body: `{}`},
+		{name: "blank model", body: `{"model":"  "}`},
+	} {
+		t.Run(
+			sample.name, func(t *testing.T) {
+				payloads, errPayloads := syntheticResponsesWebsocketPrewarmPayloads([]byte(sample.body))
+				if errPayloads != nil {
+					t.Fatal(errPayloads)
+				}
+				if len(payloads) != 2 || gjson.GetBytes(payloads[0], "type").String() != "response.created" ||
+					gjson.GetBytes(payloads[1], "type").String() != wsEventTypeDone {
+					t.Fatalf("unexpected synthetic prewarm payloads: %q", payloads)
+				}
+				firstID := gjson.GetBytes(payloads[0], "response.id").String()
+				if !strings.HasPrefix(firstID, "resp_prewarm_") ||
+					gjson.GetBytes(payloads[1], "response.id").String() != firstID {
+					t.Fatalf("synthetic prewarm response IDs differ: %q", payloads)
+				}
+				for index, payload := range payloads {
+					model := gjson.GetBytes(payload, "response.model")
+					output := gjson.GetBytes(payload, "response.output")
+					if model.String() != sample.model || (sample.model == "" && model.Exists()) ||
+						!output.IsArray() || len(output.Array()) != 0 ||
+						gjson.GetBytes(payload, "sequence_number").Int() != int64(index) {
+						t.Fatalf("prewarm lost model, output or sequence: %s", payload)
+					}
+				}
+				for _, field := range []string{
+					"input_tokens", "output_tokens", "total_tokens", "input_tokens_details.cached_tokens",
+					"output_tokens_details.reasoning_tokens",
+				} {
+					if value := gjson.GetBytes(
+						payloads[1], "response.usage."+field,
+					); value.Type != gjson.Number || value.Int() != 0 {
+						t.Fatalf("prewarm lost explicit zero %s: %s", field, payloads[1])
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -266,6 +360,7 @@ func TestIsCodexResponsesLiteRequest(t *testing.T) {
 	if !isCodexResponsesLiteRequest(nil, headers) {
 		t.Fatal("native header was not recognized")
 	}
+	//goland:noinspection SpellCheckingInspection
 	body := []byte(`{"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"TrUe"}}`)
 	if !isCodexResponsesLiteRequest(body, nil) {
 		t.Fatal("websocket metadata mirror was not recognized")
@@ -295,7 +390,8 @@ func TestResponsesWebsocketHandlesPrewarmLocally(t *testing.T) {
 		t.Fatal(errDeadline)
 	}
 
-	prewarm := []byte(`{"type":"response.create","model":"test","generate":false,"input":[{"type":"message","id":"base","role":"developer","content":"base"}]}`)
+	prewarm := []byte(`{"type":"response.create","model":"test","generate":false,"input":[{"t` +
+		`ype":"message","id":"base","role":"developer","content":"base"}]}`)
 	if errWrite := client.WriteMessage(websocket.TextMessage, prewarm); errWrite != nil {
 		t.Fatal(errWrite)
 	}
@@ -313,6 +409,14 @@ func TestResponsesWebsocketHandlesPrewarmLocally(t *testing.T) {
 		gjson.GetBytes(done, "type").String() != wsEventTypeDone {
 		t.Fatalf("unexpected prewarm events: created=%s done=%s", created, done)
 	}
+	for _, payload := range [][]byte{created, done} {
+		output := gjson.GetBytes(payload, "response.output")
+		if gjson.GetBytes(
+			payload, "response.model",
+		).String() != "test" || !output.IsArray() || len(output.Array()) != 0 {
+			t.Fatalf("local prewarm lost request model or empty output: %s", payload)
+		}
+	}
 
 	wrongParent := []byte(`{"type":"response.create","previous_response_id":"resp_prewarm_wrong","input":[]}`)
 	if errWrite := client.WriteMessage(websocket.TextMessage, wrongParent); errWrite != nil {
@@ -327,7 +431,8 @@ func TestResponsesWebsocketHandlesPrewarmLocally(t *testing.T) {
 		t.Fatalf("wrong prewarm parent was accepted: %s", errorPayload)
 	}
 
-	secondPrewarm := []byte(`{"type":"response.create","model":"test","generate":false,"input":[{"type":"message","id":"new-base","role":"developer","content":"new"}]}`)
+	secondPrewarm := []byte(`{"type":"response.create","model":"test","generate":false,"input":[{"t` +
+		`ype":"message","id":"new-base","role":"developer","content":"new"}]}`)
 	if errWrite := client.WriteMessage(websocket.TextMessage, secondPrewarm); errWrite != nil {
 		t.Fatal(errWrite)
 	}
@@ -363,37 +468,41 @@ func TestForwardResponsesWebsocketEmitsPingAndPreservesNativeCompletion(t *testi
 	resultCh := make(chan error, 1)
 	data := make(chan cliproxyexecutor.StreamChunk, 2)
 	errs := make(chan *handlers.ErrorMessage)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		conn, errUpgrade := responsesWebsocketUpgrader.Upgrade(w, request, nil)
-		if errUpgrade != nil {
-			resultCh <- errUpgrade
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
-		ginCtx.Request = request
-		interval := 20 * time.Millisecond
-		handler := NewResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
-		_, _, _, errMsg, errForward := handler.forwardResponsesWebsocket(
-			ginCtx,
-			newResponsesWebsocketWriter(conn),
-			func(...any) {},
-			data,
-			errs,
-			nil,
-			"ping-session",
-			"ping-downstream",
-			responsesWebsocketForwardOptions{
-				preserveCompletionOutput: func() bool { return true },
-				keepAliveInterval:        &interval,
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				conn, errUpgrade := responsesWebsocketUpgrader.Upgrade(w, request, nil)
+				if errUpgrade != nil {
+					resultCh <- errUpgrade
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ginCtx.Request = request
+				interval := 20 * time.Millisecond
+				handler := NewResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+				_, _, _, errMsg, errForward := handler.forwardResponsesWebsocket(
+					ginCtx,
+					newResponsesWebsocketWriter(conn),
+					func(...any) {},
+					data,
+					errs,
+					nil,
+					"ping-session",
+					"ping-downstream",
+					responsesWebsocketForwardOptions{
+						preserveCompletionOutput: func() bool { return true },
+						keepAliveInterval:        &interval,
+					},
+				)
+				if errMsg != nil {
+					resultCh <- errMsg.Error
+					return
+				}
+				resultCh <- errForward
 			},
-		)
-		if errMsg != nil {
-			resultCh <- errMsg.Error
-			return
-		}
-		resultCh <- errForward
-	}))
+		),
+	)
 	defer server.Close()
 
 	client, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
@@ -402,13 +511,15 @@ func TestForwardResponsesWebsocketEmitsPingAndPreservesNativeCompletion(t *testi
 	}
 	defer func() { _ = client.Close() }()
 	pingReceived := make(chan struct{}, 1)
-	client.SetPingHandler(func(appData string) error {
-		select {
-		case pingReceived <- struct{}{}:
-		default:
-		}
-		return client.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
-	})
+	client.SetPingHandler(
+		func(appData string) error {
+			select {
+			case pingReceived <- struct{}{}:
+			default:
+			}
+			return client.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+		},
+	)
 	payloadCh := make(chan []byte, 1)
 	go func() {
 		for {
@@ -425,8 +536,14 @@ func TestForwardResponsesWebsocketEmitsPingAndPreservesNativeCompletion(t *testi
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("websocket Ping control frame was not emitted")
 	}
-	data <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"streamed"}}`)}
-	data <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-native","output":[]}}`), Terminal: true}
+	data <- cliproxyexecutor.StreamChunk{
+		Payload: []byte(`{"type":"response.output_item.done","output_index":` +
+			`0,"item":{"type":"message","id":` +
+			`"streamed"}}`),
+	}
+	data <- cliproxyexecutor.StreamChunk{
+		Payload: []byte(`{"type":"response.completed","response":{"id":"resp-native","output":[]}}`), Terminal: true,
+	}
 	close(data)
 	close(errs)
 
@@ -491,9 +608,13 @@ func (e *prewarmCaptureExecutor) ExecuteStream(
 	call := len(e.payloads)
 	e.mu.Unlock()
 	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(
-		`{"type":"response.completed","response":{"id":"generated-%d","status":"completed","output":[{"type":"message","id":"output-%d"}]}}`, call, call,
-	))}
+	chunks <- cliproxyexecutor.StreamChunk{
+		Payload: []byte(fmt.Sprintf(
+			`{"type":"response.completed","response":{"id":"generated-%d","status":`+
+				`"completed","output":[{"type":"message","id":"output-%d"}]}}`,
+			call, call,
+		)),
+	}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -502,96 +623,145 @@ func TestResponsesWebsocketIncrementalPrewarmKeepsHistoryWithoutExecution(t *tes
 	gin.SetMode(gin.TestMode)
 	for _, warmups := range []int{1, 2} {
 		for _, emptyFollowup := range []bool{false, true} {
-			t.Run(fmt.Sprintf("warmups_%d_empty_%t", warmups, emptyFollowup), func(t *testing.T) {
-				executor := &prewarmCaptureExecutor{}
-				manager := coreauth.NewManager(nil, nil, nil)
-				manager.RegisterExecutor(executor)
-				const model = "incremental-prewarm-model"
-				auth := &coreauth.Auth{ID: t.Name(), Provider: executor.Identifier(), Status: coreauth.StatusActive}
-				if _, err := manager.Register(context.Background(), auth); err != nil {
-					t.Fatal(err)
-				}
-				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
-				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
-				handler := NewResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
-				router := gin.New()
-				router.GET("/v1/responses", handler.ResponsesWebsocket)
-				server := httptest.NewServer(router)
-				defer server.Close()
-				client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer func() { _ = client.Close() }()
-				if err = client.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-					t.Fatal(err)
-				}
-				send := func(body string) {
-					t.Helper()
-					if errWrite := client.WriteMessage(websocket.TextMessage, []byte(body)); errWrite != nil {
-						t.Fatal(errWrite)
+			t.Run(
+				fmt.Sprintf("warmups_%d_empty_%t", warmups, emptyFollowup), func(t *testing.T) {
+					executor := &prewarmCaptureExecutor{}
+					manager := coreauth.NewManager(nil, nil, nil)
+					manager.RegisterExecutor(executor)
+					const model = "incremental-prewarm-model"
+					auth := &coreauth.Auth{
+						ID:       t.Name(),
+						Provider: executor.Identifier(),
+						Status:   coreauth.StatusActive,
 					}
-				}
-				read := func(event string) []byte {
-					t.Helper()
-					_, body, errRead := client.ReadMessage()
-					if errRead != nil {
-						t.Fatal(errRead)
+					if _, err := manager.Register(context.Background(), auth); err != nil {
+						t.Fatal(err)
 					}
-					if gjson.GetBytes(body, "type").String() != event {
-						t.Fatalf("event = %s, want %s", body, event)
+					registry.GetGlobalRegistry().RegisterClient(
+						auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}},
+					)
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+					handler := NewResponsesAPIHandler(
+						handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager),
+					)
+					router := gin.New()
+					router.GET("/v1/responses", handler.ResponsesWebsocket)
+					server := httptest.NewServer(router)
+					defer server.Close()
+					client, _, err := websocket.DefaultDialer.Dial(
+						"ws"+strings.TrimPrefix(
+							server.URL, "http",
+						)+"/v1/responses", nil,
+					)
+					if err != nil {
+						t.Fatal(err)
 					}
-					return body
-				}
-				send(`{"type":"response.create","model":"` + model + `","input":[{"type":"message","id":"initial-user"}]}`)
-				responseID := gjson.GetBytes(read(wsEventTypeDone), "response.id").String()
-				wantIDs := []string{"initial-user", "output-1"}
-				for index := 1; index <= warmups; index++ {
-					id := fmt.Sprintf("warmup-%d", index)
-					send(fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"generate":false,"input":[{"type":"message","id":%q}]}`, responseID, id))
-					created := read("response.created")
-					responseID = gjson.GetBytes(created, "response.id").String()
-					done := read(wsEventTypeDone)
-					if !strings.HasPrefix(responseID, "resp_prewarm_") || gjson.GetBytes(done, "response.id").String() != responseID ||
-						len(gjson.GetBytes(done, "response.output").Array()) != 0 || gjson.GetBytes(done, "response.usage.total_tokens").Int() != 0 {
-						t.Fatalf("prewarm events = %s %s", created, done)
+					defer func() { _ = client.Close() }()
+					if err = client.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+						t.Fatal(err)
 					}
+					send := func(body string) {
+						t.Helper()
+						if errWrite := client.WriteMessage(websocket.TextMessage, []byte(body)); errWrite != nil {
+							t.Fatal(errWrite)
+						}
+					}
+					read := func(event string) []byte {
+						t.Helper()
+						_, body, errRead := client.ReadMessage()
+						if errRead != nil {
+							t.Fatal(errRead)
+						}
+						if gjson.GetBytes(body, "type").String() != event {
+							t.Fatalf("event = %s, want %s", body, event)
+						}
+						return body
+					}
+					send(
+						`{"type":"response.create","model":"` +
+							model +
+							`","input":[{"type":"message","id":"initial-user"}]}`,
+					)
+					responseID := gjson.GetBytes(read(wsEventTypeCompleted), "response.id").String()
+					wantIDs := []string{"initial-user", "output-1"}
+					for index := 1; index <= warmups; index++ {
+						id := fmt.Sprintf("warmup-%d", index)
+						send(
+							fmt.Sprintf(
+								`{"type":"response.create","previous_response_id":%q,"generate":false,`+
+									`"input":[{"type":"message","id":`+
+									`%q}]}`,
+								responseID,
+								id,
+							),
+						)
+						created := read("response.created")
+						responseID = gjson.GetBytes(created, "response.id").String()
+						done := read(wsEventTypeDone)
+						if !strings.HasPrefix(responseID, "resp_prewarm_") || gjson.GetBytes(
+							done, "response.id",
+						).String() != responseID ||
+							len(gjson.GetBytes(done, "response.output").Array()) != 0 || gjson.GetBytes(
+							done, "response.usage.total_tokens",
+						).Int() != 0 {
+							t.Fatalf("prewarm events = %s %s", created, done)
+						}
+						for _, payload := range [][]byte{created, done} {
+							output := gjson.GetBytes(payload, "response.output")
+							if gjson.GetBytes(
+								payload, "response.model",
+							).String() != model || !output.IsArray() || len(output.Array()) != 0 {
+								t.Fatalf(
+									"incremental prewarm lost inherited model or empty output: %s",
+									payload,
+								)
+							}
+						}
+						executor.mu.Lock()
+						calls := len(executor.payloads)
+						executor.mu.Unlock()
+						if calls != 1 {
+							t.Fatalf("upstream calls after prewarm = %d, want 1", calls)
+						}
+						wantIDs = append(wantIDs, id)
+					}
+					input := `[]`
+					if !emptyFollowup {
+						input = `[{"type":"message","id":"followup"}]`
+						wantIDs = append(wantIDs, "followup")
+					}
+					send(
+						fmt.Sprintf(
+							`{"type":"response.create","previous_response_id":%q,"input":%s}`,
+							responseID,
+							input,
+						),
+					)
+					read(wsEventTypeCompleted)
 					executor.mu.Lock()
-					calls := len(executor.payloads)
+					payloads := append([][]byte(nil), executor.payloads...)
 					executor.mu.Unlock()
-					if calls != 1 {
-						t.Fatalf("upstream calls after prewarm = %d, want 1", calls)
+					if len(payloads) != 2 {
+						t.Fatalf("upstream calls = %d, want 2", len(payloads))
 					}
-					wantIDs = append(wantIDs, id)
-				}
-				input := `[]`
-				if !emptyFollowup {
-					input = `[{"type":"message","id":"followup"}]`
-					wantIDs = append(wantIDs, "followup")
-				}
-				send(fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"input":%s}`, responseID, input))
-				read(wsEventTypeDone)
-				executor.mu.Lock()
-				payloads := append([][]byte(nil), executor.payloads...)
-				executor.mu.Unlock()
-				if len(payloads) != 2 {
-					t.Fatalf("upstream calls = %d, want 2", len(payloads))
-				}
-				forwarded := payloads[1]
-				if gjson.GetBytes(forwarded, "previous_response_id").Exists() || gjson.GetBytes(forwarded, "generate").Exists() ||
-					gjson.GetBytes(forwarded, "model").String() != model {
-					t.Fatalf("forwarded metadata = %s", forwarded)
-				}
-				items := gjson.GetBytes(forwarded, "input").Array()
-				if len(items) != len(wantIDs) {
-					t.Fatalf("forwarded history = %s, want IDs %v", forwarded, wantIDs)
-				}
-				for index, id := range wantIDs {
-					if items[index].Get("id").String() != id {
-						t.Fatalf("history[%d] = %s, want %s", index, items[index].Raw, id)
+					forwarded := payloads[1]
+					if gjson.GetBytes(forwarded, "previous_response_id").Exists() || gjson.GetBytes(
+						forwarded, "generate",
+					).Exists() ||
+						gjson.GetBytes(forwarded, "model").String() != model {
+						t.Fatalf("forwarded metadata = %s", forwarded)
 					}
-				}
-			})
+					items := gjson.GetBytes(forwarded, "input").Array()
+					if len(items) != len(wantIDs) {
+						t.Fatalf("forwarded history = %s, want IDs %v", forwarded, wantIDs)
+					}
+					for index, id := range wantIDs {
+						if items[index].Get("id").String() != id {
+							t.Fatalf("history[%d] = %s, want %s", index, items[index].Raw, id)
+						}
+					}
+				},
+			)
 		}
 	}
 }

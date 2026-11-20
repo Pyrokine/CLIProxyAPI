@@ -181,85 +181,87 @@ func TestOpenAIResponsesCompactFailurePreservesErrorAndAvailability(t *testing.T
 			wantPhrase: "compact endpoint not found",
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			executor := &compactCaptureExecutor{
-				compactErr: &compactHandlerStatusError{status: test.status, message: test.message},
-				normalResp: []byte(`{"id":"normal","status":"completed"}`),
-			}
-			manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
-			manager.SetRetryConfig(2, 0, 1)
-			manager.RegisterExecutor(executor)
-			authIDs := []string{
-				fmt.Sprintf("compact-handler-auth-%d-a", index),
-				fmt.Sprintf("compact-handler-auth-%d-b", index),
-			}
-			for authIndex, authID := range authIDs {
-				auth := &coreauth.Auth{
-					ID:       authID,
-					Provider: executor.Identifier(),
-					Status:   coreauth.StatusActive,
-					Attributes: map[string]string{
-						"priority": fmt.Sprintf("%d", 10-authIndex),
-					},
+		t.Run(
+			test.name, func(t *testing.T) {
+				executor := &compactCaptureExecutor{
+					compactErr: &compactHandlerStatusError{status: test.status, message: test.message},
+					normalResp: []byte(`{"id":"normal","status":"completed"}`),
 				}
-				if _, err := manager.Register(context.Background(), auth); err != nil {
-					t.Fatalf("Register auth: %v", err)
+				manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+				manager.SetRetryConfig(2, 0, 1)
+				manager.RegisterExecutor(executor)
+				authIDs := []string{
+					fmt.Sprintf("compact-handler-auth-%d-a", index),
+					fmt.Sprintf("compact-handler-auth-%d-b", index),
 				}
-				registry.GetGlobalRegistry().RegisterClient(
-					auth.ID,
-					auth.Provider,
-					[]*registry.ModelInfo{{ID: "test-model"}},
+				for authIndex, authID := range authIDs {
+					auth := &coreauth.Auth{
+						ID:       authID,
+						Provider: executor.Identifier(),
+						Status:   coreauth.StatusActive,
+						Attributes: map[string]string{
+							"priority": fmt.Sprintf("%d", 10-authIndex),
+						},
+					}
+					if _, err := manager.Register(context.Background(), auth); err != nil {
+						t.Fatalf("Register auth: %v", err)
+					}
+					registry.GetGlobalRegistry().RegisterClient(
+						auth.ID,
+						auth.Provider,
+						[]*registry.ModelInfo{{ID: "test-model"}},
+					)
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				}
+
+				base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+				h := NewResponsesAPIHandler(base)
+				router := gin.New()
+				router.POST("/v1/responses/compact", h.Compact)
+				router.POST("/v1/responses", h.Responses)
+
+				compactReq := httptest.NewRequest(
+					http.MethodPost,
+					"/v1/responses/compact",
+					strings.NewReader(`{"model":"test-model","input":"hello"}`),
 				)
-				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
-			}
-
-			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-			h := NewResponsesAPIHandler(base)
-			router := gin.New()
-			router.POST("/v1/responses/compact", h.Compact)
-			router.POST("/v1/responses", h.Responses)
-
-			compactReq := httptest.NewRequest(
-				http.MethodPost,
-				"/v1/responses/compact",
-				strings.NewReader(`{"model":"test-model","input":"hello"}`),
-			)
-			compactReq.Header.Set("Content-Type", "application/json")
-			compactResp := httptest.NewRecorder()
-			router.ServeHTTP(compactResp, compactReq)
-			if compactResp.Code != test.status || !strings.Contains(compactResp.Body.String(), test.wantPhrase) {
-				t.Fatalf("compact response = %d/%s", compactResp.Code, compactResp.Body.String())
-			}
-			if executor.calls != 1 {
-				t.Fatalf("compact executor calls = %d, want 1", executor.calls)
-			}
-
-			for _, authID := range authIDs {
-				auth, ok := manager.GetByID(authID)
-				if !ok || auth == nil {
-					t.Fatalf("auth %s missing", authID)
+				compactReq.Header.Set("Content-Type", "application/json")
+				compactResp := httptest.NewRecorder()
+				router.ServeHTTP(compactResp, compactReq)
+				if compactResp.Code != test.status || !strings.Contains(compactResp.Body.String(), test.wantPhrase) {
+					t.Fatalf("compact response = %d/%s", compactResp.Code, compactResp.Body.String())
 				}
-				if auth.Unavailable || !auth.NextRetryAfter.IsZero() {
-					t.Fatalf("compact failure changed credential state: %#v", auth)
+				if executor.calls != 1 {
+					t.Fatalf("compact executor calls = %d, want 1", executor.calls)
 				}
-				if state := auth.ModelStates["test-model"]; state != nil &&
-					(state.Unavailable || !state.NextRetryAfter.IsZero()) {
-					t.Fatalf("compact failure changed model state: %#v", state)
-				}
-			}
 
-			normalReq := httptest.NewRequest(
-				http.MethodPost,
-				"/v1/responses",
-				strings.NewReader(`{"model":"test-model","input":"hello"}`),
-			)
-			normalReq.Header.Set("Content-Type", "application/json")
-			normalResp := httptest.NewRecorder()
-			router.ServeHTTP(normalResp, normalReq)
-			if normalResp.Code != http.StatusOK ||
-				!strings.Contains(normalResp.Body.String(), `"id":"normal"`) {
-				t.Fatalf("normal response = %d/%s", normalResp.Code, normalResp.Body.String())
-			}
-		})
+				for _, authID := range authIDs {
+					auth, ok := manager.GetByID(authID)
+					if !ok || auth == nil {
+						t.Fatalf("auth %s missing", authID)
+					}
+					if auth.Unavailable || !auth.NextRetryAfter.IsZero() {
+						t.Fatalf("compact failure changed credential state: %#v", auth)
+					}
+					if state := auth.ModelStates["test-model"]; state != nil &&
+						(state.Unavailable || !state.NextRetryAfter.IsZero()) {
+						t.Fatalf("compact failure changed model state: %#v", state)
+					}
+				}
+
+				normalReq := httptest.NewRequest(
+					http.MethodPost,
+					"/v1/responses",
+					strings.NewReader(`{"model":"test-model","input":"hello"}`),
+				)
+				normalReq.Header.Set("Content-Type", "application/json")
+				normalResp := httptest.NewRecorder()
+				router.ServeHTTP(normalResp, normalReq)
+				if normalResp.Code != http.StatusOK ||
+					!strings.Contains(normalResp.Body.String(), `"id":"normal"`) {
+					t.Fatalf("normal response = %d/%s", normalResp.Code, normalResp.Body.String())
+				}
+			},
+		)
 	}
 }

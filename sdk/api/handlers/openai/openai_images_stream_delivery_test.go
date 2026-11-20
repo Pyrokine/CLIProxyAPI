@@ -226,7 +226,11 @@ func TestCollectImagesFromResponsesChunksDefersTerminalAcknowledgement(t *testin
 	events := make([]string, 0, 4)
 	data := make(chan coreexecutor.StreamChunk, 2)
 	data <- coreexecutor.StreamChunk{
-		Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"" + testPNGBase64 + "\",\"output_format\":\"png\"}]}}\n\n"),
+		Payload: []byte(("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":12" +
+			("3,\"output\":[{\"type\":\"image_generation_call\",\"result\":" +
+				"\"")) +
+			testPNGBase64 +
+			"\",\"output_format\":\"png\"}]}}\n\n"),
 		Acknowledge: func(err error) {
 			if err != nil {
 				t.Errorf("payload acknowledgement = %v", err)
@@ -252,7 +256,11 @@ func TestCollectImagesFromResponsesChunksDefersTerminalAcknowledgement(t *testin
 		t.Fatalf("collectImagesFromResponsesChunks error = %#v", errMsg)
 	}
 	if terminalAcknowledge == nil || !reflect.DeepEqual(events, []string{"payload_ack"}) {
-		t.Fatalf("collector events = %v, terminal acknowledgement present = %t", events, terminalAcknowledge != nil)
+		t.Fatalf(
+			"collector events = %v, terminal acknowledgement present = %t",
+			events,
+			terminalAcknowledge != nil,
+		)
 	}
 	if !strings.Contains(string(out), `"url":"https://cpa.test/v1/artifacts/img_`) {
 		t.Fatalf("collected response = %s", out)
@@ -275,7 +283,11 @@ func TestCollectImagesFromResponsesUsesDeliveryAwareStream(t *testing.T) {
 		imageCaptureExecutor: &imageCaptureExecutor{},
 		chunks: []coreexecutor.StreamChunk{
 			{
-				Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"" + testPNGBase64 + "\",\"output_format\":\"png\"}]}}\n\n"),
+				Payload: []byte(("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":12" +
+					("3,\"output\":[{\"type\":\"image_generation_call\",\"result\":" +
+						"\"")) +
+					testPNGBase64 +
+					"\",\"output_format\":\"png\"}]}}\n\n"),
 				Acknowledge: func(err error) {
 					payloadAcknowledged <- err
 				},
@@ -386,7 +398,12 @@ func TestCollectImagesFromResponsesChunksAcknowledgesProtocolErrorAfterResponse(
 				)
 				if out != nil || terminalAcknowledge != nil || errMsg == nil || errMsg.Error == nil ||
 					!strings.Contains(errMsg.Error.Error(), "before completion") {
-					t.Fatalf("collector result = (%s, terminal:%t, %#v)", out, terminalAcknowledge != nil, errMsg)
+					t.Fatalf(
+						"collector result = (%s, terminal:%t, %#v)",
+						out,
+						terminalAcknowledge != nil,
+						errMsg,
+					)
 				}
 				if !reflect.DeepEqual(events, []string{"payload_ack"}) {
 					t.Fatalf("events before error response = %v", events)
@@ -423,7 +440,11 @@ func TestCollectImagesFromResponsesChunksLateErrorWins(t *testing.T) {
 	lateErr := errors.New("late responses failure")
 	go func() {
 		data <- coreexecutor.StreamChunk{
-			Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"" + testPNGBase64 + "\",\"output_format\":\"png\"}]}}\n\n"),
+			Payload: []byte(("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":12" +
+				("3,\"output\":[{\"type\":\"image_generation_call\",\"result\":" +
+					"\"")) +
+				testPNGBase64 +
+				"\",\"output_format\":\"png\"}]}}\n\n"),
 			Acknowledge: func(err error) {
 				if err != nil {
 					t.Errorf("payload acknowledgement = %v", err)
@@ -469,7 +490,11 @@ func TestCollectImagesFromResponsesChunksRequiresTransportTerminal(t *testing.T)
 	acknowledged := false
 	data := make(chan coreexecutor.StreamChunk, 1)
 	data <- coreexecutor.StreamChunk{
-		Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"" + testPNGBase64 + "\",\"output_format\":\"png\"}]}}\n\n"),
+		Payload: []byte(("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":12" +
+			("3,\"output\":[{\"type\":\"image_generation_call\",\"result\":" +
+				"\"")) +
+			testPNGBase64 +
+			"\",\"output_format\":\"png\"}]}}\n\n"),
 		Acknowledge: func(err error) {
 			if err != nil {
 				t.Errorf("payload acknowledgement = %v", err)

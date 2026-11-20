@@ -158,6 +158,9 @@ func websocketDownstreamSessionKey(req *http.Request) string {
 			return sessionID
 		}
 	}
+	if sessionID := strings.TrimSpace(req.Header.Get("Session-Id")); sessionID != "" {
+		return sessionID
+	}
 	if sessionID := strings.TrimSpace(req.Header.Get("Session_id")); sessionID != "" {
 		return sessionID
 	}
@@ -453,25 +456,27 @@ func parseResponsesWebsocketRepairRequest(payload []byte) (gjson.Result, json.Ra
 	var previousResponseID json.RawMessage
 	inputFound := false
 	valid := true
-	root.ForEach(func(key, value gjson.Result) bool {
-		switch {
-		case strings.EqualFold(key.String(), "input"):
-			if !value.IsArray() && strings.TrimSpace(value.Raw) != "null" {
-				valid = false
-				return false
+	root.ForEach(
+		func(key, value gjson.Result) bool {
+			switch {
+			case strings.EqualFold(key.String(), "input"):
+				if !value.IsArray() && strings.TrimSpace(value.Raw) != "null" {
+					valid = false
+					return false
+				}
+				input = value
+				inputFound = true
+			case strings.EqualFold(key.String(), "previous_response_id"):
+				var ok bool
+				previousResponseID, ok = responsesWebsocketRawMessageForResult(payload, value)
+				if !ok {
+					valid = false
+					return false
+				}
 			}
-			input = value
-			inputFound = true
-		case strings.EqualFold(key.String(), "previous_response_id"):
-			var ok bool
-			previousResponseID, ok = responsesWebsocketRawMessageForResult(payload, value)
-			if !ok {
-				valid = false
-				return false
-			}
-		}
-		return true
-	})
+			return true
+		},
+	)
 	if !valid || !inputFound || !input.IsArray() {
 		return gjson.Result{}, nil, false
 	}
@@ -500,21 +505,23 @@ func parseResponsesWebsocketInputItemsNoCopy(
 	var items []responsesWebsocketInputItem
 	var rawItems []json.RawMessage
 	valid := true
-	input.ForEach(func(_, itemResult gjson.Result) bool {
-		rawItem, ok := responsesWebsocketRawMessageForResult(payload, itemResult)
-		if !ok {
-			valid = false
-			return false
-		}
-		item, errItem := parseResponsesWebsocketInputItem(rawItem)
-		if errItem != nil {
-			valid = false
-			return false
-		}
-		items = append(items, item)
-		rawItems = append(rawItems, rawItem)
-		return true
-	})
+	input.ForEach(
+		func(_, itemResult gjson.Result) bool {
+			rawItem, ok := responsesWebsocketRawMessageForResult(payload, itemResult)
+			if !ok {
+				valid = false
+				return false
+			}
+			item, errItem := parseResponsesWebsocketInputItem(rawItem)
+			if errItem != nil {
+				valid = false
+				return false
+			}
+			items = append(items, item)
+			rawItems = append(rawItems, rawItem)
+			return true
+		},
+	)
 	if !valid {
 		return nil, nil, false
 	}
@@ -580,7 +587,7 @@ func repairResponsesToolCallItems(
 				continue
 			}
 
-			if _, ok := callPresent[item.callID]; ok {
+			if _, ok := callPresent[item.callID]; ok || allowOrphanOutputs {
 				filtered = append(filtered, item)
 				continue
 			}
@@ -599,9 +606,6 @@ func repairResponsesToolCallItems(
 					continue
 				}
 			}
-			if allowOrphanOutputs {
-				filtered = append(filtered, item)
-			}
 			continue
 		}
 		if !isResponsesToolCallType(item.itemType) {
@@ -615,7 +619,15 @@ func repairResponsesToolCallItems(
 			filtered = append(filtered, item)
 			continue
 		}
+		if allowOrphanOutputs && isCompleteResponsesWebsocketToolCall(util.ParseGJSONBytesNoCopy(item.raw)) {
+			filtered = append(filtered, item)
+			continue
+		}
 		if cached, ok := outputCache.get(sessionKey, item.callID); ok {
+			if allowOrphanOutputs {
+				filtered = append(filtered, item)
+				continue
+			}
 			cachedItem, errCached := parseResponsesWebsocketInputItem(cached)
 			if errCached != nil {
 				return nil, errCached

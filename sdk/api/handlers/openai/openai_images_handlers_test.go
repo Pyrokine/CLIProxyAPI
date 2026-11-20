@@ -101,7 +101,10 @@ func (s *testImageArtifactStore) PutBytes(
 	return record, nil
 }
 
-func (s *testImageArtifactStore) PutDataURL(ctx context.Context, raw string) (handlers.ImageArtifactRecord, error) {
+func (s *testImageArtifactStore) PutDataURL(
+	ctx context.Context,
+	raw string,
+) (handlers.ImageArtifactRecord, error) {
 	header, encoded, ok := strings.Cut(strings.TrimSpace(raw), ",")
 	if !ok {
 		return handlers.ImageArtifactRecord{}, errors.New("invalid test data URL")
@@ -153,7 +156,9 @@ func (e *imageCaptureExecutor) Execute(
 	if raw, ok := opts.Metadata[coreexecutor.ServiceTierMetadataKey].(string); ok {
 		e.serviceTier = raw
 	}
-	return coreexecutor.Response{Payload: []byte(`{"created":1,"data":[{"b64_json":"` + testPNGBase64 + `"}]}`)}, nil
+	return coreexecutor.Response{
+		Payload: []byte(`{"created":1,"data":[{"b64_json":"` + testPNGBase64 + `"}]}`),
+	}, nil
 }
 
 func (e *imageCaptureExecutor) ExecuteStream(
@@ -178,7 +183,11 @@ func (e *imageCaptureExecutor) CountTokens(
 	return coreexecutor.Response{}, errors.New("not implemented")
 }
 
-func (e *imageCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+func (e *imageCaptureExecutor) HttpRequest(
+	context.Context,
+	*coreauth.Auth,
+	*http.Request,
+) (*http.Response, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -360,7 +369,11 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 				req := httptest.NewRequest(
 					http.MethodPost,
 					"/v1/images/generations",
-					strings.NewReader(`{"model":"XAI/Grok-Imagine-Image-Quality(HIGH)","prompt":"draw","aspect_ratio":"9:20","quality":" high "}`),
+					strings.NewReader(
+						`{"model":"XAI/Grok-Imagine-Image-Quality(HIGH)","prompt":"draw",`+
+							`"aspect_ratio":"9:20","quality":" high `+
+							`"}`,
+					),
 				)
 				req.Header.Set("Content-Type", "application/json")
 				return req
@@ -393,7 +406,9 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 					http.MethodPost,
 					"/v1/images/edits",
 					strings.NewReader(
-						`{"model":"XAI/Grok-Imagine-Image-2.0","prompt":"edit","images":[{"image_url":"data:image/png;base64,iVBORw0KGgo="}],"size":"20:9","quality":"low"}`,
+						`{"model":"XAI/Grok-Imagine-Image-2.0","prompt":"edit","images":[{"imag`+
+							`e_url":"data:image/png;base64,iVBORw0KGgo="}],"size":"20:9","quality":`+
+							`"low"}`,
 					),
 				)
 				req.Header.Set("Content-Type", "application/json")
@@ -452,7 +467,9 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 					http.MethodPost,
 					"/v1/images/edits",
 					strings.NewReader(
-						`{"model":"gpt-image-2.5-sunburst","prompt":"edit","quality":"max","images":[{"file_id":"file-abc"}]}`,
+						`{"model":"gpt-image-2.5-sunburst","prompt":"edit","quality":"max",`+
+							`"images":[{"file_id":`+
+							`"file-abc"}]}`,
 					),
 				)
 				req.Header.Set("Content-Type", "application/json")
@@ -525,17 +542,31 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 
 				if resp.Code != http.StatusOK {
 					t.Fatalf(
-						"model %q status = %d, want %d: %s", tt.model, resp.Code, http.StatusOK, resp.Body.String(),
+						"model %q status = %d, want %d: %s",
+						tt.model,
+						resp.Code,
+						http.StatusOK,
+						resp.Body.String(),
 					)
 				}
 				if executor.model != tt.wantModel {
-					t.Fatalf("executor model = %q, want %q; payload=%s", executor.model, tt.wantModel, executor.payload)
+					t.Fatalf(
+						"executor model = %q, want %q; payload=%s",
+						executor.model,
+						tt.wantModel,
+						executor.payload,
+					)
 				}
 				if tt.wantAspectRatio != "" {
 					got := gjson.GetBytes(executor.payload, "aspect_ratio").String()
 					multipartValue := []byte("\r\n" + tt.wantAspectRatio + "\r\n")
 					if got != tt.wantAspectRatio && !bytes.Contains(executor.payload, multipartValue) {
-						t.Fatalf("aspect_ratio = %q, want %q; payload=%s", got, tt.wantAspectRatio, executor.payload)
+						t.Fatalf(
+							"aspect_ratio = %q, want %q; payload=%s",
+							got,
+							tt.wantAspectRatio,
+							executor.payload,
+						)
 					}
 				}
 				if tt.wantQuality != "" {
@@ -666,7 +697,12 @@ func TestImagesGenerationsChecksCustomXAIPrefixAccessRule(t *testing.T) {
 
 func TestCollectImagesFromResponsesStreamFallsBackToPartialImage(t *testing.T) {
 	dataCh := make(chan []byte, 1)
-	dataCh <- []byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"partial_image_b64\":\"" + testPNGBase64 + "\",\"output_format\":\"png\",\"size\":\"1024x1024\",\"quality\":\"low\",\"background\":\"opaque\"}\n\n" +
+	dataCh <- []byte("data: {\"type\":\"response.image_generation_call.partial_image\"," +
+		"\"partial_image_b64\":" +
+		"\"" +
+		testPNGBase64 +
+		("\",\"output_format\":\"png\",\"size\":\"1024x1024\",\"quality\":\"low\",\"background\":\"opaque\"}\n" +
+			"\n") +
 		"data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[]}}\n\n")
 	close(dataCh)
 
@@ -710,7 +746,9 @@ func TestForwardImagesStreamIgnoresEmptyCompletedAfterPartialImage(t *testing.T)
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 
-	firstChunk := []byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"partial_image_b64\":\"abc\",\"output_format\":\"png\",\"partial_image_index\":0}\n\n" +
+	firstChunk := []byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"par" +
+		"tial_image_b64\":\"abc\",\"output_format\":\"png\",\"partial_image_ind" +
+		"ex\":0}\n\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[]}}\n\n")
 	dataCh := make(chan []byte)
 	close(dataCh)
@@ -757,7 +795,10 @@ func TestRewriteOpenAICompatImagesPayloadMaterializesURL(t *testing.T) {
 	h := NewAPIHandler(base)
 
 	out, err := h.rewriteOpenAICompatImagesPayload(
-		context.Background(), c, []byte(`{"created":1,"data":[{"url":"https://provider.example/image.png"}]}`), true,
+		context.Background(),
+		c,
+		[]byte(`{"created":1,"data":[{"url":"https://provider.example/image.png"}]}`),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("rewriteOpenAICompatImagesPayload: %v", err)
@@ -803,7 +844,10 @@ func TestRewriteOpenAICompatSSEFrameMaterializesURL(t *testing.T) {
 			break
 		}
 	}
-	if got := gjson.Get(payload, "data.0.url").String(); !strings.HasPrefix(got, "https://cpa.test/v1/artifacts/img_") {
+	if got := gjson.Get(payload, "data.0.url").String(); !strings.HasPrefix(
+		got,
+		"https://cpa.test/v1/artifacts/img_",
+	) {
 		t.Fatalf("rewritten SSE url = %q, want CPA artifact URL; payload=%s", got, payload)
 	}
 }
@@ -835,7 +879,11 @@ func TestForwardImagesStreamMaterializesCompletedImage(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 
-	firstChunk := []byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"" + testPNGBase64 + "\",\"output_format\":\"png\"}]}}\n\n")
+	firstChunk := []byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":12" +
+		("3,\"output\":[{\"type\":\"image_generation_call\",\"result\":" +
+			"\"") +
+		testPNGBase64 +
+		"\",\"output_format\":\"png\"}]}}\n\n")
 	dataCh := make(chan []byte)
 	close(dataCh)
 
@@ -866,7 +914,10 @@ func TestForwardImagesStreamMaterializesCompletedImage(t *testing.T) {
 		t.Fatalf("event = %q, want completed event", events[0])
 	}
 	_, eventPayload, _ := strings.Cut(events[0], ":")
-	if got := gjson.Get(eventPayload, "url").String(); !strings.HasPrefix(got, "https://cpa.test/v1/artifacts/img_") {
+	if got := gjson.Get(eventPayload, "url").String(); !strings.HasPrefix(
+		got,
+		"https://cpa.test/v1/artifacts/img_",
+	) {
 		t.Fatalf("url = %q, want CPA artifact URL; event=%s", got, events[0])
 	}
 	if got := gjson.Get(eventPayload, "artifact_id").String(); !strings.HasPrefix(got, "img_") {
@@ -887,7 +938,11 @@ func newImageStreamTestHandler(t *testing.T) (*APIHandler, *gin.Context, *httpte
 
 func TestInspectImageSSEFrameReadsNestedResponseFailure(t *testing.T) {
 	info := inspectImageSSEFrame(
-		[]byte("data: {\"type\":\"response.failed\",\"response\":{\"status_code\":429,\"error\":{\"message\":\"try later\"}}}\n\n"),
+		[]byte(
+			"data: {\"type\":\"response.failed\",\"response\":{\"status_code\":429," +
+				"\"error\":{\"message\":\"try " +
+				"later\"}}}\n\n",
+		),
 	)
 	if info.err == nil {
 		t.Fatal("inspectImageSSEFrame returned nil error")
@@ -1069,7 +1124,9 @@ func TestInspectImageSSEFrameAcceptsValidMultilineData(t *testing.T) {
 }
 
 func TestInspectImageSSEFrameAcceptsResponseIncomplete(t *testing.T) {
-	info := inspectImageSSEFrame([]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n"))
+	info := inspectImageSSEFrame(
+		[]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n"),
+	)
 	if info.err != nil {
 		t.Fatalf("frame error = %v, want nil", info.err)
 	}
@@ -1079,14 +1136,16 @@ func TestInspectImageSSEFrameAcceptsResponseIncomplete(t *testing.T) {
 }
 
 func TestExtractImagesFromResponsesIncomplete(t *testing.T) {
-	results, _, usage, metadata, err := extractImagesFromResponsesCompleted([]byte(`{
+	results, _, usage, metadata, err := extractImagesFromResponsesCompleted(
+		[]byte(`{
 		"type":"response.incomplete",
 		"response":{
 			"status":"incomplete",
 			"output":[{"type":"image_generation_call","result":"AA==","output_format":"png"}],
 			"tool_usage":{"image_gen":{"generated_images":1}}
 		}
-	}`))
+	}`),
+	)
 	if err != nil {
 		t.Fatalf("extractImagesFromResponsesCompleted() error = %v", err)
 	}
@@ -1153,7 +1212,8 @@ func TestForwardRawImageStreamRejectsResponseFailedEvent(t *testing.T) {
 		c,
 		nil,
 		nil,
-		[]byte("data: {\"type\":\"response.failed\",\"response\":{\"status_code\":503,\"error\":{\"message\":\"provider unavailable\"}}}\n\n"),
+		[]byte("data: {\"type\":\"response.failed\",\"response\":{\"status_code\":503,"+
+			"\"error\":{\"message\":\"provider unavailable\"}}}\n\n"),
 	)
 	if err == nil || !strings.Contains(err.Error(), "provider unavailable") {
 		t.Fatalf("forwardRawImageStream error = %v", err)
@@ -1170,14 +1230,19 @@ func TestForwardRawImageStreamRejectsResponseFailedEvent(t *testing.T) {
 func TestCollectImagesFromResponsesStreamLateErrorWins(t *testing.T) {
 	h, c, _ := newImageStreamTestHandler(t)
 	dataCh := make(chan []byte, 1)
-	dataCh <- []byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"" + testPNGBase64 + "\",\"output_format\":\"png\"}]}}\n\n")
+	dataCh <- []byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":12" +
+		("3,\"output\":[{\"type\":\"image_generation_call\",\"result\":" +
+			"\"") +
+		testPNGBase64 +
+		"\",\"output_format\":\"png\"}]}}\n\n")
 	close(dataCh)
 	errCh := make(chan *handlers.ErrorMessage, 1)
 	errCh <- &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New("late responses failure")}
 	close(errCh)
 
 	out, errMsg := h.collectImagesFromResponsesStream(context.Background(), c, dataCh, errCh, "url")
-	if errMsg == nil || errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "late responses failure") {
+	if errMsg == nil || errMsg.Error == nil ||
+		!strings.Contains(errMsg.Error.Error(), "late responses failure") {
 		t.Fatalf("collectImagesFromResponsesStream = (%s, %#v)", out, errMsg)
 	}
 	if out != nil {
@@ -1186,7 +1251,7 @@ func TestCollectImagesFromResponsesStreamLateErrorWins(t *testing.T) {
 }
 
 func TestForwardImagesStreamLateErrorSuppressesCompletedEvent(t *testing.T) {
-	h, c, _ := newImageStreamTestHandler(t)
+	h, c, recorder := newImageStreamTestHandler(t)
 	errCh := make(chan *handlers.ErrorMessage, 1)
 	errCh <- &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New("late responses failure")}
 	close(errCh)
@@ -1197,7 +1262,11 @@ func TestForwardImagesStreamLateErrorSuppressesCompletedEvent(t *testing.T) {
 		c,
 		nil,
 		errCh,
-		[]byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[{\"type\":\"image_generation_call\",\"result\":\""+testPNGBase64+"\",\"output_format\":\"png\"}]}}\n\n"),
+		[]byte("data: {\"type\":\"response.completed\",\"response\":{\"created_at\":12"+
+			("3,\"output\":[{\"type\":\"image_generation_call\",\"result\":"+
+				"\"")+
+			testPNGBase64+
+			"\",\"output_format\":\"png\"}]}}\n\n"),
 		"url",
 		"image_generation",
 		func(eventName string, dataJSON []byte) {
@@ -1207,20 +1276,21 @@ func TestForwardImagesStreamLateErrorSuppressesCompletedEvent(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "late responses failure") {
 		t.Fatalf("forwardImagesStream error = %v", err)
 	}
-	if len(events) != 1 || !strings.HasPrefix(events[0], "error:") {
-		t.Fatalf("events = %v, want only late error", events)
+	if len(events) != 0 || !strings.Contains(recorder.Body.String(), "event: error") {
+		t.Fatalf("events = %v, body = %q, want only the late error response", events, recorder.Body.String())
 	}
 }
 
 func TestForwardImagesStreamRequiresCompletion(t *testing.T) {
-	h, c, _ := newImageStreamTestHandler(t)
+	h, c, recorder := newImageStreamTestHandler(t)
 	var events []string
 	err := h.forwardImagesStream(
 		context.Background(),
 		c,
 		nil,
 		nil,
-		[]byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"partial_image_b64\":\"abc\",\"partial_image_index\":0}\n\n"),
+		[]byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"par"+
+			"tial_image_b64\":\"abc\",\"partial_image_index\":0}\n\n"),
 		"b64_json",
 		"image_generation",
 		func(eventName string, dataJSON []byte) {
@@ -1230,10 +1300,13 @@ func TestForwardImagesStreamRequiresCompletion(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "disconnected before completion") {
 		t.Fatalf("forwardImagesStream error = %v", err)
 	}
-	if len(events) != 2 || !strings.HasPrefix(
-		events[0], "image_generation.partial_image:",
-	) || !strings.HasPrefix(events[1], "error:") {
-		t.Fatalf("events = %v, want partial image followed by error", events)
+	if len(events) != 1 || !strings.HasPrefix(events[0], "image_generation.partial_image:") ||
+		!strings.Contains(recorder.Body.String(), "event: error") {
+		t.Fatalf(
+			"events = %v, body = %q, want partial image callback and error response",
+			events,
+			recorder.Body.String(),
+		)
 	}
 }
 

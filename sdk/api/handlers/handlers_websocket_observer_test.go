@@ -109,11 +109,13 @@ func TestExecuteWithAuthManagerWiresWebSocketResponseObserver(t *testing.T) {
 		if opts.WebSocketResponseObserver == nil {
 			t.Fatal("WebSocketResponseObserver = nil")
 		}
-		opts.WebSocketResponseObserver(ctx, coreexecutor.WebSocketResponseEvent{
-			Provider:  "codex",
-			EventType: "response.created",
-			Payload:   []byte(`{"type":"response.created"}`),
-		})
+		opts.WebSocketResponseObserver(
+			ctx, coreexecutor.WebSocketResponseEvent{
+				Provider:  "codex",
+				EventType: "response.created",
+				Payload:   []byte(`{"type":"response.created"}`),
+			},
+		)
 		return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 	}
 	handler := newLifecycleHandler(t, "handler-websocket-observer", executor)

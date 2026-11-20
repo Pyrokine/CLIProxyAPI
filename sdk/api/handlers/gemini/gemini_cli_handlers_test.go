@@ -43,6 +43,7 @@ func TestGeminiCLIHandlerAllowsEndpointConfigBeforeLocalCheck(t *testing.T) {
 	handler := NewCLIAPIHandler(base)
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
+	//goland:noinspection HttpUrlsUsage
 	req := httptest.NewRequest(
 		http.MethodPost, "http://example.com/v1internal:generateContent", strings.NewReader(`{}`),
 	)
@@ -89,6 +90,7 @@ func TestGeminiCLILocalRequestRequiresLoopbackRemoteAndHost(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
+				//goland:noinspection HttpUrlsUsage
 				req := httptest.NewRequest(http.MethodPost, "http://"+tt.host+"/v1internal:generateContent", nil)
 				req.RemoteAddr = tt.remoteAddr
 				req.Host = tt.host

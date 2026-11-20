@@ -57,23 +57,27 @@ func TestBuildOpenAIResponsesStreamFailedChunkTimeoutIsRetryable(t *testing.T) {
 		{http.StatusBadRequest, "invalid_request_error", "invalid_request_error"},
 		{http.StatusBadGateway, "server_error", "internal_server_error"},
 	} {
-		t.Run(http.StatusText(tt.status), func(t *testing.T) {
-			chunk := BuildOpenAIResponsesStreamFailedChunk(tt.status, "connection closed", 0)
-			var payload struct {
-				Response struct {
-					Error struct {
-						Type string `json:"type"`
-						Code string `json:"code"`
-					} `json:"error"`
-				} `json:"response"`
-			}
-			if err := json.Unmarshal(chunk, &payload); err != nil {
-				t.Fatal(err)
-			}
-			if payload.Response.Error.Type != tt.wantType || payload.Response.Error.Code != tt.wantCode {
-				t.Fatalf("response.error = %+v, want type %q code %q", payload.Response.Error, tt.wantType, tt.wantCode)
-			}
-		})
+		t.Run(
+			http.StatusText(tt.status), func(t *testing.T) {
+				chunk := BuildOpenAIResponsesStreamFailedChunk(tt.status, "connection closed", 0)
+				var payload struct {
+					Response struct {
+						Error struct {
+							Type string `json:"type"`
+							Code string `json:"code"`
+						} `json:"error"`
+					} `json:"response"`
+				}
+				if err := json.Unmarshal(chunk, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.Response.Error.Type != tt.wantType || payload.Response.Error.Code != tt.wantCode {
+					t.Fatalf(
+						"response.error = %+v, want type %q code %q", payload.Response.Error, tt.wantType, tt.wantCode,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -122,47 +126,63 @@ func TestResponsesStreamErrorSequenceNumberPreservesIntegerMetadata(t *testing.T
 		{"error", BuildOpenAIResponsesStreamErrorChunk},
 		{"failed", BuildOpenAIResponsesStreamFailedChunk},
 	} {
-		t.Run(builder.name, func(t *testing.T) {
-			for _, test := range []struct {
-				name, body string
-				caller     int
-				want       int64
-			}{
-				{"nested HTTP", `{"error":{"code":"custom","message":"blocked"},"sequence_number":9}`, 0, 9},
-				{"typed error", `{"type":"error","code":"custom","message":"blocked","sequence_number":17}`, 0, 17},
-				{"failed response", `{"type":"response.failed","sequence_number":12,"response":{"error":{"message":"blocked"}}}`, 0, 12},
-				{"large integer", `{"type":"error","message":"blocked","sequence_number":9007199254740993}`, 0, 9007199254740993},
-				{"caller precedence", `{"error":{"message":"blocked"},"sequence_number":9}`, 7, 7},
-				{"negative caller", `{"error":{"message":"blocked"},"sequence_number":9}`, -1, 9},
-				{"negative upstream", `{"type":"error","message":"blocked","sequence_number":-2}`, 0, 0},
-				{"fractional upstream", `{"type":"error","message":"blocked","sequence_number":1.5}`, 0, 0},
-				{"out of range", `{"type":"error","message":"blocked","sequence_number":9223372036854775808}`, 0, 0},
-				{"string upstream", `{"type":"error","message":"blocked","sequence_number":"9"}`, 0, 0},
-			} {
-				t.Run(test.name, func(t *testing.T) {
-					want := test.want
-					if int64(int(want)) != want {
-						want = 0
-					}
-					body := builder.build(http.StatusBadRequest, test.body, test.caller)
-					var payload struct {
-						SequenceNumber int64 `json:"sequence_number"`
-					}
-					if err := json.Unmarshal(body, &payload); err != nil {
-						t.Fatal(err)
-					}
-					if payload.SequenceNumber != want {
-						t.Fatalf("sequence_number = %d, want %d; body=%s", payload.SequenceNumber, want, body)
-					}
-				})
-			}
-		})
+		t.Run(
+			builder.name, func(t *testing.T) {
+				for _, test := range []struct {
+					name, body string
+					caller     int
+					want       int64
+				}{
+					{"nested HTTP", `{"error":{"code":"custom","message":"blocked"},"sequence_number":9}`, 0, 9},
+					{"typed error", `{"type":"error","code":"custom","message":"blocked","sequence_number":17}`, 0, 17},
+					{
+						"failed response",
+						`{"type":"response.failed","sequence_number":12,"response":{"error":{"message":"blocked"}}}`, 0,
+						12,
+					},
+					{
+						"large integer", `{"type":"error","message":"blocked","sequence_number":9007199254740993}`, 0,
+						9007199254740993,
+					},
+					{"caller precedence", `{"error":{"message":"blocked"},"sequence_number":9}`, 7, 7},
+					{"negative caller", `{"error":{"message":"blocked"},"sequence_number":9}`, -1, 9},
+					{"negative upstream", `{"type":"error","message":"blocked","sequence_number":-2}`, 0, 0},
+					{"fractional upstream", `{"type":"error","message":"blocked","sequence_number":1.5}`, 0, 0},
+					{
+						"out of range", `{"type":"error","message":"blocked","sequence_number":9223372036854775808}`, 0,
+						0,
+					},
+					{"string upstream", `{"type":"error","message":"blocked","sequence_number":"9"}`, 0, 0},
+				} {
+					t.Run(
+						test.name, func(t *testing.T) {
+							want := test.want
+							if int64(int(want)) != want {
+								want = 0
+							}
+							body := builder.build(http.StatusBadRequest, test.body, test.caller)
+							var payload struct {
+								SequenceNumber int64 `json:"sequence_number"`
+							}
+							if err := json.Unmarshal(body, &payload); err != nil {
+								t.Fatal(err)
+							}
+							if payload.SequenceNumber != want {
+								t.Fatalf("sequence_number = %d, want %d; body=%s", payload.SequenceNumber, want, body)
+							}
+						},
+					)
+				}
+			},
+		)
 	}
 }
 
 func TestResponsesStreamErrorPreservesIntegerDetails(t *testing.T) {
-	body := BuildOpenAIResponsesStreamErrorChunk(http.StatusBadRequest,
-		`{"type":"error","message":"limit","code":9007199254740993}`, 0)
+	body := BuildOpenAIResponsesStreamErrorChunk(
+		http.StatusBadRequest,
+		`{"type":"error","message":"limit","code":9007199254740993}`, 0,
+	)
 	var ordinary struct {
 		Code string `json:"code"`
 	}
@@ -172,8 +192,12 @@ func TestResponsesStreamErrorPreservesIntegerDetails(t *testing.T) {
 	if ordinary.Code != "9007199254740993" {
 		t.Fatalf("error code = %q, want exact integer; body=%s", ordinary.Code, body)
 	}
-	body = BuildOpenAIResponsesStreamFailedChunk(http.StatusBadRequest,
-		`{"error":{"type":"invalid_request_error","message":"limit","code":9007199254740993,"retry_after_ms":9007199254740993,"param":null}}`, 0)
+	body = BuildOpenAIResponsesStreamFailedChunk(
+		http.StatusBadRequest,
+		`{"error":{"type":"invalid_request_error","message":"limit","code":9007`+
+			`199254740993,"retry_after_ms":9007199254740993,"param":null}}`,
+		0,
+	)
 	var failed struct {
 		Response struct {
 			Error map[string]json.RawMessage `json:"error"`

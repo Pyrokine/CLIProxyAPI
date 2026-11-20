@@ -3,6 +3,8 @@
 // model listing, content generation, streaming content generation, and token counting.
 // It serves as a proxy layer between clients and the constant.Gemini backend service,
 // handling request translation, client management, and response processing.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (
@@ -71,9 +73,11 @@ func (h *APIHandler) GeminiModels(c *gin.Context) {
 		}
 		normalizedModels = append(normalizedModels, normalizedModel)
 	}
-	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
-		"models": normalizedModels,
-	})
+	h.WriteModelListResponse(
+		c, h.HandlerType(), gin.H{
+			"models": normalizedModels,
+		},
+	)
 }
 
 // GeminiGetHandler handles GET requests for specific constant.Gemini model information.
@@ -205,8 +209,8 @@ func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName strin
 		handlers.SetSSEHeaders(c)
 	}
 
-	// Peek at the first chunk
-	for {
+	// 首块到达前保留错误通道，等待两个通道分别结束
+	for dataChan != nil || errChan != nil {
 		select {
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
@@ -229,13 +233,8 @@ func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName strin
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Closed without data
-				if alt == "" {
-					setSSEHeaders()
-				}
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				cliCancel(handlers.DeliverStreamResponse(c.Writer, flusher, func() error { return nil }))
-				return
+				dataChan = nil
+				continue
 			}
 
 			// Success! Set headers.
@@ -250,6 +249,12 @@ func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName strin
 			return
 		}
 	}
+
+	if alt == "" {
+		setSSEHeaders()
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	cliCancel(handlers.DeliverStreamResponse(c.Writer, flusher, func() error { return nil }))
 }
 
 // handleCountTokens handles token counting requests for constant.Gemini models.
@@ -355,7 +360,7 @@ func forwardStream(
 				if errMsg.Error != nil && errMsg.Error.Error() != "" {
 					errText = errMsg.Error.Error()
 				}
-				body := handlers.BuildErrorResponseBody(status, errText)
+				body := handlers.BuildErrorResponseBodyWithError(status, errText, errMsg.Error)
 				if alt == "" {
 					return handlers.WriteStreamBytes(
 						c.Writer, []byte("event: error\ndata: "), body, []byte("\n\n"),

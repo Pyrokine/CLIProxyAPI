@@ -3,6 +3,8 @@ package handlers
 import "net/http"
 
 // APIHandler defines the interface that all API handlers must implement.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type APIHandler interface {
 	// HandlerType returns the type identifier for this API handler.
 	HandlerType() string

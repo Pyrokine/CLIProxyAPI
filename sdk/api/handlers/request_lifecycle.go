@@ -25,11 +25,13 @@ type requestLifecycleSkipHost interface {
 }
 
 type requestLifecycleTracker struct {
-	once         sync.Once
-	ctx          context.Context
-	host         PluginInterceptorHost
-	skipPluginID string
-	completion   pluginapi.RequestCompletion
+	once            sync.Once
+	ctx             context.Context
+	observationCtx  context.Context
+	stopObservation context.CancelFunc
+	host            PluginInterceptorHost
+	skipPluginID    string
+	completion      pluginapi.RequestCompletion
 }
 
 func newExecutionRequestID() string {
@@ -49,10 +51,16 @@ func (h *BaseAPIHandler) newRequestLifecycleTracker(
 	if requestID == "" {
 		requestID = newExecutionRequestID()
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	observationCtx, stopObservation := context.WithCancel(ctx)
 	return &requestLifecycleTracker{
-		ctx:          ctx,
-		host:         h.interceptorHost(),
-		skipPluginID: skipPluginID,
+		ctx:             ctx,
+		observationCtx:  observationCtx,
+		stopObservation: stopObservation,
+		host:            h.interceptorHost(),
+		skipPluginID:    skipPluginID,
 		completion: pluginapi.RequestCompletion{
 			RequestID:      requestID,
 			TraceID:        logging.GetRequestID(ctx),
@@ -90,6 +98,9 @@ func (t *requestLifecycleTracker) complete(
 	}
 	t.once.Do(
 		func() {
+			if t.stopObservation != nil {
+				t.stopObservation()
+			}
 			completion := t.completion
 			completion.Metadata = pluginExecutionMetadata(completion.Metadata)
 			completion.Outcome = outcome
@@ -179,7 +190,7 @@ func executionErrorMessage(err error) *ErrorMessage {
 			status = http.StatusInternalServerError
 		}
 	}
-	if body, direct := clienterror.ResponseBodyFromError(err); direct {
+	if body, direct := clienterror.ResponseBodyFromError(err); direct && !coreauth.IsTerminalAuthError(err) {
 		contentType := http.DetectContentType(body)
 		if json.Valid(body) {
 			contentType = "application/json"

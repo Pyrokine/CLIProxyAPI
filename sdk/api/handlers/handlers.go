@@ -67,6 +67,7 @@ func ReadRequestBodyWithLimit(c *gin.Context, maxDecodedBytes int64) ([]byte, er
 	return decoded, nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func DecodeRequestBody(raw []byte, contentEncoding string) ([]byte, error) {
 	return DecodeRequestBodyWithLimit(raw, contentEncoding, maxDecodedRequestBodyBytes)
 }
@@ -156,6 +157,9 @@ type ErrorDetail struct {
 
 	// Code is a short code identifying the error, if applicable.
 	Code string `json:"code,omitempty"`
+
+	// Retryable 在已知失败需要人工处理时明确为 false
+	Retryable *bool `json:"retryable,omitempty"`
 }
 
 const idempotencyKeyMetadataKey = "idempotency_key"
@@ -178,11 +182,22 @@ type disallowFreeAuthContextKey struct{}
 type requireResponsesContinuationContextKey struct{}
 
 // PluginInterceptorHost applies plugin interceptors around handler execution.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PluginInterceptorHost interface {
-	InterceptRequestBeforeAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
-	InterceptRequestAfterAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
+	InterceptRequestBeforeAuth(
+		context.Context,
+		pluginapi.RequestInterceptRequest,
+	) pluginapi.RequestInterceptResponse
+	InterceptRequestAfterAuth(
+		context.Context,
+		pluginapi.RequestInterceptRequest,
+	) pluginapi.RequestInterceptResponse
 	InterceptResponse(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
-	InterceptStreamChunk(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
+	InterceptStreamChunk(
+		context.Context,
+		pluginapi.StreamChunkInterceptRequest,
+	) pluginapi.StreamChunkInterceptResponse
 }
 
 type pluginInterceptorSkipHost interface {
@@ -273,7 +288,10 @@ func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) cont
 }
 
 // WithSelectedAuthInfoCallback returns a child context that receives non-secret selected auth details.
-func WithSelectedAuthInfoCallback(ctx context.Context, callback func(coreexecutor.SelectedAuthInfo)) context.Context {
+func WithSelectedAuthInfoCallback(
+	ctx context.Context,
+	callback func(coreexecutor.SelectedAuthInfo),
+) context.Context {
 	if callback == nil {
 		return ctx
 	}
@@ -330,6 +348,11 @@ func disallowFreeAuthFromContext(ctx context.Context) bool {
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // Valid JSON error text retains its payload and is compacted for single-line SSE data.
 func BuildErrorResponseBody(status int, errText string) []byte {
+	return BuildErrorResponseBodyWithError(status, errText, nil)
+}
+
+// BuildErrorResponseBodyWithError 保留已分类的上游认证失败及其重试标记
+func BuildErrorResponseBodyWithError(status int, errText string, cause error) []byte {
 	if status <= 0 {
 		status = http.StatusInternalServerError
 	}
@@ -337,8 +360,13 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 		errText = http.StatusText(status)
 	}
 
-	trimmed := strings.TrimSpace(errText)
-	if trimmed != "" {
+	terminal := coreauth.IsTerminalAuthError(cause)
+	if terminal {
+		errText = "Upstream credentials require reauthentication: [REDACTED]"
+		if diagnostic := logging.SafeErrorDiagnostic(cause); diagnostic != "" {
+			errText += " (" + diagnostic + ")"
+		}
+	} else if trimmed := strings.TrimSpace(errText); trimmed != "" {
 		var compact bytes.Buffer
 		if err := json.Compact(&compact, []byte(trimmed)); err == nil {
 			return compact.Bytes()
@@ -370,12 +398,18 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 		}
 	}
 
+	var retryable *bool
+	if terminal {
+		errType, code = "authentication_error", "upstream_authentication_required"
+		retryable = new(false)
+	}
 	payload, err := json.Marshal(
 		ErrorResponse{
 			Error: ErrorDetail{
-				Message: errText,
-				Type:    errType,
-				Code:    code,
+				Message:   errText,
+				Type:      errType,
+				Code:      code,
+				Retryable: retryable,
 			},
 		},
 	)
@@ -403,7 +437,8 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 
 // NonStreamingKeepAliveInterval returns the keep-alive interval for non-streaming responses.
 // Returning 0 disables keep-alives (default when unset).
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func NonStreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := 0
 	if cfg != nil {
@@ -416,7 +451,8 @@ func NonStreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 }
 
 // StreamingBootstrapRetries returns how many times a streaming request may be retried before any bytes are sent.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	retries := defaultStreamingBootstrapRetries
 	if cfg != nil {
@@ -430,6 +466,8 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
 // Default is false.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
 	return cfg != nil && cfg.PassthroughHeaders
 }
@@ -464,6 +502,8 @@ func extractSessionIDsFromRequest(request *http.Request) (string, string) {
 }
 
 // EnrichContextWithSessionHierarchy records the session hierarchy extracted from the current request state.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func EnrichContextWithSessionHierarchy(
 	ctx context.Context,
 	headers http.Header,
@@ -497,7 +537,8 @@ func enrichContextWithSessionHierarchy(
 		return util.WithInferredSessionID(ctx, clientMetadata.SessionID)
 	}
 	if clientMetadata.SessionID != "" || clientMetadata.ParentSessionID != "" || clientMetadata.NodeKind != "" ||
-		clientMetadata.IsFork || clientMetadata.IsCompaction || util.SessionIDFromContext(ctx) != "" {
+		clientMetadata.IsFork || clientMetadata.IsCompaction ||
+		util.SessionIDFromContext(ctx) != "" {
 		clientMetadata.SessionID = ""
 		clientMetadata.ParentSessionID = ""
 		clientMetadata.NodeKind = ""
@@ -541,7 +582,8 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	requestPath := ""
 	var ginCtx *gin.Context
 	if ctx != nil {
-		if currentGinCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && currentGinCtx != nil && currentGinCtx.Request != nil {
+		if currentGinCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && currentGinCtx != nil &&
+			currentGinCtx.Request != nil {
 			ginCtx = currentGinCtx
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 			requestPath = strings.TrimSpace(ginCtx.FullPath())
@@ -555,6 +597,11 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 
 	meta := make(map[string]any)
+	if ctx != nil {
+		if selectionModel, _ := ctx.Value(protocolAuthSelectionModelContextKey{}).(string); selectionModel != "" {
+			meta[coreexecutor.AuthSelectionModelMetadataKey] = selectionModel
+		}
+	}
 	meta[coreexecutor.ServiceTierMetadataKey] = coreusage.ServiceTierFromContext(ctx)
 	if key != "" {
 		meta[idempotencyKeyMetadataKey] = key
@@ -611,6 +658,36 @@ func requestCallerScope(ginCtx *gin.Context) string {
 		return ""
 	}
 	return coresession.CallerScope(fmt.Sprint(value))
+}
+
+func setImageCredentialRequirement(req coreexecutor.Request, opts *coreexecutor.Options) {
+	if opts.SourceFormat.String() != "openai-response" && opts.SourceFormat.String() != "codex" {
+		return
+	}
+	for _, tool := range gjson.GetBytes(req.Payload, "tools").Array() {
+		model := canonicalImageOnlyModel(tool.Get("model").String())
+		if tool.Get("type").String() != "image_generation" || !registry.IsOpenAIImageModel(model) ||
+			registry.IsCodexImageModel(model) {
+			continue
+		}
+		if opts.Metadata == nil {
+			opts.Metadata = make(map[string]any)
+		}
+		opts.Metadata[coreexecutor.RequireAPIKeyAuthMetadataKey] = true
+		return
+	}
+}
+
+func imageCredentialSelectionError(err error, opts coreexecutor.Options) error {
+	required, _ := opts.Metadata[coreexecutor.RequireAPIKeyAuthMetadataKey].(bool)
+	var authErr *coreauth.Error
+	if required && errors.As(err, &authErr) && authErr != nil &&
+		(authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable") {
+		return fmt.Errorf(
+			"GPT Image 2.6 requires an available OpenAI API-key credential allowed by this request: %w", err,
+		)
+	}
+	return err
 }
 
 func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {
@@ -748,6 +825,7 @@ type BaseAPIHandler struct {
 
 	apiKeyPolicyMu    sync.RWMutex
 	apiKeyPolicyStore coreusage.APIKeyReservationStore
+	videoTaskStore    VideoTaskStore
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -868,7 +946,10 @@ func isNilPluginInterceptorHost(host PluginInterceptorHost) bool {
 	}
 }
 
-func (h *BaseAPIHandler) FilterModelsForCurrentAPIKey(c *gin.Context, models []map[string]any) []map[string]any {
+func (h *BaseAPIHandler) FilterModelsForCurrentAPIKey(
+	c *gin.Context,
+	models []map[string]any,
+) []map[string]any {
 	if h == nil || h.ConfigSnapshot() == nil || len(models) == 0 {
 		return models
 	}
@@ -901,10 +982,14 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 	}
 	body, errMarshal := json.Marshal(payload)
 	if errMarshal != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: ErrorDetail{
-			Message: "Failed to encode model catalog",
-			Type:    "server_error",
-		}})
+		c.JSON(
+			http.StatusInternalServerError, ErrorResponse{
+				Error: ErrorDetail{
+					Message: "Failed to encode model catalog",
+					Type:    "server_error",
+				},
+			},
+		)
 		return
 	}
 	h.WriteModelListResponseBody(c, sourceFormat, body)
@@ -952,7 +1037,10 @@ func (h *BaseAPIHandler) WriteModelListResponseBody(c *gin.Context, sourceFormat
 		}
 		if err := json.Unmarshal(body, &catalog); err != nil {
 			lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusBadGateway, err)
-			c.JSON(http.StatusBadGateway, ErrorResponse{Error: ErrorDetail{Message: "Invalid model catalog", Type: "api_error"}})
+			c.JSON(
+				http.StatusBadGateway,
+				ErrorResponse{Error: ErrorDetail{Message: "Invalid model catalog", Type: "api_error"}},
+			)
 			return
 		}
 		var selected json.RawMessage
@@ -974,9 +1062,13 @@ func (h *BaseAPIHandler) WriteModelListResponseBody(c *gin.Context, sourceFormat
 		}
 		if selected == nil {
 			lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusNotFound, nil)
-			c.JSON(http.StatusNotFound, ErrorResponse{Error: ErrorDetail{
-				Message: "Model not found", Type: "invalid_request_error", Code: "model_not_found",
-			}})
+			c.JSON(
+				http.StatusNotFound, ErrorResponse{
+					Error: ErrorDetail{
+						Message: "Model not found", Type: "invalid_request_error", Code: "model_not_found",
+					},
+				},
+			)
 			return
 		}
 		body = selected
@@ -1114,7 +1206,8 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 // Parameters:
 //   - handler: The API handler associated with the request.
 //   - c: The Gin context of the current request.
-//   - ctx: The parent context (caller values/deadlines are preserved; request context adds cancellation and request ID).
+//   - ctx: The parent context preserves caller values and deadlines.
+//     The request context adds cancellation and the request ID.
 //
 // Returns:
 //   - context.Context: The new context with cancellation and embedded values.
@@ -1207,7 +1300,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 					return
 				}
 			}
-			if existingBytes := requestLogContextBytes(c, "API_RESPONSE"); len(bytes.TrimSpace(existingBytes)) > 0 {
+			if existingBytes := requestLogContextBytes(c, "API_RESPONSE"); len(
+				bytes.TrimSpace(existingBytes),
+			) > 0 {
 				switch params[0].(type) {
 				case error, string:
 					return
@@ -1238,8 +1333,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 	}
 }
 
-// StartNonStreamingKeepAlive emits blank lines every 5 seconds while waiting for a non-streaming response.
-// It returns a stop function that must be called before writing the final response.
+// StartNonStreamingKeepAlive 按配置间隔发送空行，返回的停止函数应在写入最终响应前调用
 func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.Context) func() {
 	if h == nil || c == nil {
 		return func() {}
@@ -1354,7 +1448,18 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(
 	alt string,
 ) ([]byte, http.Header, *ErrorMessage) {
 	return h.executeNonStream(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, false, nil, nil, "", h.AuthManager.Execute,
+		ctx,
+		handlerType,
+		handlerType,
+		modelName,
+		rawJSON,
+		alt,
+		false,
+		false,
+		nil,
+		nil,
+		"",
+		h.AuthManager.Execute,
 	)
 }
 
@@ -1366,7 +1471,18 @@ func (h *BaseAPIHandler) ExecuteImageWithAuthManager(
 	alt string,
 ) ([]byte, http.Header, *ErrorMessage) {
 	return h.executeNonStream(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, true, false, nil, nil, "", h.AuthManager.Execute,
+		ctx,
+		handlerType,
+		handlerType,
+		modelName,
+		rawJSON,
+		alt,
+		true,
+		false,
+		nil,
+		nil,
+		"",
+		h.AuthManager.Execute,
 	)
 }
 
@@ -1379,7 +1495,18 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(
 	alt string,
 ) ([]byte, http.Header, *ErrorMessage) {
 	return h.executeNonStream(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, false, nil, nil, "", h.AuthManager.ExecuteCount,
+		ctx,
+		handlerType,
+		handlerType,
+		modelName,
+		rawJSON,
+		alt,
+		false,
+		false,
+		nil,
+		nil,
+		"",
+		h.AuthManager.ExecuteCount,
 	)
 }
 
@@ -1407,6 +1534,9 @@ func (h *BaseAPIHandler) executeNonStream(
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	if internalExecution {
+		reqMeta[modelExecutionMetadataSourceKey] = modelExecutionInternalSource
+	}
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
@@ -1429,6 +1559,7 @@ func (h *BaseAPIHandler) executeNonStream(
 	lifecycle := h.newRequestLifecycleTracker(
 		ctx, executionID, handlerType, normalizedModel, modelName, false, reqMeta, skipPluginID,
 	)
+	defer lifecycle.stopObservation()
 	afterAuthCapture := &requestAfterAuthCapture{}
 	opts := coreexecutor.Options{
 		Stream:                      false,
@@ -1442,7 +1573,8 @@ func (h *BaseAPIHandler) executeNonStream(
 		WebSocketResponseObserver:   h.webSocketResponseObserver(lifecycle, skipPluginID),
 		ProxyURL:                    coreexecutor.RequestProxyURL(ctx),
 
-		Metadata: reqMeta}
+		Metadata: reqMeta,
+	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	var termination *ErrorMessage
 	req, opts, termination = h.applyRequestInterceptorsBeforeAuth(
@@ -1453,18 +1585,27 @@ func (h *BaseAPIHandler) executeNonStream(
 		lifecycle.completeError(ctx, termination)
 		return nil, nil, termination
 	}
+	setImageCredentialRequirement(req, &opts)
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := execFn(ctx, providers, req, opts)
 	if err != nil {
+		err = imageCredentialSelectionError(err, opts)
 		reservation.settleError(ctx, err)
 		errMsg = executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		return nil, nil, errMsg
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
-	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
+	ctx = enrichContextWithSessionHierarchy(
+		ctx,
+		executedOpts.Headers,
+		executedReq.Payload,
+		executedOpts.Metadata,
+	)
 	rawResponseHeaders := cloneHeader(resp.Headers)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, internalExecution || PassthroughHeadersEnabled(h.ConfigSnapshot()))
+	responseHeaders := downstreamHeadersFromExecutor(
+		rawResponseHeaders, internalExecution || PassthroughHeadersEnabled(h.ConfigSnapshot()),
+	)
 	body, responseHeaders := h.applyResponseInterceptors(
 		ctx, responseType, normalizedModel, modelName, executedOpts, rawResponseHeaders, responseHeaders,
 		executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, lifecycle.requestID(),
@@ -1483,7 +1624,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(
 	rawJSON []byte,
 	alt string,
 ) (<-chan []byte, http.Header, <-chan *ErrorMessage) {
-	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, false, false, nil, nil, "")
+	return h.executeStreamWithAuthManager(
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, false, nil, nil, "",
+	)
 }
 
 // ExecuteStreamChunksWithAuthManager preserves per-chunk delivery acknowledgements.
@@ -1500,13 +1643,17 @@ func (h *BaseAPIHandler) ExecuteStreamChunksWithAuthManager(
 }
 
 // ExecuteImageStreamWithAuthManager executes a streaming image request via the core auth manager.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(
 	ctx context.Context,
 	handlerType, modelName string,
 	rawJSON []byte,
 	alt string,
 ) (<-chan []byte, http.Header, <-chan *ErrorMessage) {
-	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, true, false, nil, nil, "")
+	return h.executeStreamWithAuthManager(
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, true, false, nil, nil, "",
+	)
 }
 
 // ExecuteImageStreamChunksWithAuthManager preserves image-stream delivery acknowledgements.
@@ -1605,6 +1752,9 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		return nil, nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	if internalExecution {
+		reqMeta[modelExecutionMetadataSourceKey] = modelExecutionInternalSource
+	}
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
@@ -1627,6 +1777,11 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 	lifecycle := h.newRequestLifecycleTracker(
 		ctx, executionID, handlerType, normalizedModel, modelName, true, reqMeta, skipPluginID,
 	)
+	defer func() {
+		if !handedOff {
+			lifecycle.stopObservation()
+		}
+	}()
 	afterAuthCapture := &requestAfterAuthCapture{}
 	opts := coreexecutor.Options{
 		Stream:                      true,
@@ -1640,7 +1795,8 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		WebSocketResponseObserver:   h.webSocketResponseObserver(lifecycle, skipPluginID),
 		ProxyURL:                    coreexecutor.RequestProxyURL(ctx),
 
-		Metadata: reqMeta}
+		Metadata: reqMeta,
+	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	var termination *ErrorMessage
 	req, opts, termination = h.applyRequestInterceptorsBeforeAuth(
@@ -1654,9 +1810,11 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		close(errChan)
 		return nil, nil, errChan
 	}
+	setImageCredentialRequirement(req, &opts)
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
+		err = imageCredentialSelectionError(err, opts)
 		errChan := make(chan *ErrorMessage, 1)
 		reservation.settleError(ctx, err)
 		errMsg = executionErrorMessage(err)
@@ -1669,7 +1827,12 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		return afterAuthCapture.apply(req, opts)
 	}
 	executedReq, executedOpts := executedRequest()
-	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
+	ctx = enrichContextWithSessionHierarchy(
+		ctx,
+		executedOpts.Headers,
+		executedReq.Payload,
+		executedOpts.Metadata,
+	)
 	passthroughHeadersEnabled := internalExecution || PassthroughHeadersEnabled(h.ConfigSnapshot())
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
@@ -1782,6 +1945,26 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 					(ctx != nil && ctx.Err() != nil && errors.Is(completionErr, ctx.Err()))) {
 				completionOutcome = pluginapi.RequestCompletionCanceled
 				completionStatus = 0
+			}
+			if !requireTransportTerminal {
+				if deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx); tracked &&
+					(completionErr == nil || errors.Is(completionErr, context.Canceled)) &&
+					completionOutcome != pluginapi.RequestCompletionRejected {
+					switch {
+					case deliveryErr == nil:
+						completionOutcome = pluginapi.RequestCompletionSucceeded
+						completionStatus, completionErr = http.StatusOK, nil
+					case errors.Is(deliveryErr, context.Canceled),
+						errors.Is(deliveryErr, context.DeadlineExceeded):
+						completionOutcome = pluginapi.RequestCompletionCanceled
+						completionStatus, completionErr = 0, deliveryErr
+					default:
+						completionOutcome = pluginapi.RequestCompletionFailed
+						completionStatus, completionErr = executionErrorMessage(
+							deliveryErr,
+						).StatusCode, deliveryErr
+					}
+				}
 			}
 			lifecycle.complete(completionOutcome, completionStatus, completionErr)
 		}()
@@ -1920,7 +2103,9 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 					}
 					if !terminalObserved {
 						reservation.markUnknown(ctx)
-						if requireTransportTerminal {
+						if ctx != nil && ctx.Err() != nil {
+							completeCancellation()
+						} else if requireTransportTerminal {
 							completionOutcome = pluginapi.RequestCompletionFailed
 							completionStatus = http.StatusBadGateway
 							completionErr = errStreamClosedBeforeTransportTerminal
@@ -2498,6 +2683,12 @@ func (h *BaseAPIHandler) webSocketResponseObserver(
 	var openCallback sync.Once
 	var callback pluginapi.WebSocketResponseCallback
 	return func(ctx context.Context, event coreexecutor.WebSocketResponseEvent) {
+		if lifecycle != nil && lifecycle.observationCtx != nil {
+			ctx = lifecycle.observationCtx
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return
+		}
 		if lifecycle != nil {
 			if event.RequestID == "" {
 				event.RequestID = lifecycle.requestID()
@@ -2521,9 +2712,11 @@ func (h *BaseAPIHandler) webSocketResponseObserver(
 			Metadata:       pluginExecutionMetadata(event.Metadata),
 		}
 		if hasCallbackHost {
-			openCallback.Do(func() {
-				callback, _ = callbackHost.OpenWebSocketResponseCallback(ctx, skipPluginID)
-			})
+			openCallback.Do(
+				func() {
+					callback, _ = callbackHost.OpenWebSocketResponseCallback(ctx, skipPluginID)
+				},
+			)
 			if callback != nil {
 				callback(pluginEvent)
 			}
@@ -2669,14 +2862,17 @@ func supportsContext1M(modelName string, providers []string) bool {
 	if baseModel == "" {
 		return false
 	}
+	foundMetadata := false
 	for _, provider := range providers {
-		info := registry.LookupModelInfo(baseModel, strings.TrimSpace(provider))
-		if info != nil {
-			return info.ContextLength >= 1_000_000
+		if info := registry.LookupModelInfo(baseModel, strings.TrimSpace(provider)); info != nil {
+			foundMetadata = true
+			if coreauth.ModelSupportsContext1M(info) {
+				return true
+			}
 		}
 	}
-	if info := registry.LookupStaticModelInfo(baseModel); info != nil {
-		return info.ContextLength >= 1_000_000
+	if !foundMetadata {
+		return coreauth.ModelSupportsContext1M(registry.LookupStaticModelInfo(baseModel))
 	}
 	return false
 }
@@ -2698,10 +2894,14 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (
 	normalizedModel string,
 	err *ErrorMessage,
 ) {
-	return h.getRequestDetailsWithOptions(modelName, false)
+	return h.getRequestDetailsWithOptions(modelName, false, "")
 }
 
-func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel bool) (
+func (h *BaseAPIHandler) getRequestDetailsWithOptions(
+	modelName string,
+	allowImageModel bool,
+	authSelectionModel string,
+) (
 	providers []string,
 	normalizedModel string,
 	err *ErrorMessage,
@@ -2726,34 +2926,42 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		return nil, "", errMsg
 	}
 
-	providers = util.GetProviderName(baseModel)
-	if len(providers) == 0 && allowImageModel {
-		if registeredModel := registry.GetGlobalRegistry().ResolveModelIDCaseInsensitive(baseModel); registeredModel != "" {
-			providers = util.GetProviderName(registeredModel)
-			if len(providers) > 0 {
-				resolvedModelName = registeredModel
+	if selectionModel := strings.TrimSpace(authSelectionModel); selectionModel != "" {
+		providers, _, err = h.getRequestDetailsWithOptions(selectionModel, allowImageModel, "")
+		if err != nil {
+			return nil, "", err
+		}
+	} else {
+		providers = util.GetProviderName(baseModel)
+		if len(providers) == 0 && allowImageModel {
+			registeredModel := registry.GetGlobalRegistry().ResolveModelIDCaseInsensitive(baseModel)
+			if registeredModel != "" {
+				providers = util.GetProviderName(registeredModel)
+				if len(providers) > 0 {
+					resolvedModelName = registeredModel
+				}
 			}
 		}
-	}
-	if len(providers) == 0 && allowImageModel && allowsBuiltinImageModelBareFallback(baseModel) {
-		if canonicalModel := canonicalImageOnlyModel(baseModel); canonicalModel != "" {
-			registeredModel := registry.GetGlobalRegistry().ResolveModelIDCaseInsensitive(canonicalModel)
-			if registeredModel == "" {
-				registeredModel = canonicalModel
-			}
-			providers = util.GetProviderName(registeredModel)
-			if len(providers) > 0 {
-				resolvedModelName = registeredModel
+		if len(providers) == 0 && allowImageModel && allowsBuiltinImageModelBareFallback(baseModel) {
+			if canonicalModel := canonicalImageOnlyModel(baseModel); canonicalModel != "" {
+				registeredModel := registry.GetGlobalRegistry().ResolveModelIDCaseInsensitive(canonicalModel)
+				if registeredModel == "" {
+					registeredModel = canonicalModel
+				}
+				providers = util.GetProviderName(registeredModel)
+				if len(providers) > 0 {
+					resolvedModelName = registeredModel
+				}
 			}
 		}
-	}
-	// Fallback: if baseModel has no provider but differs from resolvedModelName,
-	// try using the full model name. This handles edge cases where custom models
-	// may be registered with their full suffixed name (e.g., "my-model(8192)").
-	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
-	// custom model registrations that include thinking suffixes.
-	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+		// Fallback: if baseModel has no provider but differs from resolvedModelName,
+		// try using the full model name. This handles edge cases where custom models
+		// may be registered with their full suffixed name (e.g., "my-model(8192)").
+		// Evaluated in Story 11.8: This fallback is intentionally preserved to support
+		// custom model registrations that include thinking suffixes.
+		if len(providers) == 0 && baseModel != resolvedModelName {
+			providers = util.GetProviderName(resolvedModelName)
+		}
 	}
 
 	if len(providers) == 0 {
@@ -2767,7 +2975,11 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 			},
 		)
 		if errMarshal != nil {
-			body = []byte(`{"error":{"message":"unknown provider for model","type":"invalid_request_error","code":"model_not_found"}}`)
+			body = []byte(
+				(`{"error":{"message":"unknown provider for model","type":` +
+					`"invalid_request_error","code":` +
+					`"model_not_found"}}`),
+			)
 		}
 		return nil, "", &ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -2820,7 +3032,7 @@ func allowsBuiltinImageModelBareFallback(model string) bool {
 
 	prefix := strings.ToLower(strings.TrimSpace(model[:idx]))
 	canonical := canonicalImageOnlyModel(model)
-	if registry.IsCodexImageModel(canonical) {
+	if registry.IsOpenAIImageModel(canonical) {
 		return prefix == "codex" || prefix == "openai"
 	}
 	switch canonical {
@@ -2833,8 +3045,8 @@ func allowsBuiltinImageModelBareFallback(model string) bool {
 
 func canonicalImageOnlyModel(model string) string {
 	baseModel := strings.ToLower(strings.TrimSpace(routeModelBaseName(model)))
-	if canonical := registry.CanonicalCodexImageModel(baseModel); canonical != "" {
-		return canonical
+	if registry.IsOpenAIImageModel(baseModel) {
+		return baseModel
 	}
 	switch baseModel {
 	case "grok-imagine-image":
@@ -3036,7 +3248,11 @@ func (h *BaseAPIHandler) WriteErrorResponseWithError(c *gin.Context, msg *ErrorM
 		}
 	}
 
-	body := BuildErrorResponseBody(status, errText)
+	var cause error
+	if msg != nil {
+		cause = msg.Error
+	}
+	body := BuildErrorResponseBodyWithError(status, errText, cause)
 	if h.requestLoggingEnabled() {
 		captured, existsCaptured := c.Get(logging.APIResponseCapturedContextKey)
 		if !existsCaptured || captured != true {

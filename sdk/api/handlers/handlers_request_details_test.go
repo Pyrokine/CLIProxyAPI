@@ -41,7 +41,8 @@ func TestGetContextWithCancelIncludesUsageManager(t *testing.T) {
 		t.Fatalf("usage manager = %p, want %p", got, manager)
 	}
 	metadata := internallogging.GetClientRequestMetadata(ctx)
-	if metadata.ClientIP != "203.0.113.42" || metadata.XForwardedFor != "198.51.100.1, 203.0.113.42" || metadata.UserAgent != "handler-test-client/1.0" {
+	if metadata.ClientIP != "203.0.113.42" || metadata.XForwardedFor != "198.51.100.1, 203.0.113.42" ||
+		metadata.UserAgent != "handler-test-client/1.0" {
 		t.Fatalf("client request metadata = %+v", metadata)
 	}
 	ginCtx.Request.RemoteAddr = "127.0.0.1:9"
@@ -62,7 +63,8 @@ func TestGetContextWithCancelCapturesSessionHierarchy(t *testing.T) {
 	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
 	defer cancel()
 	metadata := internallogging.GetClientRequestMetadata(ctx)
-	if metadata.SessionID != "claude:root-session:agent:worker" || metadata.ParentSessionID != "claude:root-session" {
+	if metadata.SessionID != "claude:root-session:agent:worker" ||
+		metadata.ParentSessionID != "claude:root-session" {
 		t.Fatalf("session hierarchy = (%q, %q)", metadata.SessionID, metadata.ParentSessionID)
 	}
 	if got := util.SessionIDFromContext(ctx); got != metadata.SessionID {
@@ -71,11 +73,13 @@ func TestGetContextWithCancelCapturesSessionHierarchy(t *testing.T) {
 }
 
 func TestEnrichContextWithSessionHierarchyReplacesAndClearsMetadata(t *testing.T) {
-	ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
-		ClientIP:        "192.0.2.1",
-		SessionID:       "header:old-child",
-		ParentSessionID: "header:old-parent",
-	})
+	ctx := internallogging.WithClientRequestMetadata(
+		context.Background(), internallogging.ClientRequestMetadata{
+			ClientIP:        "192.0.2.1",
+			SessionID:       "header:old-child",
+			ParentSessionID: "header:old-parent",
+		},
+	)
 	ctx = util.WithSessionID(ctx, "header:old-child")
 	ctx = EnrichContextWithSessionHierarchy(
 		ctx,
@@ -84,14 +88,19 @@ func TestEnrichContextWithSessionHierarchyReplacesAndClearsMetadata(t *testing.T
 		nil,
 	)
 	metadata := internallogging.GetClientRequestMetadata(ctx)
-	if metadata.ClientIP != "192.0.2.1" || metadata.SessionID != "session:new-child" || metadata.ParentSessionID != "session:new-parent" {
+	if metadata.ClientIP != "192.0.2.1" || metadata.SessionID != "session:new-child" ||
+		metadata.ParentSessionID != "session:new-parent" {
 		t.Fatalf("replaced session metadata = %+v", metadata)
 	}
 
 	ctx = EnrichContextWithSessionHierarchy(ctx, nil, nil, nil)
 	metadata = internallogging.GetClientRequestMetadata(ctx)
 	if metadata.SessionID != "" || metadata.ParentSessionID != "" || util.SessionIDFromContext(ctx) != "" {
-		t.Fatalf("cleared session metadata = %+v, context session = %q", metadata, util.SessionIDFromContext(ctx))
+		t.Fatalf(
+			"cleared session metadata = %+v, context session = %q",
+			metadata,
+			util.SessionIDFromContext(ctx),
+		)
 	}
 }
 
@@ -103,26 +112,37 @@ func TestEnrichContextWithSessionHierarchyPublishesLCPNodeKind(t *testing.T) {
 		{name: "compaction", kind: "compaction", compaction: true},
 		{name: "fork", kind: "fork", compaction: false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := EnrichContextWithSessionHierarchy(context.Background(), nil, nil, map[string]any{
-				coreexecutor.CanonicalSessionIDMetadataKey:   "lcp:v1:child",
-				coreexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:child",
-				coreexecutor.ParentSessionIDMetadataKey:      "lcp:v1:root",
-				coreexecutor.NodeKindMetadataKey:             tc.kind,
-				coreexecutor.IsCompactionMetadataKey:         tc.compaction,
-				coreexecutor.IsForkMetadataKey:               !tc.compaction,
-			})
-			metadata := internallogging.GetClientRequestMetadata(ctx)
-			if metadata.SessionID != "lcp:v1:child" || metadata.ParentSessionID != "lcp:v1:root" ||
-				metadata.NodeKind != tc.kind || metadata.IsCompaction != tc.compaction || metadata.IsFork == tc.compaction {
-				t.Fatalf("session node metadata = %+v", metadata)
-			}
-			ctx = EnrichContextWithSessionHierarchy(ctx, nil, nil, nil)
-			metadata = internallogging.GetClientRequestMetadata(ctx)
-			if metadata.SessionID != "" || metadata.ParentSessionID != "" || metadata.NodeKind != "" || metadata.IsFork || metadata.IsCompaction {
-				t.Fatalf("stale session node metadata = %+v", metadata)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				ctx := EnrichContextWithSessionHierarchy(
+					context.Background(), nil, nil, map[string]any{
+						coreexecutor.CanonicalSessionIDMetadataKey:   "lcp:v1:child",
+						coreexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:child",
+						coreexecutor.ParentSessionIDMetadataKey:      "lcp:v1:root",
+						coreexecutor.NodeKindMetadataKey:             tc.kind,
+						coreexecutor.IsCompactionMetadataKey:         tc.compaction,
+						coreexecutor.IsForkMetadataKey:               !tc.compaction,
+					},
+				)
+				metadata := internallogging.GetClientRequestMetadata(ctx)
+				if metadata.SessionID != "lcp:v1:child" || metadata.ParentSessionID != "lcp:v1:root" ||
+					metadata.NodeKind !=
+						tc.kind ||
+					metadata.IsCompaction !=
+						tc.compaction ||
+					metadata.IsFork ==
+						tc.compaction {
+					t.Fatalf("session node metadata = %+v", metadata)
+				}
+				ctx = EnrichContextWithSessionHierarchy(ctx, nil, nil, nil)
+				metadata = internallogging.GetClientRequestMetadata(ctx)
+				if metadata.SessionID != "" || metadata.ParentSessionID != "" || metadata.NodeKind != "" ||
+					metadata.IsFork ||
+					metadata.IsCompaction {
+					t.Fatalf("stale session node metadata = %+v", metadata)
+				}
+			},
+		)
 	}
 }
 
@@ -493,7 +513,7 @@ func TestGetRequestDetailsWithOptionsCanonicalizesBuiltinImageModels(t *testing.
 	for _, tt := range tests {
 		t.Run(
 			tt.model, func(t *testing.T) {
-				providers, model, errMsg := handler.getRequestDetailsWithOptions(tt.model, true)
+				providers, model, errMsg := handler.getRequestDetailsWithOptions(tt.model, true, "")
 				if errMsg != nil {
 					t.Fatalf("getRequestDetailsWithOptions(%q, true) error = %v", tt.model, errMsg.Error)
 				}
@@ -507,7 +527,7 @@ func TestGetRequestDetailsWithOptionsCanonicalizesBuiltinImageModels(t *testing.
 		)
 	}
 
-	if _, _, errMsg := handler.getRequestDetailsWithOptions("TeamB/GPT-IMAGE-2(HIGH)", true); errMsg == nil {
+	if _, _, errMsg := handler.getRequestDetailsWithOptions("TeamB/GPT-IMAGE-2(HIGH)", true, ""); errMsg == nil {
 		t.Fatal("unknown image model prefix unexpectedly fell back to the bare model")
 	}
 }
@@ -636,6 +656,95 @@ func TestFilterModelsForCurrentAPIKeyUsesCatalogNameForDisabledAlias(t *testing.
 	models := handler.FilterModelsForCurrentAPIKey(nil, []map[string]any{{"id": "py-gpt-disabled"}})
 	if len(models) != 0 {
 		t.Fatalf("expected disabled canonical model to hide alias model, got %+v", models)
+	}
+}
+
+func TestModelCatalogGlobalSwitchGuardsExecutionEntries(t *testing.T) {
+	for _, entry := range []string{"execute", "count", "image", "stream", "image-stream", "http"} {
+		t.Run(
+			entry, func(t *testing.T) {
+				model := "global-switch-" + entry
+				executor := &lifecycleCaptureExecutor{}
+				handler := newLifecycleHandler(t, model, executor)
+				for _, apiKey := range []string{"", "unrestricted-key", "allowed-key"} {
+					for _, enabled := range []bool{false, true, false} {
+						handler.UpdateClients(
+							&sdkconfig.SDKConfig{
+								ModelCatalog: sdkconfig.ModelCatalogConfig{
+									Models: []sdkconfig.ModelCatalogModel{{Name: model, Enabled: &enabled}},
+								},
+								APIKeyRules: map[string]internalconfig.APIKeyRule{
+									"allowed-key": {CanonicalModels: []string{model}},
+								},
+							},
+						)
+						executor.mu.Lock()
+						executor.lastRequest = coreexecutor.Request{}
+						executor.mu.Unlock()
+						ctx, cancel := context.WithTimeout(apiKeyPolicyContext(apiKey, t.Name()), 5*time.Second)
+						var errMsg *ErrorMessage
+						httpCalled := false
+						switch entry {
+						case "execute":
+							_, _, errMsg = handler.ExecuteWithAuthManager(ctx, "openai", model, nil, "")
+						case "count":
+							_, _, errMsg = handler.ExecuteCountWithAuthManager(ctx, "openai", model, nil, "")
+						case "image":
+							_, _, errMsg = handler.ExecuteImageWithAuthManager(ctx, "openai", model, nil, "")
+						case "stream", "image-stream":
+							stream := handler.ExecuteStreamWithAuthManager
+							if entry == "image-stream" {
+								stream = handler.ExecuteImageStreamWithAuthManager
+							}
+							data, _, failures := stream(ctx, "openai", model, nil, "")
+							for data != nil || failures != nil {
+								select {
+								case _, open := <-data:
+									if !open {
+										data = nil
+									}
+								case failure, open := <-failures:
+									if !open {
+										failures = nil
+									} else {
+										errMsg = failure
+									}
+								case <-ctx.Done():
+									cancel()
+									t.Fatal(ctx.Err())
+								}
+							}
+						case "http":
+							errMsg = handler.ExecuteHTTPWithAPIKeyPolicy(
+								ctx, "openai", "codex", model, model,
+								func(_ context.Context, _ string, dispatch func()) *ErrorMessage {
+									httpCalled = true
+									dispatch()
+									return nil
+								},
+							)
+						}
+						cancel()
+						called := executor.captured().Model != "" || httpCalled
+						if enabled {
+							if !called {
+								t.Fatalf(
+									"enabled model did not reach %s for key %q: %+v",
+									entry,
+									apiKey,
+									errMsg,
+								)
+							}
+						} else if called || errMsg == nil || errMsg.StatusCode != http.StatusForbidden {
+							t.Fatalf(
+								"disabled model reached %s for key %q: called=%v error=%+v", entry, apiKey, called,
+								errMsg,
+							)
+						}
+					}
+				}
+			},
+		)
 	}
 }
 

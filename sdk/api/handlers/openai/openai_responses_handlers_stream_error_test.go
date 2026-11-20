@@ -5,11 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
-	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	"github.com/tidwall/gjson"
-	"google.golang.org/protobuf/encoding/protowire"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +13,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
@@ -321,7 +322,10 @@ func TestResponsesHandlerSendsKeepAliveWhileWaitingForFirstUpstreamChunk(t *test
 	if heartbeatIndex < 0 || completedIndex < 0 || heartbeatIndex >= completedIndex {
 		t.Fatalf("stream order = %q, want keep-alive before response.completed", body)
 	}
-	if contentType := recorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
+	if contentType := recorder.Header().Get("Content-Type"); !strings.HasPrefix(
+		contentType,
+		"text/event-stream",
+	) {
 		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
 	}
 }
@@ -378,7 +382,12 @@ func TestForwardResponsesStreamExposesOnlyClientFaults(t *testing.T) {
 	}{
 		{name: "bad request", status: http.StatusBadRequest, message: "bad request", wantExposed: true},
 		{name: "conflict", status: http.StatusConflict, message: "conflict", wantExposed: true},
-		{name: "message too big", status: http.StatusRequestEntityTooLarge, message: "too large", wantExposed: true},
+		{
+			name:        "message too big",
+			status:      http.StatusRequestEntityTooLarge,
+			message:     "too large",
+			wantExposed: true,
+		},
 		{name: "unprocessable", status: http.StatusUnprocessableEntity, message: "invalid", wantExposed: true},
 		{
 			name:        "cyber policy behind bad gateway",
@@ -423,12 +432,12 @@ func TestForwardResponsesStreamExposesOnlyClientFaults(t *testing.T) {
 
 				h.forwardResponsesStream(c, flusher, func(error) {}, nil, data, errs)
 				body := recorder.Body.String()
-				exposed := strings.Contains(body, `"type":"error"`)
-				if exposed != test.wantExposed {
-					t.Fatalf("error exposed = %t, want %t: %q", exposed, test.wantExposed, body)
+				if !strings.Contains(body, `"type":"error"`) || strings.Contains(body, `"error":{`) {
+					t.Fatalf("expected streaming error chunk: %q", body)
 				}
-				if exposed && strings.Contains(body, `"error":{`) {
-					t.Fatalf("expected streaming error chunk, got HTTP error body: %q", body)
+				if !test.wantExposed && (strings.Contains(body, test.message) ||
+					!strings.Contains(body, http.StatusText(http.StatusBadGateway))) {
+					t.Fatalf("expected generic failure without upstream details: %q", body)
 				}
 			},
 		)
@@ -465,7 +474,10 @@ func TestForwardResponsesStreamUsesResponseFailedForCodex(t *testing.T) {
 				errs := make(chan *handlers.ErrorMessage, 1)
 				errs <- &handlers.ErrorMessage{
 					StatusCode: http.StatusBadRequest,
-					Error:      errors.New(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`),
+					Error: errors.New(
+						`{"error":{"type":"invalid_request","code":"cyber_policy",` +
+							`"message":"blocked"}}`,
+					),
 				}
 				close(errs)
 
@@ -521,7 +533,9 @@ func TestResponsesSSEAccumulatorAcceptsIncompleteAndSuppressesPostTerminalFrames
 		[]byte(
 			"event: response.incomplete\ndata: {\"type\":\"response.incomplete\"}\n\n" +
 				"event: response.done\ndata: {\"type\":\"response.done\"}\n\n" +
-				"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"late\"}\n\n",
+				("event: response.output_text.delta\ndata: {\"type\":" +
+					"\"response.output_text.delta\",\"delta\":" +
+					"\"late\"}\n\n"),
 		),
 	)
 
@@ -596,8 +610,10 @@ func TestForwardResponsesStreamRejectsMalformedSSEAtCleanClose(t *testing.T) {
 	if strings.Contains(body, "data: {\"type\":\n\n") {
 		t.Fatalf("malformed terminal SSE frame was forwarded: %q", body)
 	}
-	if strings.Contains(body, `"type":"error"`) || strings.Contains(body, "malformed data") {
-		t.Fatalf("malformed upstream stream error was exposed: %q", body)
+	if !strings.Contains(body, `"type":"error"`) ||
+		!strings.Contains(body, http.StatusText(http.StatusBadGateway)) ||
+		strings.Contains(body, "malformed data") {
+		t.Fatalf("expected generic failure without malformed-stream details: %q", body)
 	}
 	if cancelledWith == nil || !strings.Contains(cancelledWith.Error(), "malformed data") {
 		t.Fatalf("cancel error = %v, want malformed data", cancelledWith)
@@ -719,8 +735,10 @@ func TestForwardResponsesStreamRejectsMultilineDataSplitAcrossChunks(t *testing.
 	if strings.Contains(body, "event: response.completed") {
 		t.Fatalf("split multiline SSE event was forwarded before validation: %q", body)
 	}
-	if strings.Contains(body, `"type":"error"`) {
-		t.Fatalf("malformed upstream stream error was exposed: %q", body)
+	if !strings.Contains(body, `"type":"error"`) ||
+		!strings.Contains(body, http.StatusText(http.StatusBadGateway)) ||
+		strings.Contains(body, "malformed data") {
+		t.Fatalf("expected generic failure without malformed-stream details: %q", body)
 	}
 }
 
@@ -778,8 +796,9 @@ func TestForwardResponsesStreamLateErrorSuppressesTerminalSuccess(t *testing.T) 
 	if strings.Contains(body, "response.completed") {
 		t.Fatalf("terminal success was emitted before late error: %q", body)
 	}
-	if strings.Contains(body, "late upstream failure") || strings.Contains(body, `"type":"error"`) {
-		t.Fatalf("non-client terminal error was exposed: %q", body)
+	if strings.Contains(body, "late upstream failure") || !strings.Contains(body, `"type":"error"`) ||
+		!strings.Contains(body, http.StatusText(http.StatusBadGateway)) {
+		t.Fatalf("expected generic late failure without upstream details: %q", body)
 	}
 	if cancelledWith == nil || !strings.Contains(cancelledWith.Error(), "late upstream failure") {
 		t.Fatalf("cancel error = %v, want late upstream failure", cancelledWith)
@@ -860,8 +879,11 @@ func TestResponsesHandlerHidesMalformedCleanCloseErrors(t *testing.T) {
 					t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
 				}
 				body := recorder.Body.String()
-				if strings.Contains(body, "event: error") || strings.Contains(body, `"type":"error"`) {
-					t.Fatalf("malformed upstream stream error was exposed: %q", body)
+				if strings.Count(body, "event: error") != 1 || !strings.Contains(body, `"type":"error"`) ||
+					!strings.Contains(body, http.StatusText(http.StatusBadGateway)) || strings.Contains(
+					body, "malformed data",
+				) {
+					t.Fatalf("expected generic malformed-stream failure: %q", body)
 				}
 				if strings.Contains(body, `{"error":{`) {
 					t.Fatalf("received plain HTTP error body: %q", body)
@@ -879,7 +901,9 @@ func TestResponsesHandlerHidesMalformedCleanCloseErrors(t *testing.T) {
 }
 
 func TestResponsesFailureTrackingRequiresSuccessfulWrite(t *testing.T) {
-	frame := []byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n")
+	frame := []byte(
+		"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n",
+	)
 	var buffer bytes.Buffer
 	writer := &responsesStreamFrameWriter{writer: &buffer}
 	writer.writeFrames([][]byte{frame})
@@ -887,7 +911,7 @@ func TestResponsesFailureTrackingRequiresSuccessfulWrite(t *testing.T) {
 		t.Fatalf("delivered failure not recorded: %v", writer.err)
 	}
 	reader, pipe := io.Pipe()
-	defer pipe.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(pipe.Close)
 	_ = reader.CloseWithError(errors.New("synthetic writer failure"))
 	writer = &responsesStreamFrameWriter{writer: pipe}
 	writer.writeFrames([][]byte{frame})
@@ -909,77 +933,105 @@ func TestDevinPatchFailureReachesRegisteredResponsesClient(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, mode := range []string{"invalid_input_type", "trailer_after_valid_patch"} {
 		for _, codex := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/codex_%t", mode, codex), func(t *testing.T) {
-				arguments, trailer := `{"input":7}`, `{}`
-				if mode == "trailer_after_valid_patch" {
-					arguments = `{"input":"  *** Begin Patch\n*** End Patch\n "}`
-					trailer = `{"error":{"code":"unavailable","message":"synthetic failure"}}`
-				}
-				tool := appendField(nil, 1, "call_patch")
-				tool = appendField(tool, 2, "functions__apply_patch")
-				tool = appendField(tool, 3, arguments)
-				frames := helps.WrapConnectEnvelope(appendField(nil, 6, string(tool)))
-				frames = append(frames, helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(trailer))...)
-				var dispatches atomic.Int32
-				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-					dispatches.Add(1)
-					if request.URL.Path != helps.DevinChatPath {
-						t.Errorf("unexpected local path %s", request.URL.Path)
+			t.Run(
+				fmt.Sprintf("%s/codex_%t", mode, codex), func(t *testing.T) {
+					arguments, trailer := `{"input":7}`, `{}`
+					if mode == "trailer_after_valid_patch" {
+						arguments = `{"input":"  *** Begin Patch\n*** End Patch\n "}`
+						trailer = `{"error":{"code":"unavailable","message":"synthetic failure"}}`
 					}
-					writer.Header().Set("Content-Type", "application/connect+proto")
-					_, _ = writer.Write(frames)
-				}))
-				defer server.Close()
-				manager := coreauth.NewManager(nil, nil, nil)
-				manager.RegisterExecutor(runtimeexecutor.NewDevinExecutor(&config.Config{}))
-				auth := &coreauth.Auth{ID: "isolated-http-devin-" + mode + fmt.Sprint(codex), Provider: "devin", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "synthetic-http-token", "base_url": server.URL, "device_seed": "synthetic-http"}}
-				if _, err := manager.Register(context.Background(), auth); err != nil {
-					t.Fatal(err)
-				}
-				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "devin/swe-2"}})
-				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
-				handler := NewResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
-				router := gin.New()
-				router.POST("/v1/responses", handler.Responses)
-				payload := `{"model":"devin/swe-2","stream":true,"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}],"input":"patch a file"}`
-				request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload))
-				request.Header.Set("Content-Type", "application/json")
-				if codex {
-					request.Header.Set("User-Agent", "codex_cli_rs/1.0")
-					request.Header.Set("Originator", "codex_cli_rs")
-				}
-				recorder := httptest.NewRecorder()
-				router.ServeHTTP(recorder, request)
-				body := recorder.Body.String()
-				if dispatches.Load() != 1 || recorder.Code != http.StatusOK {
-					t.Fatalf("dispatches=%d status=%d body=%s", dispatches.Load(), recorder.Code, body)
-				}
-				var kinds []string
-				var createdID, failedID string
-				failures := 0
-				for _, line := range strings.Split(body, "\n") {
-					if !strings.HasPrefix(line, "data:") {
-						continue
+					tool := appendField(nil, 1, "call_patch")
+					tool = appendField(tool, 2, "functions__apply_patch")
+					tool = appendField(tool, 3, arguments)
+					frames := helps.WrapConnectEnvelope(appendField(nil, 6, string(tool)))
+					frames = append(
+						frames,
+						helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(trailer))...,
+					)
+					var dispatches atomic.Int32
+					server := httptest.NewServer(
+						http.HandlerFunc(
+							func(writer http.ResponseWriter, request *http.Request) {
+								dispatches.Add(1)
+								if request.URL.Path != helps.DevinChatPath {
+									t.Errorf("unexpected local path %s", request.URL.Path)
+								}
+								writer.Header().Set("Content-Type", "application/connect+proto")
+								_, _ = writer.Write(frames)
+							},
+						),
+					)
+					defer server.Close()
+					manager := coreauth.NewManager(nil, nil, nil)
+					manager.RegisterExecutor(runtimeexecutor.NewDevinExecutor(&config.Config{}))
+					auth := &coreauth.Auth{
+						ID: "isolated-http-devin-" + mode + fmt.Sprint(codex), Provider: "devin",
+						Status: coreauth.StatusActive, Attributes: map[string]string{
+							"api_key": "synthetic-http-token", "base_url": server.URL, "device_seed": "synthetic-http",
+						},
 					}
-					event := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-					kind := event.Get("type").String()
-					kinds = append(kinds, kind)
-					if kind == "response.created" {
-						createdID = event.Get("response.id").String()
+					if _, err := manager.Register(context.Background(), auth); err != nil {
+						t.Fatal(err)
 					}
-					if kind == "response.failed" || kind == "error" {
-						failures++
-						failedID = event.Get("response.id").String()
+					registry.GetGlobalRegistry().RegisterClient(
+						auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "devin/swe-2"}},
+					)
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+					handler := NewResponsesAPIHandler(
+						handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager),
+					)
+					router := gin.New()
+					router.POST("/v1/responses", handler.Responses)
+					payload := `{"model":"devin/swe-2","stream":true,"tools":[{"type":"namespace","nam` +
+						`e":"functions","tools":[{"type":"custom","name":"apply_patch","format"` +
+						`:{"type":"grammar","definition":"start: patch"}}]}],"input":"patch a f` +
+						`ile"}`
+					request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload))
+					request.Header.Set("Content-Type", "application/json")
+					if codex {
+						request.Header.Set("User-Agent", "codex_cli_rs/1.0")
+						request.Header.Set("Originator", "codex_cli_rs")
 					}
-					if kind == "response.completed" || kind == "response.incomplete" {
-						t.Fatalf("success terminal on failed patch: %s", body)
+					recorder := httptest.NewRecorder()
+					router.ServeHTTP(recorder, request)
+					body := recorder.Body.String()
+					if dispatches.Load() != 1 || recorder.Code != http.StatusOK {
+						t.Fatalf("dispatches=%d status=%d body=%s", dispatches.Load(), recorder.Code, body)
 					}
-				}
-				if failures != 1 || strings.Contains(body, "[DONE]") {
-					t.Fatalf("failure event count=%d events=%v body=%s", failures, kinds, body)
-				}
-				t.Logf("actual HTTP client codex=%t mode=%s events=%v created_id=%q failed_response_id=%q", codex, mode, kinds, createdID, failedID)
-			})
+					var kinds []string
+					var createdID, failedID string
+					failures := 0
+					for line := range strings.SplitSeq(body, "\n") {
+						if !strings.HasPrefix(line, "data:") {
+							continue
+						}
+						event := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+						kind := event.Get("type").String()
+						kinds = append(kinds, kind)
+						if kind == "response.created" {
+							createdID = event.Get("response.id").String()
+						}
+						if kind == "response.failed" || kind == "error" {
+							failures++
+							failedID = event.Get("response.id").String()
+						}
+						if kind == "response.completed" || kind == "response.incomplete" {
+							t.Fatalf("success terminal on failed patch: %s", body)
+						}
+					}
+					if failures != 1 || strings.Contains(body, "[DONE]") {
+						t.Fatalf("failure event count=%d events=%v body=%s", failures, kinds, body)
+					}
+					t.Logf(
+						"actual HTTP client codex=%t mode=%s events=%v created_id=%q failed_response_id=%q",
+						codex,
+						mode,
+						kinds,
+						createdID,
+						failedID,
+					)
+				},
+			)
 		}
 	}
 }
@@ -987,55 +1039,89 @@ func TestDevinPatchFailureReachesRegisteredResponsesClient(t *testing.T) {
 func TestGeminiPatchFailureReachesRegisteredResponsesClient(t *testing.T) {
 	for _, provider := range []string{"gemini", "gemini-interactions", "vertex"} {
 		for _, codex := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/codex_%t", provider, codex), func(t *testing.T) {
-				wire := "data: {\"responseId\":\"http-gemini\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"working\"}]}}]}\n\n" +
-					"data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"apply_patch\",\"args\":{\"input\":7}}}]},\"finishReason\":\"STOP\"}]}\n\n"
-				if provider == "gemini-interactions" {
-					wire = "data: {\"event_type\":\"interaction.start\",\"interaction\":{\"id\":\"http-gemini\"}}\n\n" +
-						"data: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"function_call\",\"id\":\"item-patch\",\"call_id\":\"call-patch\",\"name\":\"apply_patch\",\"arguments\":{\"input\":7}}}\n\n" +
-						"data: {\"event_type\":\"step.stop\",\"index\":0}\n\ndata: [DONE]\n\n"
-				}
-				var dispatches atomic.Int32
-				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-					dispatches.Add(1)
-					if native := strings.HasSuffix(request.URL.Path, "/interactions"); native != (provider == "gemini-interactions") {
-						t.Errorf("provider=%s, upstream path=%s", provider, request.URL.Path)
+			t.Run(
+				fmt.Sprintf("%s/codex_%t", provider, codex), func(t *testing.T) {
+					wire := "data: {\"responseId\":\"http-gemini\",\"candidates\":[{\"content\":" +
+						"{\"parts\":[{\"text\":" +
+						"\"working\"}]}}]}\n\n" +
+						("data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"n" +
+							"ame\":\"apply_patch\",\"args\":{\"input\":7}}}]},\"finishReason\":\"ST" +
+							"OP\"}]}\n\n")
+					if provider == "gemini-interactions" {
+						wire = "data: {\"event_type\":\"interaction.start\",\"interaction\":{\"id\":" +
+							"\"http-gemini\"}}\n\n" +
+							("data: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"" +
+								"function_call\",\"id\":\"item-patch\",\"call_id\":\"call-patch\",\"nam" +
+								"e\":\"apply_patch\",\"arguments\":{\"input\":7}}}\n\n") +
+							"data: {\"event_type\":\"step.stop\",\"index\":0}\n\ndata: [DONE]\n\n"
 					}
-					writer.Header().Set("Content-Type", "text/event-stream")
-					_, _ = io.WriteString(writer, wire)
-				}))
-				defer server.Close()
-				manager := coreauth.NewManager(nil, nil, nil)
-				var executor coreauth.ProviderExecutor = runtimeexecutor.NewGeminiExecutor(&config.Config{})
-				switch provider {
-				case "gemini-interactions":
-					executor = runtimeexecutor.NewGeminiInteractionsExecutor(&config.Config{})
-				case "vertex":
-					executor = runtimeexecutor.NewGeminiVertexExecutor(&config.Config{})
-				}
-				manager.RegisterExecutor(executor)
-				auth := &coreauth.Auth{ID: t.Name(), Provider: provider, Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "synthetic-token", "base_url": server.URL}}
-				if _, err := manager.Register(context.Background(), auth); err != nil {
-					t.Fatal(err)
-				}
-				registry.GetGlobalRegistry().RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: "gemini-2.5-flash"}})
-				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
-				handler := NewResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
-				router := gin.New()
-				router.POST("/v1/responses", handler.Responses)
-				request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gemini-2.5-flash","stream":true,"input":"patch a file","tools":[{"type":"custom","name":"apply_patch"}]}`))
-				request.Header.Set("Content-Type", "application/json")
-				if codex {
-					request.Header.Set("User-Agent", "codex_cli_rs/1.0")
-					request.Header.Set("Originator", "codex_cli_rs")
-				}
-				recorder := httptest.NewRecorder()
-				router.ServeHTTP(recorder, request)
-				body := recorder.Body.String()
-				if recorder.Code != http.StatusOK || dispatches.Load() != 1 || strings.Count(body, `"type":"response.failed"`) != 1 || strings.Contains(body, `"type":"response.completed"`) || strings.Contains(body, "[DONE]") {
-					t.Fatalf("status=%d, dispatches=%d, body=%s", recorder.Code, dispatches.Load(), body)
-				}
-			})
+					var dispatches atomic.Int32
+					server := httptest.NewServer(
+						http.HandlerFunc(
+							func(writer http.ResponseWriter, request *http.Request) {
+								dispatches.Add(1)
+								if native := strings.HasSuffix(
+									request.URL.Path, "/interactions",
+								); native != (provider == "gemini-interactions") {
+									t.Errorf("provider=%s, upstream path=%s", provider, request.URL.Path)
+								}
+								writer.Header().Set("Content-Type", "text/event-stream")
+								_, _ = io.WriteString(writer, wire)
+							},
+						),
+					)
+					defer server.Close()
+					manager := coreauth.NewManager(nil, nil, nil)
+					var executor coreauth.ProviderExecutor = runtimeexecutor.NewGeminiExecutor(&config.Config{})
+					switch provider {
+					case "gemini-interactions":
+						executor = runtimeexecutor.NewGeminiInteractionsExecutor(&config.Config{})
+					case "vertex":
+						executor = runtimeexecutor.NewGeminiVertexExecutor(&config.Config{})
+					}
+					manager.RegisterExecutor(executor)
+					auth := &coreauth.Auth{
+						ID: t.Name(), Provider: provider, Status: coreauth.StatusActive,
+						Attributes: map[string]string{"api_key": "synthetic-token", "base_url": server.URL},
+					}
+					if _, err := manager.Register(context.Background(), auth); err != nil {
+						t.Fatal(err)
+					}
+					registry.GetGlobalRegistry().RegisterClient(
+						auth.ID, provider, []*registry.ModelInfo{{ID: "gemini-2.5-flash"}},
+					)
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+					handler := NewResponsesAPIHandler(
+						handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager),
+					)
+					router := gin.New()
+					router.POST("/v1/responses", handler.Responses)
+					request := httptest.NewRequest(
+						http.MethodPost,
+						"/v1/responses",
+						strings.NewReader(
+							`{"model":"gemini-2.5-flash","stream":true,"input":"patch a file",`+
+								`"tools":[{"type":"custom","name":`+
+								`"apply_patch"}]}`,
+						),
+					)
+					request.Header.Set("Content-Type", "application/json")
+					if codex {
+						request.Header.Set("User-Agent", "codex_cli_rs/1.0")
+						request.Header.Set("Originator", "codex_cli_rs")
+					}
+					recorder := httptest.NewRecorder()
+					router.ServeHTTP(recorder, request)
+					body := recorder.Body.String()
+					if recorder.Code != http.StatusOK || dispatches.Load() != 1 || strings.Count(
+						body, `"type":"response.failed"`,
+					) != 1 || strings.Contains(body, `"type":"response.completed"`) || strings.Contains(
+						body, "[DONE]",
+					) {
+						t.Fatalf("status=%d, dispatches=%d, body=%s", recorder.Code, dispatches.Load(), body)
+					}
+				},
+			)
 		}
 	}
 }

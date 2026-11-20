@@ -99,7 +99,9 @@ func TestClaudeHandlerRejectsEmptyStreamBootstrapWithoutMessageStop(t *testing.T
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/messages",
-		strings.NewReader(`{"model":"`+model+`","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`),
+		strings.NewReader(
+			`{"model":"`+model+`","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`,
+		),
 	)
 	request.Header.Set("Content-Type", "application/json")
 
@@ -138,7 +140,8 @@ func parseClaudeHandlerSSEEvents(t *testing.T, stream string) []claudeHandlerSSE
 	events := make([]claudeHandlerSSEEvent, 0, len(blocks))
 	for _, block := range blocks {
 		lines := strings.Split(block, "\n")
-		if len(lines) != 2 || !strings.HasPrefix(lines[0], "event: ") || !strings.HasPrefix(lines[1], "data: ") {
+		if len(lines) != 2 || !strings.HasPrefix(lines[0], "event: ") ||
+			!strings.HasPrefix(lines[1], "data: ") {
 			t.Fatalf("invalid SSE block %q", block)
 		}
 		data := strings.TrimPrefix(lines[1], "data: ")
@@ -170,6 +173,13 @@ func assertClaudeHandlerSSELifecycle(t *testing.T, events []claudeHandlerSSEEven
 				"event %d name %q does not match payload type %q", eventIndex, event.name,
 				event.data.Get("type").String(),
 			)
+		}
+		if event.name == "message_delta" || event.name == "message_stop" || event.name == "error" {
+			for index, isOpen := range open {
+				if isOpen {
+					t.Fatalf("block %d remained open before %s", index, event.name)
+				}
+			}
 		}
 		switch event.name {
 		case "message_start":
@@ -214,11 +224,13 @@ func TestForwardClaudeStream_TransportErrorClosesOpenBlocks(t *testing.T) {
 	events := runClaudeForwardStream(
 		t,
 		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n"+
-			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+			("event: content_block_start\ndata: {\"type\":\"content_block_start\",\""+
+				"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"),
 	)
 
 	assertClaudeHandlerSSELifecycle(t, events)
-	if len(events) != 4 || events[2].name != "content_block_stop" || events[2].data.Get("index").Int() != 3 || events[3].name != "error" {
+	if len(events) != 4 || events[2].name != "content_block_stop" || events[2].data.Get("index").Int() != 3 ||
+		events[3].name != "error" {
 		t.Fatalf("terminal events = %#v, want block 3 stop followed by error", events)
 	}
 }
@@ -227,7 +239,9 @@ func TestForwardClaudeStream_TransportErrorAfterMessageDeltaFinishesNormally(t *
 	events := runClaudeForwardStream(
 		t,
 		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n"+
-			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n",
+			("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":"+
+				"{\"stop_reason\":\"end_turn\"},\"usage\":"+
+				"{}}\n\n"),
 	)
 
 	assertClaudeHandlerSSELifecycle(t, events)
@@ -268,7 +282,9 @@ func TestForwardClaudeStream_TransportErrorAfterMessageStopIsSuppressed(t *testi
 	events := runClaudeForwardStream(
 		t,
 		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n"+
-			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n"+
+			("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":"+
+				"{\"stop_reason\":\"end_turn\"},\"usage\":"+
+				"{}}\n\n")+
 			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 	)
 
@@ -309,7 +325,9 @@ func TestForwardClaudeStreamChunksValidatesProtocolTerminal(t *testing.T) {
 		{
 			name: "complete message delta synthesizes message stop",
 			payload: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n" +
-				"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n",
+				("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":" +
+					"{\"stop_reason\":\"end_turn\"},\"usage\":" +
+					"{}}\n\n"),
 			wantTerminalBody: "event: message_stop\n",
 		},
 	}
@@ -361,7 +379,9 @@ func TestForwardClaudeStreamChunksValidatesProtocolTerminal(t *testing.T) {
 				if test.wantAckError == "" {
 					if terminalAckErr != nil || canceledWith != nil {
 						t.Fatalf(
-							"terminal acknowledgement/cancel errors = %v/%v, want nil", terminalAckErr, canceledWith,
+							"terminal acknowledgement/cancel errors = %v/%v, want nil",
+							terminalAckErr,
+							canceledWith,
 						)
 					}
 				} else {
@@ -419,7 +439,9 @@ func TestForwardClaudeStreamChunksDoesNotAppendErrorAfterMessageStop(t *testing.
 	data <- coreexecutor.StreamChunk{
 		Payload: []byte(
 			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n" +
-				"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n" +
+				("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":" +
+					"{\"stop_reason\":\"end_turn\"},\"usage\":" +
+					"{}}\n\n") +
 				"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 		),
 	}
@@ -454,7 +476,8 @@ func TestForwardClaudeStreamChunksPropagatesCancelAndWriteFailure(t *testing.T) 
 			cancelRequest()
 			recorder := httptest.NewRecorder()
 			ginContext, _ := gin.CreateTestContext(recorder)
-			ginContext.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(requestContext)
+			ginContext.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil).
+				WithContext(requestContext)
 			var canceledWith error
 			handler := NewCodeAPIHandler(handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil))
 
@@ -511,7 +534,12 @@ func TestForwardClaudeStreamChunksPropagatesCancelAndWriteFailure(t *testing.T) 
 			)
 
 			if !errors.Is(acknowledgedWith, writeErr) || !errors.Is(canceledWith, writeErr) {
-				t.Fatalf("acknowledgement/cancel errors = %v/%v, want %v", acknowledgedWith, canceledWith, writeErr)
+				t.Fatalf(
+					"acknowledgement/cancel errors = %v/%v, want %v",
+					acknowledgedWith,
+					canceledWith,
+					writeErr,
+				)
 			}
 		},
 	)
@@ -526,7 +554,9 @@ func TestForwardClaudeStreamChunksAcknowledgesProtocolWrites(t *testing.T) {
 	data := make(chan coreexecutor.StreamChunk, 2)
 	data <- coreexecutor.StreamChunk{
 		Payload: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n" +
-			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\n" +
+			("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":" +
+				"{\"stop_reason\":\"end_turn\"},\"usage\":" +
+				"{}}\n\n") +
 			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
 		Acknowledge: func(err error) {
 			if err != nil {
@@ -747,7 +777,7 @@ func TestClaudeStreamingHeartbeatFlushesAcrossAllWaitingPhases(t *testing.T) {
 	if errResponse != nil {
 		t.Fatalf("start stream: %v", errResponse)
 	}
-	defer response.Body.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(response.Body.Close)
 	if got := response.Header.Get("Content-Type"); got != "text/event-stream" {
 		t.Fatalf("Content-Type = %q, want text/event-stream", got)
 	}
@@ -905,7 +935,8 @@ func TestClaudeHeartbeatWriteFailureCancelsWithoutFlush(t *testing.T) {
 		t.Fatalf("writer writes=%d flushes=%d, want one write and no flush", writer.writes, writer.flushes)
 	}
 	outcome := state.Snapshot()
-	if !outcome.Failed || outcome.Kind != internallogging.RequestOutcomeStreamError || outcome.Reason != writer.err.Error() {
+	if !outcome.Failed || outcome.Kind != internallogging.RequestOutcomeStreamError ||
+		outcome.Reason != writer.err.Error() {
 		t.Fatalf("request outcome = %+v, want Claude heartbeat failure", outcome)
 	}
 	if countClaudeTimelineEvents(timeline.Snapshot(), "client.stream.heartbeat.summary") != 1 {

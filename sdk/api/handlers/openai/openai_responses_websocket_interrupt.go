@@ -141,10 +141,12 @@ func readResponsesWebsocketInput(
 					continue
 				}
 				appendResponsesInterruptDiagnostic(timeline, payload, "rejected")
-				_, errWrite := writeResponsesWebsocketError(writer, &handlers.ErrorMessage{
-					StatusCode: http.StatusBadRequest,
-					Error:      errInterrupt,
-				})
+				_, errWrite := writeResponsesWebsocketError(
+					writer, &handlers.ErrorMessage{
+						StatusCode: http.StatusBadRequest,
+						Error:      errInterrupt,
+					},
+				)
 				if errWrite != nil {
 					cancel(errWrite)
 					return
@@ -182,7 +184,11 @@ func appendResponsesInterruptDiagnostic(timeline *websocketTimelineRecorder, pay
 	appendWebsocketEvent(timeline, event, data)
 }
 
-func (h *ResponsesAPIHandler) forwardResponsesWebsocketInterrupt(ctx context.Context, sessionID string, payload []byte) error {
+func (h *ResponsesAPIHandler) forwardResponsesWebsocketInterrupt(
+	ctx context.Context,
+	sessionID string,
+	payload []byte,
+) error {
 	responseID := gjson.GetBytes(payload, "response_id")
 	if responseID.Type != gjson.String || strings.TrimSpace(responseID.String()) == "" {
 		return fmt.Errorf("response.interrupt requires response_id")
@@ -200,13 +206,15 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocketInterrupt(ctx context.Con
 	if !ok {
 		return fmt.Errorf("upstream executor does not support response.interrupt")
 	}
-	ctx = cliproxyexecutor.WithWebsocketAuthCheck(ctx, func(authID string) bool {
-		auth, found := h.AuthManager.GetByID(authID)
-		if !found || auth == nil {
-			auth, found = h.AuthManager.GetExecutionSessionAuthByID(sessionID, authID)
-		}
-		return found && auth != nil && !auth.Disabled && auth.Status != coreauth.StatusDisabled
-	})
+	ctx = cliproxyexecutor.WithWebsocketAuthCheck(
+		ctx, func(authID string) bool {
+			auth, found := h.AuthManager.GetByID(authID)
+			if !found || auth == nil {
+				auth, found = h.AuthManager.GetExecutionSessionAuthByID(sessionID, authID)
+			}
+			return found && auth != nil && !auth.Disabled && auth.Status != coreauth.StatusDisabled
+		},
+	)
 	return sender.InterruptExecutionSession(ctx, sessionID, payload)
 }
 
@@ -221,8 +229,14 @@ func completeResponsesWebsocketLocalInterrupt(
 	pendingToolCallIDs map[string]struct{},
 ) ([]byte, string, []string, *handlers.ErrorMessage, error) {
 	responseID := strings.TrimSpace(gjson.GetBytes(payload, "response_id").String())
-	output := responseCompletedOutputFromPayload([]byte(`{"response":{"output":[]}}`), outputItemsByIndex, outputItemsFallback)
-	incomplete := []byte(`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}`)
+	output := responseCompletedOutputFromPayload(
+		[]byte(`{"response":{"output":[]}}`), outputItemsByIndex, outputItemsFallback,
+	)
+	incomplete := []byte(
+		(`{"type":"response.incomplete","response":{"status":"incomplete",` +
+			`"incomplete_details":{"reason":` +
+			`"interrupted"}}}`),
+	)
 	var err error
 	incomplete, err = sjson.SetBytes(incomplete, "response.id", responseID)
 	if err == nil {
