@@ -83,7 +83,11 @@ func (h *Handler) mutateModelCatalog(
 		respondModelCatalogMutationError(c, errors.Join(err, rollbackErr))
 		return modelCatalogMutationResult{}, false
 	}
+	if persistedHash != "" {
+		RecordMutationEffect(mutationRequestContext(c), "configuration.persisted", "configuration")
+	}
 	commit, callback := h.publishConfigLocked(next, persistedHash)
+	RecordMutationEffect(mutationRequestContext(c), "configuration.published", "configuration")
 	commit.ModelCatalogPrepared = true
 	h.mu.Unlock()
 
@@ -100,6 +104,7 @@ func (h *Handler) mutateModelCatalog(
 		previousConfig,
 		transaction,
 	); err != nil {
+		failMutation(ctx)
 		log.WithError(err).WithField("generation", commit.Generation).
 			Error("model catalog runtime transaction failed")
 		c.JSON(
@@ -108,6 +113,9 @@ func (h *Handler) mutateModelCatalog(
 		)
 		return modelCatalogMutationResult{}, false
 	}
+	RecordMutationEffect(ctx, "model.persisted", "model")
+	RecordMutationEffect(ctx, "model.published", "model")
+	CompleteMutation(ctx)
 	return modelCatalogMutationResult{
 		doc:        doc,
 		backupPath: transaction.BackupPath(),
@@ -124,6 +132,7 @@ func (h *Handler) commitModelCatalogTransaction(
 	baseDoc modelcatalog.File,
 	previousConfig *config.Config,
 	transaction *modelcatalog.UpdateTransaction,
+	restoreConfig ...func() (string, error),
 ) error {
 	h.runtimeCommitMu.Lock()
 	defer h.runtimeCommitMu.Unlock()
@@ -155,7 +164,7 @@ func (h *Handler) commitModelCatalogTransaction(
 	}
 
 	rollbackErr := transaction.Rollback()
-	configRollbackErr := h.rollbackModelCatalogConfig(ctx, commit, previousConfig, baseDoc)
+	configRollbackErr := h.rollbackModelCatalogConfig(ctx, commit, previousConfig, baseDoc, restoreConfig...)
 	return errors.Join(transactionErr, rollbackErr, configRollbackErr)
 }
 
@@ -164,6 +173,7 @@ func (h *Handler) rollbackModelCatalogConfig(
 	failedCommit ConfigCommit,
 	previousConfig *config.Config,
 	baseDoc modelcatalog.File,
+	restoreConfig ...func() (string, error),
 ) error {
 	if previousConfig == nil {
 		return fmt.Errorf("previous model catalog config is nil")
@@ -173,7 +183,13 @@ func (h *Handler) rollbackModelCatalogConfig(
 		h.mu.Unlock()
 		return fmt.Errorf("model catalog config generation changed before rollback")
 	}
-	persistedHash, persistErr := h.persistModelCatalogRollback(previousConfig)
+	var persistedHash string
+	var persistErr error
+	if len(restoreConfig) > 0 {
+		persistedHash, persistErr = restoreConfig[0]()
+	} else {
+		persistedHash, persistErr = h.persistModelCatalogRollback(previousConfig)
+	}
 	rollbackCommit, callback := h.publishConfigLocked(previousConfig, persistedHash)
 	rollbackCommit.ModelCatalogPrepared = true
 	h.mu.Unlock()

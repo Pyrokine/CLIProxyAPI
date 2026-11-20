@@ -47,6 +47,7 @@ func TestEnsureRuntimeModelUsesNamedFamilyBeforeProtocolChannel(t *testing.T) {
 		{name: "deepseek-v4-pro", channel: "claude", wantProvider: "DeepSeek", wantGroup: "V4"},
 		{name: "glm-5.3", channel: "openai-compatibility", wantProvider: "GLM", wantGroup: "GLM 5"},
 		{name: "grok-4.6", channel: "openai", wantProvider: "Grok", wantGroup: "Grok 4.6"},
+		{name: "muse-wonder-1.0", channel: "meta", wantProvider: "Meta", wantGroup: "Meta"},
 		{name: "unidentified-model", channel: "claude", wantProvider: "Claude", wantGroup: "Claude"},
 	}
 
@@ -58,7 +59,8 @@ func TestEnsureRuntimeModelUsesNamedFamilyBeforeProtocolChannel(t *testing.T) {
 				if model == nil {
 					t.Fatal("EnsureRuntimeModel() returned nil")
 				}
-				if model.Channel != test.channel || model.Provider != test.wantProvider || model.Group != test.wantGroup {
+				if model.Channel != test.channel || model.Provider != test.wantProvider ||
+					model.Group != test.wantGroup {
 					t.Fatalf(
 						"runtime model = (channel %q, provider %q, group %q), want (%q, %q, %q)",
 						model.Channel,
@@ -159,10 +161,11 @@ func TestDefaultCatalogIncludesCurrentDocumentedCompatibilityModels(t *testing.T
 		{name: "qwen3.8-max", provider: "Qwen"},
 		{name: "qwen3.8-max-0902", provider: "Qwen"},
 		{name: "qwen3.8-flash", provider: "Qwen"},
-		{name: "qwen3-coder-next", provider: "Qwen"},
+		{name: "qwen4-max", provider: "Qwen"},
 		{name: "MiniMax-M3", provider: "MiniMax"},
-		{name: "MiniMax-M2.7", provider: "MiniMax"},
-		{name: "MiniMax-M2.7-highspeed", provider: "MiniMax"},
+		{name: "MiniMax-M3.1-Flash", provider: "MiniMax"},
+		{name: "glm-5.3-flashx", provider: "GLM"},
+		{name: "glm-5.3-flashx-legal", provider: "GLM"},
 	} {
 		model, ok := catalog.Find(test.name)
 		if !ok {
@@ -178,10 +181,9 @@ func TestDefaultCatalogIncludesCurrentDocumentedCompatibilityModels(t *testing.T
 	}
 
 	for _, name := range []string{
-		"glm-5.3-flashx",
-		"kimi-k2.8",
-		"kimi-k2.8-code",
-		"kimi-k3-256k",
+		"qwen3-coder-next",
+		"MiniMax-M2.7",
+		"MiniMax-M2.7-highspeed",
 		"gpt-5.3-codex-spark",
 	} {
 		if model, ok := catalog.Find(name); ok {
@@ -205,6 +207,23 @@ func TestDefaultCatalogIncludesCurrentDocumentedCompatibilityModels(t *testing.T
 		}
 		if _, ok := catalog.Price(name); !ok {
 			t.Errorf("current native model %q is missing a price-status record", name)
+		}
+	}
+}
+
+func TestDefaultCatalogKeepsFixedKimiCompatibilityEntries(t *testing.T) {
+	catalog := DefaultFile()
+	for _, name := range []string{"kimi-k2.8", "kimi-k2.8-code", "kimi-k3-256k"} {
+		model, exists := catalog.Find(name)
+		if !exists || model.Provider != "Kimi" || model.Channel != "kimi" || !model.Enabled || model.UserCreated {
+			t.Errorf("fixed Kimi model %q = %+v, exists=%t", name, model, exists)
+		}
+	}
+	for _, name := range []string{"kimi-k2.8", "kimi-k2.8-code"} {
+		price, exists := catalog.Price(name)
+		if !exists || price.EffectiveStatus() != PriceStatusUnpriced || price.Prompt != 0 || price.Completion != 0 ||
+			price.UnpricedReason == "" {
+			t.Errorf("Kimi price %q = %+v, want an explicit unpriced record", name, price)
 		}
 	}
 }

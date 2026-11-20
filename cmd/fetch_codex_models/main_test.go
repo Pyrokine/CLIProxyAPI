@@ -19,6 +19,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+// noinspection GoBoolExpressions
 func TestCodexClientMetadata159(t *testing.T) {
 	if defaultClientVersion != "0.159.0" {
 		t.Fatalf("defaultClientVersion = %q", defaultClientVersion)
@@ -41,16 +42,18 @@ func TestRefreshedCodexPlanUpdatesAuthMetadata(t *testing.T) {
 		{name: "missing claim defaults to free", idToken: makeIDToken(""), want: codexauth.DefaultPlanType},
 		{name: "invalid token defaults to free", idToken: "invalid", want: codexauth.DefaultPlanType},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			auth := &coreauth.Auth{Metadata: map[string]any{"plan_type": "stale-plus"}}
-			applyRefreshedCodexPlan(auth, &codexauth.TokenData{PlanType: tc.tokenPlan, IDToken: tc.idToken})
-			if got := auth.Metadata["plan_type"]; got != tc.want {
-				t.Fatalf("metadata plan_type = %v, want %q", got, tc.want)
-			}
-			if got := auth.Attributes["plan_type"]; got != tc.want {
-				t.Fatalf("attribute plan_type = %q, want %q", got, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				auth := &coreauth.Auth{Metadata: map[string]any{"plan_type": "stale-plus"}}
+				applyRefreshedCodexPlan(auth, &codexauth.TokenData{PlanType: tc.tokenPlan, IDToken: tc.idToken})
+				if got := auth.Metadata["plan_type"]; got != tc.want {
+					t.Fatalf("metadata plan_type = %v, want %q", got, tc.want)
+				}
+				if got := auth.Attributes["plan_type"]; got != tc.want {
+					t.Fatalf("attribute plan_type = %q, want %q", got, tc.want)
+				}
+			},
+		)
 	}
 }
 
@@ -81,24 +84,28 @@ func TestFetchModelsUses159MetadataAndFakeTransport(t *testing.T) {
 	const accessToken = "codex-access-token-for-test"
 	const accountID = "account-test"
 	fixture := `{"models":[{"slug":"gpt-6-astra"},{"slug":"gpt-5.6-sol"}]}`
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if got := req.URL.Query().Get("client_version"); got != defaultClientVersion {
-			t.Fatalf("client_version = %q", got)
-		}
-		if got := req.Header.Get("User-Agent"); got != defaultCodexUserAgent {
-			t.Fatalf("User-Agent = %q", got)
-		}
-		if got := req.Header.Get("Originator"); got != defaultCodexOriginator {
-			t.Fatalf("Originator = %q", got)
-		}
-		if got := req.Header.Get("Authorization"); got != "Bearer "+accessToken {
-			t.Fatalf("Authorization = %q", got)
-		}
-		if got := req.Header.Get("Chatgpt-Account-Id"); got != accountID {
-			t.Fatalf("Chatgpt-Account-Id = %q", got)
-		}
-		return response(http.StatusOK, fixture), nil
-	})}
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				if got := req.URL.Query().Get("client_version"); got != defaultClientVersion {
+					t.Fatalf("client_version = %q", got)
+				}
+				if got := req.Header.Get("User-Agent"); got != defaultCodexUserAgent {
+					t.Fatalf("User-Agent = %q", got)
+				}
+				if got := req.Header.Get("Originator"); got != defaultCodexOriginator {
+					t.Fatalf("Originator = %q", got)
+				}
+				if got := req.Header.Get("Authorization"); got != "Bearer "+accessToken {
+					t.Fatalf("Authorization = %q", got)
+				}
+				if got := req.Header.Get("Chatgpt-Account-Id"); got != accountID {
+					t.Fatalf("Chatgpt-Account-Id = %q", got)
+				}
+				return response(http.StatusOK, fixture), nil
+			},
+		),
+	}
 	auth := &coreauth.Auth{Metadata: map[string]any{"account_id": accountID}}
 
 	raw, count, err := fetchModelsWithClient(context.Background(), auth, accessToken, defaultClientVersion, client)
@@ -112,9 +119,13 @@ func TestFetchModelsUses159MetadataAndFakeTransport(t *testing.T) {
 
 func TestFetchModelsRejectsCredentialMaterialInOutput(t *testing.T) {
 	const accessToken = "codex-secret-token-for-test"
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return response(http.StatusOK, `{"models":[],"debug":"`+accessToken+`"}`), nil
-	})}
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(*http.Request) (*http.Response, error) {
+				return response(http.StatusOK, `{"models":[],"debug":"`+accessToken+`"}`), nil
+			},
+		),
+	}
 	auth := &coreauth.Auth{Metadata: map[string]any{"access_token": accessToken}}
 
 	raw, count, err := fetchModelsWithClient(context.Background(), auth, accessToken, defaultClientVersion, client)
@@ -133,9 +144,13 @@ func TestFetchModelsRedactsTransportAndStatusFailures(t *testing.T) {
 	const accessToken = "codex-secret-token-for-test"
 	auth := &coreauth.Auth{Metadata: map[string]any{"access_token": accessToken}}
 
-	transportFailure := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("transport rejected " + accessToken)
-	})}
+	transportFailure := &http.Client{
+		Transport: roundTripFunc(
+			func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("transport rejected " + accessToken)
+			},
+		),
+	}
 	if _, _, err := fetchModelsWithClient(
 		context.Background(), auth, accessToken, defaultClientVersion, transportFailure,
 	); err == nil {
@@ -144,9 +159,13 @@ func TestFetchModelsRedactsTransportAndStatusFailures(t *testing.T) {
 		t.Fatalf("transport error leaked access token: %q", err)
 	}
 
-	statusFailure := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return response(http.StatusUnauthorized, `{"authorization":"Bearer `+accessToken+`"}`), nil
-	})}
+	statusFailure := &http.Client{
+		Transport: roundTripFunc(
+			func(*http.Request) (*http.Response, error) {
+				return response(http.StatusUnauthorized, `{"authorization":"Bearer `+accessToken+`"}`), nil
+			},
+		),
+	}
 	if _, _, err := fetchModelsWithClient(
 		context.Background(), auth, accessToken, defaultClientVersion, statusFailure,
 	); err == nil {
@@ -166,15 +185,17 @@ func TestCountModels(t *testing.T) {
 		{name: "incomplete model", raw: `{"models":[{"slug":"gpt-5.6-sol"}]}`, count: 1},
 		{name: "empty", raw: `{"models":[]}`, count: 0},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			count, err := countModels([]byte(testCase.raw))
-			if err != nil {
-				t.Fatalf("countModels() error = %v", err)
-			}
-			if count != testCase.count {
-				t.Fatalf("countModels() = %d, want %d", count, testCase.count)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				count, err := countModels([]byte(testCase.raw))
+				if err != nil {
+					t.Fatalf("countModels() error = %v", err)
+				}
+				if count != testCase.count {
+					t.Fatalf("countModels() = %d, want %d", count, testCase.count)
+				}
+			},
+		)
 	}
 	if _, err := countModels([]byte(`{"models":`)); err == nil {
 		t.Fatal("countModels(malformed) error = nil")

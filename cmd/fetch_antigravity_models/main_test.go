@@ -32,14 +32,18 @@ func TestDefaultAntigravityFetchBaseURLs(t *testing.T) {
 
 func TestFetchModelsTriesEnabledCredentialsWithoutMergingCatalogs(t *testing.T) {
 	var calls []string
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		token := req.Header.Get("Authorization")
-		calls = append(calls, token)
-		if token == "Bearer fixture-valid" {
-			return response(http.StatusOK, antigravityFixture("fixture-catalog-model")), nil
-		}
-		return response(http.StatusUnauthorized, `{}`), nil
-	})}
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				token := req.Header.Get("Authorization")
+				calls = append(calls, token)
+				if token == "Bearer fixture-valid" {
+					return response(http.StatusOK, antigravityFixture("fixture-catalog-model")), nil
+				}
+				return response(http.StatusUnauthorized, `{}`), nil
+			},
+		),
+	}
 	auths := []*coreauth.Auth{
 		nil,
 		{ID: "backup.back.json", Provider: "antigravity", Metadata: map[string]any{"access_token": "fixture-backup"}},
@@ -54,20 +58,31 @@ func TestFetchModelsTriesEnabledCredentialsWithoutMergingCatalogs(t *testing.T) 
 	if err != nil || len(models) != 1 || models[0].ID != "fixture-catalog-model" {
 		t.Fatalf("fetchModels: models=%v err=%v", models, err)
 	}
-	if want := []string{"Bearer fixture-invalid", "Bearer fixture-invalid", "Bearer fixture-valid"}; !reflect.DeepEqual(calls, want) {
+	if want := []string{
+		"Bearer fixture-invalid", "Bearer fixture-invalid", "Bearer fixture-valid",
+	}; !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls = %v, want %v", calls, want)
 	}
 }
 
 func TestFetchModelsBackupOnlyAndAllFailures(t *testing.T) {
 	for _, success := range []bool{true, false} {
-		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			if success {
-				return response(http.StatusOK, antigravityFixture("fixture-backup-model")), nil
-			}
-			return nil, errors.New("fixture-backup-secret transport error")
-		})}
-		auths := []*coreauth.Auth{{ID: "fixture.back.json", Provider: "antigravity", Metadata: map[string]any{"access_token": "fixture-backup-secret"}}}
+		client := &http.Client{
+			Transport: roundTripFunc(
+				func(*http.Request) (*http.Response, error) {
+					if success {
+						return response(http.StatusOK, antigravityFixture("fixture-backup-model")), nil
+					}
+					return nil, errors.New("fixture-backup-secret transport error")
+				},
+			),
+		}
+		auths := []*coreauth.Auth{
+			{
+				ID: "fixture.back.json", Provider: "antigravity",
+				Metadata: map[string]any{"access_token": "fixture-backup-secret"},
+			},
+		}
 		models, err := fetchModels(context.Background(), auths, []string{"https://fixture.invalid"}, client)
 		if success {
 			if err != nil || len(models) != 1 || models[0].ID != "fixture-backup-model" {
@@ -89,22 +104,26 @@ func TestFetchModelsRetriesEndpointBeforeFallback(t *testing.T) {
 	var calls []string
 	dailyAttempts := 0
 
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		mu.Lock()
-		calls = append(calls, req.URL.Host)
-		mu.Unlock()
-		if got := req.Header.Get("Authorization"); got != "Bearer "+accessToken {
-			t.Fatalf("Authorization = %q", got)
-		}
-		if req.URL.Host == "daily.invalid" {
-			dailyAttempts++
-			if dailyAttempts == 1 {
-				return response(http.StatusServiceUnavailable, `{"error":"temporary"}`), nil
-			}
-			return response(http.StatusOK, antigravityFixture("gemini-3.6-flash")), nil
-		}
-		return nil, errors.New("unexpected endpoint")
-	})}
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				mu.Lock()
+				calls = append(calls, req.URL.Host)
+				mu.Unlock()
+				if got := req.Header.Get("Authorization"); got != "Bearer "+accessToken {
+					t.Fatalf("Authorization = %q", got)
+				}
+				if req.URL.Host == "daily.invalid" {
+					dailyAttempts++
+					if dailyAttempts == 1 {
+						return response(http.StatusServiceUnavailable, `{"error":"temporary"}`), nil
+					}
+					return response(http.StatusOK, antigravityFixture("gemini-3.6-flash")), nil
+				}
+				return nil, errors.New("unexpected endpoint")
+			},
+		),
+	}
 	auth := &coreauth.Auth{Metadata: map[string]any{"access_token": accessToken, "project_id": "project-a"}}
 
 	models, err := fetchModelsFromBaseURLs(context.Background(), auth, baseURLs, client)
@@ -124,13 +143,17 @@ func TestFetchModelsUsesDailyProdSandboxOrder(t *testing.T) {
 	const accessToken = "test-antigravity-token"
 	baseURLs := []string{"https://daily.invalid", "https://prod.invalid", "https://sandbox.invalid"}
 	var calls []string
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls = append(calls, req.URL.Host)
-		if req.URL.Host == "sandbox.invalid" {
-			return response(http.StatusOK, antigravityFixture("gemini-2.5-flash")), nil
-		}
-		return response(http.StatusBadGateway, `{"authorization":"Bearer `+accessToken+`"}`), nil
-	})}
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				calls = append(calls, req.URL.Host)
+				if req.URL.Host == "sandbox.invalid" {
+					return response(http.StatusOK, antigravityFixture("gemini-2.5-flash")), nil
+				}
+				return response(http.StatusBadGateway, `{"authorization":"Bearer `+accessToken+`"}`), nil
+			},
+		),
+	}
 	auth := &coreauth.Auth{Metadata: map[string]any{"access_token": accessToken}}
 
 	models, err := fetchModelsFromBaseURLs(context.Background(), auth, baseURLs, client)
@@ -154,13 +177,17 @@ func TestFetchModelsPreservesAttemptErrorsWithoutCredentialLeak(t *testing.T) {
 	const accessToken = "test-antigravity-secret"
 	baseURLs := []string{"https://daily.invalid", "https://prod.invalid"}
 	call := 0
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		call++
-		if call == 1 {
-			return nil, errors.New("transport rejected " + accessToken)
-		}
-		return response(http.StatusUnauthorized, `{"token":"`+accessToken+`"}`), nil
-	})}
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				call++
+				if call == 1 {
+					return nil, errors.New("transport rejected " + accessToken)
+				}
+				return response(http.StatusUnauthorized, `{"token":"`+accessToken+`"}`), nil
+			},
+		),
+	}
 	auth := &coreauth.Auth{Metadata: map[string]any{"access_token": accessToken}}
 
 	models, err := fetchModelsFromBaseURLs(context.Background(), auth, baseURLs, client)
@@ -188,9 +215,13 @@ func TestFetchModelsPreservesAttemptErrorsWithoutCredentialLeak(t *testing.T) {
 
 func TestFetchModelsRejectsCredentialMaterialInSuccessBody(t *testing.T) {
 	const accessToken = "test-antigravity-secret"
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return response(http.StatusOK, `{"models":{"safe-model":{"displayName":"`+accessToken+`"}}}`), nil
-	})}
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(*http.Request) (*http.Response, error) {
+				return response(http.StatusOK, `{"models":{"safe-model":{"displayName":"`+accessToken+`"}}}`), nil
+			},
+		),
+	}
 	auth := &coreauth.Auth{Metadata: map[string]any{"access_token": accessToken}}
 
 	models, err := fetchModelsFromBaseURLs(context.Background(), auth, []string{"https://daily.invalid"}, client)

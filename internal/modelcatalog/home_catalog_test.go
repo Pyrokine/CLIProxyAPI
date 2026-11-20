@@ -22,7 +22,8 @@ func TestDecodeHomeCatalogRejectsInvalidNativeCapabilities(t *testing.T) {
 }
 
 func TestDecodeHomeCatalogKeepsSameIDRoutesSeparate(t *testing.T) {
-	catalog, err := modelcatalog.DecodeHomeCatalog([]byte(`{
+	catalog, err := modelcatalog.DecodeHomeCatalog(
+		[]byte(`{
 		"codex": [{
 			"id": "shared-model",
 			"context_length": 123456,
@@ -37,7 +38,8 @@ func TestDecodeHomeCatalogKeepsSameIDRoutesSeparate(t *testing.T) {
 			"thinking": {"levels": ["low"]},
 			"native_capabilities": {"web_search": true}
 		}]
-	}`))
+	}`),
+	)
 	if err != nil {
 		t.Fatalf("DecodeHomeCatalog() error = %v", err)
 	}
@@ -79,13 +81,15 @@ func TestDecodeHomeCatalogKeepsSameIDRoutesSeparate(t *testing.T) {
 }
 
 func TestHomeCatalogRoutesAndModelsAreDeepCloned(t *testing.T) {
-	catalog, err := modelcatalog.DecodeHomeCatalog([]byte(`{
+	catalog, err := modelcatalog.DecodeHomeCatalog(
+		[]byte(`{
 		"codex": [{
 			"id": "clone-model",
 			"thinking": {"levels": ["low", "high"]},
 			"native_capabilities": {"web_search": true}
 		}]
-	}`))
+	}`),
+	)
 	if err != nil {
 		t.Fatalf("DecodeHomeCatalog() error = %v", err)
 	}
@@ -144,26 +148,30 @@ func TestHomeCatalogWebSearchCapabilityUsesFalseUnknownTruePriority(t *testing.T
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			catalog, err := modelcatalog.DecodeHomeCatalog([]byte(test.raw))
-			if err != nil {
-				t.Fatalf("DecodeHomeCatalog() error = %v", err)
-			}
-			got := catalog.ResponsesWebSearchCapability("m")
-			if (got != nil) != test.present {
-				t.Fatalf("capability presence = %v, want %v", got != nil, test.present)
-			}
-			if got != nil && *got != test.want {
-				t.Fatalf("capability = %v, want %v", *got, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				catalog, err := modelcatalog.DecodeHomeCatalog([]byte(test.raw))
+				if err != nil {
+					t.Fatalf("DecodeHomeCatalog() error = %v", err)
+				}
+				got := catalog.ResponsesWebSearchCapability("m")
+				if (got != nil) != test.present {
+					t.Fatalf("capability presence = %v, want %v", got != nil, test.present)
+				}
+				if got != nil && *got != test.want {
+					t.Fatalf("capability = %v, want %v", *got, test.want)
+				}
+			},
+		)
 	}
 }
 
 func TestHomeCatalogResolvesKimiK3256KLegacyMetadata(t *testing.T) {
-	catalog, err := modelcatalog.DecodeHomeCatalog([]byte(`{
+	catalog, err := modelcatalog.DecodeHomeCatalog(
+		[]byte(`{
 		"kimi": [{"id":"kimi-k3-256k"}]
-	}`))
+	}`),
+	)
 	if err != nil {
 		t.Fatalf("DecodeHomeCatalog() error = %v", err)
 	}
@@ -202,7 +210,8 @@ func TestHomeCatalogResolvesKimiK3256KLegacyMetadata(t *testing.T) {
 }
 
 func TestHomeCatalogCodexProjectionUsesRequestMetadata(t *testing.T) {
-	catalog, err := modelcatalog.DecodeHomeCatalog([]byte(`{
+	catalog, err := modelcatalog.DecodeHomeCatalog(
+		[]byte(`{
 		"codex": [{
 			"id": "gpt-5.6-sol",
 			"context_length": 0,
@@ -212,7 +221,8 @@ func TestHomeCatalogCodexProjectionUsesRequestMetadata(t *testing.T) {
 			"thinking": {"levels": ["low", "high"]},
 			"native_capabilities": {"web_search": true}
 		}]
-	}`))
+	}`),
+	)
 	if err != nil {
 		t.Fatalf("DecodeHomeCatalog() error = %v", err)
 	}

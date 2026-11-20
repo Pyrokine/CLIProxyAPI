@@ -21,59 +21,164 @@ func TestResolveResponsesWebSearchCapability(t *testing.T) {
 		want    bool
 		present bool
 	}{
-		{name: "supported codex", routes: []NativeCapabilityRoute{{Provider: "codex", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
-		{name: "supported xai", routes: []NativeCapabilityRoute{{Provider: "xai", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
-		{name: "supported claude", routes: []NativeCapabilityRoute{{Provider: "claude", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
-		{name: "supported antigravity", routes: []NativeCapabilityRoute{{Provider: "antigravity", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
-		{name: "explicit unsupported model", routes: []NativeCapabilityRoute{{Provider: "codex", NativeCapabilities: testNativeCapabilities(&falseValue)}}, want: false, present: true},
-		{name: "supported gemini", routes: []NativeCapabilityRoute{{Provider: "gemini", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
-		{name: "supported gemini CLI", routes: []NativeCapabilityRoute{{Provider: "gemini-cli", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
-		{name: "supported vertex", routes: []NativeCapabilityRoute{{Provider: "vertex", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
-		{name: "supported AIStudio", routes: []NativeCapabilityRoute{{Provider: "aistudio", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
-		{name: "unsupported provider path", routes: []NativeCapabilityRoute{{Provider: "openai", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: false, present: true},
-		{name: "Gemini native Interactions remains unsupported", routes: []NativeCapabilityRoute{{Provider: "gemini-interactions", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: false, present: true},
+		{
+			name: "supported codex", routes: []NativeCapabilityRoute{
+				{
+					Provider: "codex", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, want: true, present: true,
+		},
+		{
+			name:   "supported xai",
+			routes: []NativeCapabilityRoute{{Provider: "xai", NativeCapabilities: testNativeCapabilities(&trueValue)}},
+			want:   true, present: true,
+		},
+		{
+			name: "supported claude", routes: []NativeCapabilityRoute{
+				{
+					Provider: "claude", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, want: true, present: true,
+		},
+		{
+			name: "supported antigravity", routes: []NativeCapabilityRoute{
+				{
+					Provider: "antigravity", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, want: true, present: true,
+		},
+		{
+			name: "explicit unsupported model", routes: []NativeCapabilityRoute{
+				{
+					Provider: "codex", NativeCapabilities: testNativeCapabilities(&falseValue),
+				},
+			}, want: false, present: true,
+		},
+		{
+			name: "supported gemini", routes: []NativeCapabilityRoute{
+				{
+					Provider: "gemini", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, want: true, present: true,
+		},
+		{
+			name: "supported gemini CLI", routes: []NativeCapabilityRoute{
+				{
+					Provider: "gemini-cli", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, want: true, present: true,
+		},
+		{
+			name: "supported vertex", routes: []NativeCapabilityRoute{
+				{
+					Provider: "vertex", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, want: true, present: true,
+		},
+		{
+			name: "supported AIStudio", routes: []NativeCapabilityRoute{
+				{
+					Provider: "aistudio", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, want: true, present: true,
+		},
+		{
+			name: "unsupported provider path", routes: []NativeCapabilityRoute{
+				{
+					Provider: "openai", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, want: false, present: true,
+		},
+		{
+			name: "Gemini native Interactions remains unsupported", routes: []NativeCapabilityRoute{
+				{
+					Provider: "gemini-interactions", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, want: false, present: true,
+		},
 		{name: "unknown metadata", routes: []NativeCapabilityRoute{{Provider: "codex"}}, present: false},
-		{name: "unknown provider", routes: []NativeCapabilityRoute{{Provider: "custom", NativeCapabilities: testNativeCapabilities(&trueValue)}}, present: false},
-		{name: "explicit false on unknown provider", routes: []NativeCapabilityRoute{{Provider: "custom", NativeCapabilities: testNativeCapabilities(&falseValue)}}, want: false, present: true},
-		{name: "unknown plus true is unknown", routes: []NativeCapabilityRoute{{Provider: "codex", NativeCapabilities: testNativeCapabilities(&trueValue)}, {Provider: "xai"}}, present: false},
-		{name: "false wins over unknown", routes: []NativeCapabilityRoute{{Provider: "codex"}, {Provider: "openai", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: false, present: true},
+		{
+			name: "unknown provider", routes: []NativeCapabilityRoute{
+				{
+					Provider: "custom", NativeCapabilities: testNativeCapabilities(&trueValue),
+				},
+			}, present: false,
+		},
+		{
+			name: "explicit false on unknown provider", routes: []NativeCapabilityRoute{
+				{
+					Provider: "custom", NativeCapabilities: testNativeCapabilities(&falseValue),
+				},
+			}, want: false, present: true,
+		},
+		{
+			name: "unknown plus true is unknown", routes: []NativeCapabilityRoute{
+				{Provider: "codex", NativeCapabilities: testNativeCapabilities(&trueValue)}, {Provider: "xai"},
+			}, present: false,
+		},
+		{
+			name: "false wins over unknown", routes: []NativeCapabilityRoute{
+				{Provider: "codex"}, {Provider: "openai", NativeCapabilities: testNativeCapabilities(&trueValue)},
+			}, want: false, present: true,
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ResolveResponsesWebSearchCapability(tt.routes)
-			if (got != nil) != tt.present {
-				t.Fatalf("presence = %v, want %v", got != nil, tt.present)
-			}
-			if got != nil && *got != tt.want {
-				t.Fatalf("capability = %v, want %v", *got, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				got := ResolveResponsesWebSearchCapability(tt.routes)
+				if (got != nil) != tt.present {
+					t.Fatalf("presence = %v, want %v", got != nil, tt.present)
+				}
+				if got != nil && *got != tt.want {
+					t.Fatalf("capability = %v, want %v", *got, tt.want)
+				}
+			},
+		)
 	}
 }
 
 func TestModelRegistryResponsesWebSearchCapabilityChecksEveryExactClientRoute(t *testing.T) {
 	reg := newTestModelRegistry()
 	trueValue, falseValue := true, false
-	reg.RegisterClient("codex-a", "codex", []*ModelInfo{
-		{ID: "shared", CatalogName: "upstream-a", NativeCapabilities: testNativeCapabilities(&trueValue)},
-		{ID: "alias", CatalogName: "upstream-capable", NativeCapabilities: testNativeCapabilities(&trueValue)},
-		{ID: "team/alias", CatalogName: "upstream-incapable", NativeCapabilities: testNativeCapabilities(&falseValue)},
-	})
-	reg.RegisterClient("codex-b", "codex", []*ModelInfo{
-		{ID: "shared", CatalogName: "upstream-b"},
-		{ID: "mixed-same-provider", CatalogName: "upstream-capable", NativeCapabilities: testNativeCapabilities(&trueValue)},
-	})
-	reg.RegisterClient("codex-c", "codex", []*ModelInfo{
-		{ID: "mixed-same-provider", CatalogName: "upstream-incapable", NativeCapabilities: testNativeCapabilities(&falseValue)},
-		{ID: "mixed-provider", NativeCapabilities: testNativeCapabilities(&trueValue)},
-	})
-	reg.RegisterClient("openai-a", "openai", []*ModelInfo{
-		{ID: "mixed-provider", NativeCapabilities: testNativeCapabilities(&trueValue)},
-	})
-	reg.RegisterClient("missing-info", "codex", []*ModelInfo{
-		{ID: "missing-client-info", NativeCapabilities: testNativeCapabilities(&trueValue)},
-	})
+	reg.RegisterClient(
+		"codex-a", "codex", []*ModelInfo{
+			{ID: "shared", CatalogName: "upstream-a", NativeCapabilities: testNativeCapabilities(&trueValue)},
+			{ID: "alias", CatalogName: "upstream-capable", NativeCapabilities: testNativeCapabilities(&trueValue)},
+			{
+				ID: "team/alias", CatalogName: "upstream-incapable",
+				NativeCapabilities: testNativeCapabilities(&falseValue),
+			},
+		},
+	)
+	reg.RegisterClient(
+		"codex-b", "codex", []*ModelInfo{
+			{ID: "shared", CatalogName: "upstream-b"},
+			{
+				ID: "mixed-same-provider", CatalogName: "upstream-capable",
+				NativeCapabilities: testNativeCapabilities(&trueValue),
+			},
+		},
+	)
+	reg.RegisterClient(
+		"codex-c", "codex", []*ModelInfo{
+			{
+				ID: "mixed-same-provider", CatalogName: "upstream-incapable",
+				NativeCapabilities: testNativeCapabilities(&falseValue),
+			},
+			{ID: "mixed-provider", NativeCapabilities: testNativeCapabilities(&trueValue)},
+		},
+	)
+	reg.RegisterClient(
+		"openai-a", "openai", []*ModelInfo{
+			{ID: "mixed-provider", NativeCapabilities: testNativeCapabilities(&trueValue)},
+		},
+	)
+	reg.RegisterClient(
+		"missing-info", "codex", []*ModelInfo{
+			{ID: "missing-client-info", NativeCapabilities: testNativeCapabilities(&trueValue)},
+		},
+	)
 	delete(reg.clientModelInfos["missing-info"], "missing-client-info")
 
 	assertCapability := func(id string, want bool, present bool) {
@@ -103,7 +208,8 @@ func TestNativeCapabilitiesCloneIsolationAndJSONVisibility(t *testing.T) {
 
 	*input.NativeCapabilities.WebSearch = false
 	got := reg.GetModelsForClient("clone-client")
-	if len(got) != 1 || got[0].NativeCapabilities == nil || got[0].NativeCapabilities.WebSearch == nil || !*got[0].NativeCapabilities.WebSearch {
+	if len(got) != 1 || got[0].NativeCapabilities == nil || got[0].NativeCapabilities.WebSearch == nil ||
+		!*got[0].NativeCapabilities.WebSearch {
 		t.Fatalf("registered metadata changed through input alias: %+v", got)
 	}
 	*got[0].NativeCapabilities.WebSearch = false
@@ -160,18 +266,20 @@ func TestModelInfoUnmarshalNativeCapabilitiesTriState(t *testing.T) {
 		{name: "false", raw: `{"id":"a","native_capabilities":{"web_search":false}}`, present: true, want: false},
 		{name: "absent", raw: `{"id":"a"}`, present: false},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			var model ModelInfo
-			if err := json.Unmarshal([]byte(tt.raw), &model); err != nil {
-				t.Fatal(err)
-			}
-			present := model.NativeCapabilities != nil && model.NativeCapabilities.WebSearch != nil
-			if present != tt.present {
-				t.Fatalf("presence = %v, want %v", present, tt.present)
-			}
-			if present && *model.NativeCapabilities.WebSearch != tt.want {
-				t.Fatalf("value = %v, want %v", *model.NativeCapabilities.WebSearch, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				var model ModelInfo
+				if err := json.Unmarshal([]byte(tt.raw), &model); err != nil {
+					t.Fatal(err)
+				}
+				present := model.NativeCapabilities != nil && model.NativeCapabilities.WebSearch != nil
+				if present != tt.present {
+					t.Fatalf("presence = %v, want %v", present, tt.present)
+				}
+				if present && *model.NativeCapabilities.WebSearch != tt.want {
+					t.Fatalf("value = %v, want %v", *model.NativeCapabilities.WebSearch, tt.want)
+				}
+			},
+		)
 	}
 }

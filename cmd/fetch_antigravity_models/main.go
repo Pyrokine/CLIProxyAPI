@@ -60,6 +60,7 @@ type modelEntry struct {
 	MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
 }
 
+//goland:noinspection DuplicatedCode
 func main() {
 	var authsDir string
 	var configPath string
@@ -73,15 +74,17 @@ func main() {
 	flag.Parse()
 
 	authsDirOverridden := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "auths-dir" {
-			authsDirOverridden = true
-		}
-	})
+	flag.Visit(
+		func(f *flag.Flag) {
+			if f.Name == "auths-dir" {
+				authsDirOverridden = true
+			}
+		},
+	)
 
 	wd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot get working directory: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: cannot get working directory: %v\n", err)
 		os.Exit(1)
 	}
 	if strings.TrimSpace(configPath) == "" {
@@ -89,7 +92,7 @@ func main() {
 	}
 	cfg, err := config.LoadConfigOptional(configPath, false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to load config file %s: %v\n", configPath, err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to load config file %s: %v\n", configPath, err)
 		os.Exit(1)
 	}
 	if cfg == nil {
@@ -104,7 +107,7 @@ func main() {
 		authsDir = filepath.Join(wd, authsDir)
 	}
 	if authsDir, err = util.ResolveAuthDir(authsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to resolve auth directory: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to resolve auth directory: %v\n", err)
 		os.Exit(1)
 	}
 	if !filepath.IsAbs(outputPath) {
@@ -118,13 +121,13 @@ func main() {
 	ctx := context.Background()
 	auths, err := fileStore.List(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to list auth files: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to list auth files: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("Fetching Antigravity model list from upstream...")
 	models, err := fetchModels(ctx, auths, defaultAntigravityFetchBaseURLs(), nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to fetch Antigravity models: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to fetch Antigravity models: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Fetched %d models.\n", len(models))
@@ -136,11 +139,11 @@ func main() {
 		raw, err = json.Marshal(modelOutput{Models: models})
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to marshal JSON: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to marshal JSON: %v\n", err)
 		os.Exit(1)
 	}
 	if err = os.WriteFile(outputPath, raw, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to write output file %s: %v\n", outputPath, err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to write output file %s: %v\n", outputPath, err)
 		os.Exit(1)
 	}
 	fmt.Printf("Model list saved to: %s\n", outputPath)
@@ -167,7 +170,10 @@ func defaultAntigravityFetchBaseURLs() []string {
 	return []string{antigravityBaseURLDaily, antigravityBaseURLProd, antigravitySandboxBaseURLDaily}
 }
 
-func fetchModels(ctx context.Context, auths []*coreauth.Auth, baseURLs []string, client *http.Client) ([]modelEntry, error) {
+func fetchModels(ctx context.Context, auths []*coreauth.Auth, baseURLs []string, client *http.Client) (
+	[]modelEntry,
+	error,
+) {
 	var candidates, backups []*coreauth.Auth
 	for _, auth := range auths {
 		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled ||
@@ -203,7 +209,7 @@ func fetchModels(ctx context.Context, auths []*coreauth.Auth, baseURLs []string,
 			err = errors.New("no models returned")
 		}
 		err = safeRequestError(err, authStringValues(auth)...)
-		fmt.Fprintf(os.Stderr, "warning: auth_index=%s model fetch failed: %v\n", authIndex, err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: auth_index=%s model fetch failed: %v\n", authIndex, err)
 		failures = append(failures, fmt.Errorf("auth_index=%s: %w", authIndex, err))
 	}
 	return nil, errors.Join(failures...)
@@ -215,10 +221,10 @@ func fetchModelsFromBaseURLs(
 	baseURLs []string,
 	client *http.Client,
 ) ([]modelEntry, error) {
-	accessToken := ""
-	if auth != nil {
-		accessToken = metaStringValue(auth.Metadata, "access_token")
+	if auth == nil {
+		return nil, errors.New("no access token found in auth")
 	}
+	accessToken := metaStringValue(auth.Metadata, "access_token")
 	if accessToken == "" {
 		return nil, errors.New("no access token found in auth")
 	}
@@ -232,13 +238,11 @@ func fetchModelsFromBaseURLs(
 	}
 
 	payload := []byte(`{}`)
-	if auth != nil {
-		if projectID := metaStringValue(auth.Metadata, "project_id"); projectID != "" {
-			var errPayload error
-			payload, errPayload = json.Marshal(map[string]string{"project": projectID})
-			if errPayload != nil {
-				return nil, fmt.Errorf("encode project request: %w", errPayload)
-			}
+	if projectID := metaStringValue(auth.Metadata, "project_id"); projectID != "" {
+		var errPayload error
+		payload, errPayload = json.Marshal(map[string]string{"project": projectID})
+		if errPayload != nil {
+			return nil, fmt.Errorf("encode project request: %w", errPayload)
 		}
 	}
 

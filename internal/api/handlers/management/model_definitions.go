@@ -50,8 +50,11 @@ func (h *Handler) GetModelsCatalogMeta(c *gin.Context) {
 func (h *Handler) PostModelsCatalogRefresh(c *gin.Context) {
 	meta, err := registry.TriggerCatalogRefresh(c.Request.Context())
 	if err != nil {
+		failMutation(c.Request.Context())
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "meta": meta})
 		return
 	}
+	RecordMutationEffect(c.Request.Context(), "model.published", "model")
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusOK, meta)
 }

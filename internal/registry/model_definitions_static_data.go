@@ -8,7 +8,8 @@ import (
 )
 
 func getCatalogModels(selectModels func(*staticModelsJSON) []*ModelInfo) []*ModelInfo {
-	for _, data := range []*staticModelsJSON{getModels(), embeddedModelsCatalog()} {
+	for _, load := range []func() *staticModelsJSON{getModels, embeddedModelsCatalog} {
+		data := load()
 		if data == nil {
 			continue
 		}
@@ -43,39 +44,47 @@ func withoutModelIDs(models []*ModelInfo, ids ...string) []*ModelInfo {
 
 // GetCodexFreeModels returns the Codex free-plan model definitions.
 func GetCodexFreeModels() []*ModelInfo {
-	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexFree }); len(dynamic) > 0 {
-		return withCodexBuiltins(dynamic)
-	}
-	return GetEmbeddedOpenAIModels()
+	return withoutModelIDs(
+		getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexFree }),
+		codexBuiltinImageModelIDs...,
+	)
 }
 
 // GetCodexTeamModels returns the Codex team-plan model definitions.
 func GetCodexTeamModels() []*ModelInfo {
-	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexTeam }); len(dynamic) > 0 {
+	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexTeam }); len(
+		dynamic,
+	) > 0 {
 		return withCodexBuiltins(dynamic)
 	}
-	return GetEmbeddedOpenAIModels()
+	return getEmbeddedOpenAIModels()
 }
 
 // GetCodexPlusModels returns the Codex plus-plan model definitions.
 func GetCodexPlusModels() []*ModelInfo {
-	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexPlus }); len(dynamic) > 0 {
+	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexPlus }); len(
+		dynamic,
+	) > 0 {
 		return withCodexBuiltins(dynamic)
 	}
-	return GetEmbeddedOpenAIModels()
+	return getEmbeddedOpenAIModels()
 }
 
 // GetCodexProModels returns the Codex pro-plan model definitions.
 func GetCodexProModels() []*ModelInfo {
-	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexPro }); len(dynamic) > 0 {
+	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexPro }); len(
+		dynamic,
+	) > 0 {
 		return withCodexBuiltins(dynamic)
 	}
-	return GetEmbeddedOpenAIModels()
+	return getEmbeddedOpenAIModels()
 }
 
 // GetClaudeModels returns the standard Claude model definitions
 func GetClaudeModels() []*ModelInfo {
-	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Claude }); len(models) > 0 {
+	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Claude }); len(
+		models,
+	) > 0 {
 		return models
 	}
 	return []*ModelInfo{
@@ -103,7 +112,12 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4.5 Haiku",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    true,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-sonnet-4-5-20250929",
@@ -114,7 +128,12 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4.5 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    true,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-sonnet-4-6",
@@ -140,7 +159,12 @@ func GetClaudeModels() []*ModelInfo {
 			Description:         "Premium model combining maximum intelligence with practical performance",
 			ContextLength:       1000000,
 			MaxCompletionTokens: 128000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    true,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-opus-4-8",
@@ -152,7 +176,12 @@ func GetClaudeModels() []*ModelInfo {
 			Description:         "Premium model combining maximum intelligence with practical performance",
 			ContextLength:       1000000,
 			MaxCompletionTokens: 128000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    true,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-sonnet-5",
@@ -170,13 +199,15 @@ func GetClaudeModels() []*ModelInfo {
 			},
 		},
 		{
-			ID:                        "claude-sonnet-5-5",
-			Object:                    "model",
-			Created:                   1790553600,
-			OwnedBy:                   "anthropic",
-			Type:                      "claude",
-			DisplayName:               "Claude Sonnet 5.5",
-			Description:               "Anthropic's agentic Sonnet model for coding, tool use, and enterprise workflows",
+			ID:          "claude-sonnet-5-5",
+			Object:      "model",
+			Created:     1790553600,
+			OwnedBy:     "anthropic",
+			Type:        "claude",
+			DisplayName: "Claude Sonnet 5.5",
+			Description: "Anthropic's agentic Sonnet model for coding, tool use, and " +
+				"enterprise " +
+				"workflows",
 			ContextLength:             1000000,
 			MaxCompletionTokens:       128000,
 			SupportedInputModalities:  []string{"text", "image"},
@@ -187,19 +218,21 @@ func GetClaudeModels() []*ModelInfo {
 			},
 		},
 		{
-			ID:                        "claude-fable-5-1",
-			Object:                    "model",
-			Created:                   1788220800,
-			OwnedBy:                   "anthropic",
-			Type:                      "claude",
-			DisplayName:               "Claude Fable 5.1",
-			Description:               "Claude Fable 5.1 extends Claude Fable 5 at the same input and output prices, with cache reads at a quarter of the cost, and brings stronger long-running agentic coding, multistep research, and document, spreadsheet, and slide work.",
+			ID:          "claude-fable-5-1",
+			Object:      "model",
+			Created:     1788220800,
+			OwnedBy:     "anthropic",
+			Type:        "claude",
+			DisplayName: "Claude Fable 5.1",
+			Description: "Claude Fable 5.1 extends Claude Fable 5 at the same input and output prices, with " +
+				"cache reads at a quarter of the cost, and brings stronger long-running agentic coding, " +
+				"multistep research, and document, spreadsheet, and slide work.",
 			ContextLength:             1000000,
 			MaxCompletionTokens:       128000,
 			SupportedInputModalities:  []string{"text", "image"},
 			SupportedOutputModalities: []string{"text"},
 			Thinking: &ThinkingSupport{
-				ZeroAllowed: false, DynamicAllowed: true,
+				Min: 1024, Max: 128000, ZeroAllowed: true,
 				Levels: []string{"low", "medium", "high", "xhigh", "max"},
 			},
 		},
@@ -221,16 +254,23 @@ func GetClaudeModels() []*ModelInfo {
 			},
 		},
 		{
-			ID:                  "claude-fable-5",
-			Object:              "model",
-			Created:             1781049600, // 2026-06-10
-			OwnedBy:             "anthropic",
-			Type:                "claude",
-			DisplayName:         "Claude Fable 5",
-			Description:         "Anthropic's most capable widely released model, for the most demanding reasoning and long-horizon agentic work",
+			ID:          "claude-fable-5",
+			Object:      "model",
+			Created:     1781049600, // 2026-06-10
+			OwnedBy:     "anthropic",
+			Type:        "claude",
+			DisplayName: "Claude Fable 5",
+			Description: "Anthropic's most capable widely released model, for the most " +
+				"demanding reasoning and long-horizon agentic " +
+				"work",
 			ContextLength:       1000000,
 			MaxCompletionTokens: 128000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    true,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-opus-4-6",
@@ -242,7 +282,12 @@ func GetClaudeModels() []*ModelInfo {
 			Description:         "Premium model combining maximum intelligence with practical performance",
 			ContextLength:       1000000,
 			MaxCompletionTokens: 128000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    true,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-opus-4-5-20251101",
@@ -254,7 +299,12 @@ func GetClaudeModels() []*ModelInfo {
 			Description:         "Premium model combining maximum intelligence with practical performance",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    true,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-opus-4-1-20250805",
@@ -265,7 +315,12 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4.1 Opus",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: false, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    false,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-opus-4-20250514",
@@ -276,7 +331,12 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4 Opus",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: false, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    false,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-sonnet-4-20250514",
@@ -287,7 +347,12 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: false, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    false,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-3-7-sonnet-20250219",
@@ -298,7 +363,12 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 3.7 Sonnet",
 			ContextLength:       128000,
 			MaxCompletionTokens: 8192,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: false, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            128000,
+				ZeroAllowed:    false,
+				DynamicAllowed: false,
+			},
 		},
 		{
 			ID:                  "claude-3-5-haiku-20241022",
@@ -338,15 +408,16 @@ func geminiStableModels() []*ModelInfo {
 			},
 		},
 		{
-			ID:               "gemini-2.5-flash",
-			Object:           "model",
-			Created:          1750118400,
-			OwnedBy:          "google",
-			Type:             "gemini",
-			Name:             "models/gemini-2.5-flash",
-			Version:          "001",
-			DisplayName:      "Gemini 2.5 Flash",
-			Description:      "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
+			ID:          "gemini-2.5-flash",
+			Object:      "model",
+			Created:     1750118400,
+			OwnedBy:     "google",
+			Type:        "gemini",
+			Name:        "models/gemini-2.5-flash",
+			Version:     "001",
+			DisplayName: "Gemini 2.5 Flash",
+			Description: "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that" +
+				" supports up to 1 million tokens, released in June of 2025.",
 			InputTokenLimit:  1048576,
 			OutputTokenLimit: 65536,
 			SupportedGenerationMethods: []string{
@@ -606,10 +677,12 @@ func geminiProImagePreview() *ModelInfo {
 func geminiVertexProductionModels() []*ModelInfo {
 	models := geminiPreviewModels(
 		geminiPreviewParams{
-			proDescription:   "Gemini 3 Pro",
-			proLevels:        []string{"low", "high"},
-			flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
-			flashLevels:      []string{"minimal", "low", "medium", "high"},
+			proDescription: "Gemini 3 Pro",
+			proLevels:      []string{"low", "high"},
+			flashDescription: "Our most intelligent model built for speed, combining frontier " +
+				"intelligence with superior search and " +
+				"grounding.",
+			flashLevels: []string{"minimal", "low", "medium", "high"},
 		},
 	)
 	for _, model := range models {
@@ -655,7 +728,7 @@ func gemini31FlashImage() *ModelInfo {
 		Thinking:                  &ThinkingSupport{Levels: []string{"minimal", "high"}},
 		SupportedInputModalities:  []string{"text", "image", "video", "pdf"},
 		SupportedOutputModalities: []string{"text", "image"},
-		NativeCapabilities:        &NativeCapabilities{WebSearch: boolPointer(true)},
+		NativeCapabilities:        &NativeCapabilities{WebSearch: new(true)},
 	}
 }
 
@@ -683,7 +756,9 @@ func gemini31FlashLiteImage() *ModelInfo {
 
 // GetGeminiModels returns the standard Gemini model definitions
 func GetGeminiModels() []*ModelInfo {
-	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Gemini }); len(models) > 0 {
+	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Gemini }); len(
+		models,
+	) > 0 {
 		return models
 	}
 	models := geminiStableModels()
@@ -711,16 +786,25 @@ func GetGeminiModels() []*ModelInfo {
 }
 
 func GetGeminiVertexModels() []*ModelInfo {
-	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Vertex }); len(models) > 0 {
+	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Vertex }); len(
+		models,
+	) > 0 {
 		return models
 	}
 	models := geminiStableModels()
+	image := gemini31FlashImage()
+	image.Description = "Gemini 3.1 Flash Image"
+	image.InputTokenLimit = 1048576
+	image.OutputTokenLimit = 65536
+	image.SupportedInputModalities = []string{"text", "image"}
+	liteImage := gemini31FlashLiteImage()
+	liteImage.SupportedInputModalities = []string{"text", "image"}
 	models = append(models, geminiVertexProductionModels()...)
 	models = append(
 		models,
 		gemini31Pro(),
-		gemini31FlashImage(),
-		gemini31FlashLiteImage(),
+		image,
+		liteImage,
 		gemini31FlashLite(),
 		gemini35FlashLite(),
 		gemini36Flash(),
@@ -770,17 +854,22 @@ func GetGeminiVertexModels() []*ModelInfo {
 
 // GetGeminiCLIModels returns the standard Gemini model definitions
 func GetGeminiCLIModels() []*ModelInfo {
-	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.GeminiCLI }); len(models) > 0 {
+	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.GeminiCLI }); len(
+		models,
+	) > 0 {
 		return models
 	}
 	models := geminiStableModels()
 	models = append(
 		models, geminiPreviewModels(
 			geminiPreviewParams{
-				proDescription:   "Our most intelligent model with SOTA reasoning and multimodal understanding, and powerful agentic and vibe coding capabilities",
-				proLevels:        []string{"low", "high"},
-				flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
-				flashLevels:      []string{"minimal", "low", "medium", "high"},
+				proDescription: "Our most intelligent model with SOTA reasoning and multimodal understanding," +
+					" and powerful agentic and vibe coding capabilities",
+				proLevels: []string{"low", "high"},
+				flashDescription: "Our most intelligent model built for speed, combining frontier " +
+					"intelligence with superior search and " +
+					"grounding.",
+				flashLevels: []string{"minimal", "low", "medium", "high"},
 			},
 		)...,
 	)
@@ -789,15 +878,19 @@ func GetGeminiCLIModels() []*ModelInfo {
 
 // GetAIStudioModels returns the Gemini model definitions for AI Studio integrations
 func GetAIStudioModels() []*ModelInfo {
-	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.AIStudio }); len(models) > 0 {
+	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.AIStudio }); len(
+		models,
+	) > 0 {
 		return models
 	}
 	models := geminiStableModels()
 	models = append(
 		models, geminiPreviewModels(
 			geminiPreviewParams{
-				proDescription:   "Gemini 3 Pro Preview",
-				flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+				proDescription: "Gemini 3 Pro Preview",
+				flashDescription: "Our most intelligent model built for speed, combining frontier " +
+					"intelligence with superior search and " +
+					"grounding.",
 			},
 		)...,
 	)
@@ -874,7 +967,10 @@ func GetAIStudioModels() []*ModelInfo {
 		// 	Description:                "State-of-the-art image generation and editing model.",
 		// 	InputTokenLimit:            1048576,
 		// 	OutputTokenLimit:           8192,
-		// 	SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+		//     SupportedGenerationMethods: []string{
+		//         "generateContent", "countTokens",
+		//         "createCachedContent", "batchGenerateContent",
+		//     },
 		// 	// image models don't support thinkingConfig; leave Thinking nil
 		// },
 		&ModelInfo{
@@ -903,7 +999,7 @@ func getOpenAIModels() []*ModelInfo {
 	return GetCodexProModels()
 }
 
-func GetEmbeddedOpenAIModels() []*ModelInfo {
+func getEmbeddedOpenAIModels() []*ModelInfo {
 	if catalog := embeddedModelsCatalog(); catalog != nil && len(catalog.CodexPro) > 0 {
 		return withCodexBuiltins(cloneModelInfos(catalog.CodexPro))
 	}
@@ -923,28 +1019,32 @@ func GetEmbeddedOpenAIModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Levels: []string{"minimal", "low", "medium", "high"}},
 		},
 		{
-			ID:                  "gpt-5-codex",
-			Object:              "model",
-			Created:             1757894400,
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-5-2025-09-15",
-			DisplayName:         "GPT 5 Codex",
-			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
+			ID:          "gpt-5-codex",
+			Object:      "model",
+			Created:     1757894400,
+			OwnedBy:     "openai",
+			Type:        "openai",
+			Version:     "gpt-5-2025-09-15",
+			DisplayName: "GPT 5 Codex",
+			Description: "Stable version of GPT 5 Codex, The best model for coding and agentic " +
+				"tasks across " +
+				"domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
-			ID:                  "gpt-5-codex-mini",
-			Object:              "model",
-			Created:             1762473600,
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-5-2025-11-07",
-			DisplayName:         "GPT 5 Codex Mini",
-			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
+			ID:          "gpt-5-codex-mini",
+			Object:      "model",
+			Created:     1762473600,
+			OwnedBy:     "openai",
+			Type:        "openai",
+			Version:     "gpt-5-2025-11-07",
+			DisplayName: "GPT 5 Codex Mini",
+			Description: "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable " +
+				"version of GPT 5 " +
+				"Codex.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -965,28 +1065,32 @@ func GetEmbeddedOpenAIModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}},
 		},
 		{
-			ID:                  "gpt-5.1-codex",
-			Object:              "model",
-			Created:             1762905600,
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5.1 Codex",
-			Description:         "Stable version of GPT 5.1 Codex, The best model for coding and agentic tasks across domains.",
+			ID:          "gpt-5.1-codex",
+			Object:      "model",
+			Created:     1762905600,
+			OwnedBy:     "openai",
+			Type:        "openai",
+			Version:     "gpt-5.1-2025-11-12",
+			DisplayName: "GPT 5.1 Codex",
+			Description: "Stable version of GPT 5.1 Codex, The best model for coding and " +
+				"agentic tasks across " +
+				"domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
-			ID:                  "gpt-5.1-codex-mini",
-			Object:              "model",
-			Created:             1762905600,
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5.1 Codex Mini",
-			Description:         "Stable version of GPT 5.1 Codex Mini: cheaper, faster, but less capable version of GPT 5.1 Codex.",
+			ID:          "gpt-5.1-codex-mini",
+			Object:      "model",
+			Created:     1762905600,
+			OwnedBy:     "openai",
+			Type:        "openai",
+			Version:     "gpt-5.1-2025-11-12",
+			DisplayName: "GPT 5.1 Codex Mini",
+			Description: "Stable version of GPT 5.1 Codex Mini: cheaper, faster, but less " +
+				"capable version of GPT 5.1 " +
+				"Codex.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -1007,14 +1111,16 @@ func GetEmbeddedOpenAIModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
 		{
-			ID:                  "gpt-5.2-codex",
-			Object:              "model",
-			Created:             1765440000,
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-5.2",
-			DisplayName:         "GPT 5.2 Codex",
-			Description:         "Stable version of GPT 5.2 Codex, The best model for coding and agentic tasks across domains.",
+			ID:          "gpt-5.2-codex",
+			Object:      "model",
+			Created:     1765440000,
+			OwnedBy:     "openai",
+			Type:        "openai",
+			Version:     "gpt-5.2",
+			DisplayName: "GPT 5.2 Codex",
+			Description: "Stable version of GPT 5.2 Codex, The best model for coding and " +
+				"agentic tasks across " +
+				"domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -1025,162 +1131,16 @@ func GetEmbeddedOpenAIModels() []*ModelInfo {
 
 // GetQwenModels returns the standard Qwen model definitions
 func GetQwenModels() []*ModelInfo {
-	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Qwen }); len(models) > 0 {
-		return models
-	}
-	return []*ModelInfo{
-		{
-			ID:                  "qwen3-coder-plus",
-			Object:              "model",
-			Created:             1753228800,
-			OwnedBy:             "qwen",
-			Type:                "qwen",
-			Version:             "3.0",
-			DisplayName:         "Qwen3 Coder Plus",
-			Description:         "Advanced code generation and understanding model",
-			ContextLength:       32768,
-			MaxCompletionTokens: 8192,
-			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
-		},
-		{
-			ID:                  "qwen3-coder-flash",
-			Object:              "model",
-			Created:             1753228800,
-			OwnedBy:             "qwen",
-			Type:                "qwen",
-			Version:             "3.0",
-			DisplayName:         "Qwen3 Coder Flash",
-			Description:         "Fast code generation model",
-			ContextLength:       8192,
-			MaxCompletionTokens: 2048,
-			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
-		},
-		{
-			ID:                  "coder-model",
-			Object:              "model",
-			Created:             1771171200,
-			OwnedBy:             "qwen",
-			Type:                "qwen",
-			Version:             "3.5",
-			DisplayName:         "Qwen 3.5 Plus",
-			Description:         "efficient hybrid model with leading coding performance",
-			ContextLength:       1048576,
-			MaxCompletionTokens: 65536,
-			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
-		},
-		{
-			ID:                  "vision-model",
-			Object:              "model",
-			Created:             1758672000,
-			OwnedBy:             "qwen",
-			Type:                "qwen",
-			Version:             "3.0",
-			DisplayName:         "Qwen3 Vision Model",
-			Description:         "Vision model model",
-			ContextLength:       32768,
-			MaxCompletionTokens: 2048,
-			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
-		},
-	}
+	return withoutModelIDs(
+		getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Qwen }),
+		"qwen3-coder-plus", "qwen3-coder-flash", "vision-model",
+	)
 }
 
-// iFlowThinkingSupport is a shared ThinkingSupport configuration for iFlow models
-// that support thinking mode via chat_template_kwargs.enable_thinking (boolean toggle).
-// Uses level-based configuration so standard normalization flows apply before conversion.
-var iFlowThinkingSupport = &ThinkingSupport{
-	Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"},
-}
-
-// GetIFlowModels returns supported models for iFlow OAuth accounts.
+// GetIFlowModels returns no current models after the service retired on April 17, 2026.
+// Historical IDs remain available through provider-specific static lookup.
 func GetIFlowModels() []*ModelInfo {
-	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.IFlow }); len(models) > 0 {
-		return models
-	}
-	entries := []struct {
-		ID                  string
-		DisplayName         string
-		Description         string
-		Created             int64
-		ContextLength       int
-		MaxCompletionTokens int
-		Thinking            *ThinkingSupport
-	}{
-		{
-			ID: "qwen3-coder-plus", DisplayName: "Qwen3-Coder-Plus", Description: "Qwen3 Coder Plus code generation",
-			Created: 1753228800,
-		},
-		{ID: "qwen3-max", DisplayName: "Qwen3-Max", Description: "Qwen3 flagship model", Created: 1758672000},
-		{
-			ID: "qwen3-vl-plus", DisplayName: "Qwen3-VL-Plus", Description: "Qwen3 multimodal vision-language",
-			Created: 1758672000,
-		},
-		{
-			ID: "qwen3-max-preview", DisplayName: "Qwen3-Max-Preview", Description: "Qwen3 Max preview build",
-			Created: 1757030400, Thinking: iFlowThinkingSupport,
-		},
-		{
-			ID: "glm-4.6", DisplayName: "GLM-4.6", Description: "Zhipu GLM 4.6 general model", Created: 1759190400,
-			Thinking: iFlowThinkingSupport,
-		},
-		{
-			ID: "glm-5", DisplayName: "GLM-5", Description: "Zhipu GLM 5 general model", Created: 1770854400,
-			ContextLength: 170000, MaxCompletionTokens: 128000, Thinking: iFlowThinkingSupport,
-		},
-		{ID: "kimi-k2", DisplayName: "Kimi-K2", Description: "Moonshot Kimi K2 general model", Created: 1752192000},
-		{
-			ID: "kimi-k2.5", DisplayName: "Kimi-K2.5", Description: "Moonshot Kimi K2.5 multimodal model",
-			Created: 1769472000, ContextLength: 262144, MaxCompletionTokens: 32768, Thinking: iFlowThinkingSupport,
-		},
-		{
-			ID: "minimax-m2.5", DisplayName: "MiniMax-M2.5", Description: "MiniMax M2.5 general model",
-			Created: 1770854400, ContextLength: 204800, Thinking: iFlowThinkingSupport,
-		},
-		{
-			ID: "deepseek-v3.2", DisplayName: "DeepSeek-V3.2-Exp", Description: "DeepSeek V3.2 experimental",
-			Created: 1759104000, Thinking: iFlowThinkingSupport,
-		},
-		{
-			ID: "deepseek-v3.1", DisplayName: "DeepSeek-V3.1-Terminus", Description: "DeepSeek V3.1 Terminus",
-			Created: 1756339200, Thinking: iFlowThinkingSupport,
-		},
-		{
-			ID: "deepseek-r1", DisplayName: "DeepSeek-R1", Description: "DeepSeek reasoning model R1",
-			Created: 1737331200,
-		},
-		{ID: "deepseek-v3", DisplayName: "DeepSeek-V3-671B", Description: "DeepSeek V3 671B", Created: 1734307200},
-		{ID: "qwen3-32b", DisplayName: "Qwen3-32B", Description: "Qwen3 32B", Created: 1747094400},
-		{
-			ID: "qwen3-235b-a22b-thinking-2507", DisplayName: "Qwen3-235B-A22B-Thinking",
-			Description: "Qwen3 235B A22B Thinking (2507)", Created: 1753401600,
-		},
-		{
-			ID: "qwen3-235b-a22b-instruct", DisplayName: "Qwen3-235B-A22B-Instruct",
-			Description: "Qwen3 235B A22B Instruct", Created: 1753401600,
-		},
-		{ID: "qwen3-235b", DisplayName: "Qwen3-235B-A22B", Description: "Qwen3 235B A22B", Created: 1753401600},
-		{
-			ID: "iflow-rome-30ba3b", DisplayName: "iFlow-ROME", Description: "iFlow Rome 30BA3B model",
-			Created: 1736899200,
-		},
-	}
-	models := make([]*ModelInfo, 0, len(entries))
-	for _, entry := range entries {
-		models = append(
-			models, &ModelInfo{
-				ID:                  entry.ID,
-				Object:              "model",
-				Created:             entry.Created,
-				OwnedBy:             "iflow",
-				Type:                "iflow",
-				DisplayName:         entry.DisplayName,
-				Description:         entry.Description,
-				ContextLength:       entry.ContextLength,
-				MaxCompletionTokens: entry.MaxCompletionTokens,
-				Thinking:            entry.Thinking,
-			},
-		)
-	}
-	return models
+	return nil
 }
 
 // antigravityModelConfig captures static antigravity model overrides, including
@@ -1191,7 +1151,9 @@ type antigravityModelConfig struct {
 }
 
 func getAntigravityModels() []*ModelInfo {
-	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Antigravity }); len(models) > 0 {
+	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Antigravity }); len(
+		models,
+	) > 0 {
 		return models
 	}
 	cfg := GetAntigravityModelConfig()
@@ -1278,6 +1240,24 @@ func GetAntigravityModelConfig() map[string]*antigravityModelConfig {
 				Levels: []string{"minimal", "low", "medium", "high"},
 			},
 		},
+		"claude-opus-5-5-high": {
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            64000,
+				ZeroAllowed:    true,
+				DynamicAllowed: true,
+			},
+			MaxCompletionTokens: 128000,
+		},
+		"claude-sonnet-5-5-high": {
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            64000,
+				ZeroAllowed:    true,
+				DynamicAllowed: true,
+			},
+			MaxCompletionTokens: 128000,
+		},
 		"claude-opus-4-6-thinking": {
 			Thinking: &ThinkingSupport{
 				Min: 1024, Max: 64000, ZeroAllowed: true, DynamicAllowed: true,
@@ -1303,7 +1283,6 @@ func GetDeepSeekModels() []*ModelInfo {
 			DisplayName:         "DeepSeek V4.1 Flash",
 			ContextLength:       1048576,
 			MaxCompletionTokens: 393216,
-			IsCompat:            true,
 		},
 		{
 			ID:                  "deepseek-v4-pro",
@@ -1313,7 +1292,6 @@ func GetDeepSeekModels() []*ModelInfo {
 			DisplayName:         "DeepSeek V4 Pro",
 			ContextLength:       1048576,
 			MaxCompletionTokens: 393216,
-			IsCompat:            true,
 		},
 		{
 			ID:                  "deepseek-v4-flash",
@@ -1323,7 +1301,6 @@ func GetDeepSeekModels() []*ModelInfo {
 			DisplayName:         "DeepSeek V4 Flash (legacy alias)",
 			ContextLength:       1048576,
 			MaxCompletionTokens: 393216,
-			IsCompat:            true,
 		},
 		{
 			ID:                  "deepseek-v4-flash-vision-exp",
@@ -1333,21 +1310,27 @@ func GetDeepSeekModels() []*ModelInfo {
 			DisplayName:         "DeepSeek V4 Flash Vision (legacy alias)",
 			ContextLength:       1048576,
 			MaxCompletionTokens: 393216,
-			IsCompat:            true,
 		},
 	}
 	for _, model := range models {
 		model.SupportedParameters = []string{"tools"}
-		model.SupportedInputModalities = []string{"text", "image"}
+		model.SupportedInputModalities = []string{"text"}
+		if model.ID != "deepseek-v4-pro" {
+			model.SupportedInputModalities = append(model.SupportedInputModalities, "image")
+		}
 		model.SupportedOutputModalities = []string{"text"}
-		model.Thinking = &ThinkingSupport{DynamicAllowed: true}
+		model.Thinking = &ThinkingSupport{
+			ZeroAllowed: true, DynamicAllowed: true, Levels: []string{"low", "high", "max"},
+		}
 	}
 	return models
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions
 func GetKimiModels() []*ModelInfo {
-	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Kimi }); len(models) > 0 {
+	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Kimi }); len(
+		models,
+	) > 0 {
 		return models
 	}
 	return []*ModelInfo{
@@ -1376,7 +1359,12 @@ func GetKimiModels() []*ModelInfo {
 			MaxCompletionTokens:       32768,
 			SupportedInputModalities:  []string{"text"},
 			SupportedOutputModalities: []string{"text"},
-			Thinking:                  &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+			Thinking: &ThinkingSupport{
+				Min:            1024,
+				Max:            32000,
+				ZeroAllowed:    true,
+				DynamicAllowed: true,
+			},
 		},
 		{
 			ID:                        "kimi-k2.5",
@@ -1421,13 +1409,15 @@ func GetKimiModels() []*ModelInfo {
 			Thinking:                  &ThinkingSupport{ZeroAllowed: false, Levels: []string{"low", "high"}},
 		},
 		{
-			ID:                        "kimi-k2.7-code-highspeed",
-			Object:                    "model",
-			Created:                   1780396800, // 2026-06-02
-			OwnedBy:                   "moonshot",
-			Type:                      "kimi",
-			DisplayName:               "Kimi K2.7 Code HighSpeed",
-			Description:               "Kimi K2.7 Code HighSpeed - Same capabilities as Kimi K2.7 Code with higher output speed (~180 tokens/s)",
+			ID:          "kimi-k2.7-code-highspeed",
+			Object:      "model",
+			Created:     1780396800, // 2026-06-02
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi K2.7 Code HighSpeed",
+			Description: "Kimi K2.7 Code HighSpeed - Same capabilities as Kimi K2.7 Code with " +
+				"higher output speed (~180 tokens/" +
+				"s)",
 			ContextLength:             262144,
 			MaxCompletionTokens:       65536,
 			SupportedInputModalities:  []string{"text", "image", "video"},
@@ -1435,25 +1425,102 @@ func GetKimiModels() []*ModelInfo {
 			Thinking:                  &ThinkingSupport{ZeroAllowed: false, Levels: []string{"low", "high"}},
 		},
 		{
-			ID:                        "kimi-k3",
-			Object:                    "model",
-			Created:                   1784073600, // 2026-07-15
-			OwnedBy:                   "moonshot",
-			Type:                      "kimi",
-			DisplayName:               "Kimi K3",
-			Description:               "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) with multimodal input",
+			ID:          "kimi-k2.8",
+			Object:      "model",
+			Created:     1789115500,
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi K2.8 Preview",
+			Description: "Kimi K2.8 Preview - Lightweight coding and agent model with near-K3 " +
+				"performance and 1M context " +
+				"window",
 			ContextLength:             1048576,
 			MaxCompletionTokens:       65536,
 			SupportedInputModalities:  []string{"text", "image", "video"},
 			SupportedOutputModalities: []string{"text"},
-			Thinking:                  &ThinkingSupport{ZeroAllowed: true, Levels: []string{"low", "high", "max"}},
+			Thinking: &ThinkingSupport{
+				ZeroAllowed: true,
+				Levels:      []string{"low", "high", "max"},
+			},
+		},
+		{
+			ID:          "kimi-k2.8-code",
+			Object:      "model",
+			Created:     1789115500,
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi K2.8 Code Preview",
+			Description: "Kimi K2.8 Code Preview - Lightweight coding and agent model with " +
+				"near-K3 performance and 1M context " +
+				"window",
+			ContextLength:             1048576,
+			MaxCompletionTokens:       65536,
+			SupportedInputModalities:  []string{"text", "image", "video"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking: &ThinkingSupport{
+				ZeroAllowed: true,
+				Levels:      []string{"low", "high", "max"},
+			},
+		},
+		{
+			ID:          "kimi-k3-256k",
+			Object:      "model",
+			Created:     1785110400,
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi K3 256K",
+			Description: "Kimi K3 256K - 256K context version of Kimi K3 delivering the same results within " +
+				"256K context at reduced quota consumption; supports image input only (no video)",
+			ContextLength:             262144,
+			MaxCompletionTokens:       65536,
+			SupportedInputModalities:  []string{"text", "image"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking: &ThinkingSupport{
+				ZeroAllowed: true,
+				Levels:      []string{"low", "high", "max"},
+			},
+		},
+		{
+			ID:          "kimi-k3",
+			Object:      "model",
+			Created:     1784073600, // 2026-07-15
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi K3",
+			Description: "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) " +
+				"with multimodal " +
+				"input",
+			ContextLength:             1048576,
+			MaxCompletionTokens:       65536,
+			SupportedInputModalities:  []string{"text", "image", "video"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking: &ThinkingSupport{
+				ZeroAllowed: true,
+				Levels:      []string{"low", "high", "max"},
+			},
 		},
 	}
 }
 
 // GetMetaModels returns Meta Muse model definitions from the current catalog.
 func GetMetaModels() []*ModelInfo {
-	return getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Meta })
+	return withMetaBuiltins(getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Meta }))
+}
+
+func withMetaBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(
+		models,
+		&ModelInfo{
+			ID: "muse-image-1.0", Object: "model", OwnedBy: "meta", Type: "meta",
+			DisplayName: "Muse Image 1.0", Name: "muse-image-1.0",
+			SupportedInputModalities: []string{"text", "image"}, SupportedOutputModalities: []string{"image"},
+		},
+		&ModelInfo{
+			ID: "muse-voice-transcribe-1.0", Object: "model", OwnedBy: "meta", Type: "meta",
+			DisplayName: "Muse Voice Transcribe 1.0", Name: "muse-voice-transcribe-1.0",
+			SupportedInputModalities: []string{"audio"}, SupportedOutputModalities: []string{"text"},
+		},
+	)
 }
 
 func xaiModelsFromCatalog(data *staticModelsJSON) []*ModelInfo {

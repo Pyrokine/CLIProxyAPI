@@ -92,7 +92,7 @@ type ModelInfo struct {
 	IsCompat bool `json:"-"`
 
 	// Config holds model-specific runtime overrides loaded from models.json.
-	Config *modelConfig `json:"config,omitempty"`
+	Config *ModelConfig `json:"config,omitempty"`
 
 	// UserDefined indicates this model was defined through config file's models[]
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
@@ -116,8 +116,8 @@ type ThinkingSupport struct {
 	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
 }
 
-// modelConfig holds optional runtime overrides for a model definition.
-type modelConfig struct {
+// ModelConfig 保存模型的运行时覆盖配置
+type ModelConfig struct {
 	// OverrideHeader forces upstream request headers when non-empty.
 	// Keys are header names; values replace any existing header.
 	OverrideHeader map[string]string `json:"override_header,omitempty"`
@@ -243,6 +243,11 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	if info := GetGlobalRegistry().getModelInfo(modelID, p); info != nil {
 		return cloneModelInfo(info)
 	}
+	if p != "" {
+		if info := LookupStaticModelInfoByChannel(modelID, p); info != nil {
+			return info
+		}
+	}
 	return LookupStaticModelInfo(modelID)
 }
 
@@ -264,7 +269,7 @@ func ResolveResponsesWebSearchCapability(routes []NativeCapabilityRoute) *bool {
 	for _, route := range routes {
 		if route.NativeCapabilities != nil && route.NativeCapabilities.WebSearch != nil &&
 			!*route.NativeCapabilities.WebSearch {
-			return boolPointer(false)
+			return new(false)
 		}
 		pathSupport := responsesWebSearchProviderPathSupport(route.Provider)
 		if pathSupport == nil {
@@ -272,7 +277,7 @@ func ResolveResponsesWebSearchCapability(routes []NativeCapabilityRoute) *bool {
 			continue
 		}
 		if !*pathSupport {
-			return boolPointer(false)
+			return new(false)
 		}
 		if route.NativeCapabilities == nil || route.NativeCapabilities.WebSearch == nil {
 			hasUnknown = true
@@ -281,26 +286,29 @@ func ResolveResponsesWebSearchCapability(routes []NativeCapabilityRoute) *bool {
 	if hasUnknown {
 		return nil
 	}
-	return boolPointer(true)
+	return new(true)
 }
 
 func responsesWebSearchProviderPathSupport(provider string) *bool {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch provider {
 	case "codex", "xai", "claude", "antigravity", "gemini", "gemini-cli", "aistudio", "vertex":
-		return boolPointer(true)
-	case "openai", "openai-compatibility", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "interactions", "gemini-interactions":
-		return boolPointer(false)
+		return new(true)
+	case "openai",
+		"openai-compatibility",
+		"kimi",
+		"kimi-ai",
+		"kimi.ai",
+		"kimi.com",
+		"interactions",
+		"gemini-interactions":
+		return new(false)
 	default:
 		if strings.HasPrefix(provider, "openai-compatible-") {
-			return boolPointer(false)
+			return new(false)
 		}
 		return nil
 	}
-}
-
-func boolPointer(value bool) *bool {
-	return &value
 }
 
 // GetResponsesWebSearchCapability resolves capability metadata across every
@@ -324,10 +332,12 @@ func (r *ModelRegistry) GetResponsesWebSearchCapability(modelID string) *bool {
 			if info := r.clientModelInfos[clientID][registeredID]; info != nil {
 				nativeCapabilities = info.NativeCapabilities
 			}
-			routes = append(routes, NativeCapabilityRoute{
-				Provider:           r.clientProviders[clientID],
-				NativeCapabilities: nativeCapabilities,
-			})
+			routes = append(
+				routes, NativeCapabilityRoute{
+					Provider:           r.clientProviders[clientID],
+					NativeCapabilities: nativeCapabilities,
+				},
+			)
 		}
 	}
 	return ResolveResponsesWebSearchCapability(routes)
@@ -357,11 +367,33 @@ func (r *ModelRegistry) SupportsConfigurationUpdates(modelID string) bool {
 	return registered
 }
 
-// ModelOverrideHeaders returns models.json config.override_header for the model, if any.
-func ModelOverrideHeaders(modelID string, _ ...string) map[string]string {
+// ModelOverrideHeaders 返回所选 Provider 的动态覆盖头，未注册时查询模型目录
+func ModelOverrideHeaders(modelID string, provider ...string) map[string]string {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return nil
+	}
+	providerName := "codex"
+	if len(provider) > 0 {
+		providerName = strings.ToLower(strings.TrimSpace(provider[0]))
+	}
+	r := GetGlobalRegistry()
+	r.mutex.RLock()
+	var info *ModelInfo
+	if registration := r.models[modelID]; registration != nil && registration.Providers[providerName] > 0 {
+		info = registration.InfoByProvider[providerName]
+	}
+	headers := modelOverrideHeadersFromInfo(info)
+	r.mutex.RUnlock()
+	if info != nil {
+		return headers
+	}
+	if headers := modelOverrideHeadersFromInfo(
+		LookupStaticModelInfoByChannel(
+			modelID, providerName,
+		),
+	); len(headers) > 0 {
+		return headers
 	}
 	if headers := modelOverrideHeadersFromInfo(LookupStaticModelInfo(modelID)); len(headers) > 0 {
 		return headers
@@ -488,7 +520,11 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 
 // ReplaceClientModels updates an unchanged registration while retaining scheduling state.
 // An epoch mismatch rejects stale discovery results without changing the registry.
-func (r *ModelRegistry) ReplaceClientModels(clientID, clientProvider string, expectedEpoch uint64, models []*ModelInfo) (uint64, bool) {
+func (r *ModelRegistry) ReplaceClientModels(
+	clientID, clientProvider string,
+	expectedEpoch uint64,
+	models []*ModelInfo,
+) (uint64, bool) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	if r.clientEpochs[clientID] != expectedEpoch {
@@ -1013,7 +1049,8 @@ func (r *ModelRegistry) ApplyClientModelProjections(
 			if registration.SuspendedClients == nil {
 				registration.SuspendedClients = make(map[string]string)
 			}
-			if reason, suspended := registration.SuspendedClients[clientID]; !suspended || reason != projection.SuspendReason {
+			if reason, suspended := registration.SuspendedClients[clientID]; !suspended ||
+				reason != projection.SuspendReason {
 				registration.SuspendedClients[clientID] = projection.SuspendReason
 				registration.LastUpdated = now
 				changed = true
@@ -1124,6 +1161,8 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 // Parameters:
 //   - clientID: The client to resume
 //   - modelID: The model being resumed
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	if clientID == "" || modelID == "" {
 		return
@@ -1374,11 +1413,11 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		if effectiveClients > 0 ||
 			(availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			if entry.info != nil {
-				result = append(result, entry.info)
+				result = append(result, cloneModelInfo(entry.info))
 				continue
 			}
 			if ok && registration != nil && registration.Info != nil {
-				result = append(result, registration.Info)
+				result = append(result, cloneModelInfo(registration.Info))
 			}
 		}
 	}
@@ -1536,6 +1575,7 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 	if model == nil {
 		return nil
 	}
+	model = cloneModelInfo(model)
 
 	switch handlerType {
 	case "openai":
@@ -1668,8 +1708,6 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 //   - string: The model ID of the first available model, or empty string if none available
 //   - error: An error if no models are available
 func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, error) {
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
 
 	// Get all available models for this handler type
 	models := r.GetAvailableModels(handlerType)

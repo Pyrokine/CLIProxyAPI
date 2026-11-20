@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"reflect"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -39,22 +41,23 @@ var embeddedModelsJSON []byte
 
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
-	Claude      []*ModelInfo `json:"claude"`
-	Gemini      []*ModelInfo `json:"gemini"`
-	Vertex      []*ModelInfo `json:"vertex"`
-	GeminiCLI   []*ModelInfo `json:"gemini-cli"`
-	AIStudio    []*ModelInfo `json:"aistudio"`
-	CodexFree   []*ModelInfo `json:"codex-free"`
-	CodexTeam   []*ModelInfo `json:"codex-team"`
-	CodexPlus   []*ModelInfo `json:"codex-plus"`
-	CodexPro    []*ModelInfo `json:"codex-pro"`
-	Qwen        []*ModelInfo `json:"qwen"`
-	IFlow       []*ModelInfo `json:"iflow"`
-	Kimi        []*ModelInfo `json:"kimi"`
-	Antigravity []*ModelInfo `json:"antigravity"`
-	XAI         []*ModelInfo `json:"xai"`
-	Devin       []*ModelInfo `json:"devin"`
-	Meta        []*ModelInfo `json:"meta"`
+	Claude      []*ModelInfo            `json:"claude"`
+	Gemini      []*ModelInfo            `json:"gemini"`
+	Vertex      []*ModelInfo            `json:"vertex"`
+	GeminiCLI   []*ModelInfo            `json:"gemini-cli"`
+	AIStudio    []*ModelInfo            `json:"aistudio"`
+	CodexFree   []*ModelInfo            `json:"codex-free"`
+	CodexTeam   []*ModelInfo            `json:"codex-team"`
+	CodexPlus   []*ModelInfo            `json:"codex-plus"`
+	CodexPro    []*ModelInfo            `json:"codex-pro"`
+	Qwen        []*ModelInfo            `json:"qwen"`
+	IFlow       []*ModelInfo            `json:"iflow"`
+	Kimi        []*ModelInfo            `json:"kimi"`
+	Antigravity []*ModelInfo            `json:"antigravity"`
+	XAI         []*ModelInfo            `json:"xai"`
+	Devin       []*ModelInfo            `json:"devin"`
+	Meta        []*ModelInfo            `json:"meta"`
+	Legacy      map[string][]*ModelInfo `json:"legacy,omitempty"`
 }
 
 type modelStore struct {
@@ -115,19 +118,23 @@ func SetModelRefreshCallback(cb ModelRefreshCallback) {
 	}
 }
 
-func embeddedModelsCatalog() *staticModelsJSON {
+// embeddedModelsCatalog returns shared read-only metadata; callers clone before modifying it.
+var embeddedModelsCatalog = sync.OnceValue(func() *staticModelsJSON {
 	var parsed staticModelsJSON
 	if err := json.Unmarshal(embeddedModelsJSON, &parsed); err != nil {
+		log.Warnf("registry: failed to parse embedded model catalog: %v", err)
 		return nil
 	}
 	return &parsed
-}
+})
 
 func init() {
 	// Load embedded data as fallback on startup.
 	if err := loadModelsFromBytes(embeddedModelsJSON, "embed"); err != nil {
 		log.Warnf(
-			"registry: failed to parse embedded models.json (embedded catalog may be incomplete or invalid; continuing startup and will rely on remote model refresh): %v",
+			"registry: failed to parse embedded models.json (embedded catalog may b"+
+				"e incomplete or invalid; continuing startup and will rely on remote mo"+
+				"del refresh): %v",
 			err,
 		)
 	}
@@ -182,24 +189,24 @@ func periodicRefresh(ctx context.Context) {
 // tryPeriodicRefresh fetches models from remote, compares with the current
 // catalog, and notifies the registered callback if any provider changed.
 func tryPeriodicRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "periodic model refresh")
+	_ = tryRefreshModels(ctx, "periodic model refresh")
 }
 
 // tryStartupRefresh fetches models from remote in the background during
 // process startup. It uses the same change detection as periodic refresh so
 // existing auth registrations can be updated after the callback is registered.
 func tryStartupRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "startup model refresh")
+	_ = tryRefreshModels(ctx, "startup model refresh")
 }
 
-func tryRefreshModels(ctx context.Context, label string) {
+func tryRefreshModels(ctx context.Context, label string) error {
 	oldData := getModels()
 
 	parsed, url := fetchModelsFromRemote(ctx, oldData)
 	if parsed == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		updateCatalogMetaAfterRefresh("", "fetch failed from all URLs")
-		return
+		return fmt.Errorf("fetch failed from all URLs")
 	}
 
 	// Detect changes before updating store.
@@ -214,11 +221,12 @@ func tryRefreshModels(ctx context.Context, label string) {
 
 	if len(changed) == 0 {
 		log.Infof("%s completed from %s, no changes detected", label, url)
-		return
+		return nil
 	}
 
 	log.Infof("%s completed from %s, changes detected for providers: %v", label, url, changed)
 	notifyModelRefresh(changed)
+	return nil
 }
 
 func updateCatalogMetaAfterRefresh(source, errMsg string) {
@@ -250,22 +258,29 @@ func GetCatalogMeta() CatalogMeta {
 	return snapshot
 }
 
-// TriggerCatalogRefresh asks the updater to re-fetch the catalog immediately.
-// It runs synchronously and returns the new meta snapshot along with any
-// error recorded by the refresh attempt.
+// TriggerCatalogRefresh 同步刷新目录，返回当前元数据快照和本次发布结果
 func TriggerCatalogRefresh(ctx context.Context) (CatalogMeta, error) {
-	tryRefreshModels(ctx, "manual model refresh")
-	meta := GetCatalogMeta()
-	if meta.LastError != "" {
-		return meta, fmt.Errorf("%s", meta.LastError)
+	err := tryRefreshModels(ctx, "manual model refresh")
+	return GetCatalogMeta(), err
+}
+
+func catalogHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:   modelsFetchTimeout,
+		Transport: proxyutil.PublicHostTransport(http.DefaultTransport),
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 catalog redirects")
+			}
+			return proxyutil.ValidatePublicHTTPURL(request.URL.String())
+		},
 	}
-	return meta, nil
 }
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
 // along with the URL it was fetched from. Returns (nil, "") if all fetches fail.
 func fetchModelsFromRemote(ctx context.Context, current *staticModelsJSON) (*staticModelsJSON, string) {
-	client := &http.Client{Timeout: modelsFetchTimeout}
+	client := catalogHTTPClient()
 	for _, url := range modelsURLs {
 		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
@@ -323,15 +338,27 @@ func mergeRemoteModelsCatalog(data []byte, current *staticModelsJSON) (*staticMo
 	if current == nil {
 		current = embeddedModelsCatalog()
 	}
-	merged := make(map[string]json.RawMessage, len(modelCatalogSectionNames))
+	var parsed staticModelsJSON
 	if current != nil {
-		currentData, err := json.Marshal(current)
-		if err != nil {
-			return nil, fmt.Errorf("encode current models catalog: %w", err)
+		parsed = *current
+		parsed.Legacy = maps.Clone(current.Legacy)
+		for channel, models := range parsed.Legacy {
+			if len(models) > 0 {
+				parsed.Legacy[channel] = cloneModelInfos(models)
+			}
 		}
-		if err = json.Unmarshal(currentData, &merged); err != nil {
-			return nil, fmt.Errorf("decode current models catalog: %w", err)
-		}
+	}
+	sections := map[string]*[]*ModelInfo{
+		"claude": &parsed.Claude, "gemini": &parsed.Gemini, "vertex": &parsed.Vertex,
+		"gemini-cli": &parsed.GeminiCLI, "aistudio": &parsed.AIStudio,
+		"codex-free": &parsed.CodexFree, "codex-team": &parsed.CodexTeam,
+		"codex-plus": &parsed.CodexPlus, "codex-pro": &parsed.CodexPro,
+		"qwen": &parsed.Qwen, "iflow": &parsed.IFlow, "kimi": &parsed.Kimi,
+		"antigravity": &parsed.Antigravity, "xai": &parsed.XAI,
+		"devin": &parsed.Devin, "meta": &parsed.Meta,
+	}
+	for _, models := range sections {
+		*models = cloneModelInfos(*models)
 	}
 
 	accepted := 0
@@ -353,22 +380,14 @@ func mergeRemoteModelsCatalog(data []byte, current *staticModelsJSON) (*staticMo
 			log.Warnf("models catalog: %s section rejected, keeping current section: %v", section, err)
 			continue
 		}
-		merged[section] = raw
+		*sections[section] = models
 		accepted++
 	}
 	if accepted == 0 {
 		return nil, fmt.Errorf("remote catalog has no valid populated provider sections")
 	}
 
-	mergedData, err := json.Marshal(merged)
-	if err != nil {
-		return nil, fmt.Errorf("encode merged models catalog: %w", err)
-	}
-	var parsed staticModelsJSON
-	if err = json.Unmarshal(mergedData, &parsed); err != nil {
-		return nil, fmt.Errorf("decode merged models catalog: %w", err)
-	}
-	if err = validateModelsCatalog(&parsed); err != nil {
+	if err := validateModelsCatalog(&parsed); err != nil {
 		return nil, fmt.Errorf("validate merged models catalog: %w", err)
 	}
 	return &parsed, nil

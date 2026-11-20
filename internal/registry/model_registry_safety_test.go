@@ -1,11 +1,11 @@
 package registry
 
 import (
+	"reflect"
 	"testing"
 )
 
-// The registry functions return direct references (not clones) for performance.
-// These tests verify the returned data is correct and accessible.
+// 模型查询保留完整字段，公开结果中的可修改对象使用独立副本
 
 func TestGetModelInfoReturnsCorrectData(t *testing.T) {
 	r := newTestModelRegistry()
@@ -136,6 +136,45 @@ func TestGetAvailableModelsReturnsSupportedParameters(t *testing.T) {
 	}
 }
 
+func TestLookupModelInfoPrefersSelectedProviderStaticCapabilities(t *testing.T) {
+	for _, provider := range []string{"kimi", "kimi-ai", "kimi.ai", "kimi.com", " KIMI ", "iflow"} {
+		t.Run(
+			provider, func(t *testing.T) {
+				const model = "kimi-k2.5"
+				want := LookupStaticModelInfoByChannel(model, provider)
+				got := LookupModelInfo(model, provider)
+				if want == nil || want.Thinking == nil || !reflect.DeepEqual(got, want) {
+					t.Fatalf("provider=%q model=%+v, want selected provider model %+v", provider, got, want)
+				}
+				got.Thinking.Levels[0] = "changed"
+				if again := LookupModelInfo(model, provider); !reflect.DeepEqual(again, want) {
+					t.Fatalf("mutating a lookup changed provider capabilities: %+v", again)
+				}
+			},
+		)
+	}
+}
+
+func TestLookupModelInfoKeepsRegisteredPriorityAndGlobalStaticLookup(t *testing.T) {
+	r := GetGlobalRegistry()
+	const model = "kimi-k2.5"
+	r.RegisterClient(
+		t.Name(), "kimi", []*ModelInfo{{ID: model, Thinking: &ThinkingSupport{Levels: []string{"medium"}}}},
+	)
+	t.Cleanup(func() { r.UnregisterClient(t.Name()) })
+	if got := LookupModelInfo(
+		model, "kimi",
+	); got == nil || got.Thinking == nil || !reflect.DeepEqual(got.Thinking.Levels, []string{"medium"}) {
+		t.Fatalf("registered model did not override static capabilities: %+v", got)
+	}
+	for _, provider := range []string{"", "unknown-provider"} {
+		want := LookupStaticModelInfo("glm-4.6")
+		if got := LookupModelInfo("glm-4.6", provider); want == nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("global static lookup changed for provider %q: %+v", provider, got)
+		}
+	}
+}
+
 func TestLookupModelInfoReturnsStaticDefinition(t *testing.T) {
 	info := LookupModelInfo("glm-4.6")
 	if info == nil || info.Thinking == nil || len(info.Thinking.Levels) == 0 {
@@ -160,7 +199,9 @@ func TestLookupModelInfoIncludesClaudeSonnet5(t *testing.T) {
 	if model.MaxCompletionTokens != 128000 {
 		t.Fatalf("Claude Sonnet 5 max completion tokens = %d, want 128000", model.MaxCompletionTokens)
 	}
-	if model.Thinking == nil || !model.Thinking.ZeroAllowed || !model.Thinking.DynamicAllowed || model.Thinking.Min != 0 || model.Thinking.Max != 0 {
+	if model.Thinking == nil || !model.Thinking.ZeroAllowed || !model.Thinking.DynamicAllowed ||
+		model.Thinking.Min != 0 ||
+		model.Thinking.Max != 0 {
 		t.Fatalf("expected Claude Sonnet 5 dynamic level-only thinking with zero allowed, got %+v", model.Thinking)
 	}
 	expectedLevels := []string{"low", "medium", "high", "xhigh", "max"}

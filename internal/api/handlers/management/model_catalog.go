@@ -28,6 +28,8 @@ type modelCatalogRow struct {
 	DisplayName               string           `json:"display_name,omitempty"`
 	UserCreated               bool             `json:"user_created"`
 	Enabled                   bool             `json:"enabled"`
+	Speed                     string           `json:"speed,omitempty"`
+	SpeedOptions              []string         `json:"speed_options,omitempty"`
 	RuntimeAvailable          bool             `json:"runtime_available"`
 	RuntimeOnly               bool             `json:"runtime_only,omitempty"`
 	RuntimeProviders          []string         `json:"runtime_providers,omitempty"`
@@ -53,9 +55,11 @@ type modelCatalogPatchRequest struct {
 	DisplayName      *string          `json:"display_name"`
 	DisplayNameKebab *string          `json:"display-name"`
 	Enabled          *bool            `json:"enabled"`
+	Speed            *string          `json:"speed"`
 	Aliases          *[]string        `json:"aliases"`
 	Price            *modelPriceEntry `json:"price"`
 	ClearPrice       *bool            `json:"clear_price"`
+	RecalculateCosts *bool            `json:"recalculate_costs"`
 }
 
 func (h *Handler) GetModelCatalog(c *gin.Context) {
@@ -85,6 +89,22 @@ func (h *Handler) PutModelCatalog(c *gin.Context) {
 		c,
 		modelCatalogMutationOptions{},
 		func(doc *modelcatalog.File) error {
+			for i := range body.Models {
+				model := &body.Models[i]
+				if model.Price != nil {
+					if err := validateModelPriceEntries(map[string]modelPriceEntry{model.Name: *model.Price}); err != nil {
+						return newConfigMutationError(http.StatusBadRequest, err.Error())
+					}
+				}
+				if model.Speed == "" {
+					if previous, exists := doc.Find(model.Name); exists {
+						model.Speed = previous.Speed
+					}
+				}
+				if !config.ModelSpeedAllowed(model.Name, model.Channel, model.Speed) {
+					return newConfigMutationError(http.StatusBadRequest, "unsupported model speed")
+				}
+			}
 			defaultsVersion := strings.TrimSpace(doc.DefaultsVersion)
 			if defaultsVersion == "" {
 				defaultsVersion = modelcatalog.DefaultsVersion
@@ -120,12 +140,33 @@ func (h *Handler) PatchModelCatalogModel(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
 	}
+	if body.Price != nil {
+		if err := validateModelPriceEntries(map[string]modelPriceEntry{body.Name: *body.Price}); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	result, ok := h.mutateModelCatalog(
 		c,
 		modelCatalogMutationOptions{},
 		func(doc *modelcatalog.File) error {
+			priceOnly := body.RecalculateCosts != nil && !*body.RecalculateCosts &&
+				body.Provider == nil && body.Channel == nil && body.Group == nil && body.DisplayName == nil &&
+				body.DisplayNameKebab == nil && body.Enabled == nil && body.Speed == nil && body.Aliases == nil
+			if priceOnly && (body.Price != nil || body.ClearPrice != nil && *body.ClearPrice) {
+				if body.Price != nil {
+					doc.SetPrice(body.Name, *body.Price)
+				}
+				if body.ClearPrice != nil && *body.ClearPrice {
+					doc.DeletePrice(body.Name)
+				}
+				return nil
+			}
 			model := doc.EnsureModel(body.Name, true)
 			applyModelCatalogPatch(doc, model, body)
+			if !config.ModelSpeedAllowed(model.Name, model.Channel, model.Speed) {
+				return newConfigMutationError(http.StatusBadRequest, "unsupported model speed")
+			}
 			if body.Aliases != nil {
 				modelcatalog.ReplaceModelAliases(doc, body.Name, *body.Aliases)
 			}
@@ -133,6 +174,9 @@ func (h *Handler) PatchModelCatalogModel(c *gin.Context) {
 		},
 	)
 	recalculate := body.Price != nil || (body.ClearPrice != nil && *body.ClearPrice)
+	if body.RecalculateCosts != nil && !*body.RecalculateCosts {
+		recalculate = false
+	}
 	recalculationPending := false
 	if result.config != nil {
 		recalculationPending = h.refreshModelPricing(recalculate)
@@ -242,6 +286,9 @@ func applyModelCatalogPatch(doc *modelcatalog.File, model *modelcatalog.Model, b
 	}
 	if body.Enabled != nil {
 		model.Enabled = *body.Enabled
+	}
+	if body.Speed != nil {
+		model.Speed = strings.ToLower(strings.TrimSpace(*body.Speed))
 	}
 	if body.Price != nil {
 		doc.SetPrice(model.Name, *body.Price)
@@ -353,6 +400,8 @@ func (h *Handler) modelCatalogResponse(
 			DisplayName:               model.DisplayName,
 			UserCreated:               model.UserCreated,
 			Enabled:                   model.Enabled,
+			Speed:                     model.Speed,
+			SpeedOptions:              config.ModelSpeedOptions(model.Name, model.Channel),
 			RuntimeAvailable:          runtimeAvailable,
 			RuntimeOnly:               runtimeOnly[nameKey],
 			RuntimeProviders:          availability.ConfiguredProviders,

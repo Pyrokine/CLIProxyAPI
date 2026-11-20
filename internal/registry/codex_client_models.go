@@ -30,7 +30,8 @@ var codexClientCatalogStore = &codexClientModelsStore{}
 func init() {
 	if _, err := loadCodexClientModelsFromBytes(embeddedCodexClientModelsJSON, "embed"); err != nil {
 		log.Warnf(
-			"registry: failed to parse embedded codex_client_models.json (Codex client catalog will remain unavailable until a valid remote refresh): %v",
+			"registry: failed to parse embedded codex_client_models.json (Codex cli"+
+				"ent catalog will remain unavailable until a valid remote refresh): %v",
 			err,
 		)
 	}
@@ -57,7 +58,7 @@ func GetCodexClientModelsRevision() uint64 {
 }
 
 func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
-	if err := validateCodexClientModelsJSON(data); err != nil {
+	if err := ValidateCodexClientModelsJSON(data); err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
 
@@ -72,9 +73,9 @@ func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 	return true, nil
 }
 
-// validateCodexClientModelsJSON validates the fields required to serve a
+// ValidateCodexClientModelsJSON validates the fields required to serve a
 // complete Codex client model catalog.
-func validateCodexClientModelsJSON(data []byte) error {
+func ValidateCodexClientModelsJSON(data []byte) error {
 	var payload codexClientModelsPayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("decode Codex client model catalog: %w", err)

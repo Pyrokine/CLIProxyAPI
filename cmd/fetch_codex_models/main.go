@@ -44,6 +44,7 @@ func init() {
 	log.SetLevel(log.InfoLevel)
 }
 
+//goland:noinspection DuplicatedCode
 func main() {
 	var authsDir string
 	var configPath string
@@ -59,15 +60,17 @@ func main() {
 	flag.Parse()
 
 	authsDirOverridden := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "auths-dir" {
-			authsDirOverridden = true
-		}
-	})
+	flag.Visit(
+		func(f *flag.Flag) {
+			if f.Name == "auths-dir" {
+				authsDirOverridden = true
+			}
+		},
+	)
 
 	wd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot get working directory: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: cannot get working directory: %v\n", err)
 		os.Exit(1)
 	}
 	if strings.TrimSpace(configPath) == "" {
@@ -75,7 +78,7 @@ func main() {
 	}
 	cfg, err := config.LoadConfigOptional(configPath, false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to load config file %s: %v\n", configPath, err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to load config file %s: %v\n", configPath, err)
 		os.Exit(1)
 	}
 	if cfg == nil {
@@ -90,7 +93,7 @@ func main() {
 		authsDir = filepath.Join(wd, authsDir)
 	}
 	if authsDir, err = util.ResolveAuthDir(authsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to resolve auth directory: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to resolve auth directory: %v\n", err)
 		os.Exit(1)
 	}
 	if !filepath.IsAbs(outputPath) {
@@ -104,12 +107,12 @@ func main() {
 	ctx := context.Background()
 	auths, err := fileStore.List(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to list auth files: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to list auth files: %v\n", err)
 		os.Exit(1)
 	}
 	chosen := findCodexAuth(auths)
 	if chosen == nil {
-		fmt.Fprintf(os.Stderr, "error: no enabled codex auth found in %s\n", authsDir)
+		_, _ = fmt.Fprintf(os.Stderr, "error: no enabled codex auth found in %s\n", authsDir)
 		os.Exit(1)
 	}
 
@@ -117,7 +120,7 @@ func main() {
 	fmt.Printf("Using auth: auth_index=%s identity=%s\n", authIndex, identity)
 	accessToken, refreshed, err := ensureAccessToken(ctx, fileStore, chosen)
 	if err != nil {
-		fmt.Fprintf(
+		_, _ = fmt.Fprintf(
 			os.Stderr,
 			"error: failed to prepare codex access token: %v\n",
 			safeRequestError(err, credentialSecrets(chosen, accessToken)...),
@@ -131,7 +134,7 @@ func main() {
 	fmt.Println("Fetching Codex model list from upstream...")
 	raw, count, err := fetchModels(ctx, chosen, accessToken, clientVersion)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to fetch codex models: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to fetch codex models: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Fetched %d models.\n", count)
@@ -139,12 +142,12 @@ func main() {
 	if pretty {
 		raw, err = prettyJSON(raw)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: failed to format JSON: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "error: failed to format JSON: %v\n", err)
 			os.Exit(1)
 		}
 	}
 	if err = os.WriteFile(outputPath, raw, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to write output file %s: %v\n", outputPath, err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to write output file %s: %v\n", outputPath, err)
 		os.Exit(1)
 	}
 	fmt.Printf("Model list saved to: %s\n", outputPath)
@@ -158,7 +161,9 @@ func findCodexAuth(auths []*coreauth.Auth) *coreauth.Auth {
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 			continue
 		}
-		if metaStringValue(auth.Metadata, "access_token") == "" && metaStringValue(auth.Metadata, "refresh_token") == "" {
+		if metaStringValue(auth.Metadata, "access_token") == "" && metaStringValue(
+			auth.Metadata, "refresh_token",
+		) == "" {
 			continue
 		}
 		return auth
@@ -373,11 +378,13 @@ func credentialSecrets(auth *coreauth.Auth, additional ...string) []string {
 	if auth == nil {
 		return secrets
 	}
-	for _, value := range auth.Attributes {
-		secrets = append(secrets, strings.TrimSpace(value))
+	for key, value := range auth.Attributes {
+		if !strings.EqualFold(strings.TrimSpace(key), "plan_type") {
+			secrets = append(secrets, strings.TrimSpace(value))
+		}
 	}
-	for _, raw := range auth.Metadata {
-		if value, ok := raw.(string); ok {
+	for key, raw := range auth.Metadata {
+		if value, ok := raw.(string); ok && !strings.EqualFold(strings.TrimSpace(key), "plan_type") {
 			secrets = append(secrets, strings.TrimSpace(value))
 		}
 	}

@@ -21,6 +21,7 @@ type defaultUpdateChange struct {
 	Fields  map[string]fieldChange `json:"fields,omitempty"`
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type DefaultUpdatePreview struct {
 	CurrentDefaultsVersion string                `json:"current_defaults_version"`
 	LatestDefaultsVersion  string                `json:"latest_defaults_version"`
@@ -57,7 +58,7 @@ func applyDefaultUpdate(configPath string, decisions []ApplyDecision) (ApplyResu
 	_, backupPath, err := update(
 		configPath,
 		nil,
-		UpdateOptions{Backup: true},
+		updateOptions{Backup: true},
 		func(doc *File) error {
 			var errApply error
 			applied, errApply = ApplyDefaultDecisions(doc, decisions)
@@ -96,9 +97,10 @@ func ApplyDefaultDecisions(current *File, decisions []ApplyDecision) (int, error
 			}
 			if hasDefaultModel {
 				if existing, ok := current.Find(name); ok {
-					enabled := existing.Enabled
+					enabled, speed := existing.Enabled, existing.Speed
 					*existing = *defaultModel
 					existing.Enabled = enabled
+					existing.Speed = speed
 				} else {
 					current.Models = append(current.Models, *defaultModel)
 				}

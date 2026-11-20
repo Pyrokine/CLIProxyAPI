@@ -19,27 +19,6 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 	cacheWriteGPT6Sol := 2.5
 	cacheWriteGPT61Sol := 2.5
 	cacheWriteGPT6Luna := 0.125
-	gptImage15Limitations := []string{
-		"Image input is USD 8 per one million tokens and cached image input is USD 2; the current manifest records the text-input and cached-text-input rates because it cannot distinguish input modality.",
-		"Image output is USD 32 per one million tokens. Fixed per-image examples vary by quality and resolution and cannot be represented by this token-only manifest.",
-		"OpenAI has deprecated this model and schedules its API shutdown for 2026-12-01.",
-	}
-	gptImage2Limitations := []string{
-		"Image input is USD 4 per one million tokens and cached image input is USD 1; the current manifest records the text-input and cached-text-input rates because it cannot distinguish input modality.",
-		"Image output is USD 15 per one million tokens. Per-image cost varies by output-token consumption, quality, and resolution and cannot be represented by this token-only manifest.",
-	}
-	gptImage25Limitations := []string{
-		"Image input is USD 8 per one million tokens and cached image input is USD 2; the current manifest records the USD 5 text-input and USD 1.25 cached-text-input rates because it cannot distinguish input modality.",
-		"Image output is USD 30 per one million tokens. The official source does not publish a fixed per-image quality or size table, and the GPT Image 2 calculator does not estimate token consumption for these models.",
-	}
-	gemini38Limitations := []string{
-		"Context cache storage is billed separately at USD 0.50 per one million tokens per hour and is not represented by request token usage.",
-		"Batch uses separate rates, and standard rates increase to USD 1.50 input, USD 0.15 cached input, and USD 7.50 output from 2027-01-01.",
-	}
-	gemini38HighLimitations := []string{
-		"This thinking-level alias uses the Gemini 3.8 Flash family rate because Google publishes no separate price for the alias.",
-		"Context cache storage and Batch use separate rates, and standard rates increase to USD 1.50 input, USD 0.15 cached input, and USD 7.50 output from 2027-01-01.",
-	}
 	want := map[string]Price{
 		"gpt-5.6-sol": {
 			Prompt: 4, Completion: 20, Cache: 0.4, CacheWrite: &cacheWriteSol,
@@ -73,24 +52,12 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 			Prompt: 0.1, Completion: 0.5, Cache: 0.01, CacheWrite: &cacheWriteGPT6Luna,
 			Status: PriceStatusPartial,
 		},
-		"gpt-image-1.5": {
-			Prompt: 5, Completion: 32, Cache: 1.25, Status: PriceStatusPartial,
-		},
-		"gpt-image-2": {
-			Prompt: 2.5, Completion: 15, Cache: 0.625, Status: PriceStatusPartial,
-		},
-		"gpt-image-2.5-flare": {
-			Prompt: 5, Completion: 30, Cache: 1.25, Status: PriceStatusPartial,
-		},
-		"gpt-image-2.5-flare-2026-09-08": {
-			Prompt: 5, Completion: 30, Cache: 1.25, Status: PriceStatusPartial,
-		},
-		"gpt-image-2.5-sunburst": {
-			Prompt: 5, Completion: 30, Cache: 1.25, Status: PriceStatusPartial,
-		},
-		"gpt-image-2.5-sunburst-2026-09-08": {
-			Prompt: 5, Completion: 30, Cache: 1.25, Status: PriceStatusPartial,
-		},
+		"gpt-image-1.5":                     {Status: PriceStatusPartial},
+		"gpt-image-2":                       {Status: PriceStatusPartial},
+		"gpt-image-2.5-flare":               {Status: PriceStatusPartial},
+		"gpt-image-2.5-flare-2026-09-08":    {Status: PriceStatusPartial},
+		"gpt-image-2.5-sunburst":            {Status: PriceStatusPartial},
+		"gpt-image-2.5-sunburst-2026-09-08": {Status: PriceStatusPartial},
 		"claude-fable-5-1": {
 			Prompt: 10, Completion: 50, Cache: 0.25, Status: PriceStatusComplete,
 		},
@@ -104,44 +71,38 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 			Prompt: 2, Completion: 6, Cache: 0.5, Status: PriceStatusPartial,
 		},
 		"gemini-3.1-flash-image": {
-			Prompt: 0.5, Completion: 3, Cache: 0.05, Status: PriceStatusPartial,
+			Status: PriceStatusPartial,
 		},
 		"gemini-3.1-flash-lite-image": {
-			Prompt: 0.25, Completion: 1.5, Cache: 0.025, Status: PriceStatusPartial,
+			Status: PriceStatusPartial,
 		},
 		"gemini-3.8-flash": {
 			Prompt: 0.75, Completion: 3.75, Cache: 0.075,
 			Status: PriceStatusPartial, AutoApply: true,
 		},
-		"gemini-3.8-flash-high": {
-			Prompt: 0.75, Completion: 3.75, Cache: 0.075,
-			Status: PriceStatusPartial, AutoApply: true,
-		},
+		"gemini-3.8-flash-high": {Status: PriceStatusUnpriced},
 		"deepseek-flash": {
 			Prompt: 0.15, Completion: 0.6, Cache: 0.003,
-			Status: PriceStatusComplete,
+			Status: PriceStatusPartial,
 		},
 		"deepseek-v4-pro": {
 			Prompt: 0.66, Completion: 1.98, Cache: 0.022,
-			Status: PriceStatusComplete,
+			Status: PriceStatusPartial,
 		},
 		"deepseek-v4-flash": {
 			Prompt: 0.15, Completion: 0.6, Cache: 0.003,
-			Status: PriceStatusComplete,
+			Status: PriceStatusPartial,
 		},
 		"deepseek-v4-flash-vision-exp": {
 			Prompt: 0.15, Completion: 0.6, Cache: 0.003,
-			Status: PriceStatusComplete,
+			Status: PriceStatusPartial,
 		},
-		"gemini-3.7-flash": {
-			Prompt: 0.75, Completion: 3.75, Cache: 0.075,
-			Status: PriceStatusPartial, AutoApply: true,
-		},
+		"gemini-3.7-flash": {Status: PriceStatusPartial},
 		"kimi-k2.7-code": {
-			Prompt: 0.95, Completion: 4, Cache: 0.19, Status: PriceStatusComplete,
+			Prompt: 0.95, Completion: 4, Cache: 0.19, Status: PriceStatusPartial,
 		},
 		"kimi-k2.7-code-highspeed": {
-			Prompt: 1.9, Completion: 8, Cache: 0.38, Status: PriceStatusComplete,
+			Prompt: 1.9, Completion: 8, Cache: 0.38, Status: PriceStatusPartial,
 		},
 		"kimi-k3": {
 			Prompt: 3, Completion: 15, Cache: 0.3,
@@ -156,11 +117,20 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 			continue
 		}
 		if got.Prompt != expected.Prompt || got.Completion != expected.Completion || got.Cache != expected.Cache ||
-			got.EffectiveStatus() != expected.EffectiveStatus() || got.AutoApply != expected.AutoApply ||
+			got.EffectiveStatus() != expected.EffectiveStatus() ||
+			got.AutoApply != expected.AutoApply ||
 			!reflect.DeepEqual(got.CacheWrite, expected.CacheWrite) {
 			t.Errorf("DefaultPrices()[%q] = %+v, want core fields %+v", name, got, expected)
 		}
-		if got.CacheRead == nil || *got.CacheRead != expected.Cache {
+		if expected.EffectiveStatus() == PriceStatusUnpriced {
+			if got.HasReferenceTokenRates() || got.UnpricedReason == "" {
+				t.Errorf(
+					"DefaultPrices()[%q] must explain unpriced status without numeric rates: %+v",
+					name,
+					got,
+				)
+			}
+		} else if got.HasBaseTokenRates() && (got.CacheRead == nil || *got.CacheRead != expected.Cache) {
 			t.Errorf("DefaultPrices()[%q].CacheRead = %v, want %v", name, got.CacheRead, expected.Cache)
 		}
 		if got.Currency != "USD" || got.Source == "" || got.CheckedAt == "" {
@@ -174,99 +144,209 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 		limitations []string
 	}{
 		"gpt-6-astra": {
-			source:    "https://developers.openai.com/api/docs/models/gpt-6-astra",
-			checkedAt: "2026-09-04",
+			source:    "https://developers.openai.com/api/docs/pricing",
+			checkedAt: "2026-11-18",
 			limitations: []string{
-				"Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
-				"Access is rolling out through the Trusted Access Program; this reference price does not establish entitlement.",
+				"USD / 1M tokens，第一方 global Standard 参考价；工具费与区域附加费另计",
+				"超过 272000 输入 tokens 时整次请求使用长上下文档",
+				"30 分钟与 12 小时缓存写入使用各自公布的单价",
+				"当前精确型号页与公开 Codex 目录列出该 ID；额外 API 访问资格条件未取得明确说明，旧 Trusted Access 限制保留为待核实事实",
 			},
 		},
 		"gpt-5.6-cyber": {
-			source:    "https://developers.openai.com/api/docs/models/gpt-5.6-cyber",
-			checkedAt: "2026-09-04",
+			source:    "https://developers.openai.com/api/docs/pricing",
+			checkedAt: "2026-11-18",
 			limitations: []string{
-				"Requests with more than 272K input tokens use 2x input and 1.5x output pricing; the current manifest does not select that tier automatically. The official source does not publish long-context cache rates.",
-				"Access requires separate Daybreak approval and provisioning.",
+				"须启用 Daybreak Red；Standard 短档输入 12.5、输出 75、缓存读 1.25、30m 写 15.625、12h 写 31.25",
+				"当前主价目表与精确模型页的 1.25x 写入倍率一致，原 USD 15 冲突说明应删除",
+				"精确页列最大输入 272000，也列 >272000 时输入 2x/输出 1.5x 条件；主价目表未公布该型号长档数值和长档缓存价，当前 schema 不推算缺失项",
 			},
 		},
 		"gpt-6-sol": {
-			source:    "https://developers.openai.com/api/docs/models/gpt-6-sol",
-			checkedAt: "2026-09-23",
+			source:    "https://developers.openai.com/api/docs/pricing",
+			checkedAt: "2026-11-18",
 			limitations: []string{
-				"Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
+				"USD / 1M tokens，第一方 global Standard 参考价；工具费与区域附加费另计",
+				"超过 272000 输入 tokens 时整次请求使用长上下文档",
+				"30 分钟与 12 小时缓存写入使用各自公布的单价",
 			},
 		},
 		"gpt-6.1-sol": {
-			source:    "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
-			checkedAt: "2026-10-09",
+			source:    "https://developers.openai.com/api/docs/pricing",
+			checkedAt: "2026-11-18",
 			limitations: []string{
-				"Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
+				"USD / 1M tokens，第一方 global Standard 参考价；工具费与区域附加费另计",
+				"超过 272000 输入 tokens 时整次请求使用长上下文档",
+				"30 分钟与 12 小时缓存写入使用各自公布的单价",
 			},
 		},
 		"claude-sonnet-5-5": {
-			source:    "https://platform.claude.com/docs/en/models/sonnet-5-5/overview",
-			checkedAt: "2026-10-09",
+			source:    "https://platform.claude.com/docs/en/about-claude/pricing",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"USD / 1M tokens，第一方 global Standard API 参考价；Batch、Fast、US-only inference 1.1x、合作云平台与工具费另计",
+			},
 		},
 		"gpt-6-luna": {
-			source:    "https://developers.openai.com/api/docs/models/gpt-6-luna",
-			checkedAt: "2026-09-23",
+			source:    "https://developers.openai.com/api/docs/pricing",
+			checkedAt: "2026-11-18",
 			limitations: []string{
-				"Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
+				"USD / 1M tokens，第一方 global Standard 参考价；工具费与区域附加费另计",
+				"超过 272000 输入 tokens 时整次请求使用长上下文档",
+				"30 分钟与 12 小时缓存写入使用各自公布的单价",
 			},
 		},
 		"gpt-image-1.5": {
-			source:      "https://developers.openai.com/api/docs/models/gpt-image-1.5",
-			checkedAt:   "2026-09-23",
-			limitations: gptImage15Limitations,
+			source:    "https://developers.openai.com/api/docs/models/gpt-image-1.5",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"同一请求的 text/image 输入、缓存读取和图像输出分别定价；缺少模态或缓存计量时保留对应未计价部分",
+				"图像使用 USD / 1M image tokens；未将每张图的估算单价写成固定 token 价格",
+				"精确官方模型页标为 Deprecated，当前参考价与可用性状态分别使用",
+			},
 		},
 		"gpt-image-2": {
-			source:      "https://developers.openai.com/api/docs/models/gpt-image-2",
-			checkedAt:   "2026-09-23",
-			limitations: gptImage2Limitations,
+			source:    "https://developers.openai.com/api/docs/models/gpt-image-2",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"同一请求的 text/image 输入、缓存读取和图像输出分别定价；缺少模态或缓存计量时保留对应未计价部分",
+				"图像使用 USD / 1M image tokens；未将每张图的估算单价写成固定 token 价格",
+				"缓存价只适用于 Responses API 的 image-generation tool，不适用于直接 Images API generations/edits",
+				"精确官方模型页标为 Deprecated，当前参考价与可用性状态分别使用",
+			},
 		},
 		"gpt-image-2.5-flare": {
-			source:      "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare",
-			checkedAt:   "2026-09-23",
-			limitations: gptImage25Limitations,
+			source:    "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"同一请求的 text/image 输入、缓存读取和图像输出分别定价；缺少模态或缓存计量时保留对应未计价部分",
+				"图像使用 USD / 1M image tokens；未将每张图的估算单价写成固定 token 价格",
+				"缓存价只适用于 Responses API 的 image-generation tool，不适用于直接 Images API generations/edits",
+			},
 		},
 		"gpt-image-2.5-flare-2026-09-08": {
-			source:      "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare",
-			checkedAt:   "2026-09-23",
-			limitations: gptImage25Limitations,
+			source:    "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"同一请求的 text/image 输入、缓存读取和图像输出分别定价；缺少模态或缓存计量时保留对应未计价部分",
+				"图像使用 USD / 1M image tokens；未将每张图的估算单价写成固定 token 价格",
+				"缓存价只适用于 Responses API 的 image-generation tool，不适用于直接 Images API generations/edits",
+			},
 		},
 		"gpt-image-2.5-sunburst": {
-			source:      "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
-			checkedAt:   "2026-09-23",
-			limitations: gptImage25Limitations,
+			source:    "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"同一请求的 text/image 输入、缓存读取和图像输出分别定价；缺少模态或缓存计量时保留对应未计价部分",
+				"图像使用 USD / 1M image tokens；未将每张图的估算单价写成固定 token 价格",
+				"缓存价只适用于 Responses API 的 image-generation tool，不适用于直接 Images API generations/edits",
+			},
 		},
 		"gpt-image-2.5-sunburst-2026-09-08": {
-			source:      "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
-			checkedAt:   "2026-09-23",
-			limitations: gptImage25Limitations,
+			source:    "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"同一请求的 text/image 输入、缓存读取和图像输出分别定价；缺少模态或缓存计量时保留对应未计价部分",
+				"图像使用 USD / 1M image tokens；未将每张图的估算单价写成固定 token 价格",
+				"缓存价只适用于 Responses API 的 image-generation tool，不适用于直接 Images API generations/edits",
+			},
 		},
 		"gemini-3.8-flash": {
-			source:      "https://ai.google.dev/gemini-api/docs/pricing",
-			checkedAt:   "2026-09-23",
-			limitations: gemini38Limitations,
+			source:    "https://aistudio.google.com/docs/pricing#gemini-3.8-flash",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"仅 Gemini Developer API Standard 付费档参考，Batch/Flex/Priority、工具和缓存存储按 published_tables 的原始单位单列",
+				"当前缓存存储 USD 0.50 / 1,000,000 token / hour；2027-01-01 为 USD 1.00 / 1,000,000 token / hour",
+				"Input price: $0.75 through December 31, 2026.; $1.50 starting January 1, 2027.",
+				"Output price (including thinking tokens): $3.75 through December 31, 2026.; $7.50 starting January 1, 2027.",
+				"Context caching price: $0.075 through December 31, 2026.; $0.15 starting January 1, 2027.; $0.50 / 1,000,000 tokens per hour (storage price) through December 31, 2026.; $1.00 / 1,000,000 tokens per hour (storage price) starting January 1, 2027.",
+			},
 		},
 		"gemini-3.8-flash-high": {
-			source:      "https://ai.google.dev/gemini-api/docs/pricing",
-			checkedAt:   "2026-09-23",
-			limitations: gemini38HighLimitations,
+			source:    "https://antigravity.google/docs/plans",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"没有公开证据把该 thinking 后缀或 agent 别名定义为独立 Gemini API ID；也未取得 Antigravity 精确模型按 token 价表，停止继承主站基础型号费率",
+			},
 		},
 		"kimi-k2.7-code": {
 			source:    "https://platform.kimi.ai/docs/pricing/chat",
-			checkedAt: "2026-09-23",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"仅用于精确同名 Moonshot/Kimi 开放平台按量 API 的单价参考；Kimi Code 订阅额度按独立合同消耗",
+				"每 1 MTok = 1,000,000 tokens；USD 国际站与 CNY 国内站分别列示，未进行汇率换算",
+				"国际站价格不含适用税费，税额按司法辖区在结算时计算",
+				"K2 系列只向已有合资格账户提供；价格页称自 2026-10-31 停止新用户，模型/API 参数页称 2026-11-01 之前注册用户可继续，计划 2026-12 底下线",
+				"当前标准价目未发布 K2 独立缓存写入费，不从 K3 或其他型号推算",
+				"CPA 内置 Kimi 渠道同名兼容 ID 当前转为 kimi-for-coding，即 K2.8 Preview；该渠道的实际按 token 价格保持未知，不能使用 API K2.7 费率描述该订阅调用",
+			},
 		},
 		"kimi-k2.7-code-highspeed": {
 			source:    "https://platform.kimi.ai/docs/pricing/chat",
-			checkedAt: "2026-09-23",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"仅用于精确同名 Moonshot/Kimi 开放平台按量 API 的单价参考；Kimi Code 订阅额度按独立合同消耗",
+				"每 1 MTok = 1,000,000 tokens；USD 国际站与 CNY 国内站分别列示，未进行汇率换算",
+				"国际站价格不含适用税费，税额按司法辖区在结算时计算",
+				"K2 系列只向已有合资格账户提供；价格页称自 2026-10-31 停止新用户，模型/API 参数页称 2026-11-01 之前注册用户可继续，计划 2026-12 底下线",
+				"当前标准价目未发布 K2 独立缓存写入费，不从 K3 或其他型号推算",
+			},
 		},
 		"grok-4.7": {
-			source:    "https://docs.x.ai/developers/models/grok-4.7",
-			checkedAt: "2026-09-23",
+			source:    "https://docs.x.ai/developers/pricing",
+			checkedAt: "2026-11-18",
 			limitations: []string{
-				"Input, cached-input, and output prices double above 200K input tokens; the current manifest does not select that tier automatically.",
+				"基础费率仅适用于总 prompt token 数小于 200000 的 xAI 第一方全局 Standard API 请求",
+				"总 prompt token 包含缓存命中 token；达到 200000 后整次请求所有 token 使用长上下文费率",
+				"US endpoint 的输入、缓存输入、输出费率乘以 1.1；第三方渠道和消费订阅费用独立",
+				"长上下文按公开的整次请求档位计价，未知计量保留具体未计价原因",
+				"Batch 表列出的七个 4.x ID 享 20% token 折扣；Build 不在折扣表中",
+				"Long-context reference (USD per million tokens): {\"trigger\":\"prompt_tokens >= 200000, including cached prompt tokens\",\"rates\":{\"prompt\":4.0,\"cache_read\":1.0,\"completion\":12.0},\"applies_to\":\"all request input, cached input and output tokens\"}",
+				"Checked against official-site search-index excerpts on 2026-11-18; the full official page was unavailable during this review.",
+			},
+		},
+		"gpt-6.2-astra": {
+			source:    "https://developers.openai.com/api/docs/pricing",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"USD / 1M tokens，第一方 global Standard 参考价；工具费与区域附加费另计",
+				"超过 272000 输入 tokens 时整次请求使用长上下文档",
+				"30 分钟与 12 小时缓存写入使用各自公布的单价",
+				"默认速度费率按非优惠标准维护，API 与 Codex 分别采用对应渠道的公开倍率；Flex 费率未公布",
+			},
+		},
+		"gpt-6.2-sol": {
+			source:    "https://developers.openai.com/api/docs/pricing",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"USD / 1M tokens，第一方 global Standard 参考价；工具费与区域附加费另计",
+				"超过 272000 输入 tokens 时整次请求使用长上下文档",
+				"30 分钟与 12 小时缓存写入使用各自公布的单价",
+				"默认速度费率按非优惠标准维护，API 与 Codex 分别采用对应渠道的公开倍率；Flex 费率未公布",
+			},
+		},
+		"gpt-6.1-terra": {
+			source:    "https://developers.openai.com/api/docs/pricing",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"USD / 1M tokens，第一方 global Standard 参考价；工具费与区域附加费另计",
+				"超过 272000 输入 tokens 时整次请求使用长上下文档",
+				"30 分钟与 12 小时缓存写入使用各自公布的单价",
+			},
+		},
+		"claude-fable-5-2": {
+			source:    "https://platform.claude.com/docs/en/about-claude/pricing",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"USD / 1M tokens，第一方 global Standard API 参考价；Batch、Fast、US-only inference 1.1x、合作云平台与工具费另计",
+			},
+		},
+		"claude-haiku-5-5": {
+			source:    "https://platform.claude.com/docs/en/about-claude/pricing",
+			checkedAt: "2026-11-18",
+			limitations: []string{
+				"USD / 1M tokens，第一方 global Standard API 参考价；Batch、Fast、US-only inference 1.1x、合作云平台与工具费另计",
+				"以上是总 prompt 长度不超过 100000 tokens 的短档；计数包含 cache read/write，超过阈值整次请求改为输入 0.50、输出 2.50、读 0.05、5m 写 0.625、1h 写 1",
 			},
 		},
 	}
@@ -275,23 +355,34 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 		if got.Source != expected.source || got.CheckedAt != expected.checkedAt ||
 			!reflect.DeepEqual(got.Limitations, expected.limitations) {
 			t.Errorf(
-				"DefaultPrices()[%q] metadata = %+v, want source %q and limitations %v", name, got, expected.source,
+				"DefaultPrices()[%q] metadata = %+v, want source %q and limitations %v",
+				name,
+				got,
+				expected.source,
 				expected.limitations,
 			)
 		}
 	}
-	for _, name := range []string{"gemini-3.8-flash", "gemini-3.8-flash-high"} {
-		if got := prices[name]; got.EffectiveUntil != "2026-12-31" {
-			t.Errorf("DefaultPrices()[%q].EffectiveUntil = %q, want 2026-12-31", name, got.EffectiveUntil)
+	for _, name := range []string{"gemini-3.6-flash", "gemini-3.8-flash"} {
+		got := prices[name]
+		if got.EffectiveUntil != "" {
+			t.Errorf("DefaultPrices()[%q] expires before its published future rate", name)
+		}
+		foundFutureRate := false
+		for _, rule := range got.ConditionalRates {
+			if rule.Provider == "gemini" && rule.EffectiveFrom == "2027-01-01T00:00:00Z" && rule.Speed == "" && rule.Prompt != nil && rule.Completion != nil && rule.CacheRead != nil {
+				foundFutureRate = *rule.Prompt == 1.5 && *rule.Completion == 7.5 && *rule.CacheRead == 0.15
+			}
+		}
+		if !foundFutureRate {
+			t.Errorf("DefaultPrices()[%q] lacks its exact published 2027 rates", name)
 		}
 	}
 
 	for _, name := range []string{
-		"kimi-k2.8",
 		"k2.8",
 		"kimi-k2.8-preview",
 		"k2.8-preview",
-		"kimi-k2.8-code",
 		"k2.8-code",
 	} {
 		if price, ok := prices[name]; ok {
@@ -305,24 +396,24 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 		"grok-imagine-image-2.0",
 		"grok-imagine-video",
 		"grok-imagine-video-1.5",
-		"qwen3.8-max",
-		"qwen3.8-max-0902",
-		"qwen3.8-flash",
 		"qwen3-coder-next",
 		"glm-4-voice",
 		"glm-4.1v-thinking-flash",
 		"glm-4.1v-thinking-flashx",
-		"glm-4.6v",
-		"glm-4.6v-flash",
-		"glm-4.6v-flashx",
 		"glm-4v-flash",
 		"glm-5v-turbo",
 		"autoglm-phone",
-		"glm-5.3-flash",
 	} {
 		price, ok := prices[name]
+		checkedAt := "2026-11-18"
+		if len(price.ModalityRates) > 0 || len(price.ChargeRates) > 0 {
+			if price.EffectiveStatus() != PriceStatusPartial || price.HasBaseTokenRates() || price.Source == "" || price.CheckedAt != checkedAt || !price.RequestScoped {
+				t.Errorf("published conditional price %q = %+v", name, price)
+			}
+			continue
+		}
 		if !ok || price.EffectiveStatus() != PriceStatusUnpriced || price.HasReferenceTokenRates() ||
-			price.Source == "" || price.CheckedAt != "2026-09-23" || price.UnpricedReason == "" {
+			price.Source == "" || price.CheckedAt != checkedAt || price.UnpricedReason == "" {
 			t.Errorf("DefaultPrices()[%q] = %+v, %t, want sourced unpriced entry", name, price, ok)
 		}
 	}
@@ -440,7 +531,11 @@ func TestDefaultInventoryHasExplicitPriceStatus(t *testing.T) {
 		switch price.EffectiveStatus() {
 		case PriceStatusComplete, PriceStatusPartial, PriceStatusUnpriced:
 		default:
-			t.Errorf("default inventory model %q has invalid price status %q", model.Name, price.EffectiveStatus())
+			t.Errorf(
+				"default inventory model %q has invalid price status %q",
+				model.Name,
+				price.EffectiveStatus(),
+			)
 		}
 	}
 }
@@ -450,7 +545,7 @@ func TestDefaultCatalogKeepsPriceManifestSeparateFromInventory(t *testing.T) {
 
 	catalog := DefaultFile()
 	aliases := catalog.ToOAuthModelAlias()
-	for _, name := range []string{"gpt-5", "gpt-5.6-cyber", "gpt-6.1-sol"} {
+	for _, name := range []string{"gpt-5", "gpt-5.6-cyber"} {
 		if _, ok := catalog.Price(name); !ok {
 			t.Errorf("default price manifest missing %q", name)
 		}
@@ -460,7 +555,12 @@ func TestDefaultCatalogKeepsPriceManifestSeparateFromInventory(t *testing.T) {
 		for channel, entries := range aliases {
 			for _, entry := range entries {
 				if modelKey(entry.Name) == modelKey(name) || modelKey(entry.Alias) == modelKey(name) {
-					t.Errorf("price-only record %q created OAuth alias in channel %q: %+v", name, channel, entry)
+					t.Errorf(
+						"price-only record %q created OAuth alias in channel %q: %+v",
+						name,
+						channel,
+						entry,
+					)
 				}
 			}
 		}
@@ -476,12 +576,16 @@ func TestDefaultCatalogKeepsPriceManifestSeparateFromInventory(t *testing.T) {
 	if !ok || sonnet.Provider != "Claude" || sonnet.Channel != "claude" || !sonnet.Enabled {
 		t.Fatalf("default Sonnet 5.5 inventory model = %+v, %v", sonnet, ok)
 	}
-	for _, name := range []string{"glm-4.6", "qwen3-max-preview", "imagen-4.0-generate-001"} {
+	for _, name := range []string{"glm-5-turbo", "qwen3-max-preview"} {
 		price, ok := catalog.Price(name)
 		if !ok || price.EffectiveStatus() != PriceStatusUnpriced || price.UnpricedReason == "" {
 			t.Errorf("unpriced record %q = %+v, %v", name, price, ok)
 		}
 	}
+	if _, exists := catalog.Find("gpt-6.1-sol"); !exists {
+		t.Fatal("declared Sol inventory entry missing from the embedded model catalog")
+	}
+
 }
 
 func TestDefaultUpdateAppliesInventoryAndPriceManifestIndependently(t *testing.T) {

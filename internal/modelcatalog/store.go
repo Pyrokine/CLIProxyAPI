@@ -25,7 +25,7 @@ var (
 	storeWriters  = make(map[string]chan struct{})
 )
 
-type UpdateOptions struct {
+type updateOptions struct {
 	Backup bool
 	Commit func(File) error
 }
@@ -279,7 +279,7 @@ func PrepareUpdate(
 func update(
 	configPath string,
 	cfg *config.Config,
-	options UpdateOptions,
+	options updateOptions,
 	mutate func(*File) error,
 ) (File, string, error) {
 	transaction, err := PrepareUpdate(configPath, cfg, options.Backup, mutate)
@@ -445,7 +445,7 @@ func ReplacePrices(configPath string, prices map[string]Price) (File, error) {
 	doc, _, err := update(
 		configPath,
 		nil,
-		UpdateOptions{},
+		updateOptions{},
 		func(doc *File) error {
 			SetPrices(doc, prices)
 			return nil
@@ -689,7 +689,8 @@ func decodeFileForLoad(data []byte) (File, bool, error) {
 	rewrite := doc.SchemaVersion < SchemaVersion || strings.TrimSpace(doc.DefaultsVersion) == ""
 	if !rewrite {
 		for i := range doc.Models {
-			if len(doc.Models[i].Aliases) > 0 || len(doc.Models[i].ForceMappedAliases) > 0 || doc.Models[i].Price != nil {
+			if len(doc.Models[i].Aliases) > 0 || len(doc.Models[i].ForceMappedAliases) > 0 ||
+				doc.Models[i].Price != nil {
 				rewrite = true
 				break
 			}
@@ -1125,5 +1126,6 @@ func applyLegacyConfig(cfg *config.Config, doc *File) {
 		if entry.Enabled != nil {
 			model.Enabled = *entry.Enabled
 		}
+		model.Speed = entry.Speed
 	}
 }

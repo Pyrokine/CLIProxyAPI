@@ -400,7 +400,7 @@ func TestUpdateSerializesConcurrentReadModifyWrite(t *testing.T) {
 			_, _, err := update(
 				configPath,
 				nil,
-				UpdateOptions{},
+				updateOptions{},
 				func(doc *File) error {
 					doc.EnsureModel(fmt.Sprintf("concurrent-model-%02d", index), true)
 					return nil
@@ -441,7 +441,7 @@ func TestUpdateRestoresExistingCatalogWhenCommitFails(t *testing.T) {
 	_, _, err := update(
 		configPath,
 		nil,
-		UpdateOptions{Commit: func(File) error { return commitErr }},
+		updateOptions{Commit: func(File) error { return commitErr }},
 		func(doc *File) error {
 			doc.EnsureModel("new-model", true)
 			return nil
@@ -470,7 +470,7 @@ func TestUpdateRemovesNewCatalogWhenCommitFails(t *testing.T) {
 	_, _, err := update(
 		configPath,
 		nil,
-		UpdateOptions{Commit: func(File) error { return commitErr }},
+		updateOptions{Commit: func(File) error { return commitErr }},
 		func(doc *File) error {
 			doc.EnsureModel("new-model", true)
 			return nil
@@ -491,7 +491,7 @@ func TestUpdateBackupUsesPreMutationSnapshotAndUniquePath(t *testing.T) {
 	_, firstBackup, err := update(
 		configPath,
 		nil,
-		UpdateOptions{Backup: true},
+		updateOptions{Backup: true},
 		func(doc *File) error {
 			doc.EnsureModel("new-only-model", true)
 			return nil
@@ -514,7 +514,7 @@ func TestUpdateBackupUsesPreMutationSnapshotAndUniquePath(t *testing.T) {
 	_, secondBackup, err := update(
 		configPath,
 		nil,
-		UpdateOptions{Backup: true},
+		updateOptions{Backup: true},
 		nil,
 	)
 	if err != nil {
@@ -732,7 +732,7 @@ func TestUpdateCommitFailureKeepsPreviousSnapshot(t *testing.T) {
 	_, _, err := update(
 		configPath,
 		nil,
-		UpdateOptions{Commit: func(File) error { return commitErr }},
+		updateOptions{Commit: func(File) error { return commitErr }},
 		func(doc *File) error {
 			doc.EnsureModel("candidate-model", true)
 			return nil

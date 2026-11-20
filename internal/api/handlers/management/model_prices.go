@@ -12,6 +12,14 @@ import (
 
 type modelPriceEntry = modelcatalog.Price
 
+func validateModelPriceEntries(prices map[string]modelPriceEntry) error {
+	doc := modelcatalog.File{
+		SchemaVersion: modelcatalog.SchemaVersion, DefaultsVersion: modelcatalog.DefaultsVersion,
+		Prices: prices,
+	}
+	return doc.Validate()
+}
+
 func (h *Handler) GetModelPrices(c *gin.Context) {
 	doc, err := modelcatalog.LoadOrInit(h.configFilePath, h.configSnapshot())
 	if err != nil {
@@ -41,6 +49,10 @@ func (h *Handler) PutModelPrices(c *gin.Context) {
 	}
 	prices := make(map[string]modelcatalog.Price, len(body.Prices))
 	maps.Copy(prices, body.Prices)
+	if err := validateModelPriceEntries(prices); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	result, ok := h.mutateModelCatalog(
 		c,
 		modelCatalogMutationOptions{},

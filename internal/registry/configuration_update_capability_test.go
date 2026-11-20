@@ -4,12 +4,14 @@ import "testing"
 
 func TestModelRegistryConfigurationUpdatesRequireEveryExactRoute(t *testing.T) {
 	reg := newTestModelRegistry()
-	reg.RegisterClient("capable", "codex", []*ModelInfo{
-		{ID: "shared", SupportConfigurationUpdate: true},
-		{ID: "alias", CatalogName: "upstream-capable", SupportConfigurationUpdate: true},
-		{ID: "team/alias", CatalogName: "upstream-capable", SupportConfigurationUpdate: true},
-		{ID: "missing-info", SupportConfigurationUpdate: true},
-	})
+	reg.RegisterClient(
+		"capable", "codex", []*ModelInfo{
+			{ID: "shared", SupportConfigurationUpdate: true},
+			{ID: "alias", CatalogName: "upstream-capable", SupportConfigurationUpdate: true},
+			{ID: "team/alias", CatalogName: "upstream-capable", SupportConfigurationUpdate: true},
+			{ID: "missing-info", SupportConfigurationUpdate: true},
+		},
+	)
 	reg.RegisterClient("incapable", "codex", []*ModelInfo{{ID: "shared"}})
 	reg.RegisterClient("missing-metadata", "codex", []*ModelInfo{{ID: "missing-info"}})
 	delete(reg.clientModelInfos["missing-metadata"], "missing-info")

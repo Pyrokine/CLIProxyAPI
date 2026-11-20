@@ -28,6 +28,7 @@ type loadMetadata struct {
 	CurrentError          string     `json:"-"`
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PriceStatus string
 
 const (
@@ -37,13 +38,15 @@ const (
 )
 
 type tokenRates struct {
-	Prompt       float64  `json:"prompt,omitempty"`
-	Completion   float64  `json:"completion,omitempty"`
-	Cache        float64  `json:"cache,omitempty"`
-	CacheRead    *float64 `json:"cache_read,omitempty"`
-	CacheWrite   *float64 `json:"cache_write,omitempty"`
-	CacheWrite5m *float64 `json:"cache_write_5m,omitempty"`
-	CacheWrite1h *float64 `json:"cache_write_1h,omitempty"`
+	Prompt        float64  `json:"prompt,omitempty"`
+	Completion    float64  `json:"completion,omitempty"`
+	Cache         float64  `json:"cache,omitempty"`
+	CacheRead     *float64 `json:"cache_read,omitempty"`
+	CacheWrite    *float64 `json:"cache_write,omitempty"`
+	CacheWrite5m  *float64 `json:"cache_write_5m,omitempty"`
+	CacheWrite1h  *float64 `json:"cache_write_1h,omitempty"`
+	CacheWrite30m *float64 `json:"cache_write_30m,omitempty"`
+	CacheWrite12h *float64 `json:"cache_write_12h,omitempty"`
 }
 
 type utcPriceBand struct {
@@ -53,26 +56,96 @@ type utcPriceBand struct {
 	tokenRates
 }
 
+type SpeedRate struct {
+	Speed          string             `json:"speed"`
+	Provider       string             `json:"provider,omitempty"`
+	Multiplier     float64            `json:"multiplier"`
+	Multipliers    map[string]float64 `json:"multipliers,omitempty"`
+	EffectiveFrom  string             `json:"effective_from,omitempty"`
+	EffectiveUntil string             `json:"effective_until,omitempty"`
+	Source         string             `json:"source,omitempty"`
+}
+
+// RateOverrides preserves the difference between an unknown rate and a published zero.
+type RateOverrides struct {
+	Prompt        *float64 `json:"prompt,omitempty"`
+	Completion    *float64 `json:"completion,omitempty"`
+	CacheRead     *float64 `json:"cache_read,omitempty"`
+	CacheWrite    *float64 `json:"cache_write,omitempty"`
+	CacheWrite5m  *float64 `json:"cache_write_5m,omitempty"`
+	CacheWrite1h  *float64 `json:"cache_write_1h,omitempty"`
+	CacheWrite30m *float64 `json:"cache_write_30m,omitempty"`
+	CacheWrite12h *float64 `json:"cache_write_12h,omitempty"`
+}
+
+type ConditionalRate struct {
+	ID              string   `json:"id,omitempty"`
+	Provider        string   `json:"provider,omitempty"`
+	Region          string   `json:"region,omitempty"`
+	Speed           string   `json:"speed,omitempty"`
+	MinInputTokens  *int64   `json:"min_input_tokens,omitempty"`
+	MaxInputTokens  *int64   `json:"max_input_tokens,omitempty"`
+	EffectiveFrom   string   `json:"effective_from,omitempty"`
+	EffectiveUntil  string   `json:"effective_until,omitempty"`
+	Multiplier      *float64 `json:"multiplier,omitempty"`
+	UnpricedBuckets []string `json:"unpriced_buckets,omitempty"`
+	Source          string   `json:"source,omitempty"`
+	RateOverrides
+}
+
+type ModalityRate struct {
+	Modality string `json:"modality"`
+	RateOverrides
+}
+
+type ChargeRate struct {
+	Speed      string  `json:"speed,omitempty"`
+	Kind       string  `json:"kind"`
+	Unit       string  `json:"unit"`
+	Price      float64 `json:"price"`
+	PerUnits   float64 `json:"per_units"`
+	Provider   string  `json:"provider,omitempty"`
+	Region     string  `json:"region,omitempty"`
+	Resolution string  `json:"resolution,omitempty"`
+	Source     string  `json:"source,omitempty"`
+}
+
+type CoverageGap struct {
+	Dimension string `json:"dimension"`
+	Reason    string `json:"reason"`
+}
+
 type Price struct {
-	Prompt         float64        `json:"prompt,omitempty"`
-	Completion     float64        `json:"completion,omitempty"`
-	Cache          float64        `json:"cache,omitempty"`
-	CacheRead      *float64       `json:"cache_read,omitempty"`
-	CacheWrite     *float64       `json:"cache_write,omitempty"`
-	CacheWrite5m   *float64       `json:"cache_write_5m,omitempty"`
-	CacheWrite1h   *float64       `json:"cache_write_1h,omitempty"`
-	UTCRateBands   []utcPriceBand `json:"utc_rate_bands,omitempty"`
-	Status         PriceStatus    `json:"status,omitempty"`
-	AutoApply      bool           `json:"auto_apply,omitempty"`
-	Currency       string         `json:"currency,omitempty"`
-	Source         string         `json:"source,omitempty"`
-	CheckedAt      string         `json:"checked_at,omitempty"`
-	EffectiveFrom  string         `json:"effective_from,omitempty"`
-	EffectiveUntil string         `json:"effective_until,omitempty"`
-	Region         string         `json:"region,omitempty"`
-	ServiceTier    string         `json:"service_tier,omitempty"`
-	UnpricedReason string         `json:"unpriced_reason,omitempty"`
-	Limitations    []string       `json:"limitations,omitempty"`
+	Prompt            float64           `json:"prompt,omitempty"`
+	Completion        float64           `json:"completion,omitempty"`
+	Cache             float64           `json:"cache,omitempty"`
+	CacheRead         *float64          `json:"cache_read,omitempty"`
+	CacheWrite        *float64          `json:"cache_write,omitempty"`
+	CacheWrite5m      *float64          `json:"cache_write_5m,omitempty"`
+	CacheWrite1h      *float64          `json:"cache_write_1h,omitempty"`
+	CacheWrite30m     *float64          `json:"cache_write_30m,omitempty"`
+	CacheWrite12h     *float64          `json:"cache_write_12h,omitempty"`
+	UTCRateBands      []utcPriceBand    `json:"utc_rate_bands,omitempty"`
+	SpeedRates        []SpeedRate       `json:"speed_rates,omitempty"`
+	ConditionalRates  []ConditionalRate `json:"conditional_rates,omitempty"`
+	ModalityRates     []ModalityRate    `json:"modality_rates,omitempty"`
+	ChargeRates       []ChargeRate      `json:"charge_rates,omitempty"`
+	RequestScoped     bool              `json:"request_scoped,omitempty"`
+	CoverageGaps      []CoverageGap     `json:"coverage_gaps,omitempty"`
+	Status            PriceStatus       `json:"status,omitempty"`
+	AutoApply         bool              `json:"auto_apply,omitempty"`
+	Currency          string            `json:"currency,omitempty"`
+	Source            string            `json:"source,omitempty"`
+	CheckedAt         string            `json:"checked_at,omitempty"`
+	EffectiveFrom     string            `json:"effective_from,omitempty"`
+	EffectiveUntil    string            `json:"effective_until,omitempty"`
+	Region            string            `json:"region,omitempty"`
+	ServiceTier       string            `json:"service_tier,omitempty"`
+	UnpricedReason    string            `json:"unpriced_reason,omitempty"`
+	Limitations       []string          `json:"limitations,omitempty"`
+	promptPresent     bool
+	completionPresent bool
+	cachePresent      bool
 }
 
 type Model struct {
@@ -83,6 +156,7 @@ type Model struct {
 	DisplayName        string   `json:"display_name,omitempty"`
 	UserCreated        bool     `json:"user_created"`
 	Enabled            bool     `json:"enabled"`
+	Speed              string   `json:"speed,omitempty"`
 	Aliases            []string `json:"aliases,omitempty"`
 	ForceMappedAliases []string `json:"force_mapped_aliases,omitempty"`
 	// Price is retained only to migrate schema v1/v2 model-local prices.
@@ -167,6 +241,7 @@ func (m *Model) sanitize() {
 		m.Group = inferGroup(m.Provider, m.Name)
 	}
 	m.DisplayName = strings.TrimSpace(m.DisplayName)
+	m.Speed = strings.ToLower(strings.TrimSpace(m.Speed))
 	m.Aliases = uniqueStrings(m.Aliases)
 	m.ForceMappedAliases = filterStringsBySet(uniqueStrings(m.ForceMappedAliases), m.Aliases)
 }
@@ -296,6 +371,7 @@ func (f *File) ToModelCatalogModels() []config.ModelCatalogModel {
 				DisplayName: strings.TrimSpace(model.DisplayName),
 				Aliases:     uniqueStrings(model.Aliases),
 				Enabled:     &enabled,
+				Speed:       model.Speed,
 			},
 		)
 	}

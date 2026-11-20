@@ -7,12 +7,18 @@ func TestReplaceClientModelsPreservesSchedulingStateAndGeneration(t *testing.T) 
 	const client = "replacement-client"
 	r.RegisterClient(client, "antigravity", []*ModelInfo{{ID: "keep"}, {ID: "keep"}, {ID: "remove"}})
 	epoch := r.ClientRegistrationEpoch(client)
-	if !r.ApplyClientModelProjections(client, epoch, 11, []ClientModelProjection{{
-		ModelID: "keep", QuotaExceeded: true, Suspended: true, SuspendReason: "rate_limit",
-	}}) {
+	if !r.ApplyClientModelProjections(
+		client, epoch, 11, []ClientModelProjection{
+			{
+				ModelID: "keep", QuotaExceeded: true, Suspended: true, SuspendReason: "rate_limit",
+			},
+		},
+	) {
 		t.Fatal("initial scheduling state was rejected")
 	}
-	currentEpoch, applied := r.ReplaceClientModels(client, "antigravity", epoch, []*ModelInfo{{ID: "keep"}, {ID: "add"}})
+	currentEpoch, applied := r.ReplaceClientModels(
+		client, "antigravity", epoch, []*ModelInfo{{ID: "keep"}, {ID: "add"}},
+	)
 	if !applied || currentEpoch <= epoch {
 		t.Fatalf("replacement = (%d, %t), want newer epoch", currentEpoch, applied)
 	}

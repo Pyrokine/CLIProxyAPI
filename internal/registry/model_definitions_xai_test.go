@@ -81,6 +81,11 @@ func TestWithXAIBuiltinsRegistersCurrentMediaModels(t *testing.T) {
 	if findModelByID(models, xaiBuiltinVideo15ModelID) == nil {
 		t.Fatalf("missing %s builtin model", xaiBuiltinVideo15ModelID)
 	}
+	lite := findModelByID(models, xaiBuiltinVideo15LiteModelID)
+	if lite == nil || !slices.Equal(lite.SupportedInputModalities, []string{"text", "image"}) ||
+		!slices.Equal(lite.SupportedOutputModalities, []string{"video"}) {
+		t.Fatalf("Video 1.5 Lite metadata = %+v", lite)
+	}
 	if preview := findModelByID(models, "grok-imagine-video-1.5-preview"); preview != nil {
 		t.Fatal("preview alias must not be exposed by the default xAI catalog")
 	}

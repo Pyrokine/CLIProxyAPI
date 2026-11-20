@@ -3,7 +3,6 @@ package registry
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"testing"
 )
@@ -23,25 +22,40 @@ func TestDevinRefreshNotifiesOnlyWhenCatalogChanges(t *testing.T) {
 	}
 	pendingRefreshChanges = nil
 	refreshCallbackMu.Unlock()
-	t.Cleanup(func() {
-		devinModelsURLs = originalURLs
-		devinCatalogStore.mu.Lock()
-		devinCatalogStore.models = originalModels
-		devinCatalogStore.rawJSON = originalRaw
-		devinCatalogStore.revision = originalRevision
-		devinCatalogStore.mu.Unlock()
-		refreshCallbackMu.Lock()
-		refreshCallback, pendingRefreshChanges = originalCallback, originalPending
-		refreshCallbackMu.Unlock()
-	})
+	t.Cleanup(
+		func() {
+			devinModelsURLs = originalURLs
+			devinCatalogStore.mu.Lock()
+			devinCatalogStore.models = originalModels
+			devinCatalogStore.rawJSON = originalRaw
+			devinCatalogStore.revision = originalRevision
+			devinCatalogStore.mu.Unlock()
+			refreshCallbackMu.Lock()
+			refreshCallback, pendingRefreshChanges = originalCallback, originalPending
+			refreshCallbackMu.Unlock()
+		},
+	)
 
-	valid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"devin":[{"id":"refresh-notification-test","context_length":100,"max_completion_tokens":20}]}`))
-	}))
+	valid := newCatalogTestServer(
+		t, http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(
+					[]byte(
+						(`{"devin":[{"id":"refresh-notification-test","context_length":100,"` +
+							`max_completion_tokens":20}]}`),
+					),
+				)
+			},
+		),
+	)
 	defer valid.Close()
-	invalid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"devin":[]}`))
-	}))
+	invalid := newCatalogTestServer(
+		t, http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"devin":[]}`))
+			},
+		),
+	)
 	defer invalid.Close()
 
 	devinModelsURLs = []string{valid.URL}

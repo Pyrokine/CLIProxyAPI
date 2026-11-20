@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 )
@@ -141,7 +142,7 @@ func TestKimiAIHasSeparateProviderWithSharedCatalog(t *testing.T) {
 
 func TestMetaModelCatalogAndProviderLookup(t *testing.T) {
 	models := GetMetaModels()
-	if len(models) != 5 || models[0].ID != "muse-spark-1.3" || models[0].OwnedBy != "meta" {
+	if len(models) != 9 || models[0].ID != "muse-spark-1.3" || models[0].OwnedBy != "meta" {
 		t.Fatalf("Meta model catalog = %#v", models)
 	}
 	models[0].ID = "mutated"
@@ -156,6 +157,22 @@ func TestMetaModelCatalogAndProviderLookup(t *testing.T) {
 	}
 	if got := LookupStaticModelInfo("muse-spark-1.3-contributor"); got == nil || got.OwnedBy != "meta" {
 		t.Fatalf("global Meta model lookup = %#v", got)
+	}
+	for _, id := range []string{"muse-wonder-1.0", "muse-ember-1.0"} {
+		if got := LookupStaticModelInfoByChannel(id, "meta"); got == nil || got.ContextLength != 1048576 {
+			t.Fatalf("current Meta model %s = %+v", id, got)
+		}
+	}
+	for _, id := range []string{"muse-image-1.0", "muse-voice-transcribe-1.0"} {
+		if info := LookupStaticModelInfoByChannel(
+			id, "meta",
+		); info == nil || len(info.SupportedInputModalities) == 0 || len(info.SupportedOutputModalities) == 0 {
+			t.Fatalf("Meta media lookup %s = %+v", id, info)
+		}
+	}
+	contributor := LookupStaticModelInfoByChannel("muse-spark-1.3-contributor", "meta")
+	if contributor.Thinking == nil || slices.Contains(contributor.Thinking.Levels, "max") {
+		t.Fatalf("Contributor reasoning levels = %+v", contributor.Thinking)
 	}
 }
 

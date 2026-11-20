@@ -1,7 +1,10 @@
 package modelcatalog
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"sort"
@@ -34,7 +37,7 @@ func (p Price) CacheReadRate() (float64, bool) {
 	if p.CacheRead != nil {
 		return *p.CacheRead, true
 	}
-	return p.Cache, true
+	return p.Cache, p.cachePresent || p.Cache != 0
 }
 
 func (p Price) CacheWriteRate() (float64, bool) {
@@ -59,8 +62,13 @@ func (p Price) CacheWrite1hRate() (float64, bool) {
 }
 
 func (p Price) HasReferenceTokenRates() bool {
-	return p.Prompt != 0 || p.Completion != 0 || p.Cache != 0 ||
-		p.CacheRead != nil || p.CacheWrite != nil || p.CacheWrite5m != nil || p.CacheWrite1h != nil
+	return p.HasBaseTokenRates() || len(p.ModalityRates) > 0 || len(p.ConditionalRates) > 0
+}
+
+func (p Price) HasBaseTokenRates() bool {
+	return p.promptPresent || p.completionPresent || p.cachePresent || p.Prompt != 0 || p.Completion != 0 || p.Cache != 0 ||
+		p.CacheRead != nil || p.CacheWrite != nil || p.CacheWrite5m != nil || p.CacheWrite1h != nil ||
+		p.CacheWrite30m != nil || p.CacheWrite12h != nil
 }
 
 func (p Price) EffectiveAt(at time.Time) bool {
@@ -76,8 +84,99 @@ func (p Price) EffectiveAt(at time.Time) bool {
 	return true
 }
 
+func (r *SpeedRate) UnmarshalJSON(data []byte) error {
+	type speedRate SpeedRate
+	var value speedRate
+	raw := struct {
+		*speedRate
+		Multipliers json.RawMessage `json:"multipliers"`
+	}{speedRate: &value}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	if len(raw.Multipliers) > 0 {
+		var overrides map[string]*float64
+		if err := json.Unmarshal(raw.Multipliers, &overrides); err != nil {
+			return fmt.Errorf("speed_rates: invalid multipliers: %w", err)
+		}
+		if overrides == nil {
+			return fmt.Errorf("speed_rates: multipliers must be an object")
+		}
+		value.Multipliers = make(map[string]float64, len(overrides))
+		for bucket, multiplier := range overrides {
+			if multiplier == nil {
+				return fmt.Errorf("speed_rates: %s multiplier must be a number", bucket)
+			}
+			value.Multipliers[bucket] = *multiplier
+		}
+	}
+	*r = SpeedRate(value)
+	return nil
+}
+
+func (r SpeedRate) EffectiveAt(at time.Time) bool {
+	return (Price{EffectiveFrom: r.EffectiveFrom, EffectiveUntil: r.EffectiveUntil}).EffectiveAt(at)
+}
+
+func (p Price) SpeedRateAt(speed, provider string, at time.Time) (SpeedRate, bool) {
+	var generic SpeedRate
+	found := false
+	for _, rule := range p.SpeedRates {
+		if rule.Speed != speed || !rule.EffectiveAt(at) {
+			continue
+		}
+		if rule.Provider != "" && rule.Provider == provider {
+			rule.Multipliers = maps.Clone(rule.Multipliers)
+			return rule, true
+		}
+		if rule.Provider == "" {
+			generic, found = rule, true
+		}
+	}
+	generic.Multipliers = maps.Clone(generic.Multipliers)
+	return generic, found
+}
+
+func (p Price) Clone() Price {
+	p.CacheRead = cloneFloat64(p.CacheRead)
+	p.CacheWrite = cloneFloat64(p.CacheWrite)
+	p.CacheWrite5m = cloneFloat64(p.CacheWrite5m)
+	p.CacheWrite1h = cloneFloat64(p.CacheWrite1h)
+	p.CacheWrite30m = cloneFloat64(p.CacheWrite30m)
+	p.CacheWrite12h = cloneFloat64(p.CacheWrite12h)
+	p.ConditionalRates = slices.Clone(p.ConditionalRates)
+	for index := range p.ConditionalRates {
+		p.ConditionalRates[index] = p.ConditionalRates[index].Clone()
+	}
+	p.ModalityRates = slices.Clone(p.ModalityRates)
+	for index := range p.ModalityRates {
+		p.ModalityRates[index].RateOverrides = p.ModalityRates[index].RateOverrides.Clone()
+	}
+	p.ChargeRates = slices.Clone(p.ChargeRates)
+	p.CoverageGaps = slices.Clone(p.CoverageGaps)
+	p.Limitations = slices.Clone(p.Limitations)
+	p.UTCRateBands = slices.Clone(p.UTCRateBands)
+	for i := range p.UTCRateBands {
+		band := &p.UTCRateBands[i]
+		band.Weekdays = slices.Clone(band.Weekdays)
+		band.CacheRead = cloneFloat64(band.CacheRead)
+		band.CacheWrite = cloneFloat64(band.CacheWrite)
+		band.CacheWrite5m = cloneFloat64(band.CacheWrite5m)
+		band.CacheWrite1h = cloneFloat64(band.CacheWrite1h)
+		band.CacheWrite30m = cloneFloat64(band.CacheWrite30m)
+		band.CacheWrite12h = cloneFloat64(band.CacheWrite12h)
+	}
+	p.SpeedRates = slices.Clone(p.SpeedRates)
+	for i := range p.SpeedRates {
+		p.SpeedRates[i].Multipliers = maps.Clone(p.SpeedRates[i].Multipliers)
+	}
+	return p
+}
+
 func (p Price) RatesAt(at time.Time) Price {
-	if at.IsZero() {
+	if at.IsZero() || p.isHoliday(at) {
 		return p
 	}
 	for _, band := range p.UTCRateBands {
@@ -87,10 +186,13 @@ func (p Price) RatesAt(at time.Time) Price {
 		p.Prompt = band.Prompt
 		p.Completion = band.Completion
 		p.Cache = band.Cache
+		p.promptPresent, p.completionPresent, p.cachePresent = p.Prompt == 0, p.Completion == 0, p.Cache == 0
 		p.CacheRead = cloneFloat64(band.CacheRead)
 		p.CacheWrite = cloneFloat64(band.CacheWrite)
 		p.CacheWrite5m = cloneFloat64(band.CacheWrite5m)
 		p.CacheWrite1h = cloneFloat64(band.CacheWrite1h)
+		p.CacheWrite30m = cloneFloat64(band.CacheWrite30m)
+		p.CacheWrite12h = cloneFloat64(band.CacheWrite12h)
 		return p
 	}
 	return p
@@ -109,15 +211,23 @@ func (p Price) validate() error {
 	}
 	if err := validateTokenRates(
 		tokenRates{
-			Prompt:       p.Prompt,
-			Completion:   p.Completion,
-			Cache:        p.Cache,
-			CacheRead:    p.CacheRead,
-			CacheWrite:   p.CacheWrite,
-			CacheWrite5m: p.CacheWrite5m,
-			CacheWrite1h: p.CacheWrite1h,
+			Prompt:        p.Prompt,
+			Completion:    p.Completion,
+			Cache:         p.Cache,
+			CacheRead:     p.CacheRead,
+			CacheWrite:    p.CacheWrite,
+			CacheWrite5m:  p.CacheWrite5m,
+			CacheWrite1h:  p.CacheWrite1h,
+			CacheWrite30m: p.CacheWrite30m,
+			CacheWrite12h: p.CacheWrite12h,
 		},
 	); err != nil {
+		return err
+	}
+	if err := validateSpeedRates(p.SpeedRates); err != nil {
+		return err
+	}
+	if err := p.validateConditionalPricing(); err != nil {
 		return err
 	}
 	intervalsByWeekday := make(map[time.Weekday][]priceBandInterval)
@@ -154,6 +264,66 @@ func (p Price) validate() error {
 	return nil
 }
 
+func validateSpeedRates(rules []SpeedRate) error {
+	type ruleKey struct{ speed, provider string }
+	type interval struct {
+		from, until       time.Time
+		hasFrom, hasUntil bool
+	}
+	intervals := make(map[ruleKey][]interval)
+	for index, rule := range rules {
+		speed := strings.ToLower(strings.TrimSpace(rule.Speed))
+		switch speed {
+		case "standard", "fast", "ultrafast", "flex", "batch":
+		default:
+			return fmt.Errorf("speed_rates[%d]: invalid speed %q", index, rule.Speed)
+		}
+		if math.IsNaN(rule.Multiplier) || math.IsInf(rule.Multiplier, 0) || rule.Multiplier <= 0 {
+			return fmt.Errorf("speed_rates[%d]: multiplier must be finite and positive", index)
+		}
+		for bucket, multiplier := range rule.Multipliers {
+			switch bucket {
+			case "prompt", "completion", "cache_read", "cache_write", "cache_write_5m", "cache_write_1h", "cache_write_30m", "cache_write_12h":
+			default:
+				return fmt.Errorf("speed_rates[%d]: invalid multiplier bucket %q", index, bucket)
+			}
+			if math.IsNaN(multiplier) || math.IsInf(multiplier, 0) || multiplier < 0 {
+				return fmt.Errorf("speed_rates[%d]: invalid %s multiplier", index, bucket)
+			}
+		}
+		from, hasFrom := parsePriceBoundary(rule.EffectiveFrom, false)
+		until, hasUntil := parsePriceBoundary(rule.EffectiveUntil, true)
+		if strings.TrimSpace(rule.EffectiveFrom) != "" && !hasFrom {
+			return fmt.Errorf("speed_rates[%d]: invalid effective_from", index)
+		}
+		if strings.TrimSpace(rule.EffectiveUntil) != "" && !hasUntil {
+			return fmt.Errorf("speed_rates[%d]: invalid effective_until", index)
+		}
+		if hasFrom && hasUntil && !from.Before(until) {
+			return fmt.Errorf("speed_rates[%d]: effective_from must precede effective_until", index)
+		}
+		key := ruleKey{speed: speed, provider: strings.TrimSpace(rule.Provider)}
+		intervals[key] = append(intervals[key], interval{from, until, hasFrom, hasUntil})
+	}
+	for key, group := range intervals {
+		sort.Slice(
+			group, func(i, j int) bool {
+				if group[i].hasFrom != group[j].hasFrom {
+					return !group[i].hasFrom
+				}
+				return group[i].from.Before(group[j].from)
+			},
+		)
+		for index := 1; index < len(group); index++ {
+			previous, current := group[index-1], group[index]
+			if !previous.hasUntil || !current.hasFrom || current.from.Before(previous.until) {
+				return fmt.Errorf("speed_rates: overlapping %s rules for provider %q", key.speed, key.provider)
+			}
+		}
+	}
+	return nil
+}
+
 type priceBandInterval struct {
 	start int
 	end   int
@@ -183,6 +353,8 @@ func validateTokenRates(rates tokenRates) error {
 		{name: "cache_write", value: rates.CacheWrite},
 		{name: "cache_write_5m", value: rates.CacheWrite5m},
 		{name: "cache_write_1h", value: rates.CacheWrite1h},
+		{name: "cache_write_30m", value: rates.CacheWrite30m},
+		{name: "cache_write_12h", value: rates.CacheWrite12h},
 	} {
 		if rate.value == nil {
 			continue
@@ -516,6 +688,7 @@ func sanitizePrice(p *Price) {
 	if p == nil {
 		return
 	}
+	*p = p.Clone()
 	p.Status = PriceStatus(strings.ToLower(strings.TrimSpace(string(p.Status))))
 	p.Currency = strings.ToUpper(strings.TrimSpace(p.Currency))
 	p.Source = strings.TrimSpace(p.Source)
@@ -526,13 +699,45 @@ func sanitizePrice(p *Price) {
 	p.ServiceTier = strings.TrimSpace(p.ServiceTier)
 	p.UnpricedReason = strings.TrimSpace(p.UnpricedReason)
 	p.Limitations = uniqueStrings(p.Limitations)
-	p.CacheRead = cloneFloat64(p.CacheRead)
 	if p.CacheRead != nil {
 		p.Cache = *p.CacheRead
 	}
-	p.CacheWrite = cloneFloat64(p.CacheWrite)
-	p.CacheWrite5m = cloneFloat64(p.CacheWrite5m)
-	p.CacheWrite1h = cloneFloat64(p.CacheWrite1h)
+	for i := range p.ConditionalRates {
+		rule := &p.ConditionalRates[i]
+		rule.ID = strings.TrimSpace(rule.ID)
+		rule.Provider = strings.TrimSpace(rule.Provider)
+		rule.Region = strings.TrimSpace(rule.Region)
+		rule.Speed = strings.ToLower(strings.TrimSpace(rule.Speed))
+		rule.EffectiveFrom = strings.TrimSpace(rule.EffectiveFrom)
+		rule.EffectiveUntil = strings.TrimSpace(rule.EffectiveUntil)
+		rule.Source = strings.TrimSpace(rule.Source)
+		rule.UnpricedBuckets = uniqueStrings(rule.UnpricedBuckets)
+	}
+	for i := range p.ModalityRates {
+		p.ModalityRates[i].Modality = strings.ToLower(strings.TrimSpace(p.ModalityRates[i].Modality))
+	}
+	for i := range p.ChargeRates {
+		rule := &p.ChargeRates[i]
+		rule.Speed = strings.ToLower(strings.TrimSpace(rule.Speed))
+		rule.Kind = strings.TrimSpace(rule.Kind)
+		rule.Unit = strings.TrimSpace(rule.Unit)
+		rule.Provider = strings.TrimSpace(rule.Provider)
+		rule.Region = strings.TrimSpace(rule.Region)
+		rule.Resolution = strings.TrimSpace(rule.Resolution)
+		rule.Source = strings.TrimSpace(rule.Source)
+	}
+	for i := range p.CoverageGaps {
+		p.CoverageGaps[i].Dimension = strings.TrimSpace(p.CoverageGaps[i].Dimension)
+		p.CoverageGaps[i].Reason = strings.TrimSpace(p.CoverageGaps[i].Reason)
+	}
+	for i := range p.SpeedRates {
+		rule := &p.SpeedRates[i]
+		rule.Speed = strings.ToLower(strings.TrimSpace(rule.Speed))
+		rule.Provider = strings.TrimSpace(rule.Provider)
+		rule.EffectiveFrom = strings.TrimSpace(rule.EffectiveFrom)
+		rule.EffectiveUntil = strings.TrimSpace(rule.EffectiveUntil)
+		rule.Source = strings.TrimSpace(rule.Source)
+	}
 	for i := range p.UTCRateBands {
 		band := &p.UTCRateBands[i]
 		weekdays := make([]string, 0, len(band.Weekdays))
@@ -542,13 +747,9 @@ func sanitizePrice(p *Price) {
 		band.Weekdays = uniqueStrings(weekdays)
 		band.Start = strings.TrimSpace(band.Start)
 		band.End = strings.TrimSpace(band.End)
-		band.CacheRead = cloneFloat64(band.CacheRead)
 		if band.CacheRead != nil {
 			band.Cache = *band.CacheRead
 		}
-		band.CacheWrite = cloneFloat64(band.CacheWrite)
-		band.CacheWrite5m = cloneFloat64(band.CacheWrite5m)
-		band.CacheWrite1h = cloneFloat64(band.CacheWrite1h)
 	}
 }
 

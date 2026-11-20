@@ -25,7 +25,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
-	executor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
@@ -84,6 +84,7 @@ type devinCredential struct {
 
 type devinHTTPClientFactory func(*coreauth.Auth) *http.Client
 
+//goland:noinspection DuplicatedCode
 func main() {
 	var authsDir string
 	var configPath string
@@ -99,15 +100,17 @@ func main() {
 	flag.Parse()
 
 	authsDirOverridden := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "auths-dir" {
-			authsDirOverridden = true
-		}
-	})
+	flag.Visit(
+		func(f *flag.Flag) {
+			if f.Name == "auths-dir" {
+				authsDirOverridden = true
+			}
+		},
+	)
 
 	wd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot get working directory: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: cannot get working directory: %v\n", err)
 		os.Exit(1)
 	}
 	if strings.TrimSpace(configPath) == "" {
@@ -115,7 +118,7 @@ func main() {
 	}
 	cfg, err := config.LoadConfigOptional(configPath, false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to load config file %s: %v\n", configPath, err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to load config file %s: %v\n", configPath, err)
 		os.Exit(1)
 	}
 	if cfg == nil {
@@ -130,7 +133,7 @@ func main() {
 		authsDir = filepath.Join(wd, authsDir)
 	}
 	if authsDir, err = util.ResolveAuthDir(authsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to resolve auth directory: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to resolve auth directory: %v\n", err)
 		os.Exit(1)
 	}
 	if !filepath.IsAbs(outputPath) {
@@ -144,16 +147,16 @@ func main() {
 	ctx := context.Background()
 	authList, err := fileStore.List(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to list auth files: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to list auth files: %v\n", err)
 		os.Exit(1)
 	}
 	credentials, err := enabledDevinCredentials(authList)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to prepare Devin credentials: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to prepare Devin credentials: %v\n", err)
 		os.Exit(1)
 	}
 	if len(credentials) == 0 {
-		fmt.Fprintf(os.Stderr, "error: no enabled devin auth found in %s\n", authsDir)
+		_, _ = fmt.Fprintf(os.Stderr, "error: no enabled devin auth found in %s\n", authsDir)
 		os.Exit(1)
 	}
 	for _, credential := range credentials {
@@ -166,7 +169,7 @@ func main() {
 	}
 	rawModels, err := fetchAllRawDevinModels(ctx, credentials, clientFactory)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: fetch failed: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: fetch failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Fetched %d raw model configs from %d enabled credentials.\n", len(rawModels), len(credentials))
@@ -185,19 +188,19 @@ func main() {
 		encoded, err = json.Marshal(output)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to encode JSON: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to encode JSON: %v\n", err)
 		os.Exit(1)
 	}
 	if containsAnySecret(encoded, credentialSecrets(credentials)) {
-		fmt.Fprintln(os.Stderr, "error: encoded model catalog contains credential material")
+		_, _ = fmt.Fprintln(os.Stderr, "error: encoded model catalog contains credential material")
 		os.Exit(1)
 	}
 	if err = os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to create output directory: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to create output directory: %v\n", err)
 		os.Exit(1)
 	}
 	if err = os.WriteFile(outputPath, encoded, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to write output file: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: failed to write output file: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Catalog written to: %s (%d models)\n", outputPath, len(output.Devin))
@@ -220,24 +223,28 @@ func enabledDevinCredentials(auths []*coreauth.Auth) ([]devinCredential, error) 
 			)
 			continue
 		}
-		credentials = append(credentials, devinCredential{
-			auth:       auth,
-			authIndex:  authIndex,
-			identity:   identity,
-			token:      token,
-			baseURL:    baseURL,
-			deviceSeed: deviceSeed,
-		})
+		credentials = append(
+			credentials, devinCredential{
+				auth:       auth,
+				authIndex:  authIndex,
+				identity:   identity,
+				token:      token,
+				baseURL:    baseURL,
+				deviceSeed: deviceSeed,
+			},
+		)
 	}
 	if len(credentialErrors) > 0 {
 		return nil, errors.Join(credentialErrors...)
 	}
-	sort.Slice(credentials, func(i, j int) bool {
-		if credentials[i].authIndex == credentials[j].authIndex {
-			return credentials[i].identity < credentials[j].identity
-		}
-		return credentials[i].authIndex < credentials[j].authIndex
-	})
+	sort.Slice(
+		credentials, func(i, j int) bool {
+			if credentials[i].authIndex == credentials[j].authIndex {
+				return credentials[i].identity < credentials[j].identity
+			}
+			return credentials[i].authIndex < credentials[j].authIndex
+		},
+	)
 	return credentials, nil
 }
 
@@ -272,12 +279,14 @@ func fetchAllRawDevinModels(
 		}
 		models, err := fetchRawDevinModels(ctx, credential, client)
 		if err != nil {
-			fetchErrors = append(fetchErrors, fmt.Errorf(
-				"auth_index=%s identity=%s: %w",
-				credential.authIndex,
-				credential.identity,
-				err,
-			))
+			fetchErrors = append(
+				fetchErrors, fmt.Errorf(
+					"auth_index=%s identity=%s: %w",
+					credential.authIndex,
+					credential.identity,
+					err,
+				),
+			)
 			continue
 		}
 		allModels = append(allModels, models...)
@@ -285,12 +294,14 @@ func fetchAllRawDevinModels(
 	if len(fetchErrors) > 0 {
 		return nil, errors.Join(fetchErrors...)
 	}
-	sort.SliceStable(allModels, func(i, j int) bool {
-		if allModels[i].UID == allModels[j].UID {
-			return allModels[i].Label < allModels[j].Label
-		}
-		return allModels[i].UID < allModels[j].UID
-	})
+	sort.SliceStable(
+		allModels, func(i, j int) bool {
+			if allModels[i].UID == allModels[j].UID {
+				return allModels[i].Label < allModels[j].Label
+			}
+			return allModels[i].UID < allModels[j].UID
+		},
+	)
 	return allModels, nil
 }
 
@@ -498,24 +509,28 @@ func formatRawModels(raw []rawDevinModel) []devinModelJSON {
 		if source.Multimodal {
 			modalities = append(modalities, "image")
 		}
-		models = append(models, devinModelJSON{
-			ID:                        source.UID,
-			Object:                    "model",
-			Type:                      "devin",
-			OwnedBy:                   vendorName(source.VendorID, source.UID),
-			DisplayName:               source.Label,
-			ContextLength:             source.ContextLength,
-			MaxCompletionTokens:       helps.DevinDefaultMaxTokens,
-			SupportedInputModalities:  modalities,
-			SupportedOutputModalities: []string{"text"},
-		})
+		models = append(
+			models, devinModelJSON{
+				ID:                        source.UID,
+				Object:                    "model",
+				Type:                      "devin",
+				OwnedBy:                   vendorName(source.VendorID, source.UID),
+				DisplayName:               source.Label,
+				ContextLength:             source.ContextLength,
+				MaxCompletionTokens:       helps.DevinDefaultMaxTokens,
+				SupportedInputModalities:  modalities,
+				SupportedOutputModalities: []string{"text"},
+			},
+		)
 	}
-	sort.SliceStable(models, func(i, j int) bool {
-		if models[i].ID == models[j].ID {
-			return models[i].DisplayName < models[j].DisplayName
-		}
-		return models[i].ID < models[j].ID
-	})
+	sort.SliceStable(
+		models, func(i, j int) bool {
+			if models[i].ID == models[j].ID {
+				return models[i].DisplayName < models[j].DisplayName
+			}
+			return models[i].ID < models[j].ID
+		},
+	)
 	return models
 }
 
@@ -553,13 +568,13 @@ func splitDevinUID(uid string) (string, string) {
 		{"-thinking-1m", "", "-1m"}, {"-thinking", "", ""},
 		{"-max-1m", "max", "-1m"}, {"-none-1m", "none", "-1m"},
 	} {
-		if strings.HasSuffix(uid, suffix.name) {
-			return strings.TrimSuffix(uid, suffix.name) + suffix.readd, suffix.effort
+		if before, ok := strings.CutSuffix(uid, suffix.name); ok {
+			return before + suffix.readd, suffix.effort
 		}
 	}
 	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
-		if strings.HasSuffix(uid, "-"+effort) {
-			return strings.TrimSuffix(uid, "-"+effort), effort
+		if before, ok := strings.CutSuffix(uid, "-"+effort); ok {
+			return before, effort
 		}
 	}
 	return uid, ""
@@ -646,18 +661,20 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 			sortLevels(levels)
 			thinking = &devinThinkingJSON{Levels: levels}
 		}
-		models = append(models, devinModelJSON{
-			ID:                        entry.baseID,
-			Object:                    "model",
-			Type:                      "devin",
-			OwnedBy:                   vendorName(entry.vendorID, entry.baseID),
-			DisplayName:               entry.displayName,
-			ContextLength:             entry.contextLength,
-			MaxCompletionTokens:       helps.DevinDefaultMaxTokens,
-			SupportedInputModalities:  modalities,
-			SupportedOutputModalities: []string{"text"},
-			Thinking:                  thinking,
-		})
+		models = append(
+			models, devinModelJSON{
+				ID:                        entry.baseID,
+				Object:                    "model",
+				Type:                      "devin",
+				OwnedBy:                   vendorName(entry.vendorID, entry.baseID),
+				DisplayName:               entry.displayName,
+				ContextLength:             entry.contextLength,
+				MaxCompletionTokens:       helps.DevinDefaultMaxTokens,
+				SupportedInputModalities:  modalities,
+				SupportedOutputModalities: []string{"text"},
+				Thinking:                  thinking,
+			},
+		)
 	}
 	return models
 }
@@ -698,20 +715,22 @@ func sortLevels(levels []string) {
 		"max":     6,
 		"fast":    7,
 	}
-	sort.SliceStable(levels, func(i, j int) bool {
-		left, leftKnown := rank[levels[i]]
-		if !leftKnown {
-			left = 99
-		}
-		right, rightKnown := rank[levels[j]]
-		if !rightKnown {
-			right = 99
-		}
-		if left == right {
-			return levels[i] < levels[j]
-		}
-		return left < right
-	})
+	sort.SliceStable(
+		levels, func(i, j int) bool {
+			left, leftKnown := rank[levels[i]]
+			if !leftKnown {
+				left = 99
+			}
+			right, rightKnown := rank[levels[j]]
+			if !rightKnown {
+				right = 99
+			}
+			if left == right {
+				return levels[i] < levels[j]
+			}
+			return left < right
+		},
+	)
 }
 
 func credentialSecrets(credentials []devinCredential) []string {

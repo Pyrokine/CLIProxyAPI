@@ -77,52 +77,67 @@ func TestEnabledDevinCredentialsRejectsEnabledTokenlessCredential(t *testing.T) 
 func TestFetchAllRawDevinModelsAggregatesEnabledCredentialsWithFakeTransport(t *testing.T) {
 	const tokenA = "enabled-token-a-for-test"
 	const tokenB = "enabled-token-b-for-test"
-	credentials, err := enabledDevinCredentials([]*coreauth.Auth{
-		devinAuth("devin-user-b.json", tokenB, "stable-user-b", false),
-		devinAuth("disabled.json", "disabled-token-for-test", "disabled-user", true),
-		devinAuth("devin-user-a.json", tokenA, "stable-user-a", false),
-	})
+	credentials, err := enabledDevinCredentials(
+		[]*coreauth.Auth{
+			devinAuth("devin-user-b.json", tokenB, "stable-user-b", false),
+			devinAuth("disabled.json", "disabled-token-for-test", "disabled-user", true),
+			devinAuth("devin-user-a.json", tokenA, "stable-user-a", false),
+		},
+	)
 	if err != nil {
 		t.Fatalf("enabledDevinCredentials() error = %v", err)
 	}
 
 	var mu sync.Mutex
 	var authorizations []string
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Host != "server.codeium.com" || req.URL.Path != devinGetCliModelConfigsPath {
-			t.Fatalf("request URL = %s", req.URL)
-		}
-		if req.Header.Get("Content-Type") != "application/proto" || req.Header.Get("Connect-Protocol-Version") != "1" {
-			t.Fatalf("Connect headers = %#v", req.Header)
-		}
-		authorization := req.Header.Get("Authorization")
-		mu.Lock()
-		authorizations = append(authorizations, authorization)
-		mu.Unlock()
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				if req.URL.Host != "server.codeium.com" || req.URL.Path != devinGetCliModelConfigsPath {
+					t.Fatalf("request URL = %s", req.URL)
+				}
+				if req.Header.Get("Content-Type") != "application/proto" ||
+					req.Header.Get("Connect-Protocol-Version") != "1" {
+					t.Fatalf("Connect headers = %#v", req.Header)
+				}
+				authorization := req.Header.Get("Authorization")
+				mu.Lock()
+				authorizations = append(authorizations, authorization)
+				mu.Unlock()
 
-		switch authorization {
-		case "Basic " + tokenA + "-" + tokenA:
-			return response(http.StatusOK, devinFixture(
-				rawDevinModel{UID: "gpt-6-astra-low", Label: "GPT-6 Astra Low", ContextLength: 100000, VendorID: 2},
-			)), nil
-		case "Basic " + tokenB + "-" + tokenB:
-			return response(http.StatusOK, devinFixture(
-				rawDevinModel{
-					UID: "gpt-6-astra-high", Label: "GPT-6 Astra High",
-					ContextLength: 200000, Multimodal: true, VendorID: 2,
-				},
-				rawDevinModel{
-					UID: "glm-5-2-none", Label: "GLM-5.2 None",
-					ContextLength: 128000, VendorID: 9,
-				},
-			)), nil
-		default:
-			return nil, errors.New("unexpected credential")
-		}
-	})}
-	models, err := fetchAllRawDevinModels(context.Background(), credentials, func(*coreauth.Auth) *http.Client {
-		return client
-	})
+				switch authorization {
+				case "Basic " + tokenA + "-" + tokenA:
+					return response(
+						http.StatusOK, devinFixture(
+							rawDevinModel{
+								UID: "gpt-6-astra-low", Label: "GPT-6 Astra Low", ContextLength: 100000, VendorID: 2,
+							},
+						),
+					), nil
+				case "Basic " + tokenB + "-" + tokenB:
+					return response(
+						http.StatusOK, devinFixture(
+							rawDevinModel{
+								UID: "gpt-6-astra-high", Label: "GPT-6 Astra High",
+								ContextLength: 200000, Multimodal: true, VendorID: 2,
+							},
+							rawDevinModel{
+								UID: "glm-5-2-none", Label: "GLM-5.2 None",
+								ContextLength: 128000, VendorID: 9,
+							},
+						),
+					), nil
+				default:
+					return nil, errors.New("unexpected credential")
+				}
+			},
+		),
+	}
+	models, err := fetchAllRawDevinModels(
+		context.Background(), credentials, func(*coreauth.Auth) *http.Client {
+			return client
+		},
+	)
 	if err != nil {
 		t.Fatalf("fetchAllRawDevinModels() error = %v", err)
 	}
@@ -147,7 +162,9 @@ func TestFetchAllRawDevinModelsAggregatesEnabledCredentialsWithFakeTransport(t *
 	if !reflect.DeepEqual(astra.SupportedInputModalities, []string{"text", "image"}) {
 		t.Fatalf("Astra modalities = %#v", astra.SupportedInputModalities)
 	}
-	if astra.Thinking == nil || !reflect.DeepEqual(astra.Thinking.Levels, []string{"low", "medium", "high", "xhigh", "max"}) {
+	if astra.Thinking == nil || !reflect.DeepEqual(
+		astra.Thinking.Levels, []string{"low", "medium", "high", "xhigh", "max"},
+	) {
 		t.Fatalf("Astra thinking = %#v", astra.Thinking)
 	}
 
@@ -210,23 +227,31 @@ func TestAggregateDevinModelsPreservesEffortsAndGrokOwner(t *testing.T) {
 func TestFetchAllRawDevinModelsPreservesSafeCredentialErrors(t *testing.T) {
 	const tokenA = "enabled-token-a-for-test"
 	const tokenB = "enabled-token-b-for-test"
-	credentials, err := enabledDevinCredentials([]*coreauth.Auth{
-		devinAuth("devin-user-a.json", tokenA, "stable-user-a", false),
-		devinAuth("devin-user-b.json", tokenB, "stable-user-b", false),
-	})
+	credentials, err := enabledDevinCredentials(
+		[]*coreauth.Auth{
+			devinAuth("devin-user-a.json", tokenA, "stable-user-a", false),
+			devinAuth("devin-user-b.json", tokenB, "stable-user-b", false),
+		},
+	)
 	if err != nil {
 		t.Fatalf("enabledDevinCredentials() error = %v", err)
 	}
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if strings.Contains(req.Header.Get("Authorization"), tokenA) {
-			return nil, errors.New("transport rejected " + tokenA)
-		}
-		return response(http.StatusUnauthorized, `{"token":"`+tokenB+`"}`), nil
-	})}
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				if strings.Contains(req.Header.Get("Authorization"), tokenA) {
+					return nil, errors.New("transport rejected " + tokenA)
+				}
+				return response(http.StatusUnauthorized, `{"token":"`+tokenB+`"}`), nil
+			},
+		),
+	}
 
-	models, err := fetchAllRawDevinModels(context.Background(), credentials, func(*coreauth.Auth) *http.Client {
-		return client
-	})
+	models, err := fetchAllRawDevinModels(
+		context.Background(), credentials, func(*coreauth.Auth) *http.Client {
+			return client
+		},
+	)
 	if err == nil {
 		t.Fatal("fetchAllRawDevinModels() error = nil")
 	}

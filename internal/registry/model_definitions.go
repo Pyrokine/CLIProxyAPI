@@ -16,6 +16,7 @@ const (
 	xaiBuiltinImageQualityModelID                    = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID                           = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID                         = "grok-imagine-video-1.5"
+	xaiBuiltinVideo15LiteModelID                     = "grok-imagine-video-1.5-lite"
 	codexBuiltinImage25ReleaseTimestamp        int64 = 1788825600 // 2026-09-08
 )
 
@@ -55,6 +56,28 @@ func CodexImageModelIDs() []string {
 	return append([]string(nil), codexBuiltinImageModelIDs...)
 }
 
+// GetOpenAIAPIImageModels returns image models verified for the public API-key channel.
+func GetOpenAIAPIImageModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID: "gpt-image-2.6-flare", Object: "model", OwnedBy: "openai", Type: "openai",
+			DisplayName: "GPT Image 2.6 Flare", Name: "gpt-image-2.6-flare",
+			SupportedInputModalities: []string{"text", "image"}, SupportedOutputModalities: []string{"image"},
+		},
+		{
+			ID: "gpt-image-2.6-sunburst", Object: "model", OwnedBy: "openai", Type: "openai",
+			DisplayName: "GPT Image 2.6 Sunburst", Name: "gpt-image-2.6-sunburst",
+			SupportedInputModalities: []string{"text", "image"}, SupportedOutputModalities: []string{"image"},
+		},
+	}
+}
+
+// IsOpenAIImageModel includes public API image models without adding OAuth entitlements.
+func IsOpenAIImageModel(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	return IsCodexImageModel(modelID) || modelID == "gpt-image-2.6-flare" || modelID == "gpt-image-2.6-sunburst"
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -77,6 +100,7 @@ func withXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 		xaiBuiltinImageQualityModelInfo(),
 		xaiBuiltinVideoModelInfo(),
 		xaiBuiltinVideo15ModelInfo(),
+		xaiBuiltinVideo15LiteModelInfo(),
 	)
 }
 
@@ -152,14 +176,16 @@ func codexBuiltinImageModelInfo(id, displayName string, created int64) *ModelInf
 
 func xaiBuiltinImageModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          xaiBuiltinImageModelID,
-		Object:      "model",
-		Created:     1735689600, // 2025-01-01
-		OwnedBy:     "xai",
-		Type:        "xai",
-		DisplayName: "Grok Imagine Image",
-		Name:        xaiBuiltinImageModelID,
-		Description: "xAI Grok image generation model.",
+		ID:                        xaiBuiltinImageModelID,
+		Object:                    "model",
+		Created:                   1735689600, // 2025-01-01
+		OwnedBy:                   "xai",
+		Type:                      "xai",
+		DisplayName:               "Grok Imagine Image",
+		Name:                      xaiBuiltinImageModelID,
+		Description:               "xAI Grok image generation model.",
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"image"},
 	}
 }
 
@@ -167,12 +193,12 @@ func xaiBuiltinImage20ModelInfo() *ModelInfo {
 	return &ModelInfo{
 		ID:                        xaiBuiltinImage20ModelID,
 		Object:                    "model",
-		Created:                   1790035200, // 2026-09-22
+		Created:                   1786060800, // 2026-08-07
 		OwnedBy:                   "xai",
 		Type:                      "xai",
 		DisplayName:               "Grok Imagine Image 2.0",
 		Name:                      xaiBuiltinImage20ModelID,
-		Description:               "xAI image generation and editing model with 1K and 2K output.",
+		Description:               "xAI image generation and editing model with 1K, 1.5K and 2K output.",
 		SupportedInputModalities:  []string{"text", "image"},
 		SupportedOutputModalities: []string{"image"},
 	}
@@ -187,33 +213,54 @@ func xaiBuiltinImageQualityModelInfo() *ModelInfo {
 		Type:        "xai",
 		DisplayName: "Grok Imagine Image Quality",
 		Name:        xaiBuiltinImageQualityModelID,
-		Description: "xAI Grok higher-fidelity image generation model.",
+		Description: "Compatibility ID redirected to Grok Imagine Image 2.0 low quality " +
+			"since November 2, 2026.",
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"image"},
 	}
 }
 
 func xaiBuiltinVideoModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          xaiBuiltinVideoModelID,
-		Object:      "model",
-		Created:     1735689600, // 2025-01-01
-		OwnedBy:     "xai",
-		Type:        "xai",
-		DisplayName: "Grok Imagine Video",
-		Name:        xaiBuiltinVideoModelID,
-		Description: "xAI Grok video generation model.",
+		ID:                        xaiBuiltinVideoModelID,
+		Object:                    "model",
+		Created:                   1735689600, // 2025-01-01
+		OwnedBy:                   "xai",
+		Type:                      "xai",
+		DisplayName:               "Grok Imagine Video",
+		Name:                      xaiBuiltinVideoModelID,
+		Description:               "xAI Grok video generation model.",
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"video"},
 	}
 }
 
 func xaiBuiltinVideo15ModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          xaiBuiltinVideo15ModelID,
-		Object:      "model",
-		Created:     1735689600,
-		OwnedBy:     "xai",
-		Type:        "xai",
-		DisplayName: "Grok Imagine Video 1.5",
-		Name:        xaiBuiltinVideo15ModelID,
-		Description: "xAI Grok video generation model.",
+		ID:                        xaiBuiltinVideo15ModelID,
+		Object:                    "model",
+		Created:                   1735689600,
+		OwnedBy:                   "xai",
+		Type:                      "xai",
+		DisplayName:               "Grok Imagine Video 1.5",
+		Name:                      xaiBuiltinVideo15ModelID,
+		Description:               "xAI Grok video generation model with reference audio and native 1080p output.",
+		SupportedInputModalities:  []string{"text", "image", "audio"},
+		SupportedOutputModalities: []string{"video"},
+	}
+}
+
+func xaiBuiltinVideo15LiteModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                        xaiBuiltinVideo15LiteModelID,
+		Object:                    "model",
+		OwnedBy:                   "xai",
+		Type:                      "xai",
+		DisplayName:               "Grok Imagine Video 1.5 Lite",
+		Name:                      xaiBuiltinVideo15LiteModelID,
+		Description:               "xAI video generation model with 480p, 720p and upscaled 1080p output.",
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"video"},
 	}
 }
 
@@ -264,43 +311,60 @@ func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
 }
 
 func legacyStaticLookupModelsByChannel(channel string) []*ModelInfo {
-	switch strings.ToLower(strings.TrimSpace(channel)) {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if channel == "gemini-interactions" {
+		channel = "gemini"
+	}
+	if channel == "kimi-ai" || channel == "kimi.ai" || channel == "kimi.com" {
+		channel = "kimi"
+	}
+	var models []*ModelInfo
+	if catalog := embeddedModelsCatalog(); catalog != nil {
+		models = cloneModelInfos(catalog.Legacy[channel])
+	}
+	switch channel {
 	case "codex":
-		return []*ModelInfo{
-			{
-				ID:                  "gpt-5.3-codex-spark",
-				Object:              "model",
-				Created:             1770912000,
-				OwnedBy:             "openai",
-				Type:                "openai",
-				DisplayName:         "GPT 5.3 Codex Spark",
-				Version:             "gpt-5.3",
-				Description:         "Retired Codex model retained for historical request lookup.",
-				ContextLength:       128000,
-				MaxCompletionTokens: 128000,
-				SupportedParameters: []string{"tools"},
-				Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
-			},
-		}
+		return append(
+			models, []*ModelInfo{
+				{
+					ID:                  "gpt-5.3-codex-spark",
+					Object:              "model",
+					Created:             1770912000,
+					OwnedBy:             "openai",
+					Type:                "openai",
+					DisplayName:         "GPT 5.3 Codex Spark",
+					Version:             "gpt-5.3",
+					Description:         "Retired Codex model retained for historical request lookup.",
+					ContextLength:       128000,
+					MaxCompletionTokens: 128000,
+					SupportedParameters: []string{"tools"},
+					Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+				},
+			}...,
+		)
 	case "kimi":
-		return []*ModelInfo{
-			{
-				ID:                        "kimi-k3-256k",
-				Object:                    "model",
-				Created:                   1785110400,
-				OwnedBy:                   "moonshot",
-				Type:                      "kimi",
-				DisplayName:               "Kimi K3 256K",
-				Description:               "Historical Kimi K3 256K route retained for exact-ID lookup.",
-				ContextLength:             262144,
-				MaxCompletionTokens:       65536,
-				SupportedInputModalities:  []string{"text", "image"},
-				SupportedOutputModalities: []string{"text"},
-				Thinking:                  &ThinkingSupport{ZeroAllowed: true, Levels: []string{"low", "high", "max"}},
-			},
-		}
+		return append(
+			models, []*ModelInfo{
+				{
+					ID:                        "kimi-k3-256k",
+					Object:                    "model",
+					Created:                   1785110400,
+					OwnedBy:                   "moonshot",
+					Type:                      "kimi",
+					DisplayName:               "Kimi K3 256K",
+					Description:               "Historical Kimi K3 256K route retained for exact-ID lookup.",
+					ContextLength:             262144,
+					MaxCompletionTokens:       65536,
+					SupportedInputModalities:  []string{"text", "image"},
+					SupportedOutputModalities: []string{"text"},
+					Thinking: &ThinkingSupport{
+						ZeroAllowed: true, Levels: []string{"low", "high", "max"},
+					},
+				},
+			}...,
+		)
 	default:
-		return nil
+		return models
 	}
 }
 
@@ -309,7 +373,7 @@ func legacyStaticLookupModelsByChannel(channel string) []*ModelInfo {
 //
 // Supported channels:
 //   - claude
-//   - gemini
+//   - `gemini`
 //   - gemini-interactions
 //   - vertex
 //   - gemini-cli
@@ -322,6 +386,8 @@ func legacyStaticLookupModelsByChannel(channel string) []*ModelInfo {
 //   - xai
 //   - devin
 //   - meta
+//
+//goland:noinspection GrazieInspection
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -336,7 +402,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "aistudio":
 		return GetAIStudioModels()
 	case "codex":
-		return getOpenAIModels()
+		return upsertModelInfos(getOpenAIModels(), GetOpenAIAPIImageModels()...)
 	case "qwen":
 		return GetQwenModels()
 	case "iflow":
@@ -376,7 +442,7 @@ func GetEmbeddedStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "aistudio":
 		return cloneModelInfos(catalog.AIStudio)
 	case "codex":
-		return GetEmbeddedOpenAIModels()
+		return upsertModelInfos(getEmbeddedOpenAIModels(), GetOpenAIAPIImageModels()...)
 	case "qwen":
 		return cloneModelInfos(catalog.Qwen)
 	case "iflow":
@@ -390,7 +456,7 @@ func GetEmbeddedStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "devin":
 		return cloneModelInfos(catalog.Devin)
 	case "meta", "muse":
-		return cloneModelInfos(catalog.Meta)
+		return withMetaBuiltins(cloneModelInfos(catalog.Meta))
 	default:
 		return nil
 	}
@@ -400,6 +466,14 @@ func GetEmbeddedStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 // It does not fall back across providers, so callers can preserve provenance.
 func LookupStaticModelInfoByChannel(modelID, channel string) *ModelInfo {
 	modelID = canonicalStaticModelID(modelID)
+	if strings.EqualFold(strings.TrimSpace(channel), "antigravity") {
+		switch modelID {
+		case "claude-opus-4-6-thinking", "claude-opus-5-5-thinking":
+			modelID = "claude-opus-5-5-high"
+		case "claude-sonnet-4-6", "claude-sonnet-5-5":
+			modelID = "claude-sonnet-5-5-high"
+		}
+	}
 	if modelID == "" {
 		return nil
 	}
@@ -428,27 +502,38 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		return nil
 	}
 
-	allModels := [][]*ModelInfo{
-		GetClaudeModels(),
-		GetGeminiModels(),
-		GetGeminiVertexModels(),
-		GetGeminiCLIModels(),
-		GetAIStudioModels(),
-		getOpenAIModels(),
-		GetQwenModels(),
-		GetIFlowModels(),
-		GetKimiModels(),
-		legacyStaticLookupModelsByChannel("kimi"),
-		GetDeepSeekModels(),
-		GetXAIModels(),
-		legacyStaticLookupModelsByChannel("codex"),
-		GetDevinModels(),
-		GetMetaModels(),
+	allModels := []func() []*ModelInfo{
+		GetClaudeModels,
+		GetGeminiModels,
+		GetGeminiVertexModels,
+		GetGeminiCLIModels,
+		GetAIStudioModels,
+		getOpenAIModels,
+		GetOpenAIAPIImageModels,
+		GetQwenModels,
+		GetIFlowModels,
+		GetKimiModels,
+		func() []*ModelInfo { return legacyStaticLookupModelsByChannel("kimi") },
+		GetDeepSeekModels,
+		GetXAIModels,
+		func() []*ModelInfo { return legacyStaticLookupModelsByChannel("codex") },
+		GetDevinModels,
+		GetMetaModels,
 	}
-	for _, models := range allModels {
-		for _, m := range models {
+	for _, loadModels := range allModels {
+		for _, m := range loadModels() {
 			if m != nil && m.ID == modelID {
 				return cloneModelInfo(m)
+			}
+		}
+	}
+
+	if catalog := embeddedModelsCatalog(); catalog != nil {
+		for _, models := range catalog.Legacy {
+			for _, model := range models {
+				if model != nil && model.ID == modelID {
+					return cloneModelInfo(model)
+				}
 			}
 		}
 	}

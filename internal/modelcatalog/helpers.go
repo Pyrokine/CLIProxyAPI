@@ -29,6 +29,8 @@ func inferProvider(channel, name string) string {
 		return "Kimi"
 	case "xai", "x-ai", "grok":
 		return "Grok"
+	case "meta", "muse":
+		return "Meta"
 	}
 	if strings.Contains(name, "claude") {
 		return "Claude"
@@ -59,6 +61,9 @@ func inferProvider(channel, name string) string {
 	if strings.Contains(name, "minimax") || strings.Contains(name, "abab") {
 		return "MiniMax"
 	}
+	if strings.HasPrefix(name, "muse-") {
+		return "Meta"
+	}
 	return "Other"
 }
 
@@ -86,6 +91,8 @@ func inferChannel(channel, name string) string {
 		return "glm"
 	case "MiniMax":
 		return "minimax"
+	case "Meta":
+		return "meta"
 	default:
 		return "other"
 	}
@@ -107,6 +114,9 @@ func inferGroup(provider, name string) string {
 		}
 		if strings.Contains(lower, "haiku") {
 			return "Haiku"
+		}
+		if strings.Contains(lower, "fable") {
+			return "Fable"
 		}
 		return "Claude"
 	case "GPT":

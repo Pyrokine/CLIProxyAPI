@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -13,7 +12,7 @@ func TestEmbeddedCodexClientModelsCatalogIsValid(t *testing.T) {
 	if revision == 0 {
 		t.Fatal("embedded Codex client model catalog revision = 0, want non-zero")
 	}
-	if err := validateCodexClientModelsJSON(data); err != nil {
+	if err := ValidateCodexClientModelsJSON(data); err != nil {
 		t.Fatalf("embedded Codex client model catalog is invalid: %v", err)
 	}
 
@@ -22,7 +21,7 @@ func TestEmbeddedCodexClientModelsCatalogIsValid(t *testing.T) {
 	if secondRevision != revision {
 		t.Fatalf("snapshot revision = %d, want %d", secondRevision, revision)
 	}
-	if err := validateCodexClientModelsJSON(second); err != nil {
+	if err := ValidateCodexClientModelsJSON(second); err != nil {
 		t.Fatalf("mutating returned snapshot changed stored catalog: %v", err)
 	}
 }
@@ -60,7 +59,8 @@ func TestLoadCodexClientModelsRejectsInvalidWithoutReplacing(t *testing.T) {
 }
 
 func TestFetchCodexClientModelsFallsBackToNextURL(t *testing.T) {
-	invalidServer := httptest.NewServer(
+	invalidServer := newCatalogTestServer(
+		t,
 		http.HandlerFunc(
 			func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -71,7 +71,8 @@ func TestFetchCodexClientModelsFallsBackToNextURL(t *testing.T) {
 	defer invalidServer.Close()
 
 	validCatalog := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
-	validServer := httptest.NewServer(
+	validServer := newCatalogTestServer(
+		t,
 		http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet {
@@ -127,7 +128,7 @@ func TestEmbeddedCodexClientModelsIncludeGPT6Astra(t *testing.T) {
 	if astra["supports_reasoning_effort_updates"] != true {
 		t.Fatalf("Astra reasoning effort updates = %v, want true", astra["supports_reasoning_effort_updates"])
 	}
-	if astra["default_reasoning_level"] != "medium" || astra["supported_in_api"] != true {
+	if astra["default_reasoning_level"] != "low" || astra["supported_in_api"] != true {
 		t.Fatalf(
 			"Astra client defaults = reasoning %v, supported_in_api %v",
 			astra["default_reasoning_level"],
@@ -189,45 +190,47 @@ func TestEmbeddedCodexClientModelsIncludeGPT6SolAndLuna(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.slug, func(t *testing.T) {
-			model := bySlug[test.slug]
-			if model == nil {
-				t.Fatal("model missing from Codex client manifest")
-			}
-			if model["display_name"] != test.displayName || model["minimal_client_version"] != "0.155.0" {
-				t.Fatalf("client identity = (%v, %v)", model["display_name"], model["minimal_client_version"])
-			}
-			if model["context_window"] != float64(272000) || model["max_context_window"] != float64(872000) ||
-				model["priority"] != test.priority {
-				t.Fatalf(
-					"client limits = (%v, %v), priority=%v",
-					model["context_window"],
-					model["max_context_window"],
-					model["priority"],
-				)
-			}
-			if model["default_reasoning_level"] != "medium" || model["supported_in_api"] != true ||
-				model["tool_mode"] != "code_mode_only" || model["multi_agent_version"] != "v2" ||
-				model["use_responses_lite"] != true {
-				t.Fatalf("client contract = %#v", model)
-			}
-			levels, ok := model["supported_reasoning_levels"].([]any)
-			if !ok || len(levels) != len(test.levels) {
-				t.Fatalf("reasoning levels = %#v, want %v", model["supported_reasoning_levels"], test.levels)
-			}
-			for index, want := range test.levels {
-				level, okLevel := levels[index].(map[string]any)
-				if !okLevel || level["effort"] != want {
-					t.Fatalf("reasoning level %d = %#v, want %q", index, levels[index], want)
+		t.Run(
+			test.slug, func(t *testing.T) {
+				model := bySlug[test.slug]
+				if model == nil {
+					t.Fatal("model missing from Codex client manifest")
 				}
-			}
-			baseInstructions, okInstructions := model["base_instructions"].(string)
-			messages, okMessages := model["model_messages"].(map[string]any)
-			if !okInstructions || baseInstructions == "" || !okMessages ||
-				messages["instructions_template"] != baseInstructions {
-				t.Fatal("client instructions are incomplete or inconsistent")
-			}
-		})
+				if model["display_name"] != test.displayName || model["minimal_client_version"] != "0.155.0" {
+					t.Fatalf("client identity = (%v, %v)", model["display_name"], model["minimal_client_version"])
+				}
+				if model["context_window"] != float64(272000) || model["max_context_window"] != float64(872000) ||
+					model["priority"] != test.priority {
+					t.Fatalf(
+						"client limits = (%v, %v), priority=%v",
+						model["context_window"],
+						model["max_context_window"],
+						model["priority"],
+					)
+				}
+				if model["default_reasoning_level"] != "medium" || model["supported_in_api"] != true ||
+					model["tool_mode"] != "code_mode_only" || model["multi_agent_version"] != "v2" ||
+					model["use_responses_lite"] != true {
+					t.Fatalf("client contract = %#v", model)
+				}
+				levels, ok := model["supported_reasoning_levels"].([]any)
+				if !ok || len(levels) != len(test.levels) {
+					t.Fatalf("reasoning levels = %#v, want %v", model["supported_reasoning_levels"], test.levels)
+				}
+				for index, want := range test.levels {
+					level, okLevel := levels[index].(map[string]any)
+					if !okLevel || level["effort"] != want {
+						t.Fatalf("reasoning level %d = %#v, want %q", index, levels[index], want)
+					}
+				}
+				baseInstructions, okInstructions := model["base_instructions"].(string)
+				messages, okMessages := model["model_messages"].(map[string]any)
+				if !okInstructions || baseInstructions == "" || !okMessages ||
+					messages["instructions_template"] != baseInstructions {
+					t.Fatal("client instructions are incomplete or inconsistent")
+				}
+			},
+		)
 	}
 }
 

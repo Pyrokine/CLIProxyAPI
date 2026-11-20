@@ -17,8 +17,11 @@ func TestDeepSeekModelsUseCurrentAnthropicCompatibleIDs(t *testing.T) {
 			t.Errorf("missing %s", modelID)
 			continue
 		}
-		if model.OwnedBy != "deepseek" || model.Type != "claude" || !model.IsCompat {
+		if model.OwnedBy != "deepseek" || model.Type != "claude" {
 			t.Errorf("%s identity = %+v, want DeepSeek Claude-compatible model", modelID, model)
+		}
+		if model.IsCompat {
+			t.Errorf("%s static catalog enabled configuration-only compatibility mode", modelID)
 		}
 		if model.ContextLength != 1048576 || model.MaxCompletionTokens != 393216 {
 			t.Errorf(
@@ -47,8 +50,8 @@ func TestKimiModelsIncludeK27Code(t *testing.T) {
 	if model == nil {
 		t.Fatal("missing kimi-k2.7-code")
 	}
-	if model.ContextLength != 262144 {
-		t.Fatalf("ContextLength = %d, want 262144", model.ContextLength)
+	if model.ContextLength != 1048576 {
+		t.Fatalf("ContextLength = %d, want 1048576", model.ContextLength)
 	}
 	if model.MaxCompletionTokens != 65536 {
 		t.Fatalf("MaxCompletionTokens = %d, want 65536", model.MaxCompletionTokens)
@@ -56,18 +59,18 @@ func TestKimiModelsIncludeK27Code(t *testing.T) {
 	if model.Thinking == nil {
 		t.Fatal("Thinking = nil, want Kimi K2.7 thinking support")
 	}
-	if model.Thinking.ZeroAllowed {
-		t.Fatal("Thinking.ZeroAllowed = true, want false")
+	if !model.Thinking.ZeroAllowed {
+		t.Fatal("Coding compatibility alias must retain the documented non-thinking route")
 	}
 }
 
-func TestKimiModelsKeepK3256KAsLookupOnly(t *testing.T) {
+func TestKimiModelsKeepK3256KInInventory(t *testing.T) {
 	tests := []struct {
 		id             string
 		contextLength  int
 		thinkingLevels []string
 	}{
-		{id: "kimi-k2.7-code-highspeed", contextLength: 262144, thinkingLevels: []string{"low", "high"}},
+		{id: "kimi-k2.7-code-highspeed", contextLength: 262144, thinkingLevels: nil},
 		{id: "kimi-k3", contextLength: 1048576, thinkingLevels: []string{"low", "high", "max"}},
 	}
 
@@ -89,12 +92,13 @@ func TestKimiModelsKeepK3256KAsLookupOnly(t *testing.T) {
 		)
 	}
 
-	if model := findModelByID(GetKimiModels(), "kimi-k3-256k"); model != nil {
-		t.Fatalf("Kimi default inventory contains lookup-only model: %+v", model)
+	model := findModelByID(GetKimiModels(), "kimi-k3-256k")
+	if model == nil || model.ContextLength != 262144 {
+		t.Fatalf("Kimi K3 256K inventory = %+v", model)
 	}
-	legacy := LookupStaticModelInfoByChannel("kimi-k3-256k", "kimi")
-	if legacy == nil || legacy.ContextLength != 262144 {
-		t.Fatalf("Kimi K3 256K legacy lookup = %+v", legacy)
+	lookup := LookupStaticModelInfoByChannel("kimi-k3-256k", "kimi")
+	if lookup == nil || lookup.ContextLength != 262144 {
+		t.Fatalf("Kimi K3 256K exact lookup = %+v", lookup)
 	}
 }
 
@@ -111,15 +115,21 @@ func TestCatalogIncludesCurrentClaudeGeminiAndKimiModels(t *testing.T) {
 	for _, modelID := range []string{"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"} {
 		model := lookup("claude", modelID)
 		if model.ContextLength != 1000000 || model.MaxCompletionTokens != 128000 {
-			t.Fatalf("%s token limits = %d/%d, want 1000000/128000", modelID, model.ContextLength, model.MaxCompletionTokens)
+			t.Fatalf(
+				"%s token limits = %d/%d, want 1000000/128000", modelID, model.ContextLength, model.MaxCompletionTokens,
+			)
 		}
 		assertThinkingLevelsEqual(t, model.Thinking, []string{"low", "medium", "high", "xhigh", "max"})
+		if modelID == "claude-fable-5-1" && (model.Thinking.Min != 0 || model.Thinking.Max != 0) {
+			t.Fatalf("Fable must use adaptive effort: %+v", model.Thinking)
+		}
 		if model.Thinking.ZeroAllowed != (modelID == "claude-sonnet-5-5") || !model.Thinking.DynamicAllowed {
-			t.Fatalf("%s thinking flags = %+v, want adaptive thinking and Sonnet 5.5 none via between_tools", modelID, model.Thinking)
+			t.Fatalf("%s adaptive thinking flags = %+v", modelID, model.Thinking)
 		}
 	}
 	sonnet := lookup("claude", "claude-sonnet-5-5")
-	if sonnet.NativeCapabilities == nil || sonnet.NativeCapabilities.WebSearch == nil || !*sonnet.NativeCapabilities.WebSearch {
+	if sonnet.NativeCapabilities == nil || sonnet.NativeCapabilities.WebSearch == nil ||
+		!*sonnet.NativeCapabilities.WebSearch {
 		t.Fatalf("Sonnet 5.5 web search capability = %+v", sonnet.NativeCapabilities)
 	}
 
@@ -136,7 +146,8 @@ func TestCatalogIncludesCurrentClaudeGeminiAndKimiModels(t *testing.T) {
 		assertThinkingLevelsEqual(t, gemini.Thinking, []string{"low", "medium", "high"})
 
 		image := lookup(channel, "gemini-3.1-flash-image")
-		if image.InputTokenLimit != 131072 || image.OutputTokenLimit != 32768 {
+		wantImageInput, wantImageOutput := 131072, 32768
+		if image.InputTokenLimit != wantImageInput || image.OutputTokenLimit != wantImageOutput {
 			t.Fatalf("%s Gemini 3.1 Flash Image limits = %d/%d", channel, image.InputTokenLimit, image.OutputTokenLimit)
 		}
 		assertThinkingLevelsEqual(t, image.Thinking, []string{"minimal", "high"})
@@ -145,7 +156,9 @@ func TestCatalogIncludesCurrentClaudeGeminiAndKimiModels(t *testing.T) {
 
 		lite := lookup(channel, "gemini-3.1-flash-lite-image")
 		if lite.InputTokenLimit != 65536 || lite.OutputTokenLimit != 4096 {
-			t.Fatalf("%s Gemini 3.1 Flash-Lite Image limits = %d/%d", channel, lite.InputTokenLimit, lite.OutputTokenLimit)
+			t.Fatalf(
+				"%s Gemini 3.1 Flash-Lite Image limits = %d/%d", channel, lite.InputTokenLimit, lite.OutputTokenLimit,
+			)
 		}
 		assertThinkingLevelsEqual(t, lite.Thinking, []string{"minimal", "high"})
 		assertStringSliceEqual(t, lite.SupportedOutputModalities, []string{"text", "image"})
@@ -164,7 +177,6 @@ func TestCatalogIncludesCurrentClaudeGeminiAndKimiModels(t *testing.T) {
 		for _, modelID := range []string{
 			"gemini-3-pro-preview",
 			"gemini-3.1-flash-image-preview",
-			"gemini-3.1-flash-lite-preview",
 		} {
 			if model := LookupStaticModelInfoByChannel(modelID, channel); model != nil {
 				t.Fatalf("retired %s model %q remains: %+v", channel, modelID, model)
@@ -173,11 +185,9 @@ func TestCatalogIncludesCurrentClaudeGeminiAndKimiModels(t *testing.T) {
 	}
 
 	for _, modelID := range []string{
-		"kimi-k2.8",
 		"k2.8",
 		"kimi-k2.8-preview",
 		"k2.8-preview",
-		"kimi-k2.8-code",
 		"k2.8-code",
 	} {
 		if model := LookupStaticModelInfo(modelID); model != nil {
@@ -207,9 +217,11 @@ func TestCatalogIncludesCurrentClaudeGeminiAndKimiModels(t *testing.T) {
 	}
 
 	kimi := lookup("kimi", "kimi-k2.5")
-	capability := ResolveResponsesWebSearchCapability([]NativeCapabilityRoute{
-		{Provider: "kimi", NativeCapabilities: kimi.NativeCapabilities},
-	})
+	capability := ResolveResponsesWebSearchCapability(
+		[]NativeCapabilityRoute{
+			{Provider: "kimi", NativeCapabilities: kimi.NativeCapabilities},
+		},
+	)
 	if capability == nil || *capability {
 		t.Fatalf("Kimi K2.5 web search capability = %v, want false", capability)
 	}
@@ -236,7 +248,7 @@ func TestC05FinalModelCatalogEntries(t *testing.T) {
 			name:                "Gemini 3.6 Flash",
 			model:               findModelByID(GetGeminiModels(), "gemini-3.6-flash"),
 			wantThinkingLevels:  []string{"minimal", "low", "medium", "high"},
-			wantDynamicThinking: true,
+			wantDynamicThinking: false,
 		},
 		{
 			name:                "Vertex Gemini 3 Pro",
@@ -260,7 +272,7 @@ func TestC05FinalModelCatalogEntries(t *testing.T) {
 			name:                "Vertex Gemini 3.1 Flash Lite",
 			model:               findModelByID(GetGeminiVertexModels(), "gemini-3.1-flash-lite"),
 			wantThinkingLevels:  []string{"minimal", "low", "medium", "high"},
-			wantDynamicThinking: true,
+			wantDynamicThinking: false,
 		},
 	}
 
@@ -306,7 +318,7 @@ func TestC05FinalModelCatalogEntries(t *testing.T) {
 	}{
 		{modelID: "gemini-3.1-flash-image", input: 131072, output: 32768},
 		{modelID: "gemini-3.1-flash-lite-image", input: 65536, output: 4096},
-		{modelID: "gemini-3-pro-image", input: 1048576, output: 65536},
+		{modelID: "gemini-3-pro-image", input: 65536, output: 32768},
 	} {
 		model := findModelByID(vertexModels, test.modelID)
 		if model == nil {
@@ -325,7 +337,6 @@ func TestC05FinalModelCatalogEntries(t *testing.T) {
 	}
 	for _, modelID := range []string{
 		"gemini-3-pro-preview",
-		"gemini-3-flash-preview",
 		"gemini-3.1-flash-image-preview",
 		"gemini-3-pro-image-preview",
 		"gemini-3.1-flash-lite-preview",
@@ -341,7 +352,6 @@ func TestC05FinalModelCatalogEntries(t *testing.T) {
 	for _, modelID := range []string{
 		"gemini-3-pro-preview",
 		"gemini-3.1-flash-image-preview",
-		"gemini-3.1-flash-lite-preview",
 	} {
 		if model := findModelByID(models.Gemini, modelID); model != nil {
 			t.Fatalf("embedded Gemini catalog retains retired model %s", modelID)
@@ -499,29 +509,31 @@ func TestCodexStaticTiersPlaceGPT6AndExcludeSpark(t *testing.T) {
 		{name: "pro", models: GetCodexProModels(), wantSol: true},
 	}
 	for _, tier := range tiers {
-		t.Run(tier.name, func(t *testing.T) {
-			if spark := findModelByID(tier.models, "gpt-5.3-codex-spark"); spark != nil {
-				t.Fatalf("retired Spark model remains in %s inventory: %+v", tier.name, spark)
-			}
-			sol := findModelByID(tier.models, "gpt-6-sol")
-			if (sol != nil) != tier.wantSol {
-				t.Fatalf("gpt-6-sol present = %t, want %t", sol != nil, tier.wantSol)
-			}
-			luna := findModelByID(tier.models, "gpt-6-luna")
-			if luna == nil {
-				t.Fatal("gpt-6-luna is missing")
-			}
-			for _, model := range []*ModelInfo{sol, luna} {
-				if model == nil {
-					continue
+		t.Run(
+			tier.name, func(t *testing.T) {
+				if spark := findModelByID(tier.models, "gpt-5.3-codex-spark"); spark != nil {
+					t.Fatalf("retired Spark model remains in %s inventory: %+v", tier.name, spark)
 				}
-				if model.ContextLength != 272000 || model.MaxCompletionTokens != 128000 {
-					t.Fatalf("%s token limits = %d/%d", model.ID, model.ContextLength, model.MaxCompletionTokens)
+				sol := findModelByID(tier.models, "gpt-6-sol")
+				if (sol != nil) != tier.wantSol {
+					t.Fatalf("gpt-6-sol present = %t, want %t", sol != nil, tier.wantSol)
 				}
-				assertThinkingLevelsEqual(t, model.Thinking, []string{"low", "medium", "high", "xhigh", "max"})
-				assertStringSliceEqual(t, model.SupportedInputModalities, []string{"text", "image"})
-			}
-		})
+				luna := findModelByID(tier.models, "gpt-6-luna")
+				if luna == nil {
+					t.Fatal("gpt-6-luna is missing")
+				}
+				for _, model := range []*ModelInfo{sol, luna} {
+					if model == nil {
+						continue
+					}
+					if model.ContextLength != 272000 || model.MaxCompletionTokens != 128000 {
+						t.Fatalf("%s token limits = %d/%d", model.ID, model.ContextLength, model.MaxCompletionTokens)
+					}
+					assertThinkingLevelsEqual(t, model.Thinking, []string{"low", "medium", "high", "xhigh", "max"})
+					assertStringSliceEqual(t, model.SupportedInputModalities, []string{"text", "image"})
+				}
+			},
+		)
 	}
 
 	legacy := LookupStaticModelInfoByChannel("gpt-5.3-codex-spark", "codex")
@@ -547,8 +559,8 @@ func TestOpenAIModelsIncludeGPT56CodexTiers(t *testing.T) {
 				if model == nil {
 					t.Fatalf("missing %s", tt.id)
 				}
-				if model.ContextLength != 921000 {
-					t.Fatalf("ContextLength = %d, want 921000", model.ContextLength)
+				if model.ContextLength != 272000 {
+					t.Fatalf("ContextLength = %d, want 272000", model.ContextLength)
 				}
 				if model.MaxCompletionTokens != 128000 {
 					t.Fatalf("MaxCompletionTokens = %d, want 128000", model.MaxCompletionTokens)
@@ -562,9 +574,6 @@ func TestOpenAIModelsIncludeGPT56CodexTiers(t *testing.T) {
 
 func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	const wantUA = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
-	GetGlobalRegistry().RegisterClient("test-model-override-shadow", "codex", []*ModelInfo{{ID: "gpt-5.6-luna"}})
-	defer GetGlobalRegistry().UnregisterClient("test-model-override-shadow")
-
 	assertGPT56ModelOverrideHeaders(t, ModelOverrideHeaders("gpt-5.6-luna"), wantUA)
 	if got := ModelOverrideHeaders("gpt-5.4"); got != nil {
 		t.Fatalf("ModelOverrideHeaders(gpt-5.4) = %#v, want nil", got)
@@ -591,7 +600,7 @@ func TestModelOverrideHeadersFallsBackToEmbeddedCatalog(t *testing.T) {
 func TestEmbeddedStaticModelDefinitionsIgnoreRemoteCatalog(t *testing.T) {
 	original := getModels()
 	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = &staticModelsJSON{Kimi: []*ModelInfo{{ID: "kimi-k2.8"}}}
+	modelsCatalogStore.data = &staticModelsJSON{Kimi: []*ModelInfo{{ID: "audit-kimi-remote-only"}}}
 	modelsCatalogStore.mu.Unlock()
 	t.Cleanup(
 		func() {
@@ -602,12 +611,12 @@ func TestEmbeddedStaticModelDefinitionsIgnoreRemoteCatalog(t *testing.T) {
 	)
 
 	dynamic := GetStaticModelDefinitionsByChannel("kimi")
-	if len(dynamic) != 1 || dynamic[0] == nil || dynamic[0].ID != "kimi-k2.8" {
-		t.Fatalf("dynamic Kimi catalog = %+v, want remote kimi-k2.8", dynamic)
+	if len(dynamic) != 1 || dynamic[0] == nil || dynamic[0].ID != "audit-kimi-remote-only" {
+		t.Fatalf("dynamic Kimi catalog = %+v, want remote audit-kimi-remote-only", dynamic)
 	}
 	embedded := GetEmbeddedStaticModelDefinitionsByChannel("kimi")
-	if findModelByID(embedded, "kimi-k2.8") != nil {
-		t.Fatalf("embedded Kimi catalog contains remote-only kimi-k2.8: %+v", embedded)
+	if findModelByID(embedded, "audit-kimi-remote-only") != nil {
+		t.Fatalf("embedded Kimi catalog contains remote-only audit-kimi-remote-only: %+v", embedded)
 	}
 	if findModelByID(embedded, "kimi-k3") == nil {
 		t.Fatalf("embedded Kimi catalog is missing kimi-k3: %+v", embedded)
@@ -645,9 +654,9 @@ func TestXAIModelsIncludeGrok45(t *testing.T) {
 		t.Fatal("Thinking = nil, want Grok 4.5 thinking support")
 	}
 	if model.Thinking.ZeroAllowed {
-		t.Fatal("Thinking.ZeroAllowed = true, want false")
+		t.Fatal("Grok 4.5 requires thinking")
 	}
-	assertThinkingLevelsEqual(t, model.Thinking, []string{"low", "medium", "high"})
+	assertThinkingLevelsEqual(t, model.Thinking, []string{"low", "medium", "high", "xhigh"})
 }
 
 func assertStringSliceEqual(t *testing.T, got []string, want []string) {

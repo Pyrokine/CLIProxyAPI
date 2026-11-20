@@ -328,7 +328,8 @@ func TestModelCatalogFileConflictRestoresCompensatingConfigAndRuntime(t *testing
 			}
 			return os.WriteFile(
 				modelcatalog.PreviousPath(configPath),
-				[]byte(`{"schema_version":3,"defaults_version":"external","models":[{"name":"external-model","provider":"Other","channel":"","group":"Other","user_created":true,"enabled":true}]}`),
+				[]byte((`{"schema_version":3,"defaults_version":"external","models":[{"name":"external-model",` +
+					`"provider":"Other","channel":"","group":"Other","user_created":true,"enabled":true}]}`)),
 				0o600,
 			)
 		},
@@ -620,7 +621,8 @@ func TestModelCatalogResponseIncludesRuntimeOnlyAvailability(t *testing.T) {
 	if !ok {
 		t.Fatalf("runtime-only model missing: %#v", response.Models)
 	}
-	if !row.RuntimeOnly || !row.RuntimeAvailable || !row.Requestable || row.Provider != "DeepSeek" || row.Group != "V4" {
+	if !row.RuntimeOnly || !row.RuntimeAvailable || !row.Requestable || row.Provider != "DeepSeek" ||
+		row.Group != "V4" {
 		t.Fatalf("runtime-only row = %#v", row)
 	}
 	if row.RuntimeConfiguredClients != 1 || row.RuntimeAvailableClients != 1 ||
@@ -668,13 +670,13 @@ func TestModelCatalogDocumentedCompatibilityModelsRequireRuntime(t *testing.T) {
 		provider string
 		channel  string
 	}{
-		"qwen3.8-max":            {provider: "Qwen", channel: "openai-compatibility"},
-		"qwen3.8-max-0902":       {provider: "Qwen", channel: "openai-compatibility"},
-		"qwen3.8-flash":          {provider: "Qwen", channel: "openai-compatibility"},
-		"qwen3-coder-next":       {provider: "Qwen", channel: "openai-compatibility"},
-		"MiniMax-M3":             {provider: "MiniMax", channel: "openai-compatibility"},
-		"MiniMax-M2.7":           {provider: "MiniMax", channel: "openai-compatibility"},
-		"MiniMax-M2.7-highspeed": {provider: "MiniMax", channel: "openai-compatibility"},
+		"qwen3.8-max":        {provider: "Qwen", channel: "openai-compatibility"},
+		"qwen3.8-max-0902":   {provider: "Qwen", channel: "openai-compatibility"},
+		"qwen3.8-flash":      {provider: "Qwen", channel: "openai-compatibility"},
+		"qwen4-max":          {provider: "Qwen", channel: "openai-compatibility"},
+		"MiniMax-M3":         {provider: "MiniMax", channel: "openai-compatibility"},
+		"MiniMax-M3.1-Flash": {provider: "MiniMax", channel: "openai-compatibility"},
+		"glm-5.3-flashx":     {provider: "GLM", channel: "openai-compatibility"},
 	}
 	for modelID, want := range models {
 		row, ok := findModelCatalogResponseRow(response.Models, modelID)

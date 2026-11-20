@@ -34,57 +34,61 @@ var staticDevinModels = []*ModelInfo{
 	devinBuiltinSWE16SlowModelInfo(),
 	{
 		ID: "devin/swe-2", Object: "model", Type: "devin", OwnedBy: "cognition", DisplayName: "SWE-2",
-		ContextLength: 262000, MaxCompletionTokens: 128000,
+		ContextLength: 262000, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"medium", "high", "max"}},
 	},
 	{
-		ID: "devin/claude-fable-5-1", Object: "model", Type: "devin", OwnedBy: "anthropic", DisplayName: "Claude Fable 5.1",
-		ContextLength: 1000000, MaxCompletionTokens: 128000,
+		ID: "devin/claude-fable-5-1", Object: "model", Type: "devin", OwnedBy: "anthropic",
+		DisplayName:   "Claude Fable 5.1",
+		ContextLength: 1000000, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
 	},
 	{
 		ID: "devin/gpt-6-astra", Object: "model", Type: "devin", OwnedBy: "openai", DisplayName: "GPT-6 Astra",
-		ContextLength: 1000000, MaxCompletionTokens: 128000,
+		ContextLength: 1000000, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
 	},
 	{
 		ID: "devin/glm-5-2", Object: "model", Type: "devin", OwnedBy: "zhipu", DisplayName: "GLM-5.2",
-		ContextLength: 200000, MaxCompletionTokens: 128000,
+		ContextLength: 200000, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"none", "high"}},
 	},
 	{
 		ID: "devin/glm-5-3", Object: "model", Type: "devin", OwnedBy: "zhipu", DisplayName: "GLM-5.3",
-		ContextLength: 1048576, MaxCompletionTokens: 128000,
+		ContextLength: 1048576, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"low", "high", "max"}},
 	},
 	{
 		ID: "devin/glm-5-3-flash", Object: "model", Type: "devin", OwnedBy: "zhipu", DisplayName: "GLM-5.3 Flash",
-		ContextLength: 1000000, MaxCompletionTokens: 128000,
+		ContextLength: 1000000, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"low", "high", "max"}},
 	},
 	{
 		ID: "devin/gpt-5-6-sol", Object: "model", Type: "devin", OwnedBy: "openai", DisplayName: "GPT-5.6 Sol",
-		ContextLength: 1000000, MaxCompletionTokens: 128000,
+		ContextLength: 1000000, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh", "max"}},
 	},
 	{
-		ID: "devin/gemini-3-8-flash", Object: "model", Type: "devin", OwnedBy: "google", DisplayName: "Gemini 3.8 Flash",
-		ContextLength: 1048576, MaxCompletionTokens: 128000,
+		ID: "devin/gemini-3-8-flash", Object: "model", Type: "devin", OwnedBy: "google",
+		DisplayName:   "Gemini 3.8 Flash",
+		ContextLength: 1048576, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 	},
 	{
 		ID: "devin/grok-4-6", Object: "model", Type: "devin", OwnedBy: "xai", DisplayName: "Grok 4.6",
-		ContextLength: 500000, MaxCompletionTokens: 131072,
+		ContextLength: 500000, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 	},
 	{
-		ID: "devin/deepseek-v4-flash", Object: "model", Type: "devin", OwnedBy: "deepseek", DisplayName: "DeepSeek V4 Flash",
-		ContextLength: 1048576, MaxCompletionTokens: 128000,
+		ID: "devin/deepseek-v4-flash", Object: "model", Type: "devin", OwnedBy: "deepseek",
+		DisplayName:   "DeepSeek V4 Flash",
+		ContextLength: 1048576, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"high", "max"}},
 	},
 	{
-		ID: "devin/deepseek-v4-1-flash", Object: "model", Type: "devin", OwnedBy: "deepseek", DisplayName: "DeepSeek V4.1 Flash",
-		ContextLength: 1048576, MaxCompletionTokens: 128000,
+		ID: "devin/deepseek-v4-1-flash", Object: "model", Type: "devin", OwnedBy: "deepseek",
+		DisplayName:   "DeepSeek V4.1 Flash",
+		ContextLength: 1048576, MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{Levels: []string{"high", "max"}},
 	},
 }
@@ -108,8 +112,8 @@ func devinBuiltinSWE16SlowModelInfo() *ModelInfo {
 	}
 }
 
-// WithDevinBuiltins preserves catalog entries while replacing built-in model definitions.
-func WithDevinBuiltins(models []*ModelInfo) []*ModelInfo {
+// withDevinBuiltins preserves catalog entries while replacing built-in model definitions.
+func withDevinBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, devinBuiltinSWE16SlowModelInfo())
 }
 
@@ -130,10 +134,10 @@ func GetDevinModels() []*ModelInfo {
 	if catalog := getModels(); catalog != nil && len(catalog.Devin) > 0 {
 		validated, err := sanitizeAndValidateDevinModels(catalog.Devin)
 		if err == nil {
-			return WithDevinBuiltins(validated)
+			return withDevinBuiltins(validated)
 		}
 	}
-	return WithDevinBuiltins(cloneModelInfos(staticDevinModels))
+	return withDevinBuiltins(cloneModelInfos(staticDevinModels))
 }
 
 // LookupDevinModel returns a model from the active Devin catalog.
@@ -160,27 +164,15 @@ func LookupDevinModel(modelID string) *ModelInfo {
 	return nil
 }
 
-// GetDevinModelsSnapshot returns the raw catalog and its in-process revision.
-func GetDevinModelsSnapshot() ([]byte, uint64) {
+// getDevinModelsSnapshot returns the raw catalog and its in-process revision.
+func getDevinModelsSnapshot() ([]byte, uint64) {
 	devinCatalogStore.mu.RLock()
 	defer devinCatalogStore.mu.RUnlock()
 	return append([]byte(nil), devinCatalogStore.rawJSON...), devinCatalogStore.revision
 }
 
-// GetDevinModelsJSON returns the current raw catalog JSON.
-func GetDevinModelsJSON() []byte {
-	data, _ := GetDevinModelsSnapshot()
-	return data
-}
-
-// GetDevinModelsRevision returns the current catalog revision.
-func GetDevinModelsRevision() uint64 {
-	_, revision := GetDevinModelsSnapshot()
-	return revision
-}
-
 func retainDevinPublicAliases(models []*ModelInfo) ([]*ModelInfo, error) {
-	embedded, err := ValidateDevinModelsJSON(embeddedDevinModelsJSON)
+	embedded, err := validateDevinModelsJSON(embeddedDevinModelsJSON)
 	if err != nil {
 		return nil, fmt.Errorf("validate embedded Devin aliases: %w", err)
 	}
@@ -200,7 +192,7 @@ func retainDevinPublicAliases(models []*ModelInfo) ([]*ModelInfo, error) {
 }
 
 func loadDevinModelsFromBytes(data []byte, source string) (bool, error) {
-	models, err := ValidateDevinModelsJSON(data)
+	models, err := validateDevinModelsJSON(data)
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
@@ -208,7 +200,7 @@ func loadDevinModelsFromBytes(data []byte, source string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
-	models = WithDevinBuiltins(models)
+	models = withDevinBuiltins(models)
 
 	rawJSON := append([]byte(nil), data...)
 	devinCatalogStore.mu.Lock()
@@ -222,8 +214,8 @@ func loadDevinModelsFromBytes(data []byte, source string) (bool, error) {
 	return true, nil
 }
 
-// ValidateDevinModelsJSON validates and normalizes a Devin model catalog.
-func ValidateDevinModelsJSON(data []byte) ([]*ModelInfo, error) {
+// validateDevinModelsJSON validates and normalizes a Devin model catalog.
+func validateDevinModelsJSON(data []byte) ([]*ModelInfo, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, fmt.Errorf("empty Devin models payload")
 	}
@@ -268,8 +260,8 @@ func splitDevinModelID(id string) (string, string) {
 			return strings.TrimSuffix(id, suffix), level
 		}
 	}
-	if strings.HasSuffix(id, "_thinking") {
-		return strings.TrimSuffix(id, "_thinking"), "high"
+	if before, ok := strings.CutSuffix(id, "_thinking"); ok {
+		return before, "high"
 	}
 	for _, suffix := range []struct {
 		tail   string
@@ -281,8 +273,8 @@ func splitDevinModelID(id string) (string, string) {
 		{tail: "-max-1m", readd: "-1m", effort: "max"},
 		{tail: "-none-1m", readd: "-1m", effort: "none"},
 	} {
-		if strings.HasSuffix(id, suffix.tail) {
-			return strings.TrimSuffix(id, suffix.tail) + suffix.readd, suffix.effort
+		if before, ok := strings.CutSuffix(id, suffix.tail); ok {
+			return before + suffix.readd, suffix.effort
 		}
 	}
 	for _, level := range devinThinkingLevelOrder {
@@ -384,9 +376,13 @@ func aggregateDevinModels(models []*ModelInfo) []*ModelInfo {
 			for level := range group.levels {
 				levels = append(levels, level)
 			}
-			sort.Slice(levels, func(i, j int) bool {
-				return slices.Index(devinThinkingLevelOrder, levels[i]) < slices.Index(devinThinkingLevelOrder, levels[j])
-			})
+			sort.Slice(
+				levels, func(i, j int) bool {
+					return slices.Index(devinThinkingLevelOrder, levels[i]) < slices.Index(
+						devinThinkingLevelOrder, levels[j],
+					)
+				},
+			)
 			group.model.Thinking = &ThinkingSupport{Levels: levels}
 		}
 		out = append(out, group.model)
@@ -417,10 +413,10 @@ func sanitizeAndValidateDevinModels(candidates []*ModelInfo) ([]*ModelInfo, erro
 		}
 		seen[model.ID] = struct{}{}
 
-		if model.ContextLength <= 0 {
+		if model.ContextLength < 0 {
 			return nil, fmt.Errorf("model %q has invalid context length %d", model.ID, model.ContextLength)
 		}
-		if model.MaxCompletionTokens <= 0 {
+		if model.MaxCompletionTokens < 0 {
 			return nil, fmt.Errorf("model %q has invalid max completion tokens %d", model.ID, model.MaxCompletionTokens)
 		}
 		if err := normalizeDevinThinkingLevels(model); err != nil {
@@ -438,7 +434,7 @@ func sanitizeAndValidateDevinModels(candidates []*ModelInfo) ([]*ModelInfo, erro
 			model.SupportedOutputModalities = []string{"text"}
 		}
 		if len(model.SupportedGenerationMethods) == 0 {
-			model.SupportedGenerationMethods = []string{"chat.completions"}
+			model.SupportedGenerationMethods = []string{"generateContent", "countTokens"}
 		}
 		models = append(models, model)
 	}

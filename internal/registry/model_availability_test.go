@@ -28,7 +28,8 @@ func TestModelAvailabilitySnapshotUsesActualClientState(t *testing.T) {
 	if got.PreferredProvider != "codex" {
 		t.Fatalf("PreferredProvider = %q, want codex", got.PreferredProvider)
 	}
-	if len(got.ConfiguredProviders) != 2 || got.ConfiguredProviders[0] != "codex" || got.ConfiguredProviders[1] != "openai" {
+	if len(got.ConfiguredProviders) != 2 || got.ConfiguredProviders[0] != "codex" ||
+		got.ConfiguredProviders[1] != "openai" {
 		t.Fatalf("ConfiguredProviders = %#v", got.ConfiguredProviders)
 	}
 	if len(got.AvailableProviders) != 1 || got.AvailableProviders[0] != "codex" {
@@ -45,9 +46,13 @@ func TestCredentialQuotaOverlapKeepsHealthyModelAvailable(t *testing.T) {
 	r.RegisterClient("healthy-key", "codex", []*ModelInfo{model})
 	r.RegisterClient("exhausted-oauth", "codex", []*ModelInfo{model})
 	_, epoch := r.GetModelsAndEpochForClient("exhausted-oauth")
-	if !r.ApplyClientModelProjections("exhausted-oauth", epoch, 1, []ClientModelProjection{{
-		ModelID: model.ID, Suspended: true, SuspendReason: "credential_quota", QuotaExceeded: true,
-	}}) {
+	if !r.ApplyClientModelProjections(
+		"exhausted-oauth", epoch, 1, []ClientModelProjection{
+			{
+				ModelID: model.ID, Suspended: true, SuspendReason: "credential_quota", QuotaExceeded: true,
+			},
+		},
+	) {
 		t.Fatal("credential quota projection was rejected")
 	}
 	if got := len(r.GetAvailableModels("openai")); got != 1 {
@@ -76,9 +81,11 @@ func TestCredentialQuotaRefreshKeepsHealthyModelAvailable(t *testing.T) {
 	model := &ModelInfo{ID: "shared-refresh-model", OwnedBy: "openai", Type: "openai"}
 	r.RegisterClient("healthy-key", "codex", []*ModelInfo{model})
 	r.RegisterClient("exhausted-oauth", "codex", []*ModelInfo{model})
-	projection := []ClientModelProjection{{
-		ModelID: model.ID, Suspended: true, SuspendReason: "credential_quota", QuotaExceeded: true,
-	}}
+	projection := []ClientModelProjection{
+		{
+			ModelID: model.ID, Suspended: true, SuspendReason: "credential_quota", QuotaExceeded: true,
+		},
+	}
 	checkAvailable := func(phase string) {
 		t.Helper()
 		if got := len(r.GetAvailableModels("openai")); got != 1 {

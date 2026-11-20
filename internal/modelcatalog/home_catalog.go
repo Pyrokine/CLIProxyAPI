@@ -12,6 +12,8 @@ import (
 )
 
 // HomeModelRoute keeps one model entry bound to the Home execution route that supplied it.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type HomeModelRoute struct {
 	Section            string
 	Provider           string
@@ -70,17 +72,19 @@ func DecodeHomeCatalog(raw []byte) (*HomeCatalog, error) {
 		return nil, fmt.Errorf("home models payload contains no models")
 	}
 
-	sort.SliceStable(routes, func(i, j int) bool {
-		leftID := homeStringValue(routes[i].Model, "id")
-		rightID := homeStringValue(routes[j].Model, "id")
-		if leftID != rightID {
-			return leftID < rightID
-		}
-		if routes[i].Provider != routes[j].Provider {
-			return routes[i].Provider < routes[j].Provider
-		}
-		return routes[i].Section < routes[j].Section
-	})
+	sort.SliceStable(
+		routes, func(i, j int) bool {
+			leftID := homeStringValue(routes[i].Model, "id")
+			rightID := homeStringValue(routes[j].Model, "id")
+			if leftID != rightID {
+				return leftID < rightID
+			}
+			if routes[i].Provider != routes[j].Provider {
+				return routes[i].Provider < routes[j].Provider
+			}
+			return routes[i].Section < routes[j].Section
+		},
+	)
 	return &HomeCatalog{routes: routes}, nil
 }
 
@@ -120,10 +124,12 @@ func (c *HomeCatalog) ResponsesWebSearchCapability(modelID string) *bool {
 		if homeStringValue(route.Model, "id") != modelID {
 			continue
 		}
-		routes = append(routes, registry.NativeCapabilityRoute{
-			Provider:           route.Provider,
-			NativeCapabilities: cloneHomeNativeCapabilities(route.NativeCapabilities),
-		})
+		routes = append(
+			routes, registry.NativeCapabilityRoute{
+				Provider:           route.Provider,
+				NativeCapabilities: cloneHomeNativeCapabilities(route.NativeCapabilities),
+			},
+		)
 	}
 	return registry.ResolveResponsesWebSearchCapability(routes)
 }
@@ -162,7 +168,9 @@ func buildHomeModelRoute(section, provider string, rawModel map[string]any) (Hom
 	if maxContextLength > 0 {
 		model["max_context_length"] = maxContextLength
 	}
-	maxCompletionTokens := homeIntValue(model, "max_completion_tokens", "max_tokens", "outputTokenLimit")
+	maxCompletionTokens := homeIntValue(
+		model, "max_completion_tokens", "maxCompletionTokens", "max_tokens", "outputTokenLimit",
+	)
 	if maxCompletionTokens <= 0 && staticInfo != nil {
 		maxCompletionTokens = staticInfo.MaxCompletionTokens
 	}
@@ -208,8 +216,8 @@ func lookupHomeStaticModelInfo(modelID, provider string) *registry.ModelInfo {
 	if info := registry.LookupStaticModelInfoByChannel(modelID, provider); info != nil {
 		return info
 	}
-	if index := strings.Index(modelID, "/"); index != -1 {
-		return registry.LookupStaticModelInfoByChannel(strings.TrimSpace(modelID[index+1:]), provider)
+	if _, after, ok := strings.Cut(modelID, "/"); ok {
+		return registry.LookupStaticModelInfoByChannel(strings.TrimSpace(after), provider)
 	}
 	return nil
 }

@@ -26,9 +26,11 @@ func StartDevinModelsUpdater(ctx context.Context, refreshHours int) {
 	if !enabled {
 		return
 	}
-	devinModelsUpdaterOnce.Do(func() {
-		go runDevinModelsUpdater(ctx, interval)
-	})
+	devinModelsUpdaterOnce.Do(
+		func() {
+			go runDevinModelsUpdater(ctx, interval)
+		},
+	)
 }
 
 func runDevinModelsUpdater(ctx context.Context, interval time.Duration) {
@@ -66,7 +68,7 @@ func tryRefreshDevinModels(ctx context.Context, label string) {
 }
 
 func fetchDevinModelsFromRemote(ctx context.Context) ([]byte, string, error) {
-	client := &http.Client{Timeout: modelsFetchTimeout}
+	client := catalogHTTPClient()
 	var lastErr error
 	for _, sourceURL := range devinModelsURLs {
 		requestContext, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
@@ -109,6 +111,10 @@ func fetchDevinModelsFromRemote(ctx context.Context) ([]byte, string, error) {
 		}
 		if len(body) > maxDevinModelsSize {
 			lastErr = fmt.Errorf("fetch %s: payload exceeds %d bytes", sourceURL, maxDevinModelsSize)
+			continue
+		}
+		if _, validationErr := validateDevinModelsJSON(body); validationErr != nil {
+			lastErr = fmt.Errorf("validate %s: %w", sourceURL, validationErr)
 			continue
 		}
 		return body, sourceURL, nil

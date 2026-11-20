@@ -70,7 +70,7 @@ func tryRefreshCodexClientModels(ctx context.Context, label string) {
 }
 
 func fetchCodexClientModelsFromRemote(ctx context.Context) ([]byte, string) {
-	client := &http.Client{Timeout: modelsFetchTimeout}
+	client := catalogHTTPClient()
 	for _, sourceURL := range codexClientModelsURLs {
 		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, sourceURL, nil)
@@ -110,7 +110,7 @@ func fetchCodexClientModelsFromRemote(ctx context.Context) ([]byte, string) {
 			log.Warnf("Codex client models fetch from %s exceeded %d bytes", sourceURL, maxCodexClientModelsSize)
 			continue
 		}
-		if err := validateCodexClientModelsJSON(data); err != nil {
+		if err := ValidateCodexClientModelsJSON(data); err != nil {
 			log.Warnf("Codex client models validate failed from %s: %v", sourceURL, err)
 			continue
 		}
