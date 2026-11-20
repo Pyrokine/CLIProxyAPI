@@ -8,8 +8,9 @@ assignees: ''
 ---
 
 **Is it a request payload issue?**
-[  ] Yes, this is a request payload issue. I am using a client/cURL to send a request payload, but I received an unexpected error.
-[  ] No, it's another issue.
+- [ ] Yes, this is a request payload issue. I am using a client/cURL to send a request payload, but I received an
+  unexpected error.
+- [ ] No, it's another issue.
 
 **If it's a request payload issue, you MUST know**
 Our team doesn't have any GODs or ORACLEs or MIND READERs. Please make sure to attach the request log or curl payload.
@@ -18,7 +19,7 @@ Our team doesn't have any GODs or ORACLEs or MIND READERs. Please make sure to a
 A clear and concise description of what the bug is.
 
 **CLI Type**
-What type of CLI account do you use?  (gemini-cli, gemini, codex, claude code or openai-compatibility)
+What type of CLI account do you use? (`gemini-cli`, `gemini`, `codex`, `claude code` or `openai-compatibility`)
 
 **Model Name**
 What model are you using? (example: gemini-2.5-pro, claude-sonnet-4-20250514, gpt-5, etc.)
@@ -37,8 +38,8 @@ A clear and concise description of what you expected to happen.
 If applicable, add screenshots to help explain your problem.
 
 **OS Type**
- - OS: [e.g. macOS]
- - Version [e.g. 15.6.0]
+ - OS: e.g. macOS
+ - Version: e.g. 15.6.0
 
 **Additional context**
 Add any other context about the problem here.

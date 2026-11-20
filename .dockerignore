@@ -1,12 +1,5 @@
-# Git and GitHub folders
-.git
-.github
-
 # Docker and CI/CD related files
 docker-compose.yml
-.dockerignore
-.gitignore
-.goreleaser.yml
 Dockerfile
 
 # Documentation and license
@@ -29,7 +22,6 @@ objectstore
 home
 config.yaml
 config.yaml.last-good
-.env
 *.bak
 *.backup
 *.old

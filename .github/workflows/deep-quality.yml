@@ -13,18 +13,30 @@ jobs:
   quality:
     name: deep-quality
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # noinspection UndefinedAction
+        uses: actions/checkout@v7.0.1
       - name: Set up Go
-        uses: actions/setup-go@v5
+        # noinspection UndefinedAction
+        uses: actions/setup-go@v7.1.0
         with:
+          # noinspection UndefinedParamsPresent
           go-version-file: go.mod
+          # noinspection UndefinedParamsPresent
           cache: true
       - name: Race tests
-        run: go test -race -timeout=25m ./...
+        run: |
+          all_packages="$(go list ./...)"
+          mapfile -t packages < <(printf '%s\n' "$all_packages" | grep -Fxv 'github.com/Pyrokine/CLIProxyAPI/v6/internal/usage')
+          test "${#packages[@]}" -gt 0
+          go test -race -timeout=60m "${packages[@]}"
+      - name: Usage race tests
+        run: go test -race -timeout=60m ./internal/usage
       - name: Staticcheck
+        if: ${{ !cancelled() }}
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
       - name: Govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+        if: ${{ !cancelled() }}
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

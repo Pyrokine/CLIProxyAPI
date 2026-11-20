@@ -11,11 +11,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # noinspection UndefinedAction
+        uses: actions/checkout@v7.0.1
       - name: Set up Go
-        uses: actions/setup-go@v5
+        # noinspection UndefinedAction
+        uses: actions/setup-go@v7.1.0
         with:
+          # noinspection UndefinedParamsPresent
           go-version-file: go.mod
+          # noinspection UndefinedParamsPresent
           cache: true
       - name: Test
         run: go test ./...

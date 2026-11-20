@@ -33,6 +33,24 @@ Client
 - 修改 Nginx 或 Cloudflare 前保存当前生效配置
 - 保留不向公网暴露认证 API 或管理路由的直接健康检查
 
+## Docker bridge 网络
+
+使用 Docker Compose 时，将容器内 `config/config.yaml` 的 `host` 设为 `""`，让服务监听容器网卡，Docker 才能转发发布的端口；Nginx
+位于宿主机时，宿主机端口映射保持 `127.0.0.1:8317:8317`，仓内 Compose 已将所有发布端口绑定到宿主机 loopback
+
+服务以本机进程运行并与 Nginx 位于同一主机时，保留 `host: "127.0.0.1"`
+
+## 原生插件构建
+
+Unix 发行构建启用 CGO，包含原生插件加载器，Linux 压缩包使用 GNU libc，Alpine Docker 构建使用 musl，插件应与宿主的操作系统、架构和
+C 库一致
+
+发布流水线在对应的 amd64／arm64 Linux runner，以及 macOS、Windows runner 上构建，GoReleaser
+生成平台压缩包后，由统一发布任务检查六个操作系统／架构产物和校验值，目标缺失或校验值不一致时停止发布
+
+本机构建可使用 `goreleaser build --single-target`，Unix 环境需要原生 C 编译器，本机 `goreleaser release`
+准备宿主平台族的产物，完整版本由流水线统一发布
+
 ## Nginx 精确路径模板
 
 把以下 location 放入现有 TLS `server` 块；timeout 和正文大小只是示例值，需要根据部署环境调整，且不能超过应用限制
@@ -141,7 +159,8 @@ Configuration Rule 只有在 DNS 记录经过 Cloudflare 代理时才会生效
 创建一个精确匹配 host、method 和 path 的 Configuration Rule，把示例 host 替换为公网 API host：
 
 ```text
-(http.host eq "api.example.com" and http.request.method eq "POST" and (http.request.uri.path eq "/v1/messages" or http.request.uri.path eq "/v1/responses"))
+(http.host eq "api.example.com" and http.request.method eq "POST" and
+ (http.request.uri.path eq "/v1/messages" or http.request.uri.path eq "/v1/responses"))
 ```
 
 只设置一个动作：
@@ -270,4 +289,5 @@ count，不要直接把连续请求视为不同用户操作
 - [NGINX core HTTP module](https://nginx.org/en/docs/http/ngx_http_core_module.html)
 - [Cloudflare Configuration Rules settings](https://developers.cloudflare.com/rules/configuration-rules/settings/)
 - [Cloudflare connection limits](https://developers.cloudflare.com/fundamentals/reference/connection-limits/)
-- [Cloudflare Error 524](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/)
+- [Cloudflare Error 524](
+  https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/)

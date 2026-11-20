@@ -2,12 +2,11 @@ name: goreleaser
 
 on:
   push:
-    # run only against tags
     tags:
       - '*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   deep-quality:
@@ -15,44 +14,153 @@ jobs:
     permissions:
       contents: read
 
-  goreleaser:
+  native-artifacts:
     needs: deep-quality
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+            container: ubuntu:20.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            container: ubuntu:20.04
+          - target: darwin
+            runner: macos-latest
+          - target: windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - name: Prepare native Linux compiler
+        if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential ca-certificates git
+      - # noinspection UndefinedAction
+        uses: actions/checkout@v7.0.1
         with:
+          # noinspection UndefinedParamsPresent
           fetch-depth: 0
-      - run: git fetch --force --tags
-      - uses: actions/setup-go@v7
+      - name: Configure workspace ownership and fetch tags
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --force --tags
+      - # noinspection UndefinedAction
+        uses: actions/setup-go@v7.1.0
         with:
+          # noinspection UndefinedParamsPresent
           go-version-file: go.mod
+          # noinspection UndefinedParamsPresent
           cache: true
-      - name: Generate Build Metadata
+      - # noinspection UndefinedAction
+        uses: goreleaser/goreleaser-action@v7.3.0
+        with:
+          # noinspection UndefinedParamsPresent
+          distribution: goreleaser
+          # noinspection UndefinedParamsPresent
+          version: v2.20.2
+          # noinspection UndefinedParamsPresent
+          args: release --clean --skip=publish,announce
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - # noinspection UndefinedAction
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          # noinspection UndefinedParamsPresent
+          name: release-${{ matrix.target }}
+          # noinspection UndefinedParamsPresent
+          if-no-files-found: error
+          # noinspection UndefinedParamsPresent
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums_*.txt
+
+  publish:
+    needs: native-artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - # noinspection UndefinedAction
+        uses: actions/checkout@v7.0.1
+        with:
+          # noinspection UndefinedParamsPresent
+          fetch-depth: 0
+      - # noinspection UndefinedAction
+        uses: actions/download-artifact@v8.0.2
+        with:
+          # noinspection UndefinedParamsPresent
+          pattern: release-*
+          # noinspection UndefinedParamsPresent
+          path: dist
+          # noinspection UndefinedParamsPresent
+          merge-multiple: true
+      - name: Validate release inventory and prepare notes
         run: |
-          echo VERSION=`git describe --tags --always --dirty` >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - name: Generate release notes
-        run: |
-          python3 <<'PY'
+          python3 -I <<'PY'
           import os
           import re
           from pathlib import Path
 
-          tag = os.environ["GITHUB_REF_NAME"]
-          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          match = re.search(rf"^##\s+{re.escape(tag)}\b.*?(?=^##\s+v|\Z)", changelog, re.M | re.S)
+          root = Path('dist')
+          archives = sorted([*root.glob('*.tar.gz'), *root.glob('*.zip')])
+          expected = {(system, arch) for system in ('linux', 'darwin', 'windows') for arch in ('amd64', 'arm64')}
+          actual = []
+          for archive in archives:
+              match = re.search(r'_(linux|darwin|windows)_(amd64|arm64)\.(tar\.gz|zip)$', archive.name)
+              if not match:
+                  raise SystemExit(f'Unexpected release archive: {archive.name}')
+              system, arch, extension = match.groups()
+              if extension != ('zip' if system == 'windows' else 'tar.gz'):
+                  raise SystemExit(f'Unexpected archive format: {archive.name}')
+              actual.append((system, arch))
+          if len(actual) != len(expected) or set(actual) != expected:
+              raise SystemExit(f'Incomplete release targets: {actual}')
+          checksums = {}
+          for manifest in sorted(root.glob('checksums_*.txt')):
+              for line in manifest.read_text(encoding='utf-8').splitlines():
+                  digest, name = line.split(maxsplit=1)
+                  name = name.lstrip('*')
+                  if not re.fullmatch(r'[0-9a-f]{64}', digest) or name in checksums or Path(name).name != name:
+                      raise SystemExit(f'Invalid or duplicate checksum entry in {manifest.name}')
+                  checksums[name] = digest
+          if set(checksums) != {archive.name for archive in archives}:
+              raise SystemExit('Release archives and checksums differ')
+          (root / 'checksums.txt').write_text(
+              ''.join(f'{checksums[name]}  {name}\n' for name in sorted(checksums)), encoding='utf-8'
+          )
+          tag = os.environ['RELEASE_TAG']
+          changelog = Path('CHANGELOG.md').read_text(encoding='utf-8')
+          match = re.search(rf'^##\s+{re.escape(tag)}\b.*?(?=^##\s+v|\Z)', changelog, re.M | re.S)
           if not match:
-              raise SystemExit(f"CHANGELOG.md has no entry for {tag}")
-          Path("release-notes.md").write_text(match.group(0).strip() + "\n", encoding="utf-8")
+              raise SystemExit(f'CHANGELOG.md has no entry for {tag}')
+          Path('release-notes.md').write_text(match.group(0).strip() + '\n', encoding='utf-8')
           PY
-      - uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean --release-notes=release-notes.md
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ env.VERSION }}
-          COMMIT: ${{ env.COMMIT }}
-          BUILD_DATE: ${{ env.BUILD_DATE }}
+          (cd dist && sha256sum -c checksums.txt)
+      - name: Publish complete release
+        run: |
+          set -euo pipefail
+          if draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            gh release edit "$RELEASE_TAG" --notes-file release-notes.md
+          elif [ "$draft" = 'release not found' ]; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --notes-file release-notes.md
+            draft=true
+          else
+            printf '%s\n' "$draft" >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/checksums.txt --clobber
+          if [ "$draft" = true ]; then
+            gh release edit "$RELEASE_TAG" --draft=false
+          fi

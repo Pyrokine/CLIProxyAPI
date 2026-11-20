@@ -11,13 +11,17 @@ jobs:
   ensure-no-translator-changes:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - # noinspection UndefinedAction
+        uses: actions/checkout@v7.0.1
         with:
+          # noinspection UndefinedParamsPresent
           fetch-depth: 0
       - name: Detect internal/translator changes
         id: changed-files
-        uses: tj-actions/changed-files@v45
+        # noinspection UndefinedAction
+        uses: tj-actions/changed-files@v47.0.6
         with:
+          # noinspection UndefinedParamsPresent
           files: |
             internal/translator/**
       - name: Fail when restricted paths change

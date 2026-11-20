@@ -1,22 +1,49 @@
 version: 2
 
 builds:
-    -   id: "cli-proxy-api"
+    - &native_unix
+        id: cli-proxy-api-linux-amd64
         env:
-            - CGO_ENABLED=0
+            - CGO_ENABLED=1
         goos:
             - linux
-            - windows
+        goarch:
+            - amd64
+        skip: '{{ or (ne .Runtime.Goos "linux") (ne .Runtime.Goarch "amd64") }}'
+        main: ./cmd/server/
+        binary: cli-proxy-api
+        ldflags:
+            - "-s -w -X 'main.version={{.Version}}' -X 'main.commit={{.FullCommit}}' \
+               -X 'main.buildDate={{.Date}}' \
+               -X 'github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.UpdateProtocol=2' \
+               -X 'github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.DataFormats=\
+               management=1:5:5;usage=1:9:9;postgres=1:1:1'"
+    -   <<: *native_unix
+        id: cli-proxy-api-linux-arm64
+        goarch:
+            - arm64
+        skip: '{{ or (ne .Runtime.Goos "linux") (ne .Runtime.Goarch "arm64") }}'
+    -   <<: *native_unix
+        id: cli-proxy-api-darwin
+        goos:
             - darwin
         goarch:
             - amd64
             - arm64
-        main: ./cmd/server/
-        binary: cli-proxy-api
-        ldflags:
-            - -s -w -X 'main.version={{.Version}}' -X 'main.commit={{.FullCommit}}' -X 'main.buildDate={{.Date}}' -X 'github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.UpdateProtocol=2'
+        skip: '{{ ne .Runtime.Goos "darwin" }}'
+    -   <<: *native_unix
+        id: cli-proxy-api-windows
+        env:
+            - CGO_ENABLED=0
+        goos:
+            - windows
+        goarch:
+            - amd64
+            - arm64
+        skip: '{{ ne .Runtime.Goos "windows" }}'
+
 archives:
-    -   id: "cli-proxy-api"
+    -   id: cli-proxy-api
         formats:
             - tar.gz
         format_overrides:
@@ -30,7 +57,10 @@ archives:
             - config.example.yaml
 
 checksum:
-    name_template: 'checksums.txt'
+    name_template: 'checksums_{{ .Runtime.Goos }}_{{ .Runtime.Goarch }}.txt'
+
+release:
+    disable: true
 
 snapshot:
     version_template: "{{ incpatch .Version }}-next"

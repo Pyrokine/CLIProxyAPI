@@ -37,6 +37,27 @@ and timing at each layer before assigning a status code to one component
 - Save the active Nginx and Cloudflare configuration before changing either layer
 - Keep a direct health check that does not expose authenticated API or management routes publicly
 
+## Docker bridge networking
+
+For Docker Compose, set `host: ""` in the container's `config/config.yaml`. The server must listen on the container
+network interface so Docker can forward the published port. Keep the host-side mapping as `127.0.0.1:8317:8317` when
+Nginx runs on the host. The provided Compose file uses loopback mappings for all published ports
+
+For a native process running beside Nginx, keep `host: "127.0.0.1"`
+
+## Native plugin builds
+
+Unix release builds enable CGO for the native plugin loader. Linux archives target GNU libc, while the Alpine Docker
+build
+uses musl. Compile each plugin for its host operating system, architecture, and C library
+
+The release workflow builds Linux on matching amd64/arm64 runners and macOS/Windows on their own runners. GoReleaser
+creates platform archives without publishing them. The publisher checks all six OS/architecture archives and their
+checksums before creating the release; a missing target or checksum mismatch stops publication
+
+For a local binary, use `goreleaser build --single-target` with the installed native C compiler on Unix. A local
+`goreleaser release` prepares artifacts for the host platform family; the workflow publishes the complete release
+
 ## Nginx exact-path template
 
 Place the following locations inside the existing TLS `server` block. The timeout and body-size values are examples;
@@ -152,7 +173,8 @@ Create a Configuration Rule with an exact host, method, and path expression. Rep
 API host:
 
 ```text
-(http.host eq "api.example.com" and http.request.method eq "POST" and (http.request.uri.path eq "/v1/messages" or http.request.uri.path eq "/v1/responses"))
+(http.host eq "api.example.com" and http.request.method eq "POST" and
+ (http.request.uri.path eq "/v1/messages" or http.request.uri.path eq "/v1/responses"))
 ```
 
 Set one action only:
@@ -241,7 +263,8 @@ release and client, verify:
   `X-Accel-Buffering: no` at the Origin and public hostname
 - no `Connection` response header over HTTP/2
 - first byte and first semantic event timing
-- heartbeat arrival before upstream setup completes, before the first semantic event, and during an ordinary response gap
+- heartbeat arrival before upstream setup completes, before the first semantic event, and during an ordinary response
+  gap
 - multiple response events and exactly one terminal event
 - prompt connection shutdown after the terminal event, including when the upstream transport does not close normally
 - non-streaming JSON responses
@@ -293,4 +316,5 @@ response bytes, and retry count. Do not assume consecutive requests represent se
 - [NGINX core HTTP module](https://nginx.org/en/docs/http/ngx_http_core_module.html)
 - [Cloudflare Configuration Rules settings](https://developers.cloudflare.com/rules/configuration-rules/settings/)
 - [Cloudflare connection limits](https://developers.cloudflare.com/fundamentals/reference/connection-limits/)
-- [Cloudflare Error 524](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/)
+- [Cloudflare Error 524](
+  https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/)

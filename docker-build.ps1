@@ -17,7 +17,10 @@ if ([string]::IsNullOrWhiteSpace($configDir)) {
         Write-Warning "Using legacy ./config.yaml. Move it to ./config/config.yaml for the new default layout."
     }
     else {
-        throw "Config file not found. Run: New-Item -ItemType Directory -Force config; Copy-Item config.example.yaml config/config.yaml"
+        throw (
+            "Config file not found. Run: New-Item -ItemType Directory -Force config; " +
+            "Copy-Item config.example.yaml config/config.yaml"
+        )
     }
 }
 
