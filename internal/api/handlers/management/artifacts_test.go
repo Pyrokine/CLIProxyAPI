@@ -19,7 +19,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const managementTestPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+//goland:noinspection SpellCheckingInspection
+const managementTestPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/" +
+	"p9sAAAAASUVORK5CYII="
 
 func managementTestPNGBytes(t *testing.T) []byte {
 	t.Helper()
@@ -37,7 +39,11 @@ func largeManagementTestPNGBytes(t *testing.T, fill byte) []byte {
 	return data
 }
 
-func newArtifactCacheTestContext(method string, path string, body string) (*gin.Context, *httptest.ResponseRecorder) {
+func newArtifactCacheTestContext(
+	method string,
+	path string,
+	body string,
+) (*gin.Context, *httptest.ResponseRecorder) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(method, path, bytes.NewBufferString(body))
@@ -120,7 +126,8 @@ func TestPutImageArtifactCacheUpdatesConfigStoreAndCleans(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	committed := h.configSnapshot()
-	if committed == nil || committed.ImageArtifactCache.RetentionDays != 5 || committed.ImageArtifactCache.MaxTotalSizeMB != 1 {
+	if committed == nil || committed.ImageArtifactCache.RetentionDays != 5 ||
+		committed.ImageArtifactCache.MaxTotalSizeMB != 1 {
 		t.Fatalf("committed config cache = %#v", committed)
 	}
 	if cfg.ImageArtifactCache.RetentionDays != 7 || cfg.ImageArtifactCache.MaxTotalSizeMB != 10240 {

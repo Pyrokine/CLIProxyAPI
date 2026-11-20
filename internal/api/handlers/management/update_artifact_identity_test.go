@@ -19,7 +19,9 @@ import (
 func TestInspectUpdateArtifactReadsBuildIdentityWithoutExecutingCandidate(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "candidate.go")
-	code := "package main\nimport \"os\"\nvar version, commit string\nfunc main() { _ = os.WriteFile(\"must-not-execute\", []byte(version+commit), 0600) }\n"
+	code := "package main\nimport \"os\"\nvar version, commit string\nfunc main() {" +
+		" _ = os.WriteFile(\"must-not-execute\", []byte(version+commit), 0600) " +
+		"}\n"
 	if err := os.WriteFile(source, []byte(code), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +31,8 @@ func TestInspectUpdateArtifactReadsBuildIdentityWithoutExecutingCandidate(t *tes
 			binary += ".exe"
 		}
 		flags := "-X main.version=v1.0.1 -X main.commit=" + commit +
-			" -X github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.UpdateProtocol=2"
+			" -X github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.UpdateProtocol=2" +
+			" -X github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.DataFormats=" + updateTestDataFormats
 		command := exec.Command("go", "build", "-o", binary, "-ldflags", flags, source)
 		command.Env = append(os.Environ(), "GOWORK=off", "GOPROXY=off")
 		if output, err := command.CombinedOutput(); err != nil {
@@ -47,7 +50,14 @@ func TestInspectUpdateArtifactReadsBuildIdentityWithoutExecutingCandidate(t *tes
 			continue
 		}
 		if err != nil || identity.Tag != "v1.0.1" || identity.Commit != commit || identity.Legacy ||
-			identity.OS != runtime.GOOS || identity.Arch != runtime.GOARCH || identity.SHA256 != sha256Hex(data) {
+			identity.OS !=
+				runtime.GOOS ||
+			identity.Arch !=
+				runtime.GOARCH ||
+			identity.SHA256 !=
+				sha256Hex(data) ||
+			identity.DataFormats !=
+				updateTestDataFormats {
 			t.Fatalf("candidate identity = %#v, %v", identity, err)
 		}
 		if err := validateUpdateArtifact(identity, "v1.0.2", false); err == nil {
@@ -74,7 +84,9 @@ func TestInspectUpdateArtifactReadsBuildIdentityWithoutExecutingCandidate(t *tes
 func TestUpdateArtifactRejectsOldProtocolBeforeInstallation(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "previous.go")
-	code := "package main\nimport \"os\"\nvar version, commit string\nfunc main() { _ = os.WriteFile(\"must-not-execute\", []byte(version+commit), 0600) }\n"
+	code := "package main\nimport \"os\"\nvar version, commit string\nfunc main() {" +
+		" _ = os.WriteFile(\"must-not-execute\", []byte(version+commit), 0600) " +
+		"}\n"
 	if err := os.WriteFile(source, []byte(code), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -119,43 +131,60 @@ func TestUpdatePrivateHealthRequiresAllArtifactIdentityFields(t *testing.T) {
 		HealthBaseURL: "http://127.0.0.1:8317", TargetVersion: identity.Tag, TargetIdentity: identity,
 	}
 	for _, field := range []string{"match", "tag", "commit", "sha256", "os", "arch", "protocol", "missing"} {
-		t.Run(field, func(t *testing.T) {
-			actual := identity
-			switch field {
-			case "tag":
-				actual.Tag = "v1.0.0"
-			case "commit":
-				actual.Commit = strings.Repeat("b", 40)
-			case "sha256":
-				actual.SHA256 = strings.Repeat("0", 64)
-			case "os":
-				actual.OS = "other"
-			case "arch":
-				actual.Arch = "other"
-			case "protocol":
-				actual.UpdateProtocol = "1"
-			}
-			payload := updateHealthResponse{Status: "ok", Version: session.TargetVersion, AttemptID: session.AttemptID, Identity: &actual}
-			if field == "missing" {
-				payload.Identity = nil
-			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_ = json.NewEncoder(w).Encode(payload)
-			}))
-			defer server.Close()
-			current := session
-			current.HealthBaseURL = server.URL
-			err := probeUpdatePrivateHealth(context.Background(), server.Client(), current, "synthetic-token", session.TargetVersion)
-			if (err == nil) != (field == "match") {
-				t.Fatalf("identity field %s, result: %v", field, err)
-			}
-		})
+		t.Run(
+			field, func(t *testing.T) {
+				actual := identity
+				switch field {
+				case "tag":
+					actual.Tag = "v1.0.0"
+				case "commit":
+					actual.Commit = strings.Repeat("b", 40)
+				case "sha256":
+					actual.SHA256 = strings.Repeat("0", 64)
+				case "os":
+					actual.OS = "other"
+				case "arch":
+					actual.Arch = "other"
+				case "protocol":
+					actual.UpdateProtocol = "1"
+				}
+				payload := updateHealthResponse{
+					Status: "ok", DataReady: true, Version: session.TargetVersion, AttemptID: session.AttemptID,
+					Identity: &actual,
+				}
+				if field == "missing" {
+					payload.Identity = nil
+				}
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, _ *http.Request) {
+							_ = json.NewEncoder(w).Encode(payload)
+						},
+					),
+				)
+				defer server.Close()
+				current := session
+				current.HealthBaseURL = server.URL
+				err := probeUpdatePrivateHealth(
+					context.Background(), server.Client(), current, "synthetic-token", session.TargetVersion,
+				)
+				if (err == nil) != (field == "match") {
+					t.Fatalf("identity field %s, result: %v", field, err)
+				}
+			},
+		)
 	}
 }
 
 func TestGetUpdateStatusFiltersAClientAttemptInsteadOfReturningAnOlderSuccess(t *testing.T) {
 	store := openUpdateGuardTestStore(t)
-	session := newUpdateGuardSession(updateGuardHost{}, "0123456789abcdef0123456789abcdef", "v1.0.1", false, time.Now())
+	session := newUpdateGuardSession(
+		updateGuardHost{},
+		"0123456789abcdef0123456789abcdef",
+		"v1.0.1",
+		false,
+		time.Now(),
+	)
 	session.Phase = updatePhaseSucceeded
 	if err := store.beginUpdateSession(context.Background(), session); err != nil {
 		t.Fatal(err)
@@ -172,7 +201,10 @@ func TestGetUpdateStatusFiltersAClientAttemptInsteadOfReturningAnOlderSuccess(t 
 		{"not-an-attempt", http.StatusBadRequest},
 	} {
 		response := httptest.NewRecorder()
-		engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/update-status?attempt_id="+test.attempt, nil))
+		engine.ServeHTTP(
+			response,
+			httptest.NewRequest(http.MethodGet, "/update-status?attempt_id="+test.attempt, nil),
+		)
 		if response.Code != test.status {
 			t.Fatalf("attempt %s status = %d, %s", test.attempt, response.Code, response.Body.String())
 		}

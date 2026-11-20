@@ -17,7 +17,8 @@ func validateUpdateGuardSession(
 	requireCandidate bool,
 	now time.Time,
 ) error {
-	if (session.SchemaVersion != 1 && session.SchemaVersion != updateGuardStateSchemaVersion) || !isUpdateAttemptID(session.AttemptID) {
+	if (session.SchemaVersion != 1 && session.SchemaVersion != updateGuardStateSchemaVersion) ||
+		!isUpdateAttemptID(session.AttemptID) {
 		return fmt.Errorf("invalid update session identity")
 	}
 	if !validVersion.MatchString(session.TargetVersion) || !validBuildVersion.MatchString(session.PreviousVersion) {
@@ -49,6 +50,9 @@ func validateUpdateGuardSession(
 			return err
 		}
 		if err := validateUpdateArtifact(session.PreviousIdentity, session.PreviousVersion, true); err != nil {
+			return err
+		}
+		if err := validateUpdateDataFormats(session); err != nil {
 			return err
 		}
 		if session.CandidatePath != updateCandidatePath(session.ExecutablePath, session.AttemptID) {

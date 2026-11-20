@@ -61,6 +61,7 @@ func updateGuardTestIdentity(data, version string) *updateArtifactIdentity {
 	return &updateArtifactIdentity{
 		Tag: version, Commit: strings.Repeat("a", 40), SHA256: sha256Hex([]byte(data)),
 		OS: goruntime.GOOS, Arch: goruntime.GOARCH, UpdateProtocol: buildinfo.UpdateProtocol,
+		DataFormats: buildinfo.DataFormats,
 	}
 }
 
@@ -90,6 +91,7 @@ func prepareArmedUpdateGuardSession(
 	session.OriginInstance = "fixture-instance"
 	session.PreviousIdentity = *updateGuardTestIdentity("old-binary", previousVersion)
 	session.TargetIdentity = *updateGuardTestIdentity("new-binary", targetVersion)
+	session.DataFormats = map[string]int{"management": 5}
 	session.Phase = updatePhasePreparing
 	session.CandidatePath = updateCandidatePath(executablePath, attemptID)
 	if err := os.WriteFile(session.CandidatePath, []byte("new-binary"), 0o755); err != nil {
@@ -127,7 +129,11 @@ func updateGuardTestRuntime(clock *updateGuardTestClock, executablePath string) 
 		restore:       restoreUpdateBackup,
 		newHTTPClient: newUpdateGuardHTTPClient,
 		quiescent:     func(context.Context, updateGuardSession) (bool, error) { return true, nil },
-		drain: func(_ context.Context, session updateGuardSession, _, action string) (executionregistry.DrainConfirmation, error) {
+		drain: func(
+			_ context.Context,
+			session updateGuardSession,
+			_, action string,
+		) (executionregistry.DrainConfirmation, error) {
 			if action == "confirm" && session.DrainConfirmation != nil {
 				return *session.DrainConfirmation, nil
 			}
@@ -151,13 +157,14 @@ func TestRunUpdateGuardSucceedsAfterThreeHealthSamples(t *testing.T) {
 				case "/healthz":
 					w.WriteHeader(http.StatusOK)
 				case updateHealthPath:
-					if token, _ := tokenValue.Load().(string); token == "" || r.Header.Get(updateHealthTokenHeader) != token {
+					if token, _ := tokenValue.Load().(string); token == "" ||
+						r.Header.Get(updateHealthTokenHeader) != token {
 						w.WriteHeader(http.StatusUnauthorized)
 						return
 					}
 					_ = json.NewEncoder(w).Encode(
 						updateHealthResponse{
-							Status: "ok", Version: targetVersion, AttemptID: attemptID,
+							Status: "ok", DataReady: true, Version: targetVersion, AttemptID: attemptID,
 							Identity: updateGuardTestIdentity("new-binary", targetVersion),
 						},
 					)
@@ -241,7 +248,7 @@ func TestRunUpdateGuardRollsBackAfterTargetVersionFailure(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(
 					updateHealthResponse{
-						Status: "ok", Version: version, AttemptID: attemptID,
+						Status: "ok", DataReady: true, Version: version, AttemptID: attemptID,
 						Identity: updateGuardTestIdentity("old-binary", previousVersion),
 					},
 				)
@@ -310,7 +317,7 @@ func TestRunUpdateGuardStopsAfterRollbackHealthFailure(t *testing.T) {
 				if r.URL.Path == updateHealthPath && r.Header.Get(updateHealthTokenHeader) == tokenValue.Load() {
 					_ = json.NewEncoder(w).Encode(
 						updateHealthResponse{
-							Status: "ok", Version: "wrong-version", AttemptID: attemptID,
+							Status: "ok", DataReady: true, Version: "wrong-version", AttemptID: attemptID,
 						},
 					)
 					return
@@ -361,7 +368,7 @@ func TestRunUpdateGuardRestoresBinaryWhenStateFailsAfterInstall(t *testing.T) {
 				if r.URL.Path == updateHealthPath && r.Header.Get(updateHealthTokenHeader) == tokenValue.Load() {
 					_ = json.NewEncoder(w).Encode(
 						updateHealthResponse{
-							Status: "ok", Version: previousVersion, AttemptID: attemptID,
+							Status: "ok", DataReady: true, Version: previousVersion, AttemptID: attemptID,
 							Identity: updateGuardTestIdentity("old-binary", previousVersion),
 						},
 					)
@@ -1089,6 +1096,7 @@ func TestRunUpdateGuardCommandDoesNotCreateStateDatabase(t *testing.T) {
 
 func TestProbeUpdateHealthVersionIdentity(t *testing.T) {
 	const attemptID = "0123456789abcdef0123456789abcdef"
+	//goland:noinspection SpellCheckingInspection
 	for _, testCase := range []struct {
 		name     string
 		actual   string
@@ -1108,20 +1116,32 @@ func TestProbeUpdateHealthVersionIdentity(t *testing.T) {
 		{name: "development label", actual: "vdev", expected: "dev"},
 		{name: "missing version", actual: "", expected: "v8.0.23"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			body, err := json.Marshal(updateHealthResponse{Status: "ok", Version: testCase.actual, AttemptID: attemptID})
-			if err != nil {
-				t.Fatalf("encode health response: %v", err)
-			}
-			client := &http.Client{Transport: updateGuardRoundTripFunc(func(*http.Request) (*http.Response, error) {
-				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
-			})}
-			session := updateGuardSession{AttemptID: attemptID, HealthBaseURL: "http://127.0.0.1:8317"}
-			err = probeUpdatePrivateHealth(context.Background(), client, session, "token", testCase.expected)
-			if (err == nil) != testCase.wantOK {
-				t.Fatalf("version identity actual=%q expected=%q: %v", testCase.actual, testCase.expected, err)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				body, err := json.Marshal(
+					updateHealthResponse{
+						Status: "ok", DataReady: true, Version: testCase.actual, AttemptID: attemptID,
+					},
+				)
+				if err != nil {
+					t.Fatalf("encode health response: %v", err)
+				}
+				client := &http.Client{
+					Transport: updateGuardRoundTripFunc(
+						func(*http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))),
+							}, nil
+						},
+					),
+				}
+				session := updateGuardSession{AttemptID: attemptID, HealthBaseURL: "http://127.0.0.1:8317"}
+				err = probeUpdatePrivateHealth(context.Background(), client, session, "token", testCase.expected)
+				if (err == nil) != testCase.wantOK {
+					t.Fatalf("version identity actual=%q expected=%q: %v", testCase.actual, testCase.expected, err)
+				}
+			},
+		)
 	}
 }
 
@@ -1136,44 +1156,75 @@ func TestUpdateHealthPreservesLegacyGuardVersionIdentity(t *testing.T) {
 		phase    string
 		want     string
 	}{
-		{name: "release binary", actual: "8.0.23-aug.2", previous: "dev", target: "v8.0.23-aug.2", phase: updatePhaseHealthCheck, want: "v8.0.23-aug.2"},
-		{name: "reverse prefix", actual: "v8.0.23-aug.2", previous: "dev", target: "8.0.23-aug.2", phase: updatePhaseHealthCheck, want: "8.0.23-aug.2"},
-		{name: "wrong release", actual: "8.0.23-aug.1", previous: "dev", target: "v8.0.23-aug.2", phase: updatePhaseHealthCheck, want: "8.0.23-aug.1"},
-		{name: "wrong build", actual: "8.0.23+build.2", previous: "dev", target: "v8.0.23+build.1", phase: updatePhaseHealthCheck, want: "8.0.23+build.2"},
-		{name: "development rollback", actual: "dev", previous: "dev", target: "v8.0.23-aug.2", phase: updatePhaseRollbackHealthCheck, want: "dev"},
-		{name: "release rollback", actual: "8.0.23-aug.1", previous: "v8.0.23-aug.1", target: "v8.0.23-aug.2", phase: updatePhaseRollbackHealthCheck, want: "v8.0.23-aug.1"},
-		{name: "same release reinstall", actual: "8.0.23-aug.2", previous: "8.0.23-aug.2", target: "v8.0.23-aug.2", phase: updatePhaseHealthCheck, want: "v8.0.23-aug.2"},
-		{name: "same release rollback", actual: "8.0.23-aug.2", previous: "8.0.23-aug.2", target: "v8.0.23-aug.2", phase: updatePhaseRollbackHealthCheck, want: "8.0.23-aug.2"},
+		{
+			name: "release binary", actual: "8.0.23-aug.2", previous: "dev", target: "v8.0.23-aug.2",
+			phase: updatePhaseHealthCheck, want: "v8.0.23-aug.2",
+		},
+		{
+			name: "reverse prefix", actual: "v8.0.23-aug.2", previous: "dev", target: "8.0.23-aug.2",
+			phase: updatePhaseHealthCheck, want: "8.0.23-aug.2",
+		},
+		{
+			name: "wrong release", actual: "8.0.23-aug.1", previous: "dev", target: "v8.0.23-aug.2",
+			phase: updatePhaseHealthCheck, want: "8.0.23-aug.1",
+		},
+		{
+			name: "wrong build", actual: "8.0.23+build.2", previous: "dev", target: "v8.0.23+build.1",
+			phase: updatePhaseHealthCheck, want: "8.0.23+build.2",
+		},
+		{
+			name: "development rollback", actual: "dev", previous: "dev", target: "v8.0.23-aug.2",
+			phase: updatePhaseRollbackHealthCheck, want: "dev",
+		},
+		{
+			name: "release rollback", actual: "8.0.23-aug.1", previous: "v8.0.23-aug.1", target: "v8.0.23-aug.2",
+			phase: updatePhaseRollbackHealthCheck, want: "v8.0.23-aug.1",
+		},
+		{
+			name: "same release reinstall", actual: "8.0.23-aug.2", previous: "8.0.23-aug.2", target: "v8.0.23-aug.2",
+			phase: updatePhaseHealthCheck, want: "v8.0.23-aug.2",
+		},
+		{
+			name: "same release rollback", actual: "8.0.23-aug.2", previous: "8.0.23-aug.2", target: "v8.0.23-aug.2",
+			phase: updatePhaseRollbackHealthCheck, want: "8.0.23-aug.2",
+		},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			buildinfo.Version = testCase.actual
-			store := openUpdateGuardTestStore(t)
-			session, token := prepareArmedUpdateGuardSession(t, store, "http://127.0.0.1:8317", time.Now().UTC(), testCase.previous, testCase.target)
-			_, err := store.transitionUpdateSession(context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
-				next.Phase = testCase.phase
-			})
-			if err != nil {
-				t.Fatalf("set health phase: %v", err)
-			}
-			handler := &Handler{stateStore: store}
-			engine := gin.New()
-			engine.GET(updateHealthPath, handler.GetUpdateHealth)
-			request := httptest.NewRequest(http.MethodGet, updateHealthPath, nil)
-			request.RemoteAddr = "127.0.0.1:12345"
-			request.Header.Set(updateHealthTokenHeader, token)
-			response := httptest.NewRecorder()
-			engine.ServeHTTP(response, request)
-			if response.Code != http.StatusOK {
-				t.Fatalf("health response status = %d", response.Code)
-			}
-			var payload updateHealthResponse
-			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
-				t.Fatalf("decode health response: %v", err)
-			}
-			if payload.Status != "ok" || payload.AttemptID != session.AttemptID || payload.Version != testCase.want {
-				t.Fatalf("health identity = %#v, expected version %q", payload, testCase.want)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				buildinfo.Version = testCase.actual
+				store := openUpdateGuardTestStore(t)
+				session, token := prepareArmedUpdateGuardSession(
+					t, store, "http://127.0.0.1:8317", time.Now().UTC(), testCase.previous, testCase.target,
+				)
+				_, err := store.transitionUpdateSession(
+					context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
+						next.Phase = testCase.phase
+					},
+				)
+				if err != nil {
+					t.Fatalf("set health phase: %v", err)
+				}
+				handler := &Handler{stateStore: store}
+				engine := gin.New()
+				engine.GET(updateHealthPath, handler.GetUpdateHealth)
+				request := httptest.NewRequest(http.MethodGet, updateHealthPath, nil)
+				request.RemoteAddr = "127.0.0.1:12345"
+				request.Header.Set(updateHealthTokenHeader, token)
+				response := httptest.NewRecorder()
+				engine.ServeHTTP(response, request)
+				if response.Code != http.StatusOK {
+					t.Fatalf("health response status = %d", response.Code)
+				}
+				var payload updateHealthResponse
+				if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+					t.Fatalf("decode health response: %v", err)
+				}
+				if payload.Status != "ok" || payload.AttemptID != session.AttemptID ||
+					payload.Version != testCase.want {
+					t.Fatalf("health identity = %#v, expected version %q", payload, testCase.want)
+				}
+			},
+		)
 	}
 }
 

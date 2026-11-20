@@ -54,15 +54,29 @@ func (h *Handler) PutImageArtifactCache(c *gin.Context) {
 		MaxTotalSizeMB *int `json:"max_total_size_mb"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
 	if body.RetentionDays != nil && *body.RetentionDays < 0 {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"error": "retention_days must be 0 (disable) or a positive integer"})
 		return
 	}
 	if body.MaxTotalSizeMB != nil && *body.MaxTotalSizeMB < 0 {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"error": "max_total_size_mb must be 0 (disable) or a positive integer"})
+		return
+	}
+
+	if body.RetentionDays != nil && *body.RetentionDays > config.MaxImageArtifactRetentionDays {
+		rejectMutation(c.Request.Context())
+		c.JSON(http.StatusBadRequest, gin.H{"error": "retention_days exceeds the supported range"})
+		return
+	}
+	if body.MaxTotalSizeMB != nil && *body.MaxTotalSizeMB > config.MaxImageArtifactCacheSizeMB {
+		rejectMutation(c.Request.Context())
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_total_size_mb exceeds the supported range"})
 		return
 	}
 
@@ -95,6 +109,7 @@ func (h *Handler) PutImageArtifactCache(c *gin.Context) {
 			ReportConfigCommitCleanupError(c.Request.Context(), err)
 		}
 		h.imageArtifacts.StartCleaner()
+		RecordMutationEffect(c.Request.Context(), "configuration.runtime_applied", "configuration")
 	}
 
 	response := gin.H{
@@ -105,6 +120,7 @@ func (h *Handler) PutImageArtifactCache(c *gin.Context) {
 	if cleanupError := warnings.cleanupErrorMessage(); cleanupError != "" {
 		response["cleanup_error"] = cleanupError
 	}
+	completeConfigMutation(c.Request.Context())
 	c.JSON(http.StatusOK, response)
 }
 

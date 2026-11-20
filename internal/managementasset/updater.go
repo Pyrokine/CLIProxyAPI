@@ -25,13 +25,15 @@ import (
 )
 
 const (
-	defaultManagementReleaseURL = "https://api.github.com/repos/Pyrokine/Cli-Proxy-API-Management-Center/releases/latest"
-	managementAssetName         = "management.html"
-	httpUserAgent               = "CLIProxyAPI-management-updater"
-	managementSyncMinInterval   = 30 * time.Second
-	defaultUpdateCheckInterval  = 3 * time.Hour
-	minCheckIntervalMinutes     = 30
-	maxManagementAssetBytes     = 10 << 20
+	defaultManagementReleaseURL = "https://api.github.com/repos/Pyrokine/Cli-Proxy-API-Management-Center/" +
+		"releases/" +
+		"latest"
+	managementAssetName        = "management.html"
+	httpUserAgent              = "CLIProxyAPI-management-updater"
+	managementSyncMinInterval  = 30 * time.Second
+	defaultUpdateCheckInterval = 3 * time.Hour
+	minCheckIntervalMinutes    = 30
+	maxManagementAssetBytes    = 10 << 20
 )
 
 // managementFileName exposes the control panel asset filename.
@@ -39,7 +41,7 @@ const managementFileName = managementAssetName
 
 var (
 	lastUpdateCheckMu   sync.Mutex
-	lastUpdateCheckTime time.Time
+	lastUpdateChecks    = make(map[string]time.Time)
 	currentConfigPtr    atomic.Pointer[config.Config]
 	schedulerOnce       sync.Once
 	schedulerConfigPath atomic.Value
@@ -94,6 +96,14 @@ func runAutoUpdater(ctx context.Context) {
 			return
 		}
 
+		if !cfg.RemoteManagement.IsAutoUpdatePanel() {
+			releaseURL := resolveReleaseURL(cfg.RemoteManagement.PanelGitHubRepository, "")
+			if _, _, err := fetchReleaseAsset(ctx, newHTTPClient(cfg.ProxyURL), releaseURL); err != nil {
+				log.WithError(err).Warn("management asset update check failed")
+			}
+			return
+		}
+
 		configPath, _ := schedulerConfigPath.Load().(string)
 		staticDir := StaticDir(configPath)
 		EnsureManagementHTML(ctx, staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository, "")
@@ -136,9 +146,6 @@ func autoUpdateSkipReason(cfg *config.Config) (string, bool) {
 	}
 	if !cfg.RemoteManagement.AutoCheckUpdate {
 		return "auto-check-update is false", true
-	}
-	if !cfg.RemoteManagement.IsAutoUpdatePanel() {
-		return "auto-update-panel is false", true
 	}
 	return "", false
 }
@@ -221,52 +228,73 @@ func EnsureManagementHTML(
 	panelRepository string,
 	version string,
 ) bool {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	staticDir = strings.TrimSpace(staticDir)
 	if staticDir == "" {
 		log.Debug("management asset sync skipped: empty static directory")
 		return false
 	}
+	if _, err := syncManagementHTML(ctx, staticDir, proxyURL, panelRepository, version, false); err != nil {
+		log.WithError(err).Warn("failed to synchronize management asset")
+	}
+	info, err := os.Stat(filepath.Join(staticDir, managementAssetName))
+	return err == nil && info.Mode().IsRegular()
+}
+
+// updateManagementHTML 返回本次下载、校验和发布的错误，手动更新绕过自动检查节流
+func updateManagementHTML(ctx context.Context, staticDir, proxyURL, panelRepository, version string) error {
+	_, err := UpdateManagementHTMLWithResult(ctx, staticDir, proxyURL, panelRepository, version)
+	return err
+}
+
+// UpdateManagementHTMLWithResult 返回文件是否已发布；latest 内容相同时返回 false 和 nil
+func UpdateManagementHTMLWithResult(ctx context.Context, staticDir, proxyURL, panelRepository, version string) (
+	bool,
+	error,
+) {
+	return syncManagementHTML(ctx, staticDir, proxyURL, panelRepository, version, true)
+}
+
+func syncManagementHTML(ctx context.Context, staticDir, proxyURL, panelRepository, version string, force bool) (
+	bool,
+	error,
+) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	staticDir = strings.TrimSpace(staticDir)
+	if staticDir == "" {
+		return false, errors.New("management asset static directory is empty")
+	}
 	localPath := filepath.Join(staticDir, managementAssetName)
 	version = strings.TrimSpace(version)
-
-	_, _, _ = sfGroup.Do(
-		localPath, func() (any, error) {
+	releaseURL := resolveReleaseURL(panelRepository, version)
+	key := fmt.Sprintf("%q|%q|%q", localPath, releaseURL, strings.TrimSpace(proxyURL))
+	result := sfGroup.DoChan(
+		fmt.Sprintf("%s|%t", key, force), func() (any, error) {
 			lastUpdateCheckMu.Lock()
 			now := time.Now()
-			timeSinceLastAttempt := now.Sub(lastUpdateCheckTime)
-			if version == "" && !lastUpdateCheckTime.IsZero() && timeSinceLastAttempt < managementSyncMinInterval {
-				lastUpdateCheckMu.Unlock()
-				log.Debugf(
-					"management asset sync skipped by throttle: last attempt %v ago (interval %v)",
-					timeSinceLastAttempt.Round(time.Second),
-					managementSyncMinInterval,
-				)
-				return nil, nil
-			}
-			lastUpdateCheckTime = now
-			lastUpdateCheckMu.Unlock()
-
-			localFileMissing := false
-			if _, errStat := os.Stat(localPath); errStat != nil {
-				if errors.Is(errStat, os.ErrNotExist) {
-					localFileMissing = true
-				} else {
-					log.WithError(errStat).Debug("failed to stat local management asset")
+			for target, checkedAt := range lastUpdateChecks {
+				if now.Sub(checkedAt) >= managementSyncMinInterval {
+					delete(lastUpdateChecks, target)
 				}
 			}
-
-			if errMkdirAll := os.MkdirAll(staticDir, 0o755); errMkdirAll != nil {
-				log.WithError(errMkdirAll).Warn("failed to prepare static directory for management asset")
-				return nil, nil
+			lastAttempt := lastUpdateChecks[key]
+			if !force && version == "" && !lastAttempt.IsZero() &&
+				now.Sub(lastAttempt) < managementSyncMinInterval {
+				lastUpdateCheckMu.Unlock()
+				log.Debug("management asset automatic sync skipped by throttle")
+				return false, nil
 			}
+			lastUpdateChecks[key] = now
+			lastUpdateCheckMu.Unlock()
 
-			releaseURL := resolveReleaseURL(panelRepository, version)
+			if err := os.MkdirAll(staticDir, 0o755); err != nil {
+				return false, fmt.Errorf("prepare management asset directory: %w", err)
+			}
 			client := newHTTPClient(proxyURL)
-
 			localHash, err := fileSHA256(localPath)
 			if err != nil {
 				if !errors.Is(err, os.ErrNotExist) {
@@ -274,60 +302,42 @@ func EnsureManagementHTML(
 				}
 				localHash = ""
 			}
-
 			asset, remoteHash, err := fetchReleaseAsset(ctx, client, releaseURL)
 			if err != nil {
-				if localFileMissing {
-					log.WithError(err).
-						Warn("failed to fetch management release information; fallback download is disabled for security (no digest verification)")
-				} else {
-					log.WithError(err).Warn("failed to fetch management release information")
-				}
-				return nil, nil
+				return false, fmt.Errorf("fetch management release: %w", err)
 			}
-
-			// Only short-circuit when caller wants "latest" and hashes match. Explicit
-			// version requests (downgrade/sidegrade) must always replace the file.
-			if version == "" && remoteHash != "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
+			if remoteHash == "" {
+				return false, errors.New("management asset release has no digest")
+			}
+			if version == "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
 				log.Debug("management asset is already up to date")
-				return nil, nil
+				return false, nil
 			}
-
 			data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
 			if err != nil {
-				if localFileMissing {
-					log.WithError(err).Warn("failed to download management asset; fallback download is disabled for security (no digest verification)")
-				} else {
-					log.WithError(err).Warn("failed to download management asset")
-				}
-				return nil, nil
-			}
-
-			// Fail-closed: reject update if remote digest is missing or mismatched
-			if remoteHash == "" {
-				log.Warn("management asset release has no digest; rejecting update (fail-closed)")
-				return nil, nil
+				return false, fmt.Errorf("download management asset: %w", err)
 			}
 			if !strings.EqualFold(remoteHash, downloadedHash) {
-				log.Errorf(
-					"remote digest mismatch for management asset: expected %s got %s (rejecting update)", remoteHash,
-					downloadedHash,
+				return false, fmt.Errorf(
+					"management asset digest mismatch: expected %s, got %s", remoteHash, downloadedHash,
 				)
-				return nil, nil
 			}
-
-			if err = atomicWriteFile(localPath, data); err != nil {
-				log.WithError(err).Warn("failed to update management asset on disk")
-				return nil, nil
+			if err := ctx.Err(); err != nil {
+				return false, err
 			}
-
+			if err := atomicWriteFile(localPath, data); err != nil {
+				return false, fmt.Errorf("publish management asset: %w", err)
+			}
 			log.Infof("management asset updated successfully (hash=%s)", downloadedHash)
-			return nil, nil
+			return true, nil
 		},
 	)
-
-	_, err := os.Stat(localPath)
-	return err == nil
+	select {
+	case completed := <-result:
+		return completed.Val.(bool), completed.Err
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
 
 // resolveReleaseURL turns a repository reference into the GitHub releases API URL.
@@ -384,7 +394,11 @@ func gitHubReleaseURL(releaseURL string) bool {
 		(parsed.Port() == "" || parsed.Port() == "443")
 }
 
-func fetchReleaseAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
+func fetchReleaseAsset(
+	ctx context.Context,
+	client *http.Client,
+	releaseURL string,
+) (*releaseAsset, string, error) {
 	if strings.TrimSpace(releaseURL) == "" {
 		releaseURL = defaultManagementReleaseURL
 	}
@@ -411,7 +425,11 @@ func fetchReleaseAsset(ctx context.Context, client *http.Client, releaseURL stri
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, "", fmt.Errorf("unexpected release status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, "", fmt.Errorf(
+			"unexpected release status %d: %s",
+			resp.StatusCode,
+			strings.TrimSpace(string(body)),
+		)
 	}
 
 	var release releaseResponse

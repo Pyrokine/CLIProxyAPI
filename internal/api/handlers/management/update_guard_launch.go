@@ -20,7 +20,8 @@ func (h *Handler) restoreUpdateAdmission(ctx context.Context) error {
 		h.inferenceAdmission.Hold(updateSessionStateKey)
 		return err
 	}
-	if session != nil && (updatePhaseMayHaveInstalledCandidate(session.Phase) || session.Phase == updatePhaseTerminalFailure) {
+	if session != nil &&
+		(updatePhaseMayHaveInstalledCandidate(session.Phase) || session.Phase == updatePhaseTerminalFailure) {
 		if !h.inferenceAdmission.Hold(session.AttemptID) {
 			return fmt.Errorf("another update already holds inference admission")
 		}
@@ -32,23 +33,27 @@ func (h *Handler) startUpdateReconciliation(ctx context.Context) {
 	if h.inferenceAdmission == nil || h.stateStore == nil {
 		return
 	}
-	h.attemptCleanupWG.Go(func() {
-		ticker := time.NewTicker(updateGuardReconcileInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				err := h.reconcileExpiredUpdate(checkCtx, realUpdateGuardRuntime())
-				cancel()
-				if err != nil && !errors.Is(err, errUpdateInProgress) && !errors.Is(err, errUpdateRecoveryRequired) && ctx.Err() == nil {
-					log.WithError(err).Warn("failed to reconcile expired update")
+	h.attemptCleanupWG.Go(
+		func() {
+			ticker := time.NewTicker(updateGuardReconcileInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					err := h.reconcileExpiredUpdate(checkCtx, realUpdateGuardRuntime())
+					cancel()
+					if err != nil && !errors.Is(err, errUpdateInProgress) && !errors.Is(
+						err, errUpdateRecoveryRequired,
+					) && ctx.Err() == nil {
+						log.WithError(err).Warn("failed to reconcile expired update")
+					}
 				}
 			}
-		}
-	})
+		},
+	)
 }
 
 func (h *Handler) reconcileExpiredUpdate(ctx context.Context, runtime updateGuardRuntime) error {
@@ -117,7 +122,9 @@ func (h *Handler) reconcileStaleUpdateSession(ctx context.Context, runtime updat
 	}
 	if session.SchemaVersion == 1 {
 		resultCode = "legacy_recovery_unverified"
-		if strings.EqualFold(normalizeUpdateHealthVersion(buildinfo.Version), normalizeUpdateHealthVersion(session.PreviousVersion)) &&
+		if strings.EqualFold(
+			normalizeUpdateHealthVersion(buildinfo.Version), normalizeUpdateHealthVersion(session.PreviousVersion),
+		) &&
 			(currentPath == session.ExecutablePath || currentPath == session.BackupPath) &&
 			session.BackupPath == session.ExecutablePath+".bak" && updatePhaseMayHaveInstalledCandidate(session.Phase) {
 			if _, backupErr := os.Lstat(session.BackupPath); backupErr == nil {

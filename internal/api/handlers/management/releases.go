@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -91,8 +92,11 @@ func (h *Handler) GetReleases(c *gin.Context) {
 	}
 
 	total := len(releases)
-	start := min((page-1)*perPage, total)
-	end := min(start+perPage, total)
+	start := total
+	if page-1 <= total/perPage {
+		start = min((page-1)*perPage, total)
+	}
+	end := start + min(perPage, total-start)
 
 	c.JSON(
 		http.StatusOK, gin.H{
@@ -161,7 +165,7 @@ func (h *Handler) fetchAllReleases(
 	}
 	cachedReleases.mu.RUnlock()
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100", repo)
+	requestURL := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100", repo)
 	client := &http.Client{Timeout: 15 * time.Second}
 
 	proxyURL = strings.TrimSpace(proxyURL)
@@ -170,14 +174,31 @@ func (h *Handler) fetchAllReleases(
 		util.SetProxy(sdkCfg, client)
 	}
 
-	body, err := githubGet(c.Request.Context(), client, url)
+	baseURL, err := url.Parse(requestURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid releases URL: %w", err)
 	}
-
-	var releases []gitHubRelease
-	if err = json.Unmarshal(body, &releases); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
+	seen := make(map[string]struct{})
+	releases := make([]gitHubRelease, 0)
+	for requestURL != "" {
+		if _, duplicate := seen[requestURL]; duplicate {
+			return nil, fmt.Errorf("repeated releases continuation")
+		}
+		seen[requestURL] = struct{}{}
+		var headers http.Header
+		body, err := githubGet(c.Request.Context(), client, requestURL, &headers)
+		if err != nil {
+			return nil, err
+		}
+		var page []gitHubRelease
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+		releases = append(releases, page...)
+		requestURL, err = releasesNextURL(headers, requestURL, baseURL.Path)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	cachedReleases.mu.Lock()
@@ -187,8 +208,55 @@ func (h *Handler) fetchAllReleases(
 	return releases, nil
 }
 
-// githubGet performs a GitHub API GET request with standard headers (User-Agent, Accept, Authorization).
-func githubGet(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+func releasesNextURL(headers http.Header, currentURL, expectedPath string) (string, error) {
+	current, err := url.Parse(currentURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid releases continuation")
+	}
+	next := ""
+	for _, line := range headers.Values("Link") {
+		for link := range strings.SplitSeq(line, ",") {
+			link = strings.TrimSpace(link)
+			end := strings.IndexByte(link, '>')
+			if !strings.HasPrefix(link, "<") || end < 1 {
+				return "", fmt.Errorf("invalid releases continuation")
+			}
+			_, parameters, err := mime.ParseMediaType("link" + link[end+1:])
+			if err != nil {
+				return "", fmt.Errorf("invalid releases continuation")
+			}
+			isNext := false
+			for relation := range strings.FieldsSeq(parameters["rel"]) {
+				isNext = isNext || strings.EqualFold(relation, "next")
+			}
+			if !isNext {
+				continue
+			}
+			if next != "" {
+				return "", fmt.Errorf("multiple releases continuations")
+			}
+			reference, err := url.Parse(link[1:end])
+			if err != nil {
+				return "", fmt.Errorf("invalid releases continuation")
+			}
+			candidate := current.ResolveReference(reference)
+			if !isGitHubAPIRequestURL(candidate.String()) || candidate.Path != expectedPath ||
+				candidate.Fragment != "" {
+				return "", fmt.Errorf("invalid releases continuation")
+			}
+			query, err := url.ParseQuery(candidate.RawQuery)
+			if err != nil {
+				return "", fmt.Errorf("invalid releases continuation")
+			}
+			candidate.RawQuery = query.Encode()
+			next = candidate.String()
+		}
+	}
+	return next, nil
+}
+
+// githubGet performs a GET request to the GitHub API with standard headers (User-Agent, Accept, Authorization).
+func githubGet(ctx context.Context, client *http.Client, url string, responseHeaders ...*http.Header) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -205,6 +273,9 @@ func githubGet(ctx context.Context, client *http.Client, url string) ([]byte, er
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if len(responseHeaders) > 0 && responseHeaders[0] != nil {
+		*responseHeaders[0] = resp.Header.Clone()
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))

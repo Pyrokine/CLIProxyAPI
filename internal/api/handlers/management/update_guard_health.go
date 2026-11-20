@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -109,8 +110,13 @@ func probeUpdatePrivateHealth(
 		return fmt.Errorf("decode private health response: %w", err)
 	}
 	if payload.Status != "ok" || payload.AttemptID != session.AttemptID ||
-		!strings.EqualFold(normalizeUpdateHealthVersion(payload.Version), normalizeUpdateHealthVersion(expectedVersion)) {
+		!strings.EqualFold(
+			normalizeUpdateHealthVersion(payload.Version), normalizeUpdateHealthVersion(expectedVersion),
+		) {
 		return fmt.Errorf("private health identity mismatch")
+	}
+	if len(session.DataFormats) > 0 && !payload.DataReady {
+		return fmt.Errorf("private health did not confirm database readiness")
 	}
 	if session.SchemaVersion == updateGuardStateSchemaVersion {
 		expectedIdentity := session.TargetIdentity
@@ -215,7 +221,20 @@ func (h *Handler) GetUpdateHealth(c *gin.Context) {
 			c.AbortWithStatus(http.StatusServiceUnavailable)
 			return
 		}
+		if len(session.DataFormats) > 0 {
+			identity.DataFormats = buildinfo.DataFormats
+		} else {
+			identity.DataFormats = ""
+		}
 		response.Identity = &identity
+	}
+	if len(session.DataFormats) > 0 {
+		formats, err := h.updateDataReadiness(c.Request.Context())
+		if err != nil || !maps.Equal(formats, session.DataFormats) {
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
+		response.DataReady = true
 	}
 	c.JSON(http.StatusOK, response)
 }

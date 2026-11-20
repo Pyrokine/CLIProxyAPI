@@ -2,13 +2,16 @@
 package artifact
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
@@ -52,6 +55,7 @@ func (*integrityError) Error() string {
 	return errIntegrity.Error()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (*integrityError) Unwrap() error {
 	return errIntegrity
 }
@@ -70,11 +74,13 @@ type CacheConfig struct {
 	CleanupInterval time.Duration
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type StoreStats struct {
 	TotalBytes int64
 	FileCount  int
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type CleanupResult struct {
 	DeletedFiles     int
 	DeletedBytes     int64
@@ -285,6 +291,8 @@ func CacheConfigFromLimits(retentionDays int, maxTotalSizeMB int) CacheConfig {
 	if maxTotalSizeMB < 0 {
 		maxTotalSizeMB = 0
 	}
+	retentionDays = min(retentionDays, int(math.MaxInt64/int64(24*time.Hour)))
+	maxTotalSizeMB = min(maxTotalSizeMB, math.MaxInt64/imageArtifactCacheMegabyteBytes)
 	return CacheConfig{
 		Retention:       time.Duration(retentionDays) * 24 * time.Hour,
 		MaxTotalBytes:   int64(maxTotalSizeMB) * imageArtifactCacheMegabyteBytes,
@@ -431,7 +439,7 @@ func (s *Store) PutRemoteImage(ctx context.Context, rawURL string) (Record, []by
 	if err != nil {
 		return Record{}, nil, fmt.Errorf("create image artifact request failed")
 	}
-	req.Header.Set("Accept", "image/png,image/jpeg,image/webp,image/gif;q=0.9")
+	req.Header.Set("Accept", "image/png,image/jpeg,image/webp,image/gif,image/svg+xml;q=0.9")
 	req.Header.Set("User-Agent", remoteImageUserAgent)
 
 	resp, err := client.Do(req)
@@ -1060,6 +1068,12 @@ func normalizeImageMIME(declared string, data []byte) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	if declared == "image/svg+xml" {
+		if validSVG(data) {
+			return declared, ".svg", nil
+		}
+		return "", "", errUnsupportedMIME
+	}
 	sniffed := strings.ToLower(strings.TrimSpace(http.DetectContentType(data)))
 	if ext, ok := extensionByMIME(sniffed); ok {
 		return sniffed, ext, nil
@@ -1068,6 +1082,37 @@ func normalizeImageMIME(declared string, data []byte) (string, string, error) {
 		return "", "", errUnsupportedMIME
 	}
 	return "", "", errUnsupportedMIME
+}
+
+func validSVG(data []byte) bool {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	depth, roots := 0, 0
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return roots == 1 && depth == 0
+		}
+		if err != nil {
+			return false
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				roots++
+				if roots != 1 || value.Name.Local != "svg" ||
+					(value.Name.Space != "" && value.Name.Space != "http://www.w3.org/2000/svg") {
+					return false
+				}
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			if depth == 0 && len(bytes.TrimSpace(value)) != 0 {
+				return false
+			}
+		}
+	}
 }
 
 func extensionByMIME(mediaType string) (string, bool) {
@@ -1080,6 +1125,8 @@ func extensionByMIME(mediaType string) (string, bool) {
 		return ".webp", true
 	case "image/gif":
 		return ".gif", true
+	case "image/svg+xml":
+		return ".svg", true
 	default:
 		return "", false
 	}
@@ -1095,6 +1142,8 @@ func mimeByExtension(ext string) (string, bool) {
 		return "image/webp", true
 	case ".gif":
 		return "image/gif", true
+	case ".svg":
+		return "image/svg+xml", true
 	default:
 		return "", false
 	}

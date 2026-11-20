@@ -40,14 +40,16 @@ func TestUpdateGuardSessionBuildMetadata(t *testing.T) {
 		{"v7.2.67+dirty\n", "v7.2.127-aug.1", false},
 		{"v7.2.67", "v7.2.127-aug.1+dirty.123", false},
 	} {
-		t.Run(test.previous+"->"+test.target, func(t *testing.T) {
-			session := newUpdateGuardSession(host, "0123456789abcdef0123456789abcdef", test.target, false, now)
-			session.PreviousVersion = test.previous
-			err := validateUpdateGuardSession(session, host.StateDBPath, executable, false, now)
-			if (err == nil) != test.valid {
-				t.Fatalf("validate session: %v, want valid=%t", err, test.valid)
-			}
-		})
+		t.Run(
+			test.previous+"->"+test.target, func(t *testing.T) {
+				session := newUpdateGuardSession(host, "0123456789abcdef0123456789abcdef", test.target, false, now)
+				session.PreviousVersion = test.previous
+				err := validateUpdateGuardSession(session, host.StateDBPath, executable, false, now)
+				if (err == nil) != test.valid {
+					t.Fatalf("validate session: %v, want valid=%t", err, test.valid)
+				}
+			},
+		)
 	}
 }
 
@@ -68,7 +70,9 @@ func TestBeginPersistentUpdatePreservesBuildMetadata(t *testing.T) {
 	buildinfo.Version = "v7.2.67-aug.3+dirty.8f1a76e34d62"
 	store := openUpdateGuardTestStore(t)
 	h := &Handler{stateStore: store, inferenceAdmission: executionregistry.NewAdmission()}
-	session, err := h.beginPersistentUpdate(context.Background(), &config.Config{Port: 8317}, "v7.2.127-aug.1", false, "")
+	session, err := h.beginPersistentUpdate(
+		context.Background(), &config.Config{Port: 8317}, "v7.2.127-aug.1", false, "",
+	)
 	if err != nil {
 		t.Fatalf("begin persistent update: %v", err)
 	}
@@ -110,11 +114,13 @@ func TestCompareUpdateVersionsBuildMetadata(t *testing.T) {
 		{"v7.2.127", "v7.2.127+dirty..hash", 0, false},
 		{"v7.2.127", "v7.2.127+dirty/hash", 0, false},
 	} {
-		t.Run(test.left+"/"+test.right, func(t *testing.T) {
-			order, comparable := compareUpdateVersions(test.left, test.right)
-			if order != test.order || comparable != test.comparable {
-				t.Fatalf("comparison=(%d,%t), want (%d,%t)", order, comparable, test.order, test.comparable)
-			}
-		})
+		t.Run(
+			test.left+"/"+test.right, func(t *testing.T) {
+				order, canCompare := compareUpdateVersions(test.left, test.right)
+				if order != test.order || canCompare != test.comparable {
+					t.Fatalf("comparison=(%d,%t), want (%d,%t)", order, canCompare, test.order, test.comparable)
+				}
+			},
+		)
 	}
 }

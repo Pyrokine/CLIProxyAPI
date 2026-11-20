@@ -15,6 +15,7 @@ func (transport releaseRoundTripper) RoundTrip(request *http.Request) (*http.Res
 }
 
 func TestGitHubGetUsesOnlyGitHubTokenForGitHubAPI(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	tests := []struct {
 		name          string
 		requestURL    string
@@ -72,25 +73,31 @@ func TestGitHubGetUsesOnlyGitHubTokenForGitHubAPI(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GITHUB_TOKEN", tt.gitHubToken)
-			t.Setenv("GITSTORE_GIT_URL", "https://github.com/example/auth-store.git")
-			t.Setenv("GITSTORE_GIT_TOKEN", tt.gitStoreToken)
-			t.Setenv("GH_TOKEN", tt.ghToken)
-			client := &http.Client{Transport: releaseRoundTripper(func(request *http.Request) (*http.Response, error) {
-				if got := request.Header.Get("Authorization"); got != tt.wantAuthorize {
-					t.Fatalf("Authorization = %q, want %q", got, tt.wantAuthorize)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				t.Setenv("GITHUB_TOKEN", tt.gitHubToken)
+				t.Setenv("GITSTORE_GIT_URL", "https://github.com/example/auth-store.git")
+				t.Setenv("GITSTORE_GIT_TOKEN", tt.gitStoreToken)
+				t.Setenv("GH_TOKEN", tt.ghToken)
+				client := &http.Client{
+					Transport: releaseRoundTripper(
+						func(request *http.Request) (*http.Response, error) {
+							if got := request.Header.Get("Authorization"); got != tt.wantAuthorize {
+								t.Fatalf("Authorization = %q, want %q", got, tt.wantAuthorize)
+							}
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     make(http.Header),
+								Body:       io.NopCloser(strings.NewReader(`[]`)),
+								Request:    request,
+							}, nil
+						},
+					),
 				}
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     make(http.Header),
-					Body:       io.NopCloser(strings.NewReader(`[]`)),
-					Request:    request,
-				}, nil
-			})}
-			if _, errGet := githubGet(context.Background(), client, tt.requestURL); errGet != nil {
-				t.Fatalf("githubGet() error = %v", errGet)
-			}
-		})
+				if _, errGet := githubGet(context.Background(), client, tt.requestURL); errGet != nil {
+					t.Fatalf("githubGet() error = %v", errGet)
+				}
+			},
+		)
 	}
 }

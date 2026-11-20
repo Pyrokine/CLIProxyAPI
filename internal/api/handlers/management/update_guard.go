@@ -62,7 +62,10 @@ type updateGuardRuntime struct {
 	restore           func(updateGuardSession) error
 	newHTTPClient     func(updateGuardSession) (*http.Client, error)
 	quiescent         func(context.Context, updateGuardSession) (bool, error)
-	drain             func(context.Context, updateGuardSession, string, string) (executionregistry.DrainConfirmation, error)
+	drain             func(context.Context, updateGuardSession, string, string) (
+		executionregistry.DrainConfirmation,
+		error,
+	)
 }
 
 type updateHealthResponse struct {
@@ -70,6 +73,7 @@ type updateHealthResponse struct {
 	Version   string                  `json:"version"`
 	AttemptID string                  `json:"attempt_id"`
 	Identity  *updateArtifactIdentity `json:"identity,omitempty"`
+	DataReady bool                    `json:"data_ready"`
 }
 
 func realUpdateGuardRuntime() updateGuardRuntime {
@@ -103,8 +107,10 @@ func updateGuardQuiescent(ctx context.Context, session updateGuardSession) (bool
 		return false, fmt.Errorf("invalid update service identity")
 	}
 	for index, unit := range []string{session.GuardUnit, session.ServiceUnit} {
-		output, err := exec.CommandContext(ctx, "systemctl", "show", "--no-pager",
-			"--property=LoadState", "--property=ActiveState", "--property=Job", unit).Output()
+		output, err := exec.CommandContext(
+			ctx, "systemctl", "show", "--no-pager",
+			"--property=LoadState", "--property=ActiveState", "--property=Job", unit,
+		).Output()
 		if err != nil {
 			return false, fmt.Errorf("inspect update service state: %w", err)
 		}
@@ -337,7 +343,12 @@ func (h *Handler) beginPersistentUpdate(
 	if err != nil {
 		return updateGuardSession{}, err
 	}
+	session.PreviousIdentity.DataFormats = buildinfo.DataFormats
 	if err = validateUpdateArtifact(session.PreviousIdentity, session.PreviousVersion, true); err != nil {
+		return updateGuardSession{}, err
+	}
+	session.DataFormats, err = h.updateDataReadiness(ctx)
+	if err != nil {
 		return updateGuardSession{}, err
 	}
 	if err = validateUpdateGuardSession(session, host.StateDBPath, host.ExecutablePath, false, now); err != nil {

@@ -50,10 +50,11 @@ type updateGuardSession struct {
 	TargetVersion     string                               `json:"target_version"`
 	PreviousVersion   string                               `json:"previous_version"`
 	OriginInstance    string                               `json:"origin_instance,omitempty"`
-	DrainDeadline     time.Time                            `json:"drain_deadline,omitempty"`
+	DrainDeadline     time.Time                            `json:"drain_deadline"`
 	DrainConfirmation *executionregistry.DrainConfirmation `json:"drain_confirmation,omitempty"`
-	TargetIdentity    updateArtifactIdentity               `json:"target_identity,omitempty"`
-	PreviousIdentity  updateArtifactIdentity               `json:"previous_identity,omitempty"`
+	TargetIdentity    updateArtifactIdentity               `json:"target_identity"`
+	PreviousIdentity  updateArtifactIdentity               `json:"previous_identity"`
+	DataFormats       map[string]int                       `json:"data_formats,omitempty"`
 	Automatic         bool                                 `json:"automatic"`
 	Phase             string                               `json:"phase"`
 	ResultCode        string                               `json:"result_code,omitempty"`
@@ -485,6 +486,7 @@ func normalizeUpdateResultCode(code string) string {
 		"guard_claim_failed",
 		"drain_failed",
 		"identity_failed",
+		"data_compatibility_failed",
 		"legacy_recovery_unverified",
 		"install_failed",
 		"restart_failed",

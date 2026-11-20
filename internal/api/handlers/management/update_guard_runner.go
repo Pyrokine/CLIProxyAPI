@@ -46,13 +46,17 @@ func runUpdateGuard(
 	if err != nil {
 		return err
 	}
-	draining, err := store.transitionUpdateSession(ctx, attemptID, updatePhaseClaimed, func(next *updateGuardSession) {
-		next.Phase = updatePhaseDraining
-		next.Percent = 90
-		next.UpdatedAt = runtime.now().UTC()
-	})
+	draining, err := store.transitionUpdateSession(
+		ctx, attemptID, updatePhaseClaimed, func(next *updateGuardSession) {
+			next.Phase = updatePhaseDraining
+			next.Percent = 90
+			next.UpdatedAt = runtime.now().UTC()
+		},
+	)
 	if err != nil {
-		return finishUpdateGuardFailureCurrent(ctx, store, *session, updatePhaseTerminalFailure, "state_failed", runtime)
+		return finishUpdateGuardFailureCurrent(
+			ctx, store, *session, updatePhaseTerminalFailure, "state_failed", runtime,
+		)
 	}
 	session = draining
 	confirmation, drainErr := runtime.drain(ctx, *session, token.Token, "wait")
@@ -61,16 +65,20 @@ func runUpdateGuard(
 		!runtime.now().Before(confirmation.Deadline) {
 		return finishUpdateGuardFailureCurrent(ctx, store, *session, updatePhaseError, "drain_failed", runtime)
 	}
-	ready, err := store.transitionUpdateSession(ctx, attemptID, updatePhaseDraining, func(next *updateGuardSession) {
-		next.Phase = updatePhaseReady
-		next.DrainConfirmation = &confirmation
-		next.Percent = 95
-		next.UpdatedAt = runtime.now().UTC()
-		next.Deadline = runtime.now().Add(updateGuardHealthTimeout).UTC()
-		next.DeadlineUnix = next.Deadline.Unix()
-	})
+	ready, err := store.transitionUpdateSession(
+		ctx, attemptID, updatePhaseDraining, func(next *updateGuardSession) {
+			next.Phase = updatePhaseReady
+			next.DrainConfirmation = &confirmation
+			next.Percent = 95
+			next.UpdatedAt = runtime.now().UTC()
+			next.Deadline = runtime.now().Add(updateGuardHealthTimeout).UTC()
+			next.DeadlineUnix = next.Deadline.Unix()
+		},
+	)
 	if err != nil {
-		return finishUpdateGuardFailureCurrent(ctx, store, *session, updatePhaseTerminalFailure, "state_failed", runtime)
+		return finishUpdateGuardFailureCurrent(
+			ctx, store, *session, updatePhaseTerminalFailure, "state_failed", runtime,
+		)
 	}
 	session = ready
 	installing, err := store.transitionUpdateSession(

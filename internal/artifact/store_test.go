@@ -214,7 +214,7 @@ func TestStoreValidateIDAndOpenRejectTraversal(t *testing.T) {
 	}
 
 	for _, id := range []string{
-		"", "../x.png", "dir/x.png", `dir\\x.png`, "img_nothex.png", "img_" + strings.Repeat("a", 64) + ".svg",
+		"", "../x.png", "dir/x.png", `dir\\x.png`, "img_nothex.png", "img_" + strings.Repeat("a", 64) + ".xml",
 	} {
 		if err = ValidateID(id); !errors.Is(err, errInvalidID) {
 			t.Fatalf("ValidateID(%q) = %v, want ErrInvalidID", id, err)

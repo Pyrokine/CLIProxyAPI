@@ -26,7 +26,9 @@ func TestBuildUpdateCompatibilityDeclaresClientAttemptSupport(t *testing.T) {
 	}
 	for _, handler := range []*Handler{nil, {}} {
 		for _, target := range []string{"v8.0.23-aug.3", "v8.0.23-aug.5"} {
-			compat := handler.buildUpdateCompatibilityFromConfig(context.Background(), target, &config.Config{UsageDataDir: dir})
+			compat := handler.buildUpdateCompatibilityFromConfig(
+				context.Background(), target, &config.Config{UsageDataDir: dir},
+			)
 			data, err := json.Marshal(compat)
 			if err != nil {
 				t.Fatal(err)
@@ -251,6 +253,7 @@ func TestUpdateHTTPClientRejectsNonHTTPSRedirect(t *testing.T) {
 	if client.CheckRedirect == nil {
 		t.Fatal("CheckRedirect is nil")
 	}
+	//goland:noinspection HttpUrlsUsage
 	req, err := http.NewRequest(http.MethodGet, "http://github.com/Pyrokine/CLIProxyAPI/releases", nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)

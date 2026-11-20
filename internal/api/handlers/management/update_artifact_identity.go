@@ -18,10 +18,16 @@ type updateArtifactIdentity struct {
 	Arch           string `json:"arch"`
 	Legacy         bool   `json:"legacy,omitempty"`
 	UpdateProtocol string `json:"update_protocol,omitempty"`
+	DataFormats    string `json:"data_formats,omitempty"`
 }
 
 var updateCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var updateLinkerIdentityPattern = regexp.MustCompile(`(?:^|\s)-X(?:=|\s+)["']?(main\.(?:version|commit)|github\.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo\.UpdateProtocol)=([^\s"']+)`)
+
+var updateLinkerIdentityPattern = regexp.MustCompile(
+	`(?:^|\s)-X(?:=|\s+)["']?(main\.(?:version|commit)|github\.com/Pyrokine` +
+		`/CLIProxyAPI/v6/internal/buildinfo\.(?:UpdateProtocol|DataFormats))=([` +
+		`^\s"']+)`,
+)
 
 // inspectUpdateArtifact 直接读取 Go 构建元信息，不执行下载的候选程序
 func inspectUpdateArtifact(data []byte, currentVersion, currentCommit string) (updateArtifactIdentity, error) {
@@ -51,6 +57,8 @@ func inspectUpdateArtifact(data []byte, currentVersion, currentCommit string) (u
 					}
 				case "github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.UpdateProtocol":
 					identity.UpdateProtocol = match[2]
+				case "github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo.DataFormats":
+					identity.DataFormats = match[2]
 				}
 			}
 		}

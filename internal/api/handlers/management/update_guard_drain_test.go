@@ -26,10 +26,12 @@ func TestUpdateGuardDrainWaitsAndRejectsAConfirmationFromAnotherProcess(t *testi
 	server := httptest.NewServer(engine)
 	defer server.Close()
 	session, token := prepareArmedUpdateGuardSession(t, store, server.URL, time.Now(), "v1.0.0", "v1.0.1")
-	current, err := store.transitionUpdateSession(context.Background(), session.AttemptID, updatePhaseLaunching, func(next *updateGuardSession) {
-		next.Phase = updatePhaseDraining
-		next.OriginInstance = admission.InstanceID()
-	})
+	current, err := store.transitionUpdateSession(
+		context.Background(), session.AttemptID, updatePhaseLaunching, func(next *updateGuardSession) {
+			next.Phase = updatePhaseDraining
+			next.OriginInstance = admission.InstanceID()
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,10 +75,12 @@ func TestUpdateGuardDrainWaitsAndRejectsAConfirmationFromAnotherProcess(t *testi
 	if drained.err != nil || !admission.Confirm(drained.confirmation) {
 		t.Fatalf("drain result: %#v", drained)
 	}
-	ready, err := store.transitionUpdateSession(context.Background(), session.AttemptID, updatePhaseDraining, func(next *updateGuardSession) {
-		next.Phase = updatePhaseInstalling
-		next.DrainConfirmation = &drained.confirmation
-	})
+	ready, err := store.transitionUpdateSession(
+		context.Background(), session.AttemptID, updatePhaseDraining, func(next *updateGuardSession) {
+			next.Phase = updatePhaseInstalling
+			next.DrainConfirmation = &drained.confirmation
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,48 +96,60 @@ func TestUpdateGuardDrainWaitsAndRejectsAConfirmationFromAnotherProcess(t *testi
 
 func TestUpdateGuardDrainFailureNeverInstallsOrRestarts(t *testing.T) {
 	for _, stage := range []string{"timeout", "wrong_instance", "expired", "confirm_failed"} {
-		t.Run(stage, func(t *testing.T) {
-			store := openUpdateGuardTestStore(t)
-			clock := &updateGuardTestClock{current: time.Now().UTC()}
-			session, _ := prepareArmedUpdateGuardSession(t, store, "http://127.0.0.1:8317", clock.now(), "v1.0.0", "v1.0.1")
-			runtime := updateGuardTestRuntime(clock, session.ExecutablePath)
-			originalDrain := runtime.drain
-			installs, restarts, resumes := 0, 0, 0
-			runtime.install = func(updateGuardSession) error { installs++; return nil }
-			runtime.runCommand = func(_ context.Context, _ string, args ...string) error {
-				if len(args) > 0 && args[0] == "restart" {
-					restarts++
+		t.Run(
+			stage, func(t *testing.T) {
+				store := openUpdateGuardTestStore(t)
+				clock := &updateGuardTestClock{current: time.Now().UTC()}
+				session, _ := prepareArmedUpdateGuardSession(
+					t, store, "http://127.0.0.1:8317", clock.now(), "v1.0.0", "v1.0.1",
+				)
+				runtime := updateGuardTestRuntime(clock, session.ExecutablePath)
+				originalDrain := runtime.drain
+				installs, restarts, resumes := 0, 0, 0
+				runtime.install = func(updateGuardSession) error { installs++; return nil }
+				runtime.runCommand = func(_ context.Context, _ string, args ...string) error {
+					if len(args) > 0 && args[0] == "restart" {
+						restarts++
+					}
+					return nil
 				}
-				return nil
-			}
-			runtime.drain = func(ctx context.Context, current updateGuardSession, token, action string) (executionregistry.DrainConfirmation, error) {
-				if action == "resume" {
-					resumes++
-					return executionregistry.DrainConfirmation{}, nil
+				runtime.drain = func(
+					ctx context.Context,
+					current updateGuardSession,
+					token, action string,
+				) (executionregistry.DrainConfirmation, error) {
+					if action == "resume" {
+						resumes++
+						return executionregistry.DrainConfirmation{}, nil
+					}
+					if stage == "timeout" {
+						return executionregistry.DrainConfirmation{}, context.DeadlineExceeded
+					}
+					if stage == "confirm_failed" && action == "confirm" {
+						return executionregistry.DrainConfirmation{}, errors.New("service restarted")
+					}
+					confirmation, err := originalDrain(ctx, current, token, action)
+					if stage == "wrong_instance" {
+						confirmation.InstanceID = "previous-process"
+					}
+					if stage == "expired" {
+						confirmation.Deadline = clock.now().Add(-time.Second)
+					}
+					return confirmation, err
 				}
-				if stage == "timeout" {
-					return executionregistry.DrainConfirmation{}, context.DeadlineExceeded
+				err := runUpdateGuard(context.Background(), store, session.AttemptID, runtime)
+				if err == nil || !strings.Contains(
+					err.Error(), "drain_failed",
+				) || installs != 0 || restarts != 0 || resumes != 1 {
+					t.Fatalf(
+						"failed guard: err=%v installs=%d restarts=%d resumes=%d", err, installs, restarts, resumes,
+					)
 				}
-				if stage == "confirm_failed" && action == "confirm" {
-					return executionregistry.DrainConfirmation{}, errors.New("service restarted")
+				if data, err := os.ReadFile(session.ExecutablePath); err != nil || string(data) != "old-binary" {
+					t.Fatalf("running executable changed: %q, %v", data, err)
 				}
-				confirmation, err := originalDrain(ctx, current, token, action)
-				if stage == "wrong_instance" {
-					confirmation.InstanceID = "previous-process"
-				}
-				if stage == "expired" {
-					confirmation.Deadline = clock.now().Add(-time.Second)
-				}
-				return confirmation, err
-			}
-			err := runUpdateGuard(context.Background(), store, session.AttemptID, runtime)
-			if err == nil || !strings.Contains(err.Error(), "drain_failed") || installs != 0 || restarts != 0 || resumes != 1 {
-				t.Fatalf("failed guard: err=%v installs=%d restarts=%d resumes=%d", err, installs, restarts, resumes)
-			}
-			if data, err := os.ReadFile(session.ExecutablePath); err != nil || string(data) != "old-binary" {
-				t.Fatalf("running executable changed: %q, %v", data, err)
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -143,7 +159,11 @@ func TestUpdateGuardRejectsCandidateChangedAfterDrain(t *testing.T) {
 	session, _ := prepareArmedUpdateGuardSession(t, store, "http://127.0.0.1:8317", clock.now(), "v1.0.0", "v1.0.1")
 	runtime := updateGuardTestRuntime(clock, session.ExecutablePath)
 	originalDrain := runtime.drain
-	runtime.drain = func(ctx context.Context, current updateGuardSession, token, action string) (executionregistry.DrainConfirmation, error) {
+	runtime.drain = func(
+		ctx context.Context,
+		current updateGuardSession,
+		token, action string,
+	) (executionregistry.DrainConfirmation, error) {
 		if action == "confirm" {
 			if err := os.WriteFile(current.CandidatePath, []byte("changed-candidate"), 0o755); err != nil {
 				return executionregistry.DrainConfirmation{}, err
@@ -153,7 +173,9 @@ func TestUpdateGuardRejectsCandidateChangedAfterDrain(t *testing.T) {
 	}
 	restarts := 0
 	runtime.runCommand = func(context.Context, string, ...string) error { restarts++; return nil }
-	if err := runUpdateGuard(context.Background(), store, session.AttemptID, runtime); err == nil || !strings.Contains(err.Error(), "install_failed") {
+	if err := runUpdateGuard(
+		context.Background(), store, session.AttemptID, runtime,
+	); err == nil || !strings.Contains(err.Error(), "install_failed") {
 		t.Fatalf("modified candidate accepted: %v", err)
 	}
 	if restarts != 0 {
@@ -168,11 +190,13 @@ func TestExpiredUpdateDoesNotUseVersionAloneAsSuccessEvidence(t *testing.T) {
 	store := openUpdateGuardTestStore(t)
 	clock := &updateGuardTestClock{current: time.Now().UTC()}
 	session, _ := prepareArmedUpdateGuardSession(t, store, "http://127.0.0.1:8317", clock.now(), "v1.0.0", "v1.0.1")
-	_, err := store.transitionUpdateSession(context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
-		next.Phase = updatePhaseHealthCheck
-		next.Deadline = clock.now().Add(-time.Second)
-		next.DeadlineUnix = next.Deadline.Unix()
-	})
+	_, err := store.transitionUpdateSession(
+		context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
+			next.Phase = updatePhaseHealthCheck
+			next.Deadline = clock.now().Add(-time.Second)
+			next.DeadlineUnix = next.Deadline.Unix()
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,13 +224,15 @@ func TestLegacyUpdateRecoveryDoesNotClaimCompleteIdentityVerification(t *testing
 	previousVersion := buildinfo.Version
 	buildinfo.Version = session.PreviousVersion
 	t.Cleanup(func() { buildinfo.Version = previousVersion })
-	legacy, err := store.transitionUpdateSession(context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
-		next.SchemaVersion = 1
-		next.Phase = updatePhaseInstalling
-		next.BackupPath = next.ExecutablePath + ".bak"
-		next.Deadline = clock.now().Add(-time.Second)
-		next.DeadlineUnix = next.Deadline.Unix()
-	})
+	legacy, err := store.transitionUpdateSession(
+		context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
+			next.SchemaVersion = 1
+			next.Phase = updatePhaseInstalling
+			next.BackupPath = next.ExecutablePath + ".bak"
+			next.Deadline = clock.now().Add(-time.Second)
+			next.DeadlineUnix = next.Deadline.Unix()
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,10 +249,13 @@ func TestLegacyUpdateRecoveryDoesNotClaimCompleteIdentityVerification(t *testing
 		t.Fatal(err)
 	}
 	current, err := store.loadUpdateSession(context.Background())
-	if err != nil || current == nil || current.Phase != updatePhaseRolledBack || current.ResultCode != "legacy_recovery_unverified" {
+	if err != nil || current == nil || current.Phase != updatePhaseRolledBack ||
+		current.ResultCode != "legacy_recovery_unverified" {
 		t.Fatalf("legacy recovery result: %#v, %v", current, err)
 	}
-	if status := updateStateFromSession(*current); status.status != "error" || !strings.Contains(status.message, "manual") {
+	if status := updateStateFromSession(*current); status.status != "error" || !strings.Contains(
+		status.message, "manual",
+	) {
 		t.Fatalf("legacy recovery hid missing identity evidence: status=%s message=%s", status.status, status.message)
 	}
 }
@@ -242,19 +271,26 @@ func TestLegacyGuardHealthRestoresAdmissionOnlyAfterGuardExit(t *testing.T) {
 	server := httptest.NewServer(engine)
 	defer server.Close()
 	clock := &updateGuardTestClock{current: time.Now().UTC()}
-	session, token := prepareArmedUpdateGuardSession(t, store, server.URL, clock.now(), "v8.0.23-aug.3", "v8.0.23-aug.4")
-	legacy, err := store.transitionUpdateSession(ctx, session.AttemptID, session.Phase, func(next *updateGuardSession) {
-		next.SchemaVersion = 1
-		next.Phase = updatePhaseHealthCheck
-		next.OriginInstance = ""
-		next.BackupPath = next.ExecutablePath + ".bak"
-		next.PreviousIdentity = updateArtifactIdentity{}
-		next.TargetIdentity = updateArtifactIdentity{}
-	})
+	session, token := prepareArmedUpdateGuardSession(
+		t, store, server.URL, clock.now(), "v8.0.23-aug.3", "v8.0.23-aug.4",
+	)
+	legacy, err := store.transitionUpdateSession(
+		ctx, session.AttemptID, session.Phase, func(next *updateGuardSession) {
+			next.SchemaVersion = 1
+			next.Phase = updatePhaseHealthCheck
+			next.OriginInstance = ""
+			next.BackupPath = next.ExecutablePath + ".bak"
+			next.PreviousIdentity = updateArtifactIdentity{}
+			next.TargetIdentity = updateArtifactIdentity{}
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.db.ExecContext(ctx, "UPDATE state_items SET value=json_set(value, '$.schema_version', 1) WHERE key=?", updateHealthTokenStateKey); err != nil {
+	if _, err = store.db.ExecContext(
+		ctx, "UPDATE state_items SET value=json_set(value, '$.schema_version', 1) WHERE key=?",
+		updateHealthTokenStateKey,
+	); err != nil {
 		t.Fatal(err)
 	}
 	previousVersion := buildinfo.Version
@@ -270,13 +306,17 @@ func TestLegacyGuardHealthRestoresAdmissionOnlyAfterGuardExit(t *testing.T) {
 	if err := verifyUpdateGuardHealth(ctx, *legacy, token, legacy.TargetVersion, runtime); err != nil {
 		t.Fatalf("legacy guard health contract failed: %v", err)
 	}
-	if _, err := store.transitionUpdateSession(ctx, session.AttemptID, legacy.Phase, func(next *updateGuardSession) {
-		next.Phase = updatePhaseSucceeded
-	}); err != nil {
+	if _, err := store.transitionUpdateSession(
+		ctx, session.AttemptID, legacy.Phase, func(next *updateGuardSession) {
+			next.Phase = updatePhaseSucceeded
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
 	runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) { return false, nil }
-	if err := handler.reconcileExpiredUpdate(ctx, runtime); !errors.Is(err, errUpdateInProgress) || !admission.Paused(session.AttemptID) {
+	if err := handler.reconcileExpiredUpdate(ctx, runtime); !errors.Is(
+		err, errUpdateInProgress,
+	) || !admission.Paused(session.AttemptID) {
 		t.Fatalf("resumed while the legacy guard was still active: %v", err)
 	}
 	runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) {
@@ -313,11 +353,13 @@ func TestInstallingUpdateKeepsAdmissionPausedAfterConfirmationExpires(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := store.transitionUpdateSession(context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
-		next.Phase = updatePhaseInstalling
-		next.OriginInstance = admission.InstanceID()
-		next.DrainConfirmation = &confirmation
-	})
+	current, err := store.transitionUpdateSession(
+		context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
+			next.Phase = updatePhaseInstalling
+			next.OriginInstance = admission.InstanceID()
+			next.DrainConfirmation = &confirmation
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,74 +382,100 @@ func TestFailedRollbackRetainsItsBackupAndRecoverySession(t *testing.T) {
 	if err := installUpdateCandidate(session); err != nil {
 		t.Fatal(err)
 	}
-	_, err := store.transitionUpdateSession(context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
-		next.Phase = updatePhaseTerminalFailure
-		next.ResultCode = "rollback_failed"
-	})
+	_, err := store.transitionUpdateSession(
+		context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
+			next.Phase = updatePhaseTerminalFailure
+			next.ResultCode = "rollback_failed"
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	handler := &Handler{stateStore: store, inferenceAdmission: executionregistry.NewAdmission()}
-	if err := handler.reconcileStaleUpdateSession(context.Background(), updateGuardTestRuntime(clock, session.ExecutablePath)); !errors.Is(err, errUpdateRecoveryRequired) {
+	if err := handler.reconcileStaleUpdateSession(
+		context.Background(), updateGuardTestRuntime(clock, session.ExecutablePath),
+	); !errors.Is(err, errUpdateRecoveryRequired) {
 		t.Errorf("recovery did not block a new attempt explicitly: %v", err)
 	}
 	if data, err := os.ReadFile(session.BackupPath); err != nil || string(data) != "old-binary" {
 		t.Fatalf("recovery backup changed: %q, %v", data, err)
 	}
 	current, err := store.loadUpdateSession(context.Background())
-	if err != nil || current == nil || current.AttemptID != session.AttemptID || current.ResultCode != "rollback_failed" {
+	if err != nil || current == nil || current.AttemptID != session.AttemptID ||
+		current.ResultCode != "rollback_failed" {
 		t.Fatalf("recovery identity was discarded: %#v, %v", current, err)
 	}
 }
 
 func TestNewHandlerRestoresInstallationPauseBeforeReturning(t *testing.T) {
-	for _, phase := range []string{updatePhaseInstalling, updatePhaseRestarting, updatePhaseHealthCheck,
-		updatePhaseRollingBack, updatePhaseRollbackRestarting, updatePhaseRollbackHealthCheck, updatePhaseTerminalFailure} {
-		t.Run(phase, func(t *testing.T) {
-			store := openUpdateGuardTestStore(t)
-			clock := &updateGuardTestClock{current: time.Now().UTC()}
-			session, _ := prepareArmedUpdateGuardSession(t, store, "http://127.0.0.1:8317", clock.now(), "v1.0.0", "v1.0.1")
-			_, err := store.transitionUpdateSession(context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
-				next.Phase = phase
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			admission := executionregistry.NewAdmission()
-			handler := NewHandler(&config.Config{}, filepath.Join(filepath.Dir(store.path), "config.yaml"), nil, WithInferenceAdmission(admission))
-			defer func() { _ = handler.Close() }()
-			_, release, err := admission.Acquire(context.Background(), nil)
-			release()
-			if !errors.Is(err, executionregistry.ErrInferencePaused) {
-				t.Fatalf("new process accepted inference during %s", phase)
-			}
-			_, err = store.transitionUpdateSession(context.Background(), session.AttemptID, phase, func(next *updateGuardSession) {
-				next.Phase = updatePhaseSucceeded
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			runtime := updateGuardTestRuntime(clock, session.ExecutablePath)
-			runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) { return false, nil }
-			if err := handler.reconcileExpiredUpdate(context.Background(), runtime); !errors.Is(err, errUpdateInProgress) || !admission.Paused(session.AttemptID) {
-				t.Fatalf("guard still running or restart queued: paused=%t err=%v", admission.Paused(session.AttemptID), err)
-			}
-			runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) {
-				return false, errors.New("systemd unavailable")
-			}
-			if err := handler.reconcileExpiredUpdate(context.Background(), runtime); err == nil || !admission.Paused(session.AttemptID) {
-				t.Fatalf("unknown systemd state resumed inference: %v", err)
-			}
-			runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) { return true, nil }
-			if err := handler.reconcileExpiredUpdate(context.Background(), runtime); err != nil {
-				t.Fatal(err)
-			}
-			_, release, err = admission.Acquire(context.Background(), nil)
-			release()
-			if err != nil {
-				t.Fatalf("completed guard did not release startup pause: %v", err)
-			}
-		})
+	for _, phase := range []string{
+		updatePhaseInstalling, updatePhaseRestarting, updatePhaseHealthCheck,
+		updatePhaseRollingBack, updatePhaseRollbackRestarting, updatePhaseRollbackHealthCheck,
+		updatePhaseTerminalFailure,
+	} {
+		t.Run(
+			phase, func(t *testing.T) {
+				store := openUpdateGuardTestStore(t)
+				clock := &updateGuardTestClock{current: time.Now().UTC()}
+				session, _ := prepareArmedUpdateGuardSession(
+					t, store, "http://127.0.0.1:8317", clock.now(), "v1.0.0", "v1.0.1",
+				)
+				_, err := store.transitionUpdateSession(
+					context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
+						next.Phase = phase
+					},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				admission := executionregistry.NewAdmission()
+				handler := NewHandler(
+					&config.Config{}, filepath.Join(filepath.Dir(store.path), "config.yaml"), nil,
+					WithInferenceAdmission(admission),
+				)
+				defer func() { _ = handler.Close() }()
+				_, release, err := admission.Acquire(context.Background(), nil)
+				release()
+				if !errors.Is(err, executionregistry.ErrInferencePaused) {
+					t.Fatalf("new process accepted inference during %s", phase)
+				}
+				_, err = store.transitionUpdateSession(
+					context.Background(), session.AttemptID, phase, func(next *updateGuardSession) {
+						next.Phase = updatePhaseSucceeded
+					},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				runtime := updateGuardTestRuntime(clock, session.ExecutablePath)
+				runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) { return false, nil }
+				if err := handler.reconcileExpiredUpdate(context.Background(), runtime); !errors.Is(
+					err, errUpdateInProgress,
+				) || !admission.Paused(session.AttemptID) {
+					t.Fatalf(
+						"guard still running or restart queued: paused=%t err=%v", admission.Paused(session.AttemptID),
+						err,
+					)
+				}
+				runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) {
+					return false, errors.New("systemd unavailable")
+				}
+				if err := handler.reconcileExpiredUpdate(
+					context.Background(), runtime,
+				); err == nil || !admission.Paused(session.AttemptID) {
+					t.Fatalf("unknown systemd state resumed inference: %v", err)
+				}
+				runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) { return true, nil }
+				if err := handler.reconcileExpiredUpdate(context.Background(), runtime); err != nil {
+					t.Fatal(err)
+				}
+				_, release, err = admission.Acquire(context.Background(), nil)
+				release()
+				if err != nil {
+					t.Fatalf("completed guard did not release startup pause: %v", err)
+				}
+			},
+		)
 	}
 }
 
@@ -429,12 +497,14 @@ func TestUpdateUnitQuiescenceRequiresNoPendingJobs(t *testing.T) {
 		{"missing job", "LoadState=loaded\nActiveState=inactive\n", true, false, true},
 		{"missing state", "LoadState=loaded\nJob=\n", true, false, true},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			ready, err := updateUnitQuiescent(test.output, test.guard)
-			if ready != test.ready || (err != nil) != test.invalid {
-				t.Fatalf("ready=%t err=%v", ready, err)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				ready, err := updateUnitQuiescent(test.output, test.guard)
+				if ready != test.ready || (err != nil) != test.invalid {
+					t.Fatalf("ready=%t err=%v", ready, err)
+				}
+			},
+		)
 	}
 }
 
@@ -443,10 +513,12 @@ func TestUpdateDrainRequiresDirectLoopbackAndItsAttemptToken(t *testing.T) {
 	admission := executionregistry.NewAdmission()
 	handler := &Handler{stateStore: store, inferenceAdmission: admission}
 	session, token := prepareArmedUpdateGuardSession(t, store, "http://127.0.0.1:8317", time.Now(), "v1.0.0", "v1.0.1")
-	_, err := store.transitionUpdateSession(context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
-		next.Phase = updatePhaseDraining
-		next.OriginInstance = admission.InstanceID()
-	})
+	_, err := store.transitionUpdateSession(
+		context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
+			next.Phase = updatePhaseDraining
+			next.OriginInstance = admission.InstanceID()
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +532,10 @@ func TestUpdateDrainRequiresDirectLoopbackAndItsAttemptToken(t *testing.T) {
 		{"127.0.0.1:1234", "wrong", http.StatusUnauthorized},
 		{"127.0.0.1:1234", "", http.StatusUnauthorized},
 	} {
-		request := httptest.NewRequest(http.MethodPost, updateDrainPath, strings.NewReader(`{"attempt_id":"`+session.AttemptID+`","action":"wait"}`))
+		request := httptest.NewRequest(
+			http.MethodPost, updateDrainPath,
+			strings.NewReader(`{"attempt_id":"`+session.AttemptID+`","action":"wait"}`),
+		)
 		request.RemoteAddr = test.peer
 		if test.peer != "127.0.0.1:1234" {
 			request.Header.Set("X-Forwarded-For", "127.0.0.1")

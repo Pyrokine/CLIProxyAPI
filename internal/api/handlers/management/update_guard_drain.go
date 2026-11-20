@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -87,6 +88,13 @@ func (h *Handler) PostUpdateDrain(c *gin.Context) {
 			return
 		}
 	case "confirm":
+		if len(session.DataFormats) > 0 {
+			formats, err := h.updateDataReadiness(c.Request.Context())
+			if err != nil || !maps.Equal(formats, session.DataFormats) {
+				c.AbortWithStatus(http.StatusServiceUnavailable)
+				return
+			}
+		}
 		if session.Phase != updatePhaseInstalling || h.inferenceAdmission.InstanceID() != session.OriginInstance ||
 			session.DrainConfirmation == nil || !h.inferenceAdmission.Commit(*session.DrainConfirmation) {
 			c.AbortWithStatus(http.StatusConflict)
@@ -120,7 +128,9 @@ func requestUpdateDrain(
 	if err != nil {
 		return executionregistry.DrainConfirmation{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, session.HealthBaseURL+updateDrainPath, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, session.HealthBaseURL+updateDrainPath, bytes.NewReader(body),
+	)
 	if err != nil {
 		return executionregistry.DrainConfirmation{}, err
 	}
@@ -133,7 +143,9 @@ func requestUpdateDrain(
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxUpdateHealthResponseBytes))
-		return executionregistry.DrainConfirmation{}, fmt.Errorf("inference drain %s returned status %d", action, response.StatusCode)
+		return executionregistry.DrainConfirmation{}, fmt.Errorf(
+			"inference drain %s returned status %d", action, response.StatusCode,
+		)
 	}
 	if action == "resume" {
 		return executionregistry.DrainConfirmation{}, nil

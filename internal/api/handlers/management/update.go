@@ -210,8 +210,11 @@ func updateStateFromSession(session updateGuardSession) updateState {
 		status = "error"
 		message = "Update failed"
 	}
-	if session.ResultCode == "legacy_recovery_unverified" {
+	switch session.ResultCode {
+	case "legacy_recovery_unverified":
 		message = "Legacy update recovery requires manual executable identity verification"
+	case "data_compatibility_failed":
+		message = "Database compatibility check failed; review the database and target version before updating"
 	}
 	return updateState{
 		status:    status,
@@ -287,7 +290,9 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 		} else if errors.Is(err, errUpdateRecoveryRequired) {
 			status = http.StatusConflict
 			code = "update_recovery_required"
-			message = "Previous update recovery is incomplete; verify the retained backup before starting another update"
+			message = "Previous update recovery is incomplete; verify the retained backup " +
+				"before starting another " +
+				"update"
 		}
 		c.JSON(status, gin.H{"error": code, "message": message})
 		return
@@ -301,6 +306,8 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 	}
 
 	go h.performUpdate(repo, proxyURL, session)
+	RecordMutationEffect(c.Request.Context(), "task.queued", "task")
+	CompleteMutation(c.Request.Context())
 
 	c.JSON(
 		http.StatusAccepted,
@@ -434,6 +441,15 @@ func (h *Handler) performUpdate(repo, proxyURL string, session updateGuardSessio
 		return
 	}
 	session.TargetIdentity = identity
+	session.DataFormats, err = h.updateDataReadiness(ctx)
+	if err != nil {
+		h.failUpdateBeforeGuard(session, updatePhasePreparing, "data_compatibility_failed", 85, err)
+		return
+	}
+	if err = validateUpdateDataFormats(session); err != nil {
+		h.failUpdateBeforeGuard(session, updatePhasePreparing, "data_compatibility_failed", 85, err)
+		return
+	}
 	session.CandidatePath = updateCandidatePath(session.ExecutablePath, session.AttemptID)
 	now = time.Now().UTC()
 	updated, err = h.stateStore.transitionUpdateSession(
@@ -443,6 +459,7 @@ func (h *Handler) performUpdate(repo, proxyURL string, session updateGuardSessio
 		func(next *updateGuardSession) {
 			next.CandidatePath = session.CandidatePath
 			next.TargetIdentity = session.TargetIdentity
+			next.DataFormats = session.DataFormats
 			next.Percent = 85
 			next.UpdatedAt = now
 		},
@@ -462,7 +479,13 @@ func (h *Handler) performUpdate(repo, proxyURL string, session updateGuardSessio
 		h.failUpdateBeforeGuard(session, updatePhasePreparing, "state_failed", 90, err)
 		return
 	}
-	setSelfUpdate("replacing", "Starting independent update guard...", session.TargetVersion, session.AttemptID, 95)
+	setSelfUpdate(
+		"replacing",
+		"Starting independent update guard...",
+		session.TargetVersion,
+		session.AttemptID,
+		95,
+	)
 	launchCtx, launchCancel := context.WithTimeout(context.Background(), updateGuardClaimTimeout+5*time.Second)
 	err = launchUpdateGuard(launchCtx, h.stateStore, session, realUpdateGuardRuntime())
 	launchCancel()
@@ -507,7 +530,13 @@ func (h *Handler) failUpdateBeforeGuard(
 		h.attachUpdateFailure(session, updatePhaseError, resultCode, now)
 	}
 	removeCandidateErr := removeUpdateCandidate(session)
-	setSelfUpdate("error", normalizeUpdateResultCode(resultCode), session.TargetVersion, session.AttemptID, percent)
+	setSelfUpdate(
+		"error",
+		normalizeUpdateResultCode(resultCode),
+		session.TargetVersion,
+		session.AttemptID,
+		percent,
+	)
 	log.WithFields(
 		log.Fields{
 			"attempt_id":  session.AttemptID,
@@ -672,7 +701,8 @@ func (h *Handler) fetchRelease(
 	var identity struct {
 		SHA string `json:"sha"`
 	}
-	if err = json.Unmarshal(commitBody, &identity); err != nil || !updateCommitPattern.MatchString(identity.SHA) {
+	if err = json.Unmarshal(commitBody, &identity); err != nil ||
+		!updateCommitPattern.MatchString(identity.SHA) {
 		return nil, fmt.Errorf("release tag does not resolve to a full commit identity")
 	}
 	release.Commit = identity.SHA
@@ -758,7 +788,7 @@ func (h *Handler) tryAutoUpdateCPA(ctx context.Context, cfg *config.Config) {
 	if h == nil || h.stateStore == nil || cfg == nil {
 		return
 	}
-	if !cfg.RemoteManagement.AutoCheckUpdate || !cfg.RemoteManagement.AutoUpdateCPA {
+	if !cfg.RemoteManagement.AutoCheckUpdate {
 		return
 	}
 	current := snapshotSelfUpdate()
@@ -773,6 +803,9 @@ func (h *Handler) tryAutoUpdateCPA(ctx context.Context, cfg *config.Config) {
 	latest, err := h.fetchLatestReleaseVersion(ctx, repo, proxyURL)
 	if err != nil {
 		log.Warnf("cpa auto-update: fetch latest release failed: %v", err)
+		return
+	}
+	if !cfg.RemoteManagement.AutoUpdateCPA {
 		return
 	}
 	if latest == "" || strings.EqualFold(strings.TrimSpace(latest), buildinfo.Version) {
@@ -831,7 +864,10 @@ func (h *Handler) fetchLatestReleaseVersion(ctx context.Context, repo string, pr
 	return version, nil
 }
 
-func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion string) updateCompatibilityResponse {
+func (h *Handler) buildUpdateCompatibility(
+	ctx context.Context,
+	targetVersion string,
+) updateCompatibilityResponse {
 	return h.buildUpdateCompatibilityFromConfig(ctx, targetVersion, h.configSnapshot())
 }
 
@@ -890,24 +926,35 @@ func (h *Handler) buildUpdateCompatibilityFromConfig(
 		if info, err := os.Stat(compat.Usage.DBPath); err == nil && !info.IsDir() {
 			compat.Usage.DBExists = true
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			compat.Compatible = false
+			compat.Usage.DBSizeBytes = -1
 			compat.Warnings = append(compat.Warnings, fmt.Sprintf("failed to stat usage db: %v", err))
 		}
 	}
 	if h.usagePersister == nil {
 		if compat.Usage.DBExists {
 			compat.Compatible = false
-			compat.Warnings = append(compat.Warnings, "usage db exists but persister is unavailable in this process")
+			compat.Warnings = append(
+				compat.Warnings,
+				"usage db exists but persister is unavailable in this process",
+			)
 		}
 		return compat
 	}
 
 	compat.Usage.PersisterReady = h.usagePersister.IsReady()
-	compat.Usage.DBSizeBytes = h.usagePersister.DBSize()
+	sizeBytes, err := h.usagePersister.DBSizeWithError()
+	compat.Usage.DBSizeBytes = sizeBytes
+	if err != nil {
+		compat.Compatible = false
+		compat.Warnings = append(compat.Warnings, fmt.Sprintf("failed to read usage database size: %v", err))
+	}
 	if !compat.Usage.PersisterReady {
 		if compat.Usage.DBExists {
 			compat.Compatible = false
 			compat.Warnings = append(
-				compat.Warnings, "usage persister is not ready; update would hide schema compatibility failures",
+				compat.Warnings,
+				"usage persister is not ready; update would hide schema compatibility failures",
 			)
 		}
 		return compat
@@ -963,7 +1010,10 @@ func expectedArchiveAssetNames(version string) []string {
 	return []string{fmt.Sprintf("CLIProxyAPI_%s_%s_%s.%s", normalizedVersion, goos, goarch, format), baseName}
 }
 
-func findReleaseAssets(assets []githubReleaseAsset, archiveNames []string) (*githubReleaseAsset, *githubReleaseAsset) {
+func findReleaseAssets(
+	assets []githubReleaseAsset,
+	archiveNames []string,
+) (*githubReleaseAsset, *githubReleaseAsset) {
 	var archiveAsset *githubReleaseAsset
 	var checksumAsset *githubReleaseAsset
 	for i := range assets {
@@ -1094,7 +1144,11 @@ func newUpdateHTTPClient(proxyURL string) *http.Client {
 	return client
 }
 
-func fetchExpectedHash(ctx context.Context, client *http.Client, checksumURL, assetName string) (string, error) {
+func fetchExpectedHash(
+	ctx context.Context,
+	client *http.Client,
+	checksumURL, assetName string,
+) (string, error) {
 	body, err := githubGet(ctx, client, checksumURL)
 	if err != nil {
 		return "", err
@@ -1161,11 +1215,20 @@ func (h *Handler) PostPanelUpdate(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 	version := strings.TrimSpace(req.Version)
 
-	ok := managementasset.EnsureManagementHTML(c.Request.Context(), staticDir, proxyURL, panelRepo, version)
-	if !ok {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "update_failed", "message": "Failed to update management panel"})
+	published, errUpdate := managementasset.UpdateManagementHTMLWithResult(
+		c.Request.Context(), staticDir, proxyURL, panelRepo, version,
+	)
+	if errUpdate != nil {
+		c.JSON(
+			http.StatusBadGateway,
+			gin.H{"error": "update_failed", "message": "Failed to update management panel"},
+		)
 		return
 	}
 
+	if published {
+		RecordMutationEffect(c.Request.Context(), "update.persisted", "update")
+		CompleteMutation(c.Request.Context())
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "Management panel updated"})
 }

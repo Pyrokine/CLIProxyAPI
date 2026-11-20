@@ -12,7 +12,6 @@ import (
 )
 
 func TestAutoUpdateSkipReason(t *testing.T) {
-	disabled := true
 	tests := []struct {
 		name       string
 		cfg        *config.Config
@@ -50,15 +49,15 @@ func TestAutoUpdateSkipReason(t *testing.T) {
 			wantSkip:   true,
 		},
 		{
-			name: "auto update disabled",
+			name: "auto install disabled keeps checking",
 			cfg: &config.Config{
 				RemoteManagement: config.RemoteManagement{
 					AutoCheckUpdate:        true,
-					DisableAutoUpdatePanel: &disabled,
+					DisableAutoUpdatePanel: true,
 				},
 			},
-			wantReason: "auto-update-panel is false",
-			wantSkip:   true,
+			wantReason: "",
+			wantSkip:   false,
 		},
 		{
 			name: "enabled",
@@ -106,6 +105,7 @@ func TestDownloadAssetRejectsOversizedBody(t *testing.T) {
 }
 
 func TestFetchReleaseAssetUsesGitHubTokenOnlyForGitHubAPI(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	tests := []struct {
 		name        string
 		url         string
@@ -152,34 +152,37 @@ func TestFetchReleaseAssetUsesGitHubTokenOnlyForGitHubAPI(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GITHUB_TOKEN", tt.gitHubToken)
-			t.Setenv("GITSTORE_GIT_URL", "https://github.com/example/auth-store.git")
-			t.Setenv("GITSTORE_GIT_TOKEN", "git-store-token")
-			t.Setenv("GH_TOKEN", "gh-token")
-			client := &http.Client{
-				Transport: roundTripFunc(
-					func(request *http.Request) (*http.Response, error) {
-						if got := request.Header.Get("Authorization"); got != tt.wantAuth {
-							t.Fatalf("Authorization = %q, want %q", got, tt.wantAuth)
-						}
-						return &http.Response{
-							StatusCode: http.StatusOK,
-							Header:     make(http.Header),
-							Body: io.NopCloser(
-								strings.NewReader(
-									`{"assets":[{"name":"management.html","browser_download_url":"https://downloads.example/management.html","digest":"sha256:abc"}]}`,
+		t.Run(
+			tt.name, func(t *testing.T) {
+				t.Setenv("GITHUB_TOKEN", tt.gitHubToken)
+				t.Setenv("GITSTORE_GIT_URL", "https://github.com/example/auth-store.git")
+				t.Setenv("GITSTORE_GIT_TOKEN", "git-store-token")
+				t.Setenv("GH_TOKEN", "gh-token")
+				client := &http.Client{
+					Transport: roundTripFunc(
+						func(request *http.Request) (*http.Response, error) {
+							if got := request.Header.Get("Authorization"); got != tt.wantAuth {
+								t.Fatalf("Authorization = %q, want %q", got, tt.wantAuth)
+							}
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     make(http.Header),
+								Body: io.NopCloser(
+									strings.NewReader(
+										`{"assets":[{"name":"management.html","browser_download_url":"https://d` +
+											`ownloads.example/management.html","digest":"sha256:abc"}]}`,
+									),
 								),
-							),
-							Request: request,
-						}, nil
-					},
-				),
-			}
-			if _, _, errFetch := fetchReleaseAsset(context.Background(), client, tt.url); errFetch != nil {
-				t.Fatalf("fetchReleaseAsset() error = %v", errFetch)
-			}
-		})
+								Request: request,
+							}, nil
+						},
+					),
+				}
+				if _, _, errFetch := fetchReleaseAsset(context.Background(), client, tt.url); errFetch != nil {
+					t.Fatalf("fetchReleaseAsset() error = %v", errFetch)
+				}
+			},
+		)
 	}
 }
 
