@@ -18,48 +18,56 @@ func TestHandleDirectWebsocketUsesOAuthAndAppliesClientSecretSession(t *testing.
 	gin.SetMode(gin.TestMode)
 	upstreamRequest := make(chan *http.Request, 1)
 	upstreamUpdate := make(chan []byte, 1)
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-		connection, errUpgrade := upgrader.Upgrade(writer, request, nil)
-		if errUpgrade != nil {
-			return
-		}
-		defer func() { _ = connection.Close() }()
-		upstreamRequest <- request.Clone(request.Context())
-		_, update, errRead := connection.ReadMessage()
-		if errRead != nil {
-			return
-		}
-		upstreamUpdate <- append([]byte(nil), update...)
-		_ = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"session.created"}`))
-		_, _, _ = connection.ReadMessage()
-	}))
+	upstreamServer := httptest.NewServer(
+		http.HandlerFunc(
+			func(writer http.ResponseWriter, request *http.Request) {
+				upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+				connection, errUpgrade := upgrader.Upgrade(writer, request, nil)
+				if errUpgrade != nil {
+					return
+				}
+				defer func() { _ = connection.Close() }()
+				upstreamRequest <- request.Clone(request.Context())
+				_, update, errRead := connection.ReadMessage()
+				if errRead != nil {
+					return
+				}
+				upstreamUpdate <- append([]byte(nil), update...)
+				_ = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"session.created"}`))
+				_, _, _ = connection.ReadMessage()
+			},
+		),
+	)
 	defer upstreamServer.Close()
 
 	manager := auth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(&captureExecutor{})
-	registerCredential(t, manager, &auth.Auth{
-		ID:       "codex-oauth",
-		Provider: "codex",
-		Status:   auth.StatusActive,
-		Metadata: map[string]any{
-			"access_token": "oauth-token",
-			"account_id":   "account-123",
+	registerCredential(
+		t, manager, &auth.Auth{
+			ID:       "codex-oauth",
+			Provider: "codex",
+			Status:   auth.StatusActive,
+			Metadata: map[string]any{
+				"access_token": "oauth-token",
+				"account_id":   "account-123",
+			},
 		},
-	})
+	)
 	handler := NewHandler(manager, nil)
 	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
 	router := gin.New()
-	router.GET("/v1/realtime", func(c *gin.Context) {
-		c.Set("apiKey", "issuer-key")
-		c.Set("accessProvider", "config-inline")
-		c.Set(ClientSecretPrincipalContextKey, "sess_123")
-		c.Set(
-			ClientSecretSessionContextKey,
-			json.RawMessage(`{"type":"realtime","model":"gpt-live-1-codex","instructions":"help"}`),
-		)
-		c.Next()
-	}, handler.HandleRealtimeWebsocket)
+	router.GET(
+		"/v1/realtime", func(c *gin.Context) {
+			c.Set("apiKey", "issuer-key")
+			c.Set("accessProvider", "config-inline")
+			c.Set(ClientSecretPrincipalContextKey, "sess_123")
+			c.Set(
+				ClientSecretSessionContextKey,
+				json.RawMessage(`{"type":"realtime","model":"gpt-live-1-codex","instructions":"help"}`),
+			)
+			c.Next()
+		}, handler.HandleRealtimeWebsocket,
+	)
 	downstreamServer := httptest.NewServer(router)
 	defer downstreamServer.Close()
 
@@ -130,14 +138,16 @@ func TestHandleDirectWebsocketRejectsClientSecretModelMismatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := NewHandler(auth.NewManager(nil, nil, nil), nil)
 	router := gin.New()
-	router.GET("/v1/realtime", func(c *gin.Context) {
-		c.Set(
-			ClientSecretSessionContextKey,
-			json.RawMessage(`{"type":"realtime","model":"gpt-live-1-codex"}`),
-		)
-		c.Set(ClientSecretPrincipalContextKey, "sess_123")
-		c.Next()
-	}, handler.HandleRealtimeWebsocket)
+	router.GET(
+		"/v1/realtime", func(c *gin.Context) {
+			c.Set(
+				ClientSecretSessionContextKey,
+				json.RawMessage(`{"type":"realtime","model":"gpt-live-1-codex"}`),
+			)
+			c.Set(ClientSecretPrincipalContextKey, "sess_123")
+			c.Next()
+		}, handler.HandleRealtimeWebsocket,
+	)
 	request := httptest.NewRequest(http.MethodGet, "/v1/realtime?model=another-live-model", nil)
 	request.Header.Set("Connection", "Upgrade")
 	request.Header.Set("Upgrade", "websocket")
@@ -151,7 +161,8 @@ func TestHandleDirectWebsocketRejectsClientSecretModelMismatch(t *testing.T) {
 
 func TestRealtimeSessionUpdateRemovesServerOwnedFields(t *testing.T) {
 	update, errUpdate := realtimeSessionUpdate(
-		json.RawMessage(`{
+		json.RawMessage(
+			`{
 			"type":"realtime",
 			"model":"gpt-live-1-codex",
 			"id":"sess_1",
@@ -159,7 +170,8 @@ func TestRealtimeSessionUpdateRemovesServerOwnedFields(t *testing.T) {
 			"expires_at":123,
 			"client_secret":{"value":"secret"},
 			"instructions":"help"
-		}`),
+		}`,
+		),
 	)
 	if errUpdate != nil {
 		t.Fatalf("realtimeSessionUpdate() error = %v", errUpdate)

@@ -189,7 +189,8 @@ func filterCodexReasoningReplayTurnItems(inputItems []gjson.Result, items [][]by
 		itemType := strings.TrimSpace(inputItem.Get("type").String())
 		switch itemType {
 		case "reasoning":
-			if encryptedContent := strings.TrimSpace(inputItem.Get("encrypted_content").String()); encryptedContent != "" {
+			if encryptedContent := strings.TrimSpace(inputItem.Get("encrypted_content").String()); encryptedContent !=
+				"" {
 				existingReasoning[encryptedContent] = true
 			}
 		case "function_call_output", "custom_tool_call_output":

@@ -13,13 +13,16 @@ import (
 // Codex declares known integer-only tool arguments as JSON Schema numbers.
 // These paths need integer types when Codex clients use a non-Codex executor.
 var codexClientIntegerToolFields = map[string][]string{
-	"exec_command":                {"yield_time_ms", "max_output_tokens", "timeout_ms"},
-	"write_stdin":                 {"session_id", "yield_time_ms", "max_output_tokens"},
-	"sleep":                       {"duration_ms"},
-	"wait_agent":                  {"timeout_ms"},
-	"wait":                        {"yield_time_ms", "max_tokens"},
-	"tool_search":                 {"limit"},
-	"test_sync_tool":              {"sleep_before_ms", "sleep_after_ms", "participants", "timeout_ms", "barrier.properties.participants", "barrier.properties.timeout_ms"},
+	"exec_command": {"yield_time_ms", "max_output_tokens", "timeout_ms"},
+	"write_stdin":  {"session_id", "yield_time_ms", "max_output_tokens"},
+	"sleep":        {"duration_ms"},
+	"wait_agent":   {"timeout_ms"},
+	"wait":         {"yield_time_ms", "max_tokens"},
+	"tool_search":  {"limit"},
+	"test_sync_tool": {
+		"sleep_before_ms", "sleep_after_ms", "participants", "timeout_ms",
+		"barrier.properties.participants", "barrier.properties.timeout_ms",
+	},
 	"create_goal":                 {"token_budget"},
 	"get_channels":                {"limit"},
 	"list_threads":                {"limit", "max_chars_per_post"},
@@ -37,7 +40,12 @@ var codexClientIntegerToolFields = map[string][]string{
 	"notes__read_file":            {"start_line", "stop_line", "start_line.anyOf.0", "stop_line.anyOf.0"},
 	"notes__search_contents":      {"max_matches_per_file", "max_files"},
 	"image_gen__imagegen":         {"num_last_images_to_include"},
-	"web__run":                    {"search_query.items.properties.recency", "image_query.items.properties.recency", "open.items.properties.lineno", "click.items.properties.id", "screenshot.items.properties.pageno", "weather.items.properties.duration", "sports.items.properties.num_games"},
+	"web__run": {
+		"search_query.items.properties.recency", "image_query.items.properties.recency",
+		"open.items.properties.lineno", "click.items.properties.id",
+		"screenshot.items.properties.pageno", "weather.items.properties.duration",
+		"sports.items.properties.num_games",
+	},
 }
 
 func normalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
@@ -68,20 +76,22 @@ func normalizeCodexIntegerToolList(tools gjson.Result, namespace string) ([]byte
 	}
 	var updated []byte
 	offset := 0
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		updatedTool, changed := normalizeCodexIntegerTool(tool, namespace)
-		if !changed {
+	tools.ForEach(
+		func(_, tool gjson.Result) bool {
+			updatedTool, changed := normalizeCodexIntegerTool(tool, namespace)
+			if !changed {
+				return true
+			}
+			if updated == nil {
+				updated = make([]byte, 0, len(tools.Raw))
+			}
+			start := tool.Index - tools.Index
+			updated = append(updated, tools.Raw[offset:start]...)
+			updated = append(updated, updatedTool...)
+			offset = start + len(tool.Raw)
 			return true
-		}
-		if updated == nil {
-			updated = make([]byte, 0, len(tools.Raw))
-		}
-		start := tool.Index - tools.Index
-		updated = append(updated, tools.Raw[offset:start]...)
-		updated = append(updated, updatedTool...)
-		offset = start + len(tool.Raw)
-		return true
-	})
+		},
+	)
 	if updated == nil {
 		return nil, false
 	}
@@ -134,15 +144,19 @@ func normalizeCodexIntegerTool(tool gjson.Result, namespace string) ([]byte, boo
 	if namespace != "" {
 		name = namespace + "__" + name
 	}
-	if strings.HasPrefix(name, "functions__") {
-		name = strings.TrimPrefix(name, "functions__")
+	if after, ok := strings.CutPrefix(name, "functions__"); ok {
+		name = after
 	} else {
 		name = strings.TrimPrefix(name, "collab__")
 	}
 	switch name {
 	case "multi_agent_v1__wait_agent", "collaboration__wait_agent":
 		name = "wait_agent"
-	case "collaboration__get_channels", "collaboration__list_threads", "collaboration__search_posts", "collaboration__read_thread", "collaboration__read_post":
+	case "collaboration__get_channels",
+		"collaboration__list_threads",
+		"collaboration__search_posts",
+		"collaboration__read_thread",
+		"collaboration__read_post":
 		name = strings.TrimPrefix(name, "collaboration__")
 	}
 	fields := codexClientIntegerToolFields[name]

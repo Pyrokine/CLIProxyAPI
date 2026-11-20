@@ -18,32 +18,39 @@ import (
 func TestCodexInterruptPreservesFrameAndIgnoresTerminalTurn(t *testing.T) {
 	upstreamFrames := make(chan [][]byte, 1)
 	keepUpstreamOpen := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade upstream: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var received [][]byte
-		for len(received) < 2 {
-			_, payload, errRead := conn.ReadMessage()
-			if errRead != nil {
-				t.Errorf("read upstream frame: %v", errRead)
-				return
-			}
-			received = append(received, bytes.Clone(payload))
-			if len(received) == 1 {
-				if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r1","output":[]}}`)); errWrite != nil {
-					t.Errorf("send terminal frame: %v", errWrite)
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+				if err != nil {
+					t.Errorf("upgrade upstream: %v", err)
 					return
 				}
-			}
-		}
-		upstreamFrames <- received
-		<-keepUpstreamOpen
-	}))
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+				var received [][]byte
+				for len(received) < 2 {
+					_, payload, errRead := conn.ReadMessage()
+					if errRead != nil {
+						t.Errorf("read upstream frame: %v", errRead)
+						return
+					}
+					received = append(received, bytes.Clone(payload))
+					if len(received) == 1 {
+						if errWrite := conn.WriteMessage(
+							websocket.TextMessage,
+							[]byte(`{"type":"response.completed","response":{"id":"r1","output":[]}}`),
+						); errWrite != nil {
+							t.Errorf("send terminal frame: %v", errWrite)
+							return
+						}
+					}
+				}
+				upstreamFrames <- received
+				<-keepUpstreamOpen
+			},
+		),
+	)
 	defer upstream.Close()
 	defer close(keepUpstreamOpen)
 	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(upstream.URL, "http"), nil)
@@ -58,26 +65,33 @@ func TestCodexInterruptPreservesFrameAndIgnoresTerminalTurn(t *testing.T) {
 	sess := executor.getOrCreateSession(sessionID)
 	sess.connMu.Lock()
 	sess.conn = conn
+	sess.connCloser = newWebsocketConnectionCloser(conn)
 	sess.authID = "auth-1"
 	sess.connMu.Unlock()
 	sess.configureConn(conn)
 	go executor.readUpstreamLoop(sess, conn)
 
 	first := []byte(`{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items","extension":42}`)
-	if errIdle := executor.InterruptExecutionSession(context.Background(), sessionID, first); !errors.Is(errIdle, cliproxyexecutor.ErrNoActiveUpstreamWebsocket) {
+	if errIdle := executor.InterruptExecutionSession(context.Background(), sessionID, first); !errors.Is(
+		errIdle, cliproxyexecutor.ErrNoActiveUpstreamWebsocket,
+	) {
 		t.Fatalf("idle interrupt = %v", errIdle)
 	}
 	readCh := make(chan codexWebsocketRead, 4)
 	sess.setActive(conn, readCh)
-	denied := cliproxyexecutor.WithWebsocketAuthCheck(context.Background(), func(authID string) bool {
-		return false
-	})
+	denied := cliproxyexecutor.WithWebsocketAuthCheck(
+		context.Background(), func(authID string) bool {
+			return false
+		},
+	)
 	if errDenied := executor.InterruptExecutionSession(denied, sessionID, first); errDenied == nil {
 		t.Fatal("disabled auth accepted the interrupt")
 	}
-	allowed := cliproxyexecutor.WithWebsocketAuthCheck(context.Background(), func(authID string) bool {
-		return authID == "auth-1"
-	})
+	allowed := cliproxyexecutor.WithWebsocketAuthCheck(
+		context.Background(), func(authID string) bool {
+			return authID == "auth-1"
+		},
+	)
 	if errForward := executor.InterruptExecutionSession(allowed, sessionID, first); errForward != nil {
 		t.Fatalf("active interrupt: %v", errForward)
 	}
@@ -113,12 +127,14 @@ func TestCodexInterruptPreservesFrameAndIgnoresTerminalTurn(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("upstream did not receive next-turn interrupt")
 	}
-	completedDuringAuth := cliproxyexecutor.WithWebsocketAuthCheck(context.Background(), func(string) bool {
-		sess.activeMu.Lock()
-		sess.terminalResponseIDs["r2"] = struct{}{}
-		sess.activeMu.Unlock()
-		return false
-	})
+	completedDuringAuth := cliproxyexecutor.WithWebsocketAuthCheck(
+		context.Background(), func(string) bool {
+			sess.activeMu.Lock()
+			sess.terminalResponseIDs["r2"] = struct{}{}
+			sess.activeMu.Unlock()
+			return false
+		},
+	)
 	if errLate := executor.InterruptExecutionSession(completedDuringAuth, sessionID, second); errLate != nil {
 		t.Fatalf("interrupt completed during credential check = %v", errLate)
 	}

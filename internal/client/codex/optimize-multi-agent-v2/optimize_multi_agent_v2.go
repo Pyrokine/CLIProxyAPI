@@ -57,9 +57,9 @@ type codexClientModelsCatalog struct {
 	Models []map[string]any `json:"models"`
 }
 
-// RewriteCodexSpawnAgentDescription optimizes spawn_agent definitions for
+// rewriteCodexMultiAgentV2Request optimizes spawn_agent definitions for
 // official Codex clients when multi-agent v2 optimization is enabled.
-func RewriteCodexSpawnAgentDescription(
+func rewriteCodexMultiAgentV2Request(
 	ctx context.Context,
 	headers http.Header,
 	payload []byte,
@@ -85,9 +85,9 @@ func RewriteCodexMultiAgentV2Input(
 	return rewriteCodexAgentMessageInput(payload, compatMode)
 }
 
-// TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
+// translateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
 // input before translating it to a non-Codex target protocol.
-func TranslateRequestWithCodexMultiAgentV2(
+func translateRequestWithCodexMultiAgentV2(
 	ctx context.Context,
 	headers http.Header,
 	cfg *config.Config,
@@ -148,7 +148,10 @@ func OptimizeCodexMultiAgentV2Request(
 	}
 	updated := rewriteCodexAgentMessageContent(payload)
 	if codexMultiAgentV2ToolsPrepared(ctx) {
-		updated = removeCodexCollaborationMessageEncryption(updated, codexCollaborationMessageToolPaths(updated))
+		updated = removeCodexCollaborationMessageEncryption(
+			updated,
+			codexCollaborationMessageToolPaths(updated),
+		)
 	} else {
 		updated, _ = PrepareCodexMultiAgentV2Tools(
 			ctx, headers, updated, cfg.Codex.OptimizeMultiAgentV2, cfg.Home.Enabled,
@@ -184,7 +187,8 @@ func codexMultiAgentV2ToolsPrepared(ctx context.Context) bool {
 
 func codexClientUserAgent(ctx context.Context, headers http.Header) string {
 	if ctx != nil {
-		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil &&
+			ginCtx.Request != nil {
 			return headerValueCaseInsensitive(ginCtx.Request.Header, "User-Agent")
 		}
 	}
@@ -614,7 +618,8 @@ func hasCodexOptimizedCollaborationConflict(payload []byte) bool {
 		return false
 	}
 	for _, item := range input.Array() {
-		if strings.TrimSpace(item.Get("type").String()) == "additional_tools" && codexToolsHaveOptimizedCollaborationConflict(item.Get("tools")) {
+		if strings.TrimSpace(item.Get("type").String()) == "additional_tools" &&
+			codexToolsHaveOptimizedCollaborationConflict(item.Get("tools")) {
 			return true
 		}
 	}
@@ -632,7 +637,8 @@ func codexToolsHaveOptimizedCollaborationConflict(tools gjson.Result) bool {
 			strings.HasPrefix(name, codexOptimizedCollaborationDotPrefix) {
 			return true
 		}
-		if strings.TrimSpace(tool.Get("type").String()) == "namespace" && codexToolsHaveOptimizedCollaborationConflict(tool.Get("tools")) {
+		if strings.TrimSpace(tool.Get("type").String()) == "namespace" &&
+			codexToolsHaveOptimizedCollaborationConflict(tool.Get("tools")) {
 			return true
 		}
 	}
@@ -649,7 +655,8 @@ func optimizeCodexCollaborationNamespace(payload []byte, toolPaths []string) ([]
 		}
 		namespacePath := toolPath[:separatorIndex]
 		namespace := gjson.GetBytes(updated, namespacePath)
-		if strings.TrimSpace(namespace.Get("type").String()) != "namespace" || strings.TrimSpace(namespace.Get("name").String()) != codexCollaborationNamespace {
+		if strings.TrimSpace(namespace.Get("type").String()) != "namespace" ||
+			strings.TrimSpace(namespace.Get("name").String()) != codexCollaborationNamespace {
 			continue
 		}
 		var errSet error
@@ -720,7 +727,17 @@ func restoreCodexCollaborationValue(value any) bool {
 			}
 		}
 		for key, child := range typed {
-			if key == "arguments" || key == "input" || key == "output" && (itemType == "function_call_output" || itemType == "custom_tool_call_output") {
+			if key ==
+				"arguments" ||
+				key ==
+					"input" ||
+				key ==
+					"output" &&
+					(itemType ==
+						"function_call_output" ||
+						itemType ==
+							("custom_tool_ca"+
+								"ll_output")) {
 				continue
 			}
 			if restoreCodexCollaborationValue(child) {

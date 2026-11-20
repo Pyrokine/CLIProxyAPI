@@ -186,9 +186,6 @@ func codexInputItemIDWithHashSuffixRunes(id string, runes []rune, attempt int) s
 	}
 	sum := sha256.Sum256([]byte(hashInput))
 	suffix := "_" + hex.EncodeToString(sum[:8])
-	prefixLength := codexInputItemIDLimit - len(suffix)
-	if len(runes) < prefixLength {
-		prefixLength = len(runes)
-	}
+	prefixLength := min(len(runes), codexInputItemIDLimit-len(suffix))
 	return string(runes[:prefixLength]) + suffix
 }

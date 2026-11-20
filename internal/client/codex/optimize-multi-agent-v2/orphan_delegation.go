@@ -23,9 +23,9 @@ const (
 	codexCollabSpawnSubagent     = "collab_spawn"
 )
 
-// RewriteCodexOrphanDelegationInput converts unpaired Codex delegation outputs
+// rewriteCodexOrphanDelegationInput converts unpaired Codex delegation outputs
 // into user messages for collab_spawn requests.
-func RewriteCodexOrphanDelegationInput(
+func rewriteCodexOrphanDelegationInput(
 	ctx context.Context,
 	headers http.Header,
 	payload []byte,
@@ -86,7 +86,7 @@ func RewriteCodexOrphanDelegationInputForConfig(
 	payload []byte,
 	cfg *config.Config,
 ) []byte {
-	return RewriteCodexOrphanDelegationInput(
+	return rewriteCodexOrphanDelegationInput(
 		ctx,
 		headers,
 		payload,
@@ -129,6 +129,8 @@ func buildCodexOrphanUserMessage(toolLabel string, output gjson.Result) []byte {
 		}
 	}
 	message := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
-	message, _ = sjson.SetBytes(message, "content.0.text", fmt.Sprintf("Tool output from %s:\n%s", toolLabel, outputText))
+	message, _ = sjson.SetBytes(
+		message, "content.0.text", fmt.Sprintf("Tool output from %s:\n%s", toolLabel, outputText),
+	)
 	return message
 }

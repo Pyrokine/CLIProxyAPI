@@ -131,16 +131,41 @@ func buildCodexClientModels(
 	}
 
 	result := make([]map[string]any, 0, len(models))
-	seen := make(map[string]struct{}, len(models))
+	byID := make(map[string]map[string]any, len(models))
+	ids := make([]string, 0, len(models))
 	for _, model := range models {
 		id := strings.TrimSpace(stringModelValue(model, "id"))
 		if id == "" {
 			continue
 		}
-		if _, duplicate := seen[id]; duplicate {
+		if previous, duplicate := byID[id]; duplicate {
+			if modalities, explicit := codexClientInputModalities(model); explicit {
+				if priorModalities, priorExplicit := codexClientInputModalities(previous); priorExplicit {
+					modalities = intersectStringSlices(priorModalities, modalities)
+				}
+				previous["supportedInputModalities"] = modalities
+			}
+			if _, explicit := model["thinking"]; explicit {
+				thinking := codexClientThinkingSupport(model)
+				if thinking == nil {
+					thinking = &registry.ThinkingSupport{Levels: []string{}}
+				}
+				if _, priorExplicit := previous["thinking"]; priorExplicit {
+					priorThinking := codexClientThinkingSupport(previous)
+					if priorThinking == nil {
+						priorThinking = &registry.ThinkingSupport{Levels: []string{}}
+					}
+					thinking = intersectThinkingSupport(priorThinking, thinking)
+				}
+				previous["thinking"] = thinking
+			}
 			continue
 		}
-		seen[id] = struct{}{}
+		byID[id] = cloneCodexClientModelMap(model)
+		ids = append(ids, id)
+	}
+	for _, id := range ids {
+		model := byID[id]
 		metadataID := codexClientMetadataModelID(id)
 
 		if template, ok := templates[metadataID]; ok {
@@ -346,8 +371,8 @@ func isCodexClientDevinModel(id string, model map[string]any, providersForModel 
 		return true
 	}
 	lookupIDs := []string{id}
-	if index := strings.Index(id, "/"); index != -1 {
-		lookupIDs = append(lookupIDs, strings.TrimSpace(id[index+1:]))
+	if _, after, ok := strings.Cut(id, "/"); ok {
+		lookupIDs = append(lookupIDs, strings.TrimSpace(after))
 	}
 	for _, lookupID := range lookupIDs {
 		if info := registry.LookupModelInfo(lookupID); info != nil &&
@@ -461,8 +486,8 @@ func codexClientProviders(id string, providersForModel ProvidersForModelFunc) []
 	}
 	providers := providersForModel(id)
 	if len(providers) == 0 {
-		if index := strings.Index(id, "/"); index != -1 {
-			providers = providersForModel(strings.TrimSpace(id[index+1:]))
+		if _, after, ok := strings.Cut(id, "/"); ok {
+			providers = providersForModel(strings.TrimSpace(after))
 		}
 	}
 	return providers
@@ -472,8 +497,8 @@ func codexClientProviderModelInfo(id, provider string) *registry.ModelInfo {
 	if info := registry.LookupModelInfo(id, provider); info != nil {
 		return info
 	}
-	if index := strings.Index(id, "/"); index != -1 {
-		return registry.LookupModelInfo(strings.TrimSpace(id[index+1:]), provider)
+	if _, after, ok := strings.Cut(id, "/"); ok {
+		return registry.LookupModelInfo(strings.TrimSpace(after), provider)
 	}
 	return nil
 }
@@ -485,10 +510,7 @@ func intersectThinkingSupport(left, right *registry.ThinkingSupport) *registry.T
 	if right == nil {
 		return left
 	}
-	minimum := left.Min
-	if right.Min > minimum {
-		minimum = right.Min
-	}
+	minimum := max(right.Min, left.Min)
 	maximum := left.Max
 	if right.Max > 0 && (maximum == 0 || right.Max < maximum) {
 		maximum = right.Max
@@ -589,7 +611,11 @@ func applyCodexClientProviderCapabilities(
 	applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 }
 
-func applyCodexClientApplyPatchCapability(entry map[string]any, id string, capability ApplyPatchCapabilityForModelFunc) {
+func applyCodexClientApplyPatchCapability(
+	entry map[string]any,
+	id string,
+	capability ApplyPatchCapabilityForModelFunc,
+) {
 	if capability == nil {
 		return
 	}
@@ -819,7 +845,7 @@ func isCodexClientNonTextModel(id string) bool {
 	if index := strings.LastIndex(target, "/"); index != -1 {
 		target = strings.TrimSpace(target[index+1:])
 	}
-	if registry.IsCodexImageModel(target) {
+	if registry.IsOpenAIImageModel(target) {
 		return true
 	}
 	switch target {
@@ -829,6 +855,9 @@ func isCodexClientNonTextModel(id string) bool {
 		"grok-imagine-video",
 		"grok-imagine-video-1.5",
 		"grok-imagine-video-1.5-preview",
+		"grok-imagine-video-1.5-lite",
+		"muse-image-1.0",
+		"muse-voice-transcribe-1.0",
 		"grok-tts",
 		"grok-voice-tts-1.0":
 		return true
@@ -936,7 +965,9 @@ func sanitizeCodexClientReasoningMetadata(entry map[string]any, clientVersion st
 		return
 	}
 
-	defaultLevel := normalizeCodexClientReasoningLevel(stringModelValue(entry, "default_reasoning_level"), clientVersion)
+	defaultLevel := normalizeCodexClientReasoningLevel(
+		stringModelValue(entry, "default_reasoning_level"), clientVersion,
+	)
 	if _, ok := allowedDefaults[defaultLevel]; !ok {
 		defaultLevel = stringModelValue(levels[0].(map[string]any), "effort")
 	}
@@ -1003,11 +1034,8 @@ func compareDottedVersions(left, right string) (int, bool) {
 	if len(leftNumbers) == 0 || len(rightNumbers) == 0 {
 		return 0, false
 	}
-	maxLength := len(leftNumbers)
-	if len(rightNumbers) > maxLength {
-		maxLength = len(rightNumbers)
-	}
-	for index := 0; index < maxLength; index++ {
+	maxLength := max(len(rightNumbers), len(leftNumbers))
+	for index := range maxLength {
 		var leftValue, rightValue int64
 		if index < len(leftNumbers) {
 			leftValue = leftNumbers[index]

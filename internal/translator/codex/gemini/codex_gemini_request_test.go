@@ -52,37 +52,18 @@ func TestConvertGeminiRequestToCodexSupportsCamelCaseSystemInstruction(t *testin
 }
 
 func TestConvertGeminiRequestToCodexPreservesSchemaPropertyNamedType(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	out := ConvertGeminiRequestToCodex(
-		"gpt-5.4", []byte(`{
-		"tools":[{
-			"functionDeclarations":[{
-				"name":"ask_user",
-				"description":"Ask the user one or more questions.",
-				"parametersJsonSchema":{
-					"type":"object",
-					"properties":{
-						"questions":{
-							"type":"array",
-							"items":{
-								"type":"object",
-								"properties":{
-									"header":{"type":"string"},
-									"type":{
-										"default":"choice",
-										"description":"Question type.",
-										"enum":["choice","text","yesno"],
-										"type":"string"
-									}
-								},
-								"required":["question","header","type"]
-							}
-						}
-					},
-					"required":["questions"]
-				}
-			}]
-		}]
-	}`), false,
+		"gpt-5.4", []byte(("{\n\t\t\"tools\":[{\n\t\t\t\"functionDeclarations\":[{\n\t\t\t\t\"name\":\"" +
+			"ask_user\",\n\t\t\t\t\"description\":\"Ask the user one or more questions.\",\n\t\t\t\t\"" +
+			"parametersJsonSchema\":{\n\t\t\t\t\t\"type\":\"object\",\n\t\t\t\t\t\"properties\":{\n\t\t\t\t\t" +
+			"\t\"questions\":{\n\t\t\t\t\t\t\t\"type\":\"array\",\n\t\t\t\t\t\t\t\"items\":{\n\t\t\t\t\t\t\t" +
+			"\t\"type\":\"object\",\n\t\t\t\t\t\t\t\t\"properties\":{\n\t\t\t\t\t\t\t\t\t\"header\":{\"type\"" +
+			":\"string\"},\n\t\t\t\t\t\t\t\t\t\"type\":{\n\t\t\t\t\t\t\t\t\t\t\"default\":\"choice\",\n\t\t\t" +
+			"\t\t\t\t\t\t\t\"description\":\"Question type.\",\n\t\t\t\t\t\t\t\t\t\t\"enum\":[\"choice\",\"" +
+			"text\",\"yesno\"],\n\t\t\t\t\t\t\t\t\t\t\"type\":\"string\"\n\t\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t" +
+			"\t},\n\t\t\t\t\t\t\t\t\"required\":[\"question\",\"header\",\"type\"]\n\t\t\t\t\t\t\t}\n\t\t\t\t" +
+			"\t\t}\n\t\t\t\t\t},\n\t\t\t\t\t\"required\":[\"questions\"]\n\t\t\t\t}\n\t\t\t}]\n\t\t}]\n\t}")), false,
 	)
 
 	tool := gjson.GetBytes(out, "tools.0")
@@ -99,7 +80,9 @@ func TestConvertGeminiRequestToCodexPreservesSchemaPropertyNamedType(t *testing.
 	if got := typeProperty.Get("default").String(); got != "choice" {
 		t.Fatalf("schema property default = %q, want choice; output: %s", got, out)
 	}
+	//goland:noinspection SpellCheckingInspection
 	if got := typeProperty.Get("enum.2").String(); got != "yesno" {
+		//goland:noinspection SpellCheckingInspection
 		t.Fatalf("schema property enum[2] = %q, want yesno; output: %s", got, out)
 	}
 }
@@ -116,7 +99,9 @@ func TestSetCodexToolChoiceFromGeminiToolConfigReusesAutoChoice(t *testing.T) {
 }
 
 func TestConvertGeminiRequestToCodexMapsFunctionCallingConfig(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tools":[{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object"}}]}],"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["lookup"]}}}`)
+	input := []byte((`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tools":[{"functionDeclarations":[` +
+		`{"name":"lookup","parameters":{"type":"object"}}]}],"toolConfig":{"functionCallingConfig":{"mode":"` +
+		`ANY","allowedFunctionNames":["lookup"]}}}`))
 
 	output := ConvertGeminiRequestToCodex("gpt-5.4", input, false)
 
@@ -129,20 +114,14 @@ func TestConvertGeminiRequestToCodexMapsFunctionCallingConfig(t *testing.T) {
 }
 
 func TestConvertGeminiRequestToCodexPreservesAndMatchesToolCallIDs(t *testing.T) {
-	input := []byte(`{
-		"contents":[
-			{"role":"model","parts":[
-				{"functionCall":{"name":"alpha","args":{}}},
-				{"functionCall":{"call_id":"beta-id","name":"beta","args":{}}},
-				{"functionCall":{"id":"alpha-two","name":"alpha","args":{}}}
-			]},
-			{"role":"user","parts":[
-				{"functionResponse":{"callId":"alpha-two","name":"alpha","response":{"result":"explicit"}}},
-				{"functionResponse":{"name":"beta","response":{"result":"named"}}},
-				{"functionResponse":{"response":{"result":"fifo"}}}
-			]}
-		]
-	}`)
+	//goland:noinspection SpellCheckingInspection
+	input := []byte(("{\n\t\t\"contents\":[\n\t\t\t{\"role\":\"model\",\"parts\":[\n\t\t\t\t{\"functionCall\":" +
+		"{\"name\":\"alpha\",\"args\":{}}},\n\t\t\t\t{\"functionCall\":{\"call_id\":\"beta-id\",\"name\":\"" +
+		"beta\",\"args\":{}}},\n\t\t\t\t{\"functionCall\":{\"id\":\"alpha-two\",\"name\":\"alpha\",\"args\":{" +
+		"}}}\n\t\t\t]},\n\t\t\t{\"role\":\"user\",\"parts\":[\n\t\t\t\t{\"functionResponse\":{\"callId\":\"" +
+		"alpha-two\",\"name\":\"alpha\",\"response\":{\"result\":\"explicit\"}}},\n\t\t\t\t{\"" +
+		"functionResponse\":{\"name\":\"beta\",\"response\":{\"result\":\"named\"}}},\n\t\t\t\t{\"" +
+		"functionResponse\":{\"response\":{\"result\":\"fifo\"}}}\n\t\t\t]}\n\t\t]\n\t}"))
 
 	output := ConvertGeminiRequestToCodex("gpt-5.4", input, false)
 	var callIDs []string
@@ -166,30 +145,71 @@ func TestConvertGeminiRequestToCodexPreservesAndMatchesToolCallIDs(t *testing.T)
 }
 
 func TestGeminiCodexRegisteredMedia(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	cases := []struct {
 		name, part, partType, field, value string
 	}{
-		{"image", `{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}`, "input_image", "image_url", "data:image/png;base64,aGVsbG8="},
-		{"snake image", `{"inline_data":{"mime_type":"image/png","data":"aGVsbG8="}}`, "input_image", "image_url", "data:image/png;base64,aGVsbG8="},
-		{"audio", `{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}}`, "input_audio", "input_audio.format", "wav"},
-		{"pdf", `{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}`, "input_file", "file_data", "data:application/pdf;base64,JVBERi0="},
-		{"video", `{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}}`, "input_file", "file_data", "data:video/mp4;base64,AAAAIGZ0eXA="},
-		{"image reference", `{"fileData":{"mimeType":"image/png","fileUri":"https://example.test/image.png"}}`, "input_image", "image_url", "https://example.test/image.png"},
-		{"file reference", `{"file_data":{"mime_type":"application/pdf","file_uri":"https://example.test/file.pdf"}}`, "input_file", "file_url", "https://example.test/file.pdf"},
-		{"blank aliases", `{"fileData":{"mimeType":" ","mime_type":"application/pdf","fileUri":" ","file_uri":"https://example.test/file.pdf"}}`, "input_file", "file_url", "https://example.test/file.pdf"},
+		{
+			"image", `{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}`, "input_image", "image_url",
+			"data:image/png;base64,aGVsbG8=",
+		},
+		{
+			"snake image", `{"inline_data":{"mime_type":"image/png","data":"aGVsbG8="}}`, "input_image", "image_url",
+			"data:image/png;base64,aGVsbG8=",
+		},
+		{
+			"audio", `{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}}`, "input_audio", "input_audio.format",
+			"wav",
+		},
+		{
+			"pdf", `{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}`, "input_file", "file_data",
+			"data:application/pdf;base64,JVBERi0=",
+		},
+		{
+			"video", `{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}}`, "input_file", "file_data",
+			"data:video/mp4;base64,AAAAIGZ0eXA=",
+		},
+		{
+			"image reference", `{"fileData":{"mimeType":"image/png","fileUri":"https://example.test/image.png"}}`,
+			"input_image", "image_url", "https://example.test/image.png",
+		},
+		{
+			"file reference",
+			`{"file_data":{"mime_type":"application/pdf","file_uri":"https://example.test/file.pdf"}}`, "input_file",
+			"file_url", "https://example.test/file.pdf",
+		},
+		{
+			"blank aliases",
+			`{"fileData":{"mimeType":" ","mime_type":"application/pdf","fileUri":" ` +
+				`","file_uri":"https://example.test/` +
+				`file.pdf"}}`,
+			"input_file", "file_url", "https://example.test/file.pdf",
+		},
 	}
 	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			request := []byte(fmt.Sprintf(`{"contents":[{"parts":[%s]}]}`, tt.part))
-			body, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatGemini, sdktranslator.FormatCodex, "codex-test", request, false)
-			if err != nil || !gjson.ValidBytes(body) {
-				t.Fatalf("media translation = (%s, %v)", body, err)
-			}
-			part := gjson.GetBytes(body, "input.0.content.0")
-			if part.Get("type").String() != tt.partType || part.Get(tt.field).String() != tt.value || gjson.GetBytes(body, "input.0.role").String() != "user" {
-				t.Fatalf("media translation = %s", body)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				request := []byte(fmt.Sprintf(`{"contents":[{"parts":[%s]}]}`, tt.part))
+				body, err := sdktranslator.TranslateRequestChecked(
+					context.Background(),
+					sdktranslator.FormatGemini,
+					sdktranslator.FormatCodex,
+					"codex-test",
+					request,
+					false,
+				)
+				if err != nil || !gjson.ValidBytes(body) {
+					t.Fatalf("media translation = (%s, %v)", body, err)
+				}
+				part := gjson.GetBytes(body, "input.0.content.0")
+				if part.Get("type").String() != tt.partType || part.Get(tt.field).String() != tt.value ||
+					gjson.GetBytes(
+						body, "input.0.role",
+					).String() != "user" {
+					t.Fatalf("media translation = %s", body)
+				}
+			},
+		)
 	}
 }
 
@@ -207,28 +227,71 @@ func TestGeminiCodexRejectsEmptiedMediaTurns(t *testing.T) {
 		{`{"fileData":false}`, "fileData"},
 	}
 	for index, tt := range cases {
-		t.Run(fmt.Sprint(index), func(t *testing.T) {
-			request := []byte(fmt.Sprintf(`{"contents":[{"role":"user","parts":[{"text":"before"}]},{"role":"model","parts":[{"text":"reply"}]},{"role":"user","parts":[{"text":" "},%s]},{"role":"model","parts":[{"text":"reply"}]},{"role":"user","parts":[{"text":"after"}]}]}`, tt.part))
-			for _, stream := range []bool{false, true} {
-				body, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatGemini, sdktranslator.FormatCodex, "codex-test", request, stream)
-				var rejected *translatorcommon.UnsupportedPartError
-				if !errors.As(err, &rejected) || rejected.Type != tt.partType || rejected.StatusCode() != 400 || !rejected.IsRequestScoped() || len(body) != 0 {
-					t.Fatalf("empty media turn = (%s, %v), want 400 for %s", body, err, tt.partType)
+		t.Run(
+			fmt.Sprint(index), func(t *testing.T) {
+				request := []byte(fmt.Sprintf(
+					`{"contents":[{"role":"user","parts":[{"text":"before"}]},{"role":"mode`+
+						`l","parts":[{"text":"reply"}]},{"role":"user","parts":[{"text":" "},%s`+
+						`]},{"role":"model","parts":[{"text":"reply"}]},{"role":"user","parts":`+
+						`[{"text":"after"}]}]}`,
+					tt.part,
+				))
+				for _, stream := range []bool{false, true} {
+					body, err := sdktranslator.TranslateRequestChecked(
+						context.Background(),
+						sdktranslator.FormatGemini,
+						sdktranslator.FormatCodex,
+						"codex-test",
+						request,
+						stream,
+					)
+					var rejected *translatorcommon.UnsupportedPartError
+					if !errors.As(
+						err, &rejected,
+					) ||
+						rejected.Type !=
+							tt.partType ||
+						rejected.StatusCode() !=
+							400 ||
+						!rejected.IsRequestScoped() ||
+						len(body) !=
+							0 {
+						t.Fatalf("empty media turn = (%s, %v), want 400 for %s", body, err, tt.partType)
+					}
 				}
-			}
-			if body := ConvertGeminiRequestToCodex("codex-test", request, false); len(body) != 0 {
-				t.Fatalf("byte request retained rejected input: %s", body)
-			}
-			mixed := []byte(fmt.Sprintf(`{"contents":[{"role":"user","parts":[%s,{"text":"keep"}]}]}`, tt.part))
-			body, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatGemini, sdktranslator.FormatCodex, "codex-test", mixed, false)
-			if err != nil || gjson.GetBytes(body, "input.0.content.0.text").String() != "keep" {
-				t.Fatalf("mixed media turn = (%s, %v)", body, err)
-			}
-			toolResult := []byte(fmt.Sprintf(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"lookup","args":{}}}]},{"role":"user","parts":[%s,{"functionResponse":{"id":"call-1","name":"lookup","response":{"result":"keep"}}}]}]}`, tt.part))
-			body, err = sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatGemini, sdktranslator.FormatCodex, "codex-test", toolResult, false)
-			if err != nil || gjson.GetBytes(body, "input.1.output").String() != "keep" || gjson.GetBytes(body, "input.1.call_id").String() != "call-1" {
-				t.Fatalf("media beside tool result = (%s, %v)", body, err)
-			}
-		})
+				if body := ConvertGeminiRequestToCodex("codex-test", request, false); len(body) != 0 {
+					t.Fatalf("byte request retained rejected input: %s", body)
+				}
+				mixed := []byte(
+					fmt.Sprintf(`{"contents":[{"role":"user","parts":[%s,{"text":"keep"}]}]}`, tt.part),
+				)
+				body, err := sdktranslator.TranslateRequestChecked(
+					context.Background(),
+					sdktranslator.FormatGemini,
+					sdktranslator.FormatCodex,
+					"codex-test",
+					mixed,
+					false,
+				)
+				if err != nil || gjson.GetBytes(body, "input.0.content.0.text").String() != "keep" {
+					t.Fatalf("mixed media turn = (%s, %v)", body, err)
+				}
+				toolResult := []byte(fmt.Sprintf(
+					`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"lookup","`+
+						`args":{}}}]},{"role":"user","parts":[%s,{"functionResponse":{"id":"call-1","name":"`+
+						`lookup","response":{"result":"keep"}}}]}]}`,
+					tt.part,
+				))
+				body, err = sdktranslator.TranslateRequestChecked(
+					context.Background(), sdktranslator.FormatGemini, sdktranslator.FormatCodex, "codex-test",
+					toolResult, false,
+				)
+				if err != nil || gjson.GetBytes(body, "input.1.output").String() != "keep" || gjson.GetBytes(
+					body, "input.1.call_id",
+				).String() != "call-1" {
+					t.Fatalf("media beside tool result = (%s, %v)", body, err)
+				}
+			},
+		)
 	}
 }

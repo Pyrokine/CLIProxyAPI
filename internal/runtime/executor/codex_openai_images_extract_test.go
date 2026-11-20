@@ -9,11 +9,24 @@ import (
 )
 
 func codexImageTestItem(result, format string) []byte {
-	return []byte(`{"type":"image_generation_call","result":"` + result + `","output_format":"` + format + `","size":"1024x1024","quality":"high","background":"transparent","revised_prompt":"revised ` + result + `"}`)
+	return []byte(
+		(`{"type":"image_generation_call","result":` +
+			`"`) +
+			result +
+			(`","output_format":` +
+				`"`) +
+			format +
+			`","size":"1024x1024","quality":"high","background":"transparent","revised_prompt":"revised ` +
+			result +
+			`"}`,
+	)
 }
 
 func TestCodexExtractImageResults_FromCompletedOutput(t *testing.T) {
-	completed := []byte(`{"type":"response.completed","response":{"created_at":123,"output":[{"type":"image_generation_call","result":"image-a","output_format":"png","size":"1024x1024","quality":"high","background":"transparent","revised_prompt":"revised prompt"}],"tool_usage":{"image_gen":{"input_tokens":11,"output_tokens":22,"total_tokens":33}}}}`)
+	completed := []byte((`{"type":"response.completed","response":{"created_at":123,"output":[{"type":"` +
+		`image_generation_call","result":"image-a","output_format":"png","size":"1024x1024","quality":"high",` +
+		`"background":"transparent","revised_prompt":"revised prompt"}],"tool_usage":{"image_gen":{"` +
+		`input_tokens":11,"output_tokens":22,"total_tokens":33}}}}`))
 
 	results, createdAt, usageRaw, firstMeta, err := codexExtractImageResults(completed, nil, nil)
 	if err != nil {
@@ -25,7 +38,8 @@ func TestCodexExtractImageResults_FromCompletedOutput(t *testing.T) {
 	if len(results) != 1 || results[0].Result != "image-a" {
 		t.Fatalf("results = %#v, want image-a", results)
 	}
-	if firstMeta.OutputFormat != "png" || firstMeta.Size != "1024x1024" || firstMeta.Quality != "high" || firstMeta.Background != "transparent" {
+	if firstMeta.OutputFormat != "png" || firstMeta.Size != "1024x1024" || firstMeta.Quality != "high" ||
+		firstMeta.Background != "transparent" {
 		t.Fatalf("firstMeta = %#v, want completed item metadata", firstMeta)
 	}
 	if got := gjson.GetBytes(usageRaw, "total_tokens").Int(); got != 33 {
@@ -64,7 +78,8 @@ func TestCodexExtractImageResults_FallbackToCollectedItemsOrdered(t *testing.T) 
 }
 
 func TestCodexExtractImageResults_PrefersCompletedOutputOverItems(t *testing.T) {
-	completed := []byte(`{"type":"response.completed","response":{"output":[{"type":"image_generation_call","result":"completed-image","output_format":"png"}]}}`)
+	completed := []byte((`{"type":"response.completed","response":{"output":[{"type":"image_gene` +
+		`ration_call","result":"completed-image","output_format":"png"}]}}`))
 	itemsByIndex := map[int64][]byte{1: codexImageTestItem("fallback-image", "png")}
 
 	results, _, _, _, err := codexExtractImageResults(completed, itemsByIndex, nil)
@@ -97,7 +112,9 @@ func TestCodexExtractImageResults_WrongEventType(t *testing.T) {
 }
 
 func TestParseCodexOpenAIImageEventAcceptsMultilineData(t *testing.T) {
-	frame := []byte("event: response.completed\ndata: {\"type\":\ndata: \"response.completed\",\"response\":{}}\n\n")
+	frame := []byte(
+		"event: response.completed\ndata: {\"type\":\ndata: \"response.completed\",\"response\":{}}\n\n",
+	)
 	eventData, ok, err := parseCodexOpenAIImageEvent(frame)
 	if err != nil {
 		t.Fatalf("parseCodexOpenAIImageEvent error: %v", err)
@@ -125,11 +142,18 @@ func TestParseCodexOpenAIImageEventNormalizesResponseDone(t *testing.T) {
 }
 
 func TestParseCodexImageToolUsage(t *testing.T) {
-	detail, ok := parseCodexImageToolUsage([]byte(`{"response":{"service_tier":"priority","tool_usage":{"image_gen":{"input_tokens":7,"output_tokens":9,"total_tokens":16,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}}}`))
+	detail, ok := parseCodexImageToolUsage(
+		[]byte((`{"response":{"service_tier":"priority","tool_usage":{"image_gen":{"inp` +
+			`ut_tokens":7,"output_tokens":9,"total_tokens":16,"input_tokens_details` +
+			`":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}` +
+			`}}`)),
+	)
 	if !ok {
 		t.Fatal("expected image usage to parse")
 	}
-	if detail.InputTokens != 7 || detail.OutputTokens != 9 || detail.TotalTokens != 16 || detail.CachedTokens != 3 || detail.ReasoningTokens != 2 {
+	if detail.InputTokens != 7 || detail.OutputTokens != 9 || detail.TotalTokens != 16 ||
+		detail.CachedTokens != 3 ||
+		detail.ReasoningTokens != 2 {
 		t.Fatalf("detail = %#v, want parsed OpenAI-style usage", detail)
 	}
 	if detail.ResponseServiceTier != "priority" {
@@ -139,12 +163,14 @@ func TestParseCodexImageToolUsage(t *testing.T) {
 
 func TestParseCodexImageToolUsagePreservesZeroTokens(t *testing.T) {
 	detail, ok := parseCodexImageToolUsage(
-		[]byte(`{"response":{"service_tier":"priority","tool_usage":{"image_gen":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}}`),
+		[]byte((`{"response":{"service_tier":"priority","tool_usage":{"image_gen":{"inp` +
+			`ut_tokens":0,"output_tokens":0,"total_tokens":0}}}}`)),
 	)
 	if !ok {
 		t.Fatal("expected zero image usage to parse")
 	}
-	if detail.ResponseServiceTier != "priority" || detail.InputTokens != 0 || detail.OutputTokens != 0 || detail.TotalTokens != 0 {
+	if detail.ResponseServiceTier != "priority" || detail.InputTokens != 0 || detail.OutputTokens != 0 ||
+		detail.TotalTokens != 0 {
 		t.Fatalf("detail = %#v", detail)
 	}
 	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete {

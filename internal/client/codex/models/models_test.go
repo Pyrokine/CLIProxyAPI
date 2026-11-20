@@ -202,18 +202,20 @@ func TestCodexClientModelsHidesSpeechModels(t *testing.T) {
 	}
 	for _, model := range models {
 		modelID, _ := model["slug"].(string)
-		t.Run(modelID, func(t *testing.T) {
-			wantVisibility, wantPatch := "hide", any(nil)
-			if modelID == "grok-4" {
-				wantVisibility, wantPatch = "list", "freeform"
-			}
-			if model["visibility"] != wantVisibility {
-				t.Fatalf("visibility = %v, want %s", model["visibility"], wantVisibility)
-			}
-			if model["apply_patch_tool_type"] != wantPatch {
-				t.Fatalf("apply_patch_tool_type = %v, want %v", model["apply_patch_tool_type"], wantPatch)
-			}
-		})
+		t.Run(
+			modelID, func(t *testing.T) {
+				wantVisibility, wantPatch := "hide", any(nil)
+				if modelID == "grok-4" {
+					wantVisibility, wantPatch = "list", "freeform"
+				}
+				if model["visibility"] != wantVisibility {
+					t.Fatalf("visibility = %v, want %s", model["visibility"], wantVisibility)
+				}
+				if model["apply_patch_tool_type"] != wantPatch {
+					t.Fatalf("apply_patch_tool_type = %v, want %v", model["apply_patch_tool_type"], wantPatch)
+				}
+			},
+		)
 	}
 }
 
@@ -273,7 +275,7 @@ func TestCodexClientModelsUsesGPT56Templates(t *testing.T) {
 		{
 			slug:              "gpt-5.6-sol",
 			displayName:       "GPT-5.6-Sol",
-			priority:          6,
+			priority:          5,
 			defaultReasoning:  "low",
 			multiAgentVersion: "v2",
 			levels:            []string{"low", "medium", "high", "xhigh", "max", "ultra"},
@@ -281,7 +283,7 @@ func TestCodexClientModelsUsesGPT56Templates(t *testing.T) {
 		{
 			slug:              "gpt-5.6-terra",
 			displayName:       "GPT-5.6-Terra",
-			priority:          7,
+			priority:          8,
 			defaultReasoning:  "medium",
 			multiAgentVersion: "v2",
 			levels:            []string{"low", "medium", "high", "xhigh", "max", "ultra"},
@@ -289,7 +291,7 @@ func TestCodexClientModelsUsesGPT56Templates(t *testing.T) {
 		{
 			slug:              "gpt-5.6-luna",
 			displayName:       "GPT-5.6-Luna",
-			priority:          8,
+			priority:          9,
 			defaultReasoning:  "medium",
 			multiAgentVersion: "v1",
 			levels:            []string{"low", "medium", "high", "xhigh", "max"},
@@ -357,8 +359,8 @@ func TestCodexClientModelsUsesGPT6AstraTemplate(t *testing.T) {
 	if got := codexClientTestInt(model["priority"]); got != 1 {
 		t.Fatalf("priority = %v, want 1", model["priority"])
 	}
-	if got, _ := model["default_reasoning_level"].(string); got != "medium" {
-		t.Fatalf("default_reasoning_level = %q, want medium", got)
+	if got, _ := model["default_reasoning_level"].(string); got != "low" {
+		t.Fatalf("default_reasoning_level = %q, want low", got)
 	}
 	if got, _ := model["minimal_client_version"].(string); got != "0.153.0" {
 		t.Fatalf("minimal_client_version = %q, want 0.153.0", got)
@@ -482,15 +484,19 @@ func TestCodexClientTemplateAliasUsesCanonicalMetadataWithoutInventingCapabiliti
 		modelID  = "tenant/codex-alias"
 	)
 	modelRegistry := registry.GetGlobalRegistry()
-	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{{
-		ID:                      modelID,
-		CatalogName:             "gpt-5.6-sol",
-		ExplicitThinking:        true,
-		ExplicitInputModalities: true,
-		SupportedInputModalities: []string{
-			"text",
+	modelRegistry.RegisterClient(
+		clientID, "openai-compatibility", []*registry.ModelInfo{
+			{
+				ID:                      modelID,
+				CatalogName:             "gpt-5.6-sol",
+				ExplicitThinking:        true,
+				ExplicitInputModalities: true,
+				SupportedInputModalities: []string{
+					"text",
+				},
+			},
 		},
-	}})
+	)
 	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
 
 	response := buildTestResponseWithProviders(
@@ -526,7 +532,9 @@ func TestCodexClientTemplateAliasUsesCanonicalMetadataWithoutInventingCapabiliti
 }
 
 func TestCodexClientUnknownModelKeepsCapabilitiesUnknown(t *testing.T) {
-	model := codexClientModelsBySlug(t, []map[string]any{{"id": "unknown-compatible-model"}})["unknown-compatible-model"]
+	model := codexClientModelsBySlug(
+		t, []map[string]any{{"id": "unknown-compatible-model"}},
+	)["unknown-compatible-model"]
 	if model == nil {
 		t.Fatal("unknown-compatible-model missing from response")
 	}
@@ -550,57 +558,67 @@ func TestApplyCPAWebSearchCapabilityThreeStates(t *testing.T) {
 		{name: "non CPA client", clientVersion: "0.154.0", capability: &trueValue},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			entry := map[string]any{"cpa_capabilities": map[string]any{"web_search": true}}
-			applyCPAWebSearchCapability(
-				entry,
-				"model",
-				func(string) *bool { return tt.capability },
-				tt.clientVersion,
-			)
-			capabilities, present := entry["cpa_capabilities"].(map[string]any)
-			if present != tt.wantPresent {
-				t.Fatalf("cpa_capabilities present = %t, want %t; entry=%#v", present, tt.wantPresent, entry)
-			}
-			if present {
-				if got, _ := capabilities["web_search"].(bool); got != tt.wantValue {
-					t.Fatalf("web_search = %v, want %v", got, tt.wantValue)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				entry := map[string]any{"cpa_capabilities": map[string]any{"web_search": true}}
+				applyCPAWebSearchCapability(
+					entry,
+					"model",
+					func(string) *bool { return tt.capability },
+					tt.clientVersion,
+				)
+				capabilities, present := entry["cpa_capabilities"].(map[string]any)
+				if present != tt.wantPresent {
+					t.Fatalf("cpa_capabilities present = %t, want %t; entry=%#v", present, tt.wantPresent, entry)
 				}
-			}
-		})
+				if present {
+					if got, _ := capabilities["web_search"].(bool); got != tt.wantValue {
+						t.Fatalf("web_search = %v, want %v", got, tt.wantValue)
+					}
+				}
+			},
+		)
 	}
 }
 
 func TestCodexClientCPAWebSearchCapabilitiesUseExactRegisteredRoutes(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	trueValue, falseValue := true, false
-	modelRegistry.RegisterClient("test-cpa-capability-true", "codex", []*registry.ModelInfo{
-		{
-			ID:          "public-capable",
-			CatalogName: "upstream-capable",
-			NativeCapabilities: &registry.NativeCapabilities{
-				WebSearch: &trueValue,
+	modelRegistry.RegisterClient(
+		"test-cpa-capability-true", "codex", []*registry.ModelInfo{
+			{
+				ID:          "public-capable",
+				CatalogName: "upstream-capable",
+				NativeCapabilities: &registry.NativeCapabilities{
+					WebSearch: &trueValue,
+				},
+			},
+			{
+				ID: "public-mixed",
+				NativeCapabilities: &registry.NativeCapabilities{
+					WebSearch: &trueValue,
+				},
 			},
 		},
-		{
-			ID: "public-mixed",
-			NativeCapabilities: &registry.NativeCapabilities{
-				WebSearch: &trueValue,
-			},
-		},
-	})
+	)
 	modelRegistry.RegisterClient("test-cpa-capability-unknown", "claude", []*registry.ModelInfo{{ID: "public-mixed"}})
-	modelRegistry.RegisterClient("test-cpa-capability-false", "codex", []*registry.ModelInfo{{
-		ID: "public-unsupported",
-		NativeCapabilities: &registry.NativeCapabilities{
-			WebSearch: &falseValue,
+	modelRegistry.RegisterClient(
+		"test-cpa-capability-false", "codex", []*registry.ModelInfo{
+			{
+				ID: "public-unsupported",
+				NativeCapabilities: &registry.NativeCapabilities{
+					WebSearch: &falseValue,
+				},
+			},
 		},
-	}})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient("test-cpa-capability-true")
-		modelRegistry.UnregisterClient("test-cpa-capability-unknown")
-		modelRegistry.UnregisterClient("test-cpa-capability-false")
-	})
+	)
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient("test-cpa-capability-true")
+			modelRegistry.UnregisterClient("test-cpa-capability-unknown")
+			modelRegistry.UnregisterClient("test-cpa-capability-false")
+		},
+	)
 
 	response := buildTestResponseWithCPACapabilities(
 		[]map[string]any{
@@ -654,26 +672,52 @@ func TestResolveResponsesWebSearchCapabilityThreeStates(t *testing.T) {
 		routes []registry.NativeCapabilityRoute
 		want   *bool
 	}{
-		{name: "true", routes: []registry.NativeCapabilityRoute{{Provider: "codex", NativeCapabilities: capabilities(&trueValue)}}, want: &trueValue},
-		{name: "explicit false", routes: []registry.NativeCapabilityRoute{{Provider: "codex", NativeCapabilities: capabilities(&falseValue)}}, want: &falseValue},
-		{name: "unsupported path", routes: []registry.NativeCapabilityRoute{{Provider: "kimi", NativeCapabilities: capabilities(&trueValue)}}, want: &falseValue},
+		{
+			name:   "true",
+			routes: []registry.NativeCapabilityRoute{{Provider: "codex", NativeCapabilities: capabilities(&trueValue)}},
+			want:   &trueValue,
+		},
+		{
+			name: "explicit false", routes: []registry.NativeCapabilityRoute{
+				{
+					Provider: "codex", NativeCapabilities: capabilities(&falseValue),
+				},
+			}, want: &falseValue,
+		},
+		{
+			name:   "unsupported path",
+			routes: []registry.NativeCapabilityRoute{{Provider: "kimi", NativeCapabilities: capabilities(&trueValue)}},
+			want:   &falseValue,
+		},
 		{name: "unknown metadata", routes: []registry.NativeCapabilityRoute{{Provider: "codex"}}},
-		{name: "unknown path", routes: []registry.NativeCapabilityRoute{{Provider: "new-provider", NativeCapabilities: capabilities(&trueValue)}}},
-		{name: "true plus unknown", routes: []registry.NativeCapabilityRoute{{Provider: "codex", NativeCapabilities: capabilities(&trueValue)}, {Provider: "claude"}}},
+		{
+			name: "unknown path", routes: []registry.NativeCapabilityRoute{
+				{
+					Provider: "new-provider", NativeCapabilities: capabilities(&trueValue),
+				},
+			},
+		},
+		{
+			name: "true plus unknown", routes: []registry.NativeCapabilityRoute{
+				{Provider: "codex", NativeCapabilities: capabilities(&trueValue)}, {Provider: "claude"},
+			},
+		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := registry.ResolveResponsesWebSearchCapability(tt.routes)
-			if tt.want == nil {
-				if got != nil {
-					t.Fatalf("capability = %v, want unknown", *got)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				got := registry.ResolveResponsesWebSearchCapability(tt.routes)
+				if tt.want == nil {
+					if got != nil {
+						t.Fatalf("capability = %v, want unknown", *got)
+					}
+					return
 				}
-				return
-			}
-			if got == nil || *got != *tt.want {
-				t.Fatalf("capability = %v, want %v", got, *tt.want)
-			}
-		})
+				if got == nil || *got != *tt.want {
+					t.Fatalf("capability = %v, want %v", got, *tt.want)
+				}
+			},
+		)
 	}
 }
 
@@ -682,7 +726,8 @@ func TestModelInfoNativeCapabilitiesAreInternalJSONMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"id":"model","native_capabilities":{"web_search":false}}`), &info); err != nil {
 		t.Fatalf("unmarshal model info: %v", err)
 	}
-	if info.NativeCapabilities == nil || info.NativeCapabilities.WebSearch == nil || *info.NativeCapabilities.WebSearch {
+	if info.NativeCapabilities == nil || info.NativeCapabilities.WebSearch == nil ||
+		*info.NativeCapabilities.WebSearch {
 		t.Fatalf("native capability = %+v, want explicit false", info.NativeCapabilities)
 	}
 	encoded, err := json.Marshal(&info)
@@ -767,42 +812,48 @@ func TestCodexClientModelsResponseFiltersExtendedReasoningLevelsByClientVersion(
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resp := buildTestResponseForClient([]map[string]any{{"id": "gpt-5.6-sol"}}, tt.version, false)
-			models, ok := resp["models"].([]map[string]any)
-			if !ok || len(models) != 1 {
-				t.Fatalf("models = %#v, want one model", resp["models"])
-			}
-			assertCodexClientReasoningLevels(t, models[0], tt.want)
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				resp := buildTestResponseForClient([]map[string]any{{"id": "gpt-5.6-sol"}}, tt.version, false)
+				models, ok := resp["models"].([]map[string]any)
+				if !ok || len(models) != 1 {
+					t.Fatalf("models = %#v, want one model", resp["models"])
+				}
+				assertCodexClientReasoningLevels(t, models[0], tt.want)
+			},
+		)
 	}
 }
 
 func TestCodexClientModelsResponsePreservesExplicitEmptyReasoningLevels(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-codex-client-empty-reasoning"
-	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
-		{
-			ID:       "custom-codex-budget-only",
-			Object:   "model",
-			OwnedBy:  "test",
-			Type:     "openai",
-			Thinking: &registry.ThinkingSupport{Min: 1024, Max: 64000, ZeroAllowed: true, DynamicAllowed: true},
+	modelRegistry.RegisterClient(
+		clientID, "openai", []*registry.ModelInfo{
+			{
+				ID:       "custom-codex-budget-only",
+				Object:   "model",
+				OwnedBy:  "test",
+				Type:     "openai",
+				Thinking: &registry.ThinkingSupport{Min: 1024, Max: 64000, ZeroAllowed: true, DynamicAllowed: true},
+			},
+			{
+				ID:       "custom-codex-empty-levels",
+				Object:   "model",
+				OwnedBy:  "test",
+				Type:     "openai",
+				Thinking: &registry.ThinkingSupport{Levels: []string{}},
+			},
 		},
-		{
-			ID:       "custom-codex-empty-levels",
-			Object:   "model",
-			OwnedBy:  "test",
-			Type:     "openai",
-			Thinking: &registry.ThinkingSupport{Levels: []string{}},
-		},
-	})
+	)
 	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
 
-	models := codexClientModelsBySlug(t, []map[string]any{
-		{"id": "custom-codex-budget-only"},
-		{"id": "custom-codex-empty-levels"},
-	})
+	models := codexClientModelsBySlug(
+		t, []map[string]any{
+			{"id": "custom-codex-budget-only"},
+			{"id": "custom-codex-empty-levels"},
+		},
+	)
 	for _, id := range []string{"custom-codex-budget-only", "custom-codex-empty-levels"} {
 		model := models[id]
 		if model == nil {
@@ -829,26 +880,31 @@ func TestSanitizeCodexClientReasoningMetadataPreservesEmptyArray(t *testing.T) {
 	}{
 		{name: "empty levels", version: "0.153.3", levels: []any{}},
 		{name: "nil levels", version: "0.153.3"},
-		{name: "legacy incompatible", version: "0.143.9", levels: []any{map[string]any{"effort": "max"}, map[string]any{"effort": "ultra"}}},
+		{
+			name: "legacy incompatible", version: "0.143.9",
+			levels: []any{map[string]any{"effort": "max"}, map[string]any{"effort": "ultra"}},
+		},
 		{name: "invalid levels", version: "0.153.3", levels: []any{nil, map[string]any{"effort": "unknown"}}},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			entry := map[string]any{
-				"supported_reasoning_levels": tt.levels,
-				"default_reasoning_level":    "max",
-			}
-			sanitizeCodexClientReasoningMetadata(entry, tt.version)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				entry := map[string]any{
+					"supported_reasoning_levels": tt.levels,
+					"default_reasoning_level":    "max",
+				}
+				sanitizeCodexClientReasoningMetadata(entry, tt.version)
 
-			encodedEntry, errMarshal := json.Marshal(entry)
-			if errMarshal != nil {
-				t.Fatalf("marshal model metadata: %v", errMarshal)
-			}
-			if got, want := string(encodedEntry), `{"supported_reasoning_levels":[]}`; got != want {
-				t.Fatalf("model metadata JSON = %s, want %s", got, want)
-			}
-		})
+				encodedEntry, errMarshal := json.Marshal(entry)
+				if errMarshal != nil {
+					t.Fatalf("marshal model metadata: %v", errMarshal)
+				}
+				if got, want := string(encodedEntry), `{"supported_reasoning_levels":[]}`; got != want {
+					t.Fatalf("model metadata JSON = %s, want %s", got, want)
+				}
+			},
+		)
 	}
 }
 

@@ -15,7 +15,9 @@ func TestConvertCodexResponseToClaudeStreamWebSearchCallEmitsServerToolBlocks(t 
 		`{"type":"response.output_item.added","item":{"id":"ws_123","type":"web_search_call","status":"in_progress"}}`,
 		`{"type":"response.web_search_call.searching","item_id":"ws_123"}`,
 		`{"type":"response.web_search_call.completed","item_id":"ws_123"}`,
-		`{"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"search weather"},"results":[{"title":"Weather","url":"https://example.com/weather"}]}}`,
+		`{"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"`+
+			`completed","action":{"type":"search","query":"search weather"},"results":[{"title":"Weather","`+
+			`url":"https://example.com/weather"}]}}`,
 		`{"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2}}}`,
 	)
 	assertCodexClaudeBlockLifecycle(t, events)
@@ -61,8 +63,12 @@ func TestConvertCodexResponseToClaudeStreamClosesTextBeforeWebSearch(t *testing.
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`,
-		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"before search"}`,
-		`{"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"weather"}}}`,
+		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":`+
+			`0,"content_index":0,"delta":"before `+
+			`search"}`,
+		`{"type":"response.output_item.done","item":{"id":"ws_123","type":"web_`+
+			`search_call","status":"completed","action":{"type":"search","query":"w`+
+			`eather"}}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
 	)
 	assertCodexClaudeBlockLifecycle(t, events)
@@ -86,9 +92,13 @@ func TestConvertCodexResponseToClaudeStreamDefersWebSearchUntilFunctionCallClose
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`,
-		`{"type":"response.output_item.added","output_index":0,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup"}}`,
-		`{"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"weather"}}}`,
-		`{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"it`+
+			`em_1","type":"function_call","call_id":"call_1","name":"lookup"}}`,
+		`{"type":"response.output_item.done","item":{"id":"ws_123","type":"web_`+
+			`search_call","status":"completed","action":{"type":"search","query":"w`+
+			`eather"}}}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"lookup","arguments":"{}"}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
 	)
 	assertCodexClaudeBlockLifecycle(t, events)
@@ -106,7 +116,9 @@ func TestConvertCodexResponseToClaudeStreamDefersWebSearchUntilFunctionCallClose
 }
 
 func TestConvertCodexResponseToClaudeStreamDeduplicatesWebSearchDone(t *testing.T) {
-	webSearchDone := `{"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"weather"}}}`
+	webSearchDone := `{"type":"response.output_item.done","item":{"id":"ws_123","type":"web_` +
+		`search_call","status":"completed","action":{"type":"search","query":"w` +
+		`eather"}}}`
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`,
@@ -125,7 +137,8 @@ func TestConvertCodexResponseToClaudeStreamDeduplicatesWebSearchDone(t *testing.
 func TestConvertCodexResponseToClaudeStreamPairsFallbackWebSearchID(t *testing.T) {
 	events := collectStructuredCodexClaudeEvents(
 		t,
-		`{"type":"response.output_item.done","item":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"weather"}}}`,
+		`{"type":"response.output_item.done","item":{"type":"web_search_call","`+
+			`status":"completed","action":{"type":"search","query":"weather"}}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
 	)
 	assertCodexClaudeBlockLifecycle(t, events)
@@ -144,19 +157,12 @@ func TestConvertCodexResponseToClaudeStreamPairsFallbackWebSearchID(t *testing.T
 }
 
 func TestConvertCodexResponseToClaudeNonStreamWebSearchCallEmitsServerToolBlocks(t *testing.T) {
-	response := []byte(`{
-		"type":"response.completed",
-		"response":{
-			"id":"resp_1",
-			"model":"gpt-5.4",
-			"stop_reason":"stop",
-			"usage":{"input_tokens":3,"output_tokens":2},
-			"output":[
-				{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","query":"search weather"}},
-				{"type":"message","content":[{"type":"output_text","text":"done"}]}
-			]
-		}
-	}`)
+	response := []byte(("{\n\t\t\"type\":\"response.completed\",\n\t\t\"response\":{\n\t\t\t\"id\":\"resp_1\"," +
+		"\n\t\t\t\"model\":\"gpt-5.4\",\n\t\t\t\"stop_reason\":\"stop\",\n\t\t\t\"usage\":{\"input_tokens\":" +
+		"3,\"output_tokens\":2},\n\t\t\t\"output\":[\n\t\t\t\t{\"type\":\"web_search_call\",\"id\":\"ws_123\"" +
+		",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"search weather\"}},\n\t\t\t\t{" +
+		"\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}\n\t\t\t]\n\t\t}\n\t" +
+		"}"))
 	out := ConvertCodexResponseToClaudeNonStream(
 		context.Background(),
 		"",

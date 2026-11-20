@@ -17,5 +17,7 @@ func init() {
 			NonStream: convertCodexResponseToInteractionsNonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatInteractions, sdktranslator.FormatCodex, convertInteractionsRequestToCodexChecked)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatInteractions, sdktranslator.FormatCodex, convertInteractionsRequestToCodexChecked,
+	)
 }

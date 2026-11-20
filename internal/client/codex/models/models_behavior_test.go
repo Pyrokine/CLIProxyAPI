@@ -11,41 +11,45 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	modelID := "mimo-v2.5-pro-codex-test"
 	textOnlyModelID := "mimo-text-only-codex-test"
 	modelRegistry := registry.GetGlobalRegistry()
-	modelRegistry.RegisterClient("codex-input-modalities-test", "openai-compatibility", []*registry.ModelInfo{
-		{
-			ID:                       modelID,
-			Object:                   "model",
-			OwnedBy:                  "mimo",
-			Type:                     "openai-compatibility",
-			DisplayName:              modelID,
-			SupportedInputModalities: []string{"text", "image"},
+	modelRegistry.RegisterClient(
+		"codex-input-modalities-test", "openai-compatibility", []*registry.ModelInfo{
+			{
+				ID:                       modelID,
+				Object:                   "model",
+				OwnedBy:                  "mimo",
+				Type:                     "openai-compatibility",
+				DisplayName:              modelID,
+				SupportedInputModalities: []string{"text", "image"},
+			},
+			{
+				ID:                       textOnlyModelID,
+				Object:                   "model",
+				OwnedBy:                  "mimo",
+				Type:                     "openai-compatibility",
+				DisplayName:              textOnlyModelID,
+				SupportedInputModalities: []string{"text"},
+			},
+			{
+				ID:                       "mimo-mixed-modalities-codex-test",
+				Object:                   "model",
+				OwnedBy:                  "mimo",
+				Type:                     "openai-compatibility",
+				DisplayName:              "mimo-mixed-modalities-codex-test",
+				SupportedInputModalities: []string{"text", "image", "audio", "video", "TEXT", "IMAGE"},
+			},
+			{
+				ID:      "compat-image-only-codex-test",
+				Object:  "model",
+				OwnedBy: "mimo",
+				Type:    registry.OpenAIImageModelType,
+			},
 		},
-		{
-			ID:                       textOnlyModelID,
-			Object:                   "model",
-			OwnedBy:                  "mimo",
-			Type:                     "openai-compatibility",
-			DisplayName:              textOnlyModelID,
-			SupportedInputModalities: []string{"text"},
+	)
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient("codex-input-modalities-test")
 		},
-		{
-			ID:                       "mimo-mixed-modalities-codex-test",
-			Object:                   "model",
-			OwnedBy:                  "mimo",
-			Type:                     "openai-compatibility",
-			DisplayName:              "mimo-mixed-modalities-codex-test",
-			SupportedInputModalities: []string{"text", "image", "audio", "video", "TEXT", "IMAGE"},
-		},
-		{
-			ID:      "compat-image-only-codex-test",
-			Object:  "model",
-			OwnedBy: "mimo",
-			Type:    registry.OpenAIImageModelType,
-		},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient("codex-input-modalities-test")
-	})
+	)
 
 	openaiModels := modelRegistry.GetAvailableModels("openai")
 	resp := BuildResponse(openaiModels, nil, false)
@@ -85,7 +89,10 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 		t.Fatalf("input_modalities[1] = %q, want image", got)
 	}
 	if got, ok := visionEntry["supports_image_detail_original"].(bool); !ok || !got {
-		t.Fatalf("supports_image_detail_original = %#v, want true", visionEntry["supports_image_detail_original"])
+		t.Fatalf(
+			"supports_image_detail_original = %#v, want true",
+			visionEntry["supports_image_detail_original"],
+		)
 	}
 
 	if textOnlyEntry == nil {
@@ -99,7 +106,10 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 		t.Fatalf("text-only input_modalities[0] = %q, want text", got)
 	}
 	if _, exists := textOnlyEntry["supports_image_detail_original"]; exists {
-		t.Fatalf("text-only model should not expose supports_image_detail_original: %#v", textOnlyEntry["supports_image_detail_original"])
+		t.Fatalf(
+			"text-only model should not expose supports_image_detail_original: %#v",
+			textOnlyEntry["supports_image_detail_original"],
+		)
 	}
 
 	if mixedEntry == nil {
@@ -116,7 +126,10 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 		t.Fatalf("mixed input_modalities[1] = %q, want image", got)
 	}
 	if got, ok := mixedEntry["supports_image_detail_original"].(bool); !ok || !got {
-		t.Fatalf("mixed supports_image_detail_original = %#v, want true", mixedEntry["supports_image_detail_original"])
+		t.Fatalf(
+			"mixed supports_image_detail_original = %#v, want true",
+			mixedEntry["supports_image_detail_original"],
+		)
 	}
 
 	if imageEntry == nil {
@@ -126,15 +139,22 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 		t.Fatalf("image model visibility = %q, want hide", got)
 	}
 	if _, exists := imageEntry["input_modalities"]; exists {
-		t.Fatalf("image endpoint model should not expose input_modalities from registry: %#v", imageEntry["input_modalities"])
+		t.Fatalf(
+			"image endpoint model should not expose input_modalities from registry: %#v",
+			imageEntry["input_modalities"],
+		)
 	}
 }
 
 func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.T) {
-	resp := BuildResponse([]map[string]any{{
-		"id":           "gpt-5.5",
-		"display_name": "Configured Codex Name",
-	}}, nil, false)
+	resp := BuildResponse(
+		[]map[string]any{
+			{
+				"id":           "gpt-5.5",
+				"display_name": "Configured Codex Name",
+			},
+		}, nil, false,
+	)
 	models, ok := resp["models"].([]map[string]any)
 	if !ok || len(models) != 1 {
 		t.Fatalf("models = %#v, want one model", resp["models"])
@@ -160,10 +180,12 @@ func TestCodexClientModelsResponse_RewritesTemplateMultiAgentVersionWhenEnabled(
 }
 
 func TestCodexClientModelsResponse_DisablesSearchToolForSynthesizedModels(t *testing.T) {
-	resp := BuildResponse([]map[string]any{
-		{"id": "custom-openai-compatible-model"},
-		{"id": "gpt-5.5"},
-	}, nil, false)
+	resp := BuildResponse(
+		[]map[string]any{
+			{"id": "custom-openai-compatible-model"},
+			{"id": "gpt-5.5"},
+		}, nil, false,
+	)
 	models, ok := resp["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
@@ -198,14 +220,16 @@ func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchToo
 		"gpt-5.4":         {"codex", "xai"},
 		"gpt-5.6-sol":     {"codex"},
 	}
-	resp := BuildResponse([]map[string]any{
-		{"id": "new-codex-model"},
-		{"id": "gpt-5.5"},
-		{"id": "gpt-5.4"},
-		{"id": "gpt-5.6-sol"},
-	}, func(id string) []string {
-		return providers[id]
-	}, false)
+	resp := BuildResponse(
+		[]map[string]any{
+			{"id": "new-codex-model"},
+			{"id": "gpt-5.5"},
+			{"id": "gpt-5.4"},
+			{"id": "gpt-5.6-sol"},
+		}, func(id string) []string {
+			return providers[id]
+		}, false,
+	)
 	models, ok := resp["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
@@ -217,7 +241,10 @@ func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchToo
 	}
 
 	if got, ok := bySlug["gpt-5.6-sol"]["supports_search_tool"].(bool); !ok || !got {
-		t.Errorf("gpt-5.6-sol supports_search_tool = %#v, want true", bySlug["gpt-5.6-sol"]["supports_search_tool"])
+		t.Errorf(
+			"gpt-5.6-sol supports_search_tool = %#v, want true",
+			bySlug["gpt-5.6-sol"]["supports_search_tool"],
+		)
 	}
 	for _, slug := range []string{"new-codex-model", "gpt-5.5", "gpt-5.4"} {
 		if got, ok := bySlug[slug]["supports_search_tool"].(bool); !ok || got {
@@ -295,15 +322,17 @@ func TestLoadCodexClientModelTemplatesRefreshesOnRevision(t *testing.T) {
 	previousErr := codexClientModelTemplatesErr
 	codexClientModelTemplatesLoaded = false
 	codexClientModelTemplatesMu.Unlock()
-	t.Cleanup(func() {
-		codexClientModelTemplatesMu.Lock()
-		codexClientModelTemplatesLoaded = previousLoaded
-		codexClientModelTemplatesRevision = previousRevision
-		codexClientModelTemplates = previousTemplates
-		codexClientDefaultTemplate = previousDefault
-		codexClientModelTemplatesErr = previousErr
-		codexClientModelTemplatesMu.Unlock()
-	})
+	t.Cleanup(
+		func() {
+			codexClientModelTemplatesMu.Lock()
+			codexClientModelTemplatesLoaded = previousLoaded
+			codexClientModelTemplatesRevision = previousRevision
+			codexClientModelTemplates = previousTemplates
+			codexClientDefaultTemplate = previousDefault
+			codexClientModelTemplatesErr = previousErr
+			codexClientModelTemplatesMu.Unlock()
+		},
+	)
 
 	first := []byte(`{"models":[{"slug":"gpt-5.5","display_name":"First"}]}`)
 	templates, defaultTemplate, err := loadCodexClientModelTemplatesSnapshot(first, 100)
@@ -357,11 +386,13 @@ func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) 
 	const wantOverride = 1048576
 	const wantDefault = 272000
 
-	resp := BuildResponse([]map[string]any{
-		{"id": "deepseek-v4-flash", "max_context_length": wantOverride},
-		{"id": "custom-default-context-model"},
-		{"id": "gpt-5.5", "max_context_length": wantOverride},
-	}, nil, false)
+	resp := BuildResponse(
+		[]map[string]any{
+			{"id": "deepseek-v4-flash", "max_context_length": wantOverride},
+			{"id": "custom-default-context-model"},
+			{"id": "gpt-5.5", "max_context_length": wantOverride},
+		}, nil, false,
+	)
 	models, ok := resp["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
@@ -397,10 +428,12 @@ func TestCodexClientModelsResponseMapsMaxCompletionTokensToMaxTokens(t *testing.
 	const wantTemplateLimit = 64000
 	const wantSynthesizedLimit = 32000
 
-	resp := BuildResponse([]map[string]any{
-		{"id": "gpt-5.5", "max_completion_tokens": wantTemplateLimit},
-		{"id": "custom-output-limit-model", "max_completion_tokens": wantSynthesizedLimit},
-	}, nil, false)
+	resp := BuildResponse(
+		[]map[string]any{
+			{"id": "gpt-5.5", "max_completion_tokens": wantTemplateLimit},
+			{"id": "custom-output-limit-model", "max_completion_tokens": wantSynthesizedLimit},
+		}, nil, false,
+	)
 	models, ok := resp["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
@@ -432,13 +465,17 @@ func TestCodexClientModelsResponseUsesProvidedCapabilitiesForNewHomeModel(t *tes
 	const modelID = "gemini-new-home-model-test"
 	const wantContextWindow = 1048576
 
-	resp := BuildResponse([]map[string]any{{
-		"id":             modelID,
-		"context_length": wantContextWindow,
-		"thinking": &registry.ThinkingSupport{
-			Levels: []string{"low", "medium", "high"},
-		},
-	}}, nil, false)
+	resp := BuildResponse(
+		[]map[string]any{
+			{
+				"id":             modelID,
+				"context_length": wantContextWindow,
+				"thinking": &registry.ThinkingSupport{
+					Levels: []string{"low", "medium", "high"},
+				},
+			},
+		}, nil, false,
+	)
 	models, ok := resp["models"].([]map[string]any)
 	if !ok || len(models) != 1 {
 		t.Fatalf("models = %#v, want one model", resp["models"])
@@ -471,9 +508,22 @@ func TestCodexClientModelsResponseDoesNotInheritUnsupportedReasoningLevels(t *te
 		wantEfforts []string
 		wantDefault string
 	}{
-		{name: "modern client", version: "0.144.0", thinking: registry.ThinkingSupport{Levels: []string{"max", "ultra"}}, wantEfforts: []string{"max", "ultra"}, wantDefault: "max"},
-		{name: "legacy client with no compatible level", version: "0.143.9", thinking: registry.ThinkingSupport{Levels: []string{"max", "ultra"}}},
-		{name: "legacy client with one compatible level", version: "0.143.9", thinking: registry.ThinkingSupport{Levels: []string{"high", "max"}}, wantEfforts: []string{"high"}, wantDefault: "high"},
+		{
+			name: "modern client", version: "0.144.0",
+			thinking: registry.ThinkingSupport{
+				Levels: []string{"max", "ultra"},
+			}, wantEfforts: []string{"max", "ultra"},
+			wantDefault: "max",
+		},
+		{
+			name: "legacy client with no compatible level", version: "0.143.9",
+			thinking: registry.ThinkingSupport{Levels: []string{"max", "ultra"}},
+		},
+		{
+			name: "legacy client with one compatible level", version: "0.143.9",
+			thinking: registry.ThinkingSupport{Levels: []string{"high", "max"}}, wantEfforts: []string{"high"},
+			wantDefault: "high",
+		},
 		{
 			name:    "budget-only model",
 			version: "0.153.3",
@@ -488,51 +538,65 @@ func TestCodexClientModelsResponseDoesNotInheritUnsupportedReasoningLevels(t *te
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resp := BuildResponseForClient([]map[string]any{{
-				"id":       "home-extended-reasoning-model-test",
-				"thinking": &tt.thinking,
-			}}, nil, false, tt.version)
-			models, ok := resp["models"].([]map[string]any)
-			if !ok || len(models) != 1 {
-				t.Fatalf("models = %#v, want one model", resp["models"])
-			}
-			model := models[0]
-			if len(tt.wantEfforts) == 0 {
-				encodedLevels, errMarshal := json.Marshal(model["supported_reasoning_levels"])
-				if errMarshal != nil {
-					t.Fatalf("marshal supported_reasoning_levels: %v", errMarshal)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				resp := BuildResponseForClient(
+					[]map[string]any{
+						{
+							"id":       "home-extended-reasoning-model-test",
+							"thinking": &tt.thinking,
+						},
+					}, nil, false, tt.version,
+				)
+				models, ok := resp["models"].([]map[string]any)
+				if !ok || len(models) != 1 {
+					t.Fatalf("models = %#v, want one model", resp["models"])
 				}
-				if string(encodedLevels) != "[]" {
-					t.Fatalf("supported_reasoning_levels JSON = %s, want []", encodedLevels)
+				model := models[0]
+				if len(tt.wantEfforts) == 0 {
+					encodedLevels, errMarshal := json.Marshal(model["supported_reasoning_levels"])
+					if errMarshal != nil {
+						t.Fatalf("marshal supported_reasoning_levels: %v", errMarshal)
+					}
+					if string(encodedLevels) != "[]" {
+						t.Fatalf("supported_reasoning_levels JSON = %s, want []", encodedLevels)
+					}
+					if _, exists := model["default_reasoning_level"]; exists {
+						t.Fatalf("default_reasoning_level = %#v, want absent", model["default_reasoning_level"])
+					}
+					return
 				}
-				if _, exists := model["default_reasoning_level"]; exists {
-					t.Fatalf("default_reasoning_level = %#v, want absent", model["default_reasoning_level"])
-				}
-				return
-			}
 
-			rawLevels, ok := model["supported_reasoning_levels"].([]any)
-			if !ok || len(rawLevels) != len(tt.wantEfforts) {
-				t.Fatalf("supported_reasoning_levels = %#v, want %v", model["supported_reasoning_levels"], tt.wantEfforts)
-			}
-			for index, want := range tt.wantEfforts {
-				level, ok := rawLevels[index].(map[string]any)
-				if !ok || stringModelValue(level, "effort") != want {
-					t.Fatalf("supported_reasoning_levels[%d] = %#v, want %q", index, rawLevels[index], want)
+				rawLevels, ok := model["supported_reasoning_levels"].([]any)
+				if !ok || len(rawLevels) != len(tt.wantEfforts) {
+					t.Fatalf(
+						"supported_reasoning_levels = %#v, want %v",
+						model["supported_reasoning_levels"],
+						tt.wantEfforts,
+					)
 				}
-			}
-			if got := stringModelValue(model, "default_reasoning_level"); got != tt.wantDefault {
-				t.Fatalf("default_reasoning_level = %q, want %q", got, tt.wantDefault)
-			}
-		})
+				for index, want := range tt.wantEfforts {
+					level, ok := rawLevels[index].(map[string]any)
+					if !ok || stringModelValue(level, "effort") != want {
+						t.Fatalf("supported_reasoning_levels[%d] = %#v, want %q", index, rawLevels[index], want)
+					}
+				}
+				if got := stringModelValue(model, "default_reasoning_level"); got != tt.wantDefault {
+					t.Fatalf("default_reasoning_level = %q, want %q", got, tt.wantDefault)
+				}
+			},
+		)
 	}
 }
 
 func TestCodexClientModelsResponse_PrefixedRouteInheritsCanonicalTemplate(t *testing.T) {
-	resp := BuildResponseForClient([]map[string]any{{
-		"id": "1/gpt-6-astra",
-	}}, nil, false, "")
+	resp := BuildResponseForClient(
+		[]map[string]any{
+			{
+				"id": "1/gpt-6-astra",
+			},
+		}, nil, false, "",
+	)
 	models, ok := resp["models"].([]map[string]any)
 	if !ok || len(models) != 1 {
 		t.Fatalf("models = %#v, want one model", resp["models"])
@@ -552,31 +616,35 @@ func TestCodexClientModelsResponse_PrefixedRouteInheritsCanonicalTemplate(t *tes
 func TestCodexClientModelsResponse_OAuthAliasesInheritCanonicalMetadata(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "codex-oauth-alias-metadata-test-client"
-	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
-		{
-			ID:          "codex-main",
-			CatalogName: "gpt-6-astra",
-			DisplayName: "GPT 6.0 Astra",
+	modelRegistry.RegisterClient(
+		clientID, "codex", []*registry.ModelInfo{
+			{
+				ID:          "codex-main",
+				CatalogName: "gpt-6-astra",
+				DisplayName: "GPT 6.0 Astra",
+			},
+			{
+				ID:          "codex-compact",
+				CatalogName: "gpt-6-astra",
+				DisplayName: "GPT 6.0 Astra",
+			},
+			{
+				ID:          "codex-luna",
+				CatalogName: "gpt-5.6-luna",
+				DisplayName: "GPT 5.6 Luna",
+			},
+			{
+				ID:          "1/codex-main",
+				CatalogName: "gpt-6-astra",
+				DisplayName: "Prefixed Astra Alias",
+			},
 		},
-		{
-			ID:          "codex-compact",
-			CatalogName: "gpt-6-astra",
-			DisplayName: "GPT 6.0 Astra",
+	)
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient(clientID)
 		},
-		{
-			ID:          "codex-luna",
-			CatalogName: "gpt-5.6-luna",
-			DisplayName: "GPT 5.6 Luna",
-		},
-		{
-			ID:          "1/codex-main",
-			CatalogName: "gpt-6-astra",
-			DisplayName: "Prefixed Astra Alias",
-		},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
-	})
+	)
 
 	availableModels := []map[string]any{
 		{"id": "codex-main", "display_name": "GPT 6.0 Astra"},
@@ -630,39 +698,43 @@ func TestCodexClientModelsResponse_OAuthAliasesInheritCanonicalMetadata(t *testi
 func TestCodexClientModelsResponse_ExplicitRouteOverridesHonored(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "codex-route-override-test-client"
-	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
-		{
-			ID:               "custom-sol",
-			CatalogName:      "gpt-5.6-sol",
-			DisplayName:      "Overridden Display Name",
-			MaxContextLength: 123456,
-			ExplicitThinking: true,
-			Thinking: &registry.ThinkingSupport{
-				Levels: []string{"low", "high"},
+	modelRegistry.RegisterClient(
+		clientID, "codex", []*registry.ModelInfo{
+			{
+				ID:               "custom-sol",
+				CatalogName:      "gpt-5.6-sol",
+				DisplayName:      "Overridden Display Name",
+				MaxContextLength: 123456,
+				ExplicitThinking: true,
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{"low", "high"},
+				},
+			},
+			{
+				ID:               "custom-astra-explicit-no-ultra",
+				CatalogName:      "gpt-6-astra",
+				DisplayName:      "Astra Without Ultra",
+				ExplicitThinking: true,
+				Thinking: &registry.ThinkingSupport{
+					// Levels match the registry default (low through max) but are explicitly defined by the user
+					Levels: []string{"low", "medium", "high", "xhigh", "max"},
+				},
+			},
+			{
+				ID:               "gpt-6-astra",
+				DisplayName:      "Direct Canonical With Explicit Thinking",
+				ExplicitThinking: true,
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{"low", "high"},
+				},
 			},
 		},
-		{
-			ID:               "custom-astra-explicit-no-ultra",
-			CatalogName:      "gpt-6-astra",
-			DisplayName:      "Astra Without Ultra",
-			ExplicitThinking: true,
-			Thinking: &registry.ThinkingSupport{
-				// Levels equal registry default (low..max) but explicitly defined by user
-				Levels: []string{"low", "medium", "high", "xhigh", "max"},
-			},
+	)
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient(clientID)
 		},
-		{
-			ID:               "gpt-6-astra",
-			DisplayName:      "Direct Canonical With Explicit Thinking",
-			ExplicitThinking: true,
-			Thinking: &registry.ThinkingSupport{
-				Levels: []string{"low", "high"},
-			},
-		},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
-	})
+	)
 
 	availableModels := []map[string]any{
 		{
@@ -713,7 +785,10 @@ func TestCodexClientModelsResponse_ExplicitRouteOverridesHonored(t *testing.T) {
 	// Assert reasoning levels were overridden to [low, high]
 	levels, okLevels := entry["supported_reasoning_levels"].([]any)
 	if !okLevels || len(levels) != 2 {
-		t.Fatalf("custom-sol supported_reasoning_levels = %#v, want [low, high]", entry["supported_reasoning_levels"])
+		t.Fatalf(
+			"custom-sol supported_reasoning_levels = %#v, want [low, high]",
+			entry["supported_reasoning_levels"],
+		)
 	}
 	if got := stringModelValue(entry, "default_reasoning_level"); got != "low" {
 		t.Errorf("default_reasoning_level = %q, want low", got)
@@ -726,12 +801,17 @@ func TestCodexClientModelsResponse_ExplicitRouteOverridesHonored(t *testing.T) {
 	}
 	astraLevels, okAstraLevels := astraNoUltra["supported_reasoning_levels"].([]any)
 	if !okAstraLevels || len(astraLevels) != 5 {
-		t.Fatalf("custom-astra-explicit-no-ultra supported_reasoning_levels = %#v, want 5 levels", astraNoUltra["supported_reasoning_levels"])
+		t.Fatalf(
+			"custom-astra-explicit-no-ultra supported_reasoning_levels = %#v, want 5 levels",
+			astraNoUltra["supported_reasoning_levels"],
+		)
 	}
 	for _, l := range astraLevels {
 		lMap, _ := l.(map[string]any)
 		if stringModelValue(lMap, "effort") == "ultra" {
-			t.Error("custom-astra-explicit-no-ultra must not contain 'ultra' because user explicitly excluded it")
+			t.Error(
+				"custom-astra-explicit-no-ultra must not contain 'ultra' because user explicitly excluded it",
+			)
 		}
 	}
 
@@ -742,7 +822,10 @@ func TestCodexClientModelsResponse_ExplicitRouteOverridesHonored(t *testing.T) {
 	}
 	directLevels, okDirectLevels := directAstra["supported_reasoning_levels"].([]any)
 	if !okDirectLevels || len(directLevels) != 2 {
-		t.Fatalf("direct gpt-6-astra supported_reasoning_levels = %#v, want [low, high]", directAstra["supported_reasoning_levels"])
+		t.Fatalf(
+			"direct gpt-6-astra supported_reasoning_levels = %#v, want [low, high]",
+			directAstra["supported_reasoning_levels"],
+		)
 	}
 	if got := stringModelValue(directAstra, "default_reasoning_level"); got != "low" {
 		t.Errorf("direct gpt-6-astra default_reasoning_level = %q, want low", got)
@@ -752,15 +835,19 @@ func TestCodexClientModelsResponse_ExplicitRouteOverridesHonored(t *testing.T) {
 func TestCodexClientModelsResponseUnknownProviderKeepsCapabilitiesUnknown(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "codex-unrelated-custom-provider-test-client"
-	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{
-		{
-			ID:          "my-unrelated-custom-model",
-			DisplayName: "Unrelated Model",
+	modelRegistry.RegisterClient(
+		clientID, "openai-compatibility", []*registry.ModelInfo{
+			{
+				ID:          "my-unrelated-custom-model",
+				DisplayName: "Unrelated Model",
+			},
 		},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
-	})
+	)
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient(clientID)
+		},
+	)
 
 	availableModels := []map[string]any{
 		{
@@ -797,20 +884,24 @@ func TestCodexClientModelsResponseUnknownProviderKeepsCapabilitiesUnknown(t *tes
 func TestCodexClientModelsResponse_UnrelatedProviderCannotWidenSearchTool(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "codex-unrelated-provider-widen-test-client"
-	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{
-		{
-			ID:          "custom-astra-on-openai-compat",
-			CatalogName: "gpt-6-astra",
-			DisplayName: "Astra on OpenAI Compat",
-			// OpenAI compatibility models get low/medium/high registered without ExplicitThinking
-			Thinking: &registry.ThinkingSupport{
-				Levels: []string{"low", "medium", "high"},
+	modelRegistry.RegisterClient(
+		clientID, "openai-compatibility", []*registry.ModelInfo{
+			{
+				ID:          "custom-astra-on-openai-compat",
+				CatalogName: "gpt-6-astra",
+				DisplayName: "Astra on OpenAI Compat",
+				// OpenAI compatibility models get low/medium/high registered without ExplicitThinking
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{"low", "medium", "high"},
+				},
 			},
 		},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
-	})
+	)
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient(clientID)
+		},
+	)
 
 	availableModels := []map[string]any{
 		{
@@ -838,7 +929,10 @@ func TestCodexClientModelsResponse_UnrelatedProviderCannotWidenSearchTool(t *tes
 	}
 	// Protocol-level capabilities MUST be restricted for non-Codex providers
 	if got, _ := entry["supports_search_tool"].(bool); got {
-		t.Errorf("supports_search_tool = %v, want false because provider is openai-compatibility, not codex", got)
+		t.Errorf(
+			"supports_search_tool = %v, want false because provider is openai-compatibility, not codex",
+			got,
+		)
 	}
 	if got, _ := entry["prefer_websockets"].(bool); got {
 		t.Errorf("prefer_websockets = %v, want false for non-Codex provider", got)
@@ -855,7 +949,10 @@ func TestCodexClientModelsResponse_UnrelatedProviderCannotWidenSearchTool(t *tes
 	// Reasoning levels must NOT be widened beyond provider's registered capabilities
 	levels, okLevels := entry["supported_reasoning_levels"].([]any)
 	if !okLevels || len(levels) != 3 {
-		t.Fatalf("supported_reasoning_levels = %#v, want 3 levels restricted to provider", entry["supported_reasoning_levels"])
+		t.Fatalf(
+			"supported_reasoning_levels = %#v, want 3 levels restricted to provider",
+			entry["supported_reasoning_levels"],
+		)
 	}
 	for _, l := range levels {
 		lMap, _ := l.(map[string]any)
@@ -874,94 +971,110 @@ func TestCodexClientModelsResponse_MixedProvidersRestrictProtocolCapabilities(t 
 		{name: "codex_first_compat_second", codexFirst: true},
 		{name: "compat_first_codex_second", codexFirst: false},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			modelRegistry := registry.GetGlobalRegistry()
-			clientCodex := "codex-mixed-provider-client-codex-" + tt.name
-			clientCompat := "codex-mixed-provider-client-compat-" + tt.name
-			aliasName := "mixed-astra-alias-" + tt.name
+		t.Run(
+			tt.name, func(t *testing.T) {
+				modelRegistry := registry.GetGlobalRegistry()
+				clientCodex := "codex-mixed-provider-client-codex-" + tt.name
+				clientCompat := "codex-mixed-provider-client-compat-" + tt.name
+				aliasName := "mixed-astra-alias-" + tt.name
 
-			registerCodex := func() {
-				modelRegistry.RegisterClient(clientCodex, "codex", []*registry.ModelInfo{
-					{
-						ID:          aliasName,
-						CatalogName: "gpt-6-astra",
-						DisplayName: "Mixed Astra Alias",
-					},
-				})
-			}
-			registerCompat := func() {
-				modelRegistry.RegisterClient(clientCompat, "openai-compatibility", []*registry.ModelInfo{
-					{
-						ID:          aliasName,
-						CatalogName: "gpt-6-astra",
-						DisplayName: "Mixed Astra Alias",
-						Thinking: &registry.ThinkingSupport{
-							Levels: []string{"low", "medium", "high"},
+				registerCodex := func() {
+					modelRegistry.RegisterClient(
+						clientCodex, "codex", []*registry.ModelInfo{
+							{
+								ID:          aliasName,
+								CatalogName: "gpt-6-astra",
+								DisplayName: "Mixed Astra Alias",
+							},
 						},
+					)
+				}
+				registerCompat := func() {
+					modelRegistry.RegisterClient(
+						clientCompat, "openai-compatibility", []*registry.ModelInfo{
+							{
+								ID:          aliasName,
+								CatalogName: "gpt-6-astra",
+								DisplayName: "Mixed Astra Alias",
+								Thinking: &registry.ThinkingSupport{
+									Levels: []string{"low", "medium", "high"},
+								},
+							},
+						},
+					)
+				}
+
+				if tt.codexFirst {
+					registerCodex()
+					registerCompat()
+				} else {
+					registerCompat()
+					registerCodex()
+				}
+
+				t.Cleanup(
+					func() {
+						modelRegistry.UnregisterClient(clientCodex)
+						modelRegistry.UnregisterClient(clientCompat)
 					},
-				})
-			}
+				)
 
-			if tt.codexFirst {
-				registerCodex()
-				registerCompat()
-			} else {
-				registerCompat()
-				registerCodex()
-			}
-
-			t.Cleanup(func() {
-				modelRegistry.UnregisterClient(clientCodex)
-				modelRegistry.UnregisterClient(clientCompat)
-			})
-
-			availableModels := []map[string]any{
-				{"id": aliasName},
-			}
-
-			resp := BuildResponseForClient(availableModels, modelRegistry.GetModelProviders, false, "0.153.4")
-			models, ok := resp["models"].([]map[string]any)
-			if !ok || len(models) != 1 {
-				t.Fatalf("models = %#v, want one model", resp["models"])
-			}
-
-			entry := models[0]
-			// Inherited model metadata from canonical gpt-6-astra
-			if got := stringModelValue(entry, "comp_hash"); got != "3000" {
-				t.Errorf("comp_hash = %q, want 3000", got)
-			}
-			if got := intModelValue(entry, "max_context_window"); got != 872000 {
-				t.Errorf("max_context_window = %d, want 872000", got)
-			}
-			// Protocol-level capabilities MUST be restricted because providers are mixed (not pure Codex)
-			if got, _ := entry["supports_search_tool"].(bool); got {
-				t.Errorf("supports_search_tool = %v, want false for mixed provider", got)
-			}
-			if got, _ := entry["prefer_websockets"].(bool); got {
-				t.Errorf("prefer_websockets = %v, want false for mixed provider", got)
-			}
-			for _, field := range []string{"apply_patch_tool_type", "upgrade", "availability_nux"} {
-				value, exists := entry[field]
-				if !exists || value != nil {
-					t.Errorf("%s = %#v, want present null for mixed provider", field, value)
+				availableModels := []map[string]any{
+					{"id": aliasName},
 				}
-			}
-			if tiers, okTiers := entry["service_tiers"].([]any); !okTiers || len(tiers) != 0 {
-				t.Errorf("service_tiers = %#v, want empty array for mixed provider", entry["service_tiers"])
-			}
-			// Reasoning levels must NOT be widened to ultra/max/xhigh regardless of registration order
-			levels, okLevels := entry["supported_reasoning_levels"].([]any)
-			if !okLevels || len(levels) != 3 {
-				t.Fatalf("supported_reasoning_levels = %#v, want 3 levels restricted to mixed provider", entry["supported_reasoning_levels"])
-			}
-			for _, l := range levels {
-				lMap, _ := l.(map[string]any)
-				effort := stringModelValue(lMap, "effort")
-				if effort == "ultra" || effort == "max" || effort == "xhigh" {
-					t.Errorf("mixed provider must not widen reasoning levels to %q", effort)
+
+				resp := BuildResponseForClient(
+					availableModels,
+					modelRegistry.GetModelProviders,
+					false,
+					"0.153.4",
+				)
+				models, ok := resp["models"].([]map[string]any)
+				if !ok || len(models) != 1 {
+					t.Fatalf("models = %#v, want one model", resp["models"])
 				}
-			}
-		})
+
+				entry := models[0]
+				// Inherited model metadata from canonical gpt-6-astra
+				if got := stringModelValue(entry, "comp_hash"); got != "3000" {
+					t.Errorf("comp_hash = %q, want 3000", got)
+				}
+				if got := intModelValue(entry, "max_context_window"); got != 872000 {
+					t.Errorf("max_context_window = %d, want 872000", got)
+				}
+				// Protocol-level capabilities MUST be restricted because providers are mixed (not pure Codex)
+				if got, _ := entry["supports_search_tool"].(bool); got {
+					t.Errorf("supports_search_tool = %v, want false for mixed provider", got)
+				}
+				if got, _ := entry["prefer_websockets"].(bool); got {
+					t.Errorf("prefer_websockets = %v, want false for mixed provider", got)
+				}
+				for _, field := range []string{"apply_patch_tool_type", "upgrade", "availability_nux"} {
+					value, exists := entry[field]
+					if !exists || value != nil {
+						t.Errorf("%s = %#v, want present null for mixed provider", field, value)
+					}
+				}
+				if tiers, okTiers := entry["service_tiers"].([]any); !okTiers || len(tiers) != 0 {
+					t.Errorf("service_tiers = %#v, want empty array for mixed provider", entry["service_tiers"])
+				}
+				// Reasoning levels must NOT be widened to ultra/max/xhigh regardless of registration order
+				levels, okLevels := entry["supported_reasoning_levels"].([]any)
+				if !okLevels || len(levels) != 3 {
+					t.Fatalf(
+						"supported_reasoning_levels = %#v, want 3 levels restricted to mixed provider",
+						entry["supported_reasoning_levels"],
+					)
+				}
+				for _, l := range levels {
+					lMap, _ := l.(map[string]any)
+					effort := stringModelValue(lMap, "effort")
+					if effort == "ultra" || effort == "max" || effort == "xhigh" {
+						t.Errorf("mixed provider must not widen reasoning levels to %q", effort)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -973,77 +1086,93 @@ func TestCodexClientModelsResponse_MixedProvidersIntersectCodexExplicitRestricti
 		{name: "codex_explicit_first", codexFirst: true},
 		{name: "compat_first_codex_explicit_second", codexFirst: false},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			modelRegistry := registry.GetGlobalRegistry()
-			clientCodex := "codex-explicit-client-" + tt.name
-			clientCompat := "compat-client-" + tt.name
-			aliasName := "intersect-explicit-alias-" + tt.name
+		t.Run(
+			tt.name, func(t *testing.T) {
+				modelRegistry := registry.GetGlobalRegistry()
+				clientCodex := "codex-explicit-client-" + tt.name
+				clientCompat := "compat-client-" + tt.name
+				aliasName := "intersect-explicit-alias-" + tt.name
 
-			registerCodex := func() {
-				modelRegistry.RegisterClient(clientCodex, "codex", []*registry.ModelInfo{
-					{
-						ID:               aliasName,
-						CatalogName:      "gpt-6-astra",
-						DisplayName:      "Astra Mixed Explicit",
-						ExplicitThinking: true,
-						Thinking: &registry.ThinkingSupport{
-							// Codex explicitly restricted to low, high
-							Levels: []string{"low", "high"},
+				registerCodex := func() {
+					modelRegistry.RegisterClient(
+						clientCodex, "codex", []*registry.ModelInfo{
+							{
+								ID:               aliasName,
+								CatalogName:      "gpt-6-astra",
+								DisplayName:      "Astra Mixed Explicit",
+								ExplicitThinking: true,
+								Thinking: &registry.ThinkingSupport{
+									// Codex explicitly supports only low and high
+									Levels: []string{"low", "high"},
+								},
+							},
 						},
-					},
-				})
-			}
-			registerCompat := func() {
-				modelRegistry.RegisterClient(clientCompat, "openai-compatibility", []*registry.ModelInfo{
-					{
-						ID:          aliasName,
-						CatalogName: "gpt-6-astra",
-						DisplayName: "Astra Mixed Explicit",
-						Thinking: &registry.ThinkingSupport{
-							// Compat supports low, medium, high
-							Levels: []string{"low", "medium", "high"},
-						},
-					},
-				})
-			}
-
-			if tt.codexFirst {
-				registerCodex()
-				registerCompat()
-			} else {
-				registerCompat()
-				registerCodex()
-			}
-
-			t.Cleanup(func() {
-				modelRegistry.UnregisterClient(clientCodex)
-				modelRegistry.UnregisterClient(clientCompat)
-			})
-
-			availableModels := []map[string]any{
-				{"id": aliasName},
-			}
-
-			resp := BuildResponseForClient(availableModels, modelRegistry.GetModelProviders, false, "0.153.4")
-			models, ok := resp["models"].([]map[string]any)
-			if !ok || len(models) != 1 {
-				t.Fatalf("models = %#v, want one model", resp["models"])
-			}
-
-			entry := models[0]
-			// The intersection of [low, high] and [low, medium, high] is exactly [low, high]
-			levels, okLevels := entry["supported_reasoning_levels"].([]any)
-			if !okLevels || len(levels) != 2 {
-				t.Fatalf("supported_reasoning_levels = %#v, want exactly 2 levels (low, high)", entry["supported_reasoning_levels"])
-			}
-			for _, l := range levels {
-				lMap, _ := l.(map[string]any)
-				effort := stringModelValue(lMap, "effort")
-				if effort == "medium" || effort == "ultra" || effort == "max" || effort == "xhigh" {
-					t.Errorf("mixed route must not contain %q because Codex explicitly excluded it", effort)
+					)
 				}
-			}
-		})
+				registerCompat := func() {
+					modelRegistry.RegisterClient(
+						clientCompat, "openai-compatibility", []*registry.ModelInfo{
+							{
+								ID:          aliasName,
+								CatalogName: "gpt-6-astra",
+								DisplayName: "Astra Mixed Explicit",
+								Thinking: &registry.ThinkingSupport{
+									// Compat supports low, medium, high
+									Levels: []string{"low", "medium", "high"},
+								},
+							},
+						},
+					)
+				}
+
+				if tt.codexFirst {
+					registerCodex()
+					registerCompat()
+				} else {
+					registerCompat()
+					registerCodex()
+				}
+
+				t.Cleanup(
+					func() {
+						modelRegistry.UnregisterClient(clientCodex)
+						modelRegistry.UnregisterClient(clientCompat)
+					},
+				)
+
+				availableModels := []map[string]any{
+					{"id": aliasName},
+				}
+
+				resp := BuildResponseForClient(
+					availableModels,
+					modelRegistry.GetModelProviders,
+					false,
+					"0.153.4",
+				)
+				models, ok := resp["models"].([]map[string]any)
+				if !ok || len(models) != 1 {
+					t.Fatalf("models = %#v, want one model", resp["models"])
+				}
+
+				entry := models[0]
+				// The intersection of [low, high] and [low, medium, high] is exactly [low, high]
+				levels, okLevels := entry["supported_reasoning_levels"].([]any)
+				if !okLevels || len(levels) != 2 {
+					t.Fatalf(
+						"supported_reasoning_levels = %#v, want exactly 2 levels (low, high)",
+						entry["supported_reasoning_levels"],
+					)
+				}
+				for _, l := range levels {
+					lMap, _ := l.(map[string]any)
+					effort := stringModelValue(lMap, "effort")
+					if effort == "medium" || effort == "ultra" || effort == "max" || effort == "xhigh" {
+						t.Errorf("mixed route must not contain %q because Codex explicitly excluded it", effort)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -1055,34 +1184,42 @@ func TestCodexClientModelsResponse_DisjointModalitiesIntersectionDoesNotRestoreT
 	aliasName := "disjoint-modalities-alias"
 
 	// Provider A supports text only
-	modelRegistry.RegisterClient(clientA, "openai-compatibility", []*registry.ModelInfo{
-		{
-			ID:                       aliasName,
-			CatalogName:              "gpt-6-astra",
-			SupportedInputModalities: []string{"text"},
+	modelRegistry.RegisterClient(
+		clientA, "openai-compatibility", []*registry.ModelInfo{
+			{
+				ID:                       aliasName,
+				CatalogName:              "gpt-6-astra",
+				SupportedInputModalities: []string{"text"},
+			},
 		},
-	})
+	)
 	// Provider B supports image only
-	modelRegistry.RegisterClient(clientB, "custom-provider-b", []*registry.ModelInfo{
-		{
-			ID:                       aliasName,
-			CatalogName:              "gpt-6-astra",
-			SupportedInputModalities: []string{"image"},
+	modelRegistry.RegisterClient(
+		clientB, "custom-provider-b", []*registry.ModelInfo{
+			{
+				ID:                       aliasName,
+				CatalogName:              "gpt-6-astra",
+				SupportedInputModalities: []string{"image"},
+			},
 		},
-	})
+	)
 	// Provider C supports audio only (3-provider test)
-	modelRegistry.RegisterClient(clientC, "custom-provider-c", []*registry.ModelInfo{
-		{
-			ID:                       aliasName,
-			CatalogName:              "gpt-6-astra",
-			SupportedInputModalities: []string{"audio"},
+	modelRegistry.RegisterClient(
+		clientC, "custom-provider-c", []*registry.ModelInfo{
+			{
+				ID:                       aliasName,
+				CatalogName:              "gpt-6-astra",
+				SupportedInputModalities: []string{"audio"},
+			},
 		},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientA)
-		modelRegistry.UnregisterClient(clientB)
-		modelRegistry.UnregisterClient(clientC)
-	})
+	)
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient(clientA)
+			modelRegistry.UnregisterClient(clientB)
+			modelRegistry.UnregisterClient(clientC)
+		},
+	)
 
 	availableModels := []map[string]any{
 		{"id": aliasName},
@@ -1110,16 +1247,20 @@ func TestCodexClientModelsResponse_AudioOnlyModalitiesDoesNotRestoreTemplate(t *
 	clientA := "audio-only-client"
 	aliasName := "audio-only-astra-alias"
 
-	modelRegistry.RegisterClient(clientA, "openai-compatibility", []*registry.ModelInfo{
-		{
-			ID:                       aliasName,
-			CatalogName:              "gpt-6-astra",
-			SupportedInputModalities: []string{"audio"},
+	modelRegistry.RegisterClient(
+		clientA, "openai-compatibility", []*registry.ModelInfo{
+			{
+				ID:                       aliasName,
+				CatalogName:              "gpt-6-astra",
+				SupportedInputModalities: []string{"audio"},
+			},
 		},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientA)
-	})
+	)
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient(clientA)
+		},
+	)
 
 	availableModels := []map[string]any{
 		{"id": aliasName},
@@ -1149,66 +1290,84 @@ func TestCodexClientModelsResponse_MixedProviderWithoutThinkingRestrictsReasonin
 		{name: "codex_first_no_thinking_second", codexFirst: true},
 		{name: "no_thinking_first_codex_second", codexFirst: false},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			modelRegistry := registry.GetGlobalRegistry()
-			clientCodex := "codex-mixed-no-think-" + tt.name
-			clientCompat := "compat-mixed-no-think-" + tt.name
-			aliasName := "mixed-no-think-alias-" + tt.name
+		t.Run(
+			tt.name, func(t *testing.T) {
+				modelRegistry := registry.GetGlobalRegistry()
+				clientCodex := "codex-mixed-no-think-" + tt.name
+				clientCompat := "compat-mixed-no-think-" + tt.name
+				aliasName := "mixed-no-think-alias-" + tt.name
 
-			registerCodex := func() {
-				modelRegistry.RegisterClient(clientCodex, "codex", []*registry.ModelInfo{
-					{
-						ID:          aliasName,
-						CatalogName: "gpt-6-astra",
-						DisplayName: "Mixed Astra Alias",
+				registerCodex := func() {
+					modelRegistry.RegisterClient(
+						clientCodex, "codex", []*registry.ModelInfo{
+							{
+								ID:          aliasName,
+								CatalogName: "gpt-6-astra",
+								DisplayName: "Mixed Astra Alias",
+							},
+						},
+					)
+				}
+				registerCompat := func() {
+					modelRegistry.RegisterClient(
+						clientCompat, "openai-compatibility", []*registry.ModelInfo{
+							{
+								ID:          aliasName,
+								CatalogName: "gpt-6-astra",
+								DisplayName: "Mixed Astra Alias",
+								// Compat provider does NOT support thinking (Thinking == nil)
+								Thinking: nil,
+							},
+						},
+					)
+				}
+
+				if tt.codexFirst {
+					registerCodex()
+					registerCompat()
+				} else {
+					registerCompat()
+					registerCodex()
+				}
+
+				t.Cleanup(
+					func() {
+						modelRegistry.UnregisterClient(clientCodex)
+						modelRegistry.UnregisterClient(clientCompat)
 					},
-				})
-			}
-			registerCompat := func() {
-				modelRegistry.RegisterClient(clientCompat, "openai-compatibility", []*registry.ModelInfo{
-					{
-						ID:          aliasName,
-						CatalogName: "gpt-6-astra",
-						DisplayName: "Mixed Astra Alias",
-						// Compat provider does NOT support thinking (Thinking == nil)
-						Thinking: nil,
-					},
-				})
-			}
+				)
 
-			if tt.codexFirst {
-				registerCodex()
-				registerCompat()
-			} else {
-				registerCompat()
-				registerCodex()
-			}
+				availableModels := []map[string]any{
+					{"id": aliasName},
+				}
 
-			t.Cleanup(func() {
-				modelRegistry.UnregisterClient(clientCodex)
-				modelRegistry.UnregisterClient(clientCompat)
-			})
+				resp := BuildResponseForClient(
+					availableModels,
+					modelRegistry.GetModelProviders,
+					false,
+					"0.153.4",
+				)
+				models, ok := resp["models"].([]map[string]any)
+				if !ok || len(models) != 1 {
+					t.Fatalf("models = %#v, want one model", resp["models"])
+				}
 
-			availableModels := []map[string]any{
-				{"id": aliasName},
-			}
-
-			resp := BuildResponseForClient(availableModels, modelRegistry.GetModelProviders, false, "0.153.4")
-			models, ok := resp["models"].([]map[string]any)
-			if !ok || len(models) != 1 {
-				t.Fatalf("models = %#v, want one model", resp["models"])
-			}
-
-			entry := models[0]
-			// Because compat provider does not support thinking, mixed route must NOT advertise reasoning levels
-			levels, okLevels := entry["supported_reasoning_levels"].([]any)
-			if !okLevels || len(levels) != 0 {
-				t.Fatalf("supported_reasoning_levels = %#v, want empty array [] when one provider has no thinking support", entry["supported_reasoning_levels"])
-			}
-			if _, exists := entry["default_reasoning_level"]; exists {
-				t.Fatalf("default_reasoning_level should be deleted when no reasoning levels supported")
-			}
-		})
+				entry := models[0]
+				// Because compat provider does not support thinking, mixed route must NOT advertise reasoning levels
+				levels, okLevels := entry["supported_reasoning_levels"].([]any)
+				if !okLevels || len(levels) != 0 {
+					t.Fatalf(
+						"supported_reasoning_levels = %#v, want empty array [] when one "+
+							"provider has no thinking "+
+							"support",
+						entry["supported_reasoning_levels"],
+					)
+				}
+				if _, exists := entry["default_reasoning_level"]; exists {
+					t.Fatalf("default_reasoning_level should be deleted when no reasoning levels supported")
+				}
+			},
+		)
 	}
 }
 
@@ -1230,14 +1389,18 @@ func TestCodexClientModelsResponse_OAuthAliasesInheritCompleteReasoningLevelsWit
 
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "codex-reasoning-levels-test-client"
-	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
-		realAstra,
-		&codexMain,
-		&prefixedMain,
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
-	})
+	modelRegistry.RegisterClient(
+		clientID, "codex", []*registry.ModelInfo{
+			realAstra,
+			&codexMain,
+			&prefixedMain,
+		},
+	)
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient(clientID)
+		},
+	)
 
 	availableModels := []map[string]any{
 		{"id": "gpt-6-astra"},
@@ -1264,7 +1427,11 @@ func TestCodexClientModelsResponse_OAuthAliasesInheritCompleteReasoningLevelsWit
 		}
 		rawLevels, okLevels := entry["supported_reasoning_levels"].([]any)
 		if !okLevels {
-			t.Fatalf("%s supported_reasoning_levels missing or wrong type: %#v", slug, entry["supported_reasoning_levels"])
+			t.Fatalf(
+				"%s supported_reasoning_levels missing or wrong type: %#v",
+				slug,
+				entry["supported_reasoning_levels"],
+			)
 		}
 		hasUltra := false
 		hasDescriptions := false
@@ -1281,7 +1448,10 @@ func TestCodexClientModelsResponse_OAuthAliasesInheritCompleteReasoningLevelsWit
 			}
 		}
 		if !hasUltra {
-			t.Errorf("%s must support 'ultra' reasoning level on modern client (inherited from gpt-6-astra template)", slug)
+			t.Errorf(
+				"%s must support 'ultra' reasoning level on modern client (inherited from gpt-6-astra template)",
+				slug,
+			)
 		}
 		if !hasDescriptions {
 			t.Errorf("%s reasoning levels must retain rich descriptions from template", slug)
@@ -1307,7 +1477,11 @@ func TestCodexClientModelsResponse_OAuthAliasesInheritCompleteReasoningLevelsWit
 		}
 		rawLevels, okLevels := entry["supported_reasoning_levels"].([]any)
 		if !okLevels {
-			t.Fatalf("%s legacy supported_reasoning_levels missing: %#v", slug, entry["supported_reasoning_levels"])
+			t.Fatalf(
+				"%s legacy supported_reasoning_levels missing: %#v",
+				slug,
+				entry["supported_reasoning_levels"],
+			)
 		}
 		for _, rawLevel := range rawLevels {
 			levelMap, okMap := rawLevel.(map[string]any)
@@ -1334,9 +1508,11 @@ func TestCodexClientModelsResponse_CPAWebSearchCapabilities(t *testing.T) {
 		{"id": "unknown-model"},
 	}
 
-	resp := BuildResponseForClientWithCPACapabilities(availableModels, nil, func(id string) *bool {
-		return capabilities[id]
-	}, false, "cpa")
+	resp := BuildResponseForClientWithCPACapabilities(
+		availableModels, nil, func(id string) *bool {
+			return capabilities[id]
+		}, false, "cpa",
+	)
 	models, ok := resp["models"].([]map[string]any)
 	if !ok || len(models) != len(availableModels) {
 		t.Fatalf("models = %#v, want %d models", resp["models"], len(availableModels))
@@ -1353,7 +1529,9 @@ func TestCodexClientModelsResponse_CPAWebSearchCapabilities(t *testing.T) {
 func TestCodexClientModelsResponse_CPAWebSearchCapabilitiesOnlyForCPAClient(t *testing.T) {
 	capabilityLookup := func(string) *bool { value := true; return &value }
 	for _, clientVersion := range []string{"", "0.153.4", "CPA", "cpa-preview"} {
-		resp := BuildResponseForClientWithCPACapabilities([]map[string]any{{"id": "gpt-5.5"}}, nil, capabilityLookup, false, clientVersion)
+		resp := BuildResponseForClientWithCPACapabilities(
+			[]map[string]any{{"id": "gpt-5.5"}}, nil, capabilityLookup, false, clientVersion,
+		)
 		models, ok := resp["models"].([]map[string]any)
 		if !ok || len(models) != 1 {
 			t.Fatalf("client version %q models = %#v, want one model", clientVersion, resp["models"])
@@ -1366,7 +1544,12 @@ func assertCPAWebSearchCapability(t *testing.T, model map[string]any, want bool,
 	t.Helper()
 	raw, present := model["cpa_capabilities"]
 	if present != wantPresent {
-		t.Fatalf("model %q cpa_capabilities presence = %v, want %v", stringModelValue(model, "slug"), present, wantPresent)
+		t.Fatalf(
+			"model %q cpa_capabilities presence = %v, want %v",
+			stringModelValue(model, "slug"),
+			present,
+			wantPresent,
+		)
 	}
 	if !wantPresent {
 		return
@@ -1376,6 +1559,11 @@ func assertCPAWebSearchCapability(t *testing.T, model map[string]any, want bool,
 		t.Fatalf("model %q cpa_capabilities = %#v, want object", stringModelValue(model, "slug"), raw)
 	}
 	if got, ok := capabilities["web_search"].(bool); !ok || got != want {
-		t.Fatalf("model %q web_search = %#v, want %v", stringModelValue(model, "slug"), capabilities["web_search"], want)
+		t.Fatalf(
+			"model %q web_search = %#v, want %v",
+			stringModelValue(model, "slug"),
+			capabilities["web_search"],
+			want,
+		)
 	}
 }

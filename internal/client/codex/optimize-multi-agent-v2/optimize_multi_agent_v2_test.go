@@ -87,10 +87,13 @@ func TestIsCodexMultiAgentClient(t *testing.T) {
 func TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata(t *testing.T) {
 	t.Parallel()
 
-	catalog := []byte(`{"models":[
-		{"slug":"model-template","display_name":"Template","description":"Template model.","default_reasoning_level":"low","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"}],"service_tiers":[{"id":"priority"}],"priority":1},
-		{"slug":"gpt-5.5","display_name":"Default","description":"Default model.","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}],"service_tiers":[{"id":"priority"}],"priority":2}
-	]}`)
+	catalog := []byte(("{\"models\":[\n\t\t{\"slug\":\"model-template\",\"display_name\":\"Template\",\"" +
+		"description\":\"Template model.\",\"default_reasoning_level\":\"low\",\"supported_reasoning_levels\"" +
+		":[{\"effort\":\"low\"},{\"effort\":\"medium\"}],\"service_tiers\":[{\"id\":\"priority\"}],\"" +
+		"priority\":1},\n\t\t{\"slug\":\"gpt-5.5\",\"display_name\":\"Default\",\"description\":\"Default " +
+		"model.\",\"default_reasoning_level\":\"medium\",\"supported_reasoning_levels\":[{\"effort\":\"low\"}" +
+		",{\"effort\":\"medium\"},{\"effort\":\"high\"}],\"service_tiers\":[{\"id\":\"priority\"}],\"" +
+		"priority\":2}\n\t]}"))
 	available := []map[string]any{
 		{"id": "custom-model", "display_name": "Custom", "description": "Registry description."},
 		{"id": "model-template"},
@@ -112,7 +115,8 @@ func TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata(t *testing.T) {
 	if len(models) != 2 {
 		t.Fatalf("model count = %d, want 2", len(models))
 	}
-	if got := models[0]; got.id != "model-template" || got.description != "Template model." || got.defaultReasoningEffort != "low" {
+	if got := models[0]; got.id != "model-template" || got.description != "Template model." ||
+		got.defaultReasoningEffort != "low" {
 		t.Fatalf("template model = %+v", got)
 	}
 	if got := strings.Join(models[0].serviceTiers, ","); got != "priority" {
@@ -161,20 +165,14 @@ func TestDecodeCodexHomeAvailableModels(t *testing.T) {
 func TestRewriteCodexSpawnAgentDescriptionNormalizesModelList(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"input":[{
-			"type":"additional_tools",
-			"role":"developer",
-			"tools":[{
-				"type":"namespace",
-				"name":"collaboration",
-				"tools":[
-					{"type":"function","name":"send_message","description":"unchanged"},
-					{"type":"function","name":"spawn_agent","description":"\n        Available model overrides (optional; inherited parent model is preferred):\n- old duplicate\n- old duplicate\n        Spawns an agent to work on a task.","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
-				]
-			}]
-		}]
-	}`)
+	payload := []byte(("{\n\t\t\"input\":[{\n\t\t\t\"type\":\"additional_tools\",\n\t\t\t\"role\":\"" +
+		"developer\",\n\t\t\t\"tools\":[{\n\t\t\t\t\"type\":\"namespace\",\n\t\t\t\t\"name\":\"" +
+		"collaboration\",\n\t\t\t\t\"tools\":[\n\t\t\t\t\t{\"type\":\"function\",\"name\":\"send_message\",\"" +
+		"description\":\"unchanged\"},\n\t\t\t\t\t{\"type\":\"function\",\"name\":\"spawn_agent\",\"" +
+		"description\":\"\\n        Available model overrides (optional; inherited parent model is preferred)" +
+		":\\n- old duplicate\\n- old duplicate\\n        Spawns an agent to work on a task.\",\"parameters\":" +
+		"{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"encrypted\":true}}}}\n\t\t\t" +
+		"\t]\n\t\t\t}]\n\t\t}]\n\t}"))
 	models := []codexSpawnAgentModel{
 		{
 			id:                     "model-alpha",
@@ -193,7 +191,9 @@ func TestRewriteCodexSpawnAgentDescriptionNormalizesModelList(t *testing.T) {
 
 	got := rewriteCodexSpawnAgentDescription(payload, models)
 	description := gjson.GetBytes(got, "input.0.tools.0.tools.1.description").String()
-	wantAlpha := "- `model-alpha`: Alpha model. Reasoning efforts: low, medium (default), high. Service tiers: priority."
+	wantAlpha := "- `model-alpha`: Alpha model. Reasoning efforts: low, medium " +
+		"(default), high. Service tiers: " +
+		"priority."
 	wantBeta := "- `model-beta`: Beta model. Reasoning efforts: low (default), high."
 	if !strings.Contains(description, wantAlpha) || !strings.Contains(description, wantBeta) {
 		t.Fatalf("description does not contain model metadata:\n%s", description)
@@ -206,7 +206,13 @@ func TestRewriteCodexSpawnAgentDescriptionNormalizesModelList(t *testing.T) {
 			t.Fatalf("model %q reference count = %d, want 1", modelID, count)
 		}
 	}
-	if strings.Index(description, "`model-beta`") > strings.Index(description, codexSpawnAgentDescriptionMarker) {
+	if strings.Index(
+		description,
+		"`model-beta`",
+	) > strings.Index(
+		description,
+		codexSpawnAgentDescriptionMarker,
+	) {
 		t.Fatalf("model list was not inserted before spawn instructions: %q", description)
 	}
 	if gotDescription := gjson.GetBytes(
@@ -224,7 +230,8 @@ func TestRewriteCodexSpawnAgentDescriptionNormalizesModelList(t *testing.T) {
 func TestRewriteCodexSpawnAgentDescriptionTopLevelWithoutMarker(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","description":"Create a worker."}]}]}`)
+	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":` +
+		`"function","name":"spawn_agent","description":"Create a worker."}]}]}`)
 	models := []codexSpawnAgentModel{
 		{
 			id:                     "model-a",
@@ -245,14 +252,11 @@ func TestRewriteCodexSpawnAgentDescriptionTopLevelWithoutMarker(t *testing.T) {
 func TestCodexSpawnAgentToolPathsIgnoreInvalidContainers(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"input":[{"type":"message","tools":[{"type":"function","name":"spawn_agent","description":"message"}]}],
-		"tools":[
-			{"type":"function","name":"wrapper","tools":[{"type":"function","name":"spawn_agent","description":"child"}]},
-			{"type":"custom","name":"spawn_agent","description":"custom"},
-			{"type":"namespace","name":"spawn_agent","description":"namespace"}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"input\":[{\"type\":\"message\",\"tools\":[{\"type\":\"function\",\"name\":\"" +
+		"spawn_agent\",\"description\":\"message\"}]}],\n\t\t\"tools\":[\n\t\t\t{\"type\":\"function\",\"" +
+		"name\":\"wrapper\",\"tools\":[{\"type\":\"function\",\"name\":\"spawn_agent\",\"description\":\"" +
+		"child\"}]},\n\t\t\t{\"type\":\"custom\",\"name\":\"spawn_agent\",\"description\":\"custom\"},\n\t\t" +
+		"\t{\"type\":\"namespace\",\"name\":\"spawn_agent\",\"description\":\"namespace\"}\n\t\t]\n\t}"))
 	if paths := codexSpawnAgentToolPaths(payload); len(paths) != 0 {
 		t.Fatalf("invalid container paths = %v, want none", paths)
 	}
@@ -261,7 +265,9 @@ func TestCodexSpawnAgentToolPathsIgnoreInvalidContainers(t *testing.T) {
 func TestOptimizeCodexMultiAgentV2RequestSkipsNamespaceConflict(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"}]},{"type":"namespace","name":"collaboration-optimize","tools":[]}]}`)
+	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":` +
+		`"function","name":"spawn_agent"}]},{"type":"namespace","name":"collabo` +
+		`ration-optimize","tools":[]}]}`)
 	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
@@ -276,7 +282,9 @@ func TestOptimizeCodexMultiAgentV2RequestSkipsNamespaceConflict(t *testing.T) {
 func TestOptimizeCodexCollaborationNamespaceWithoutModels(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"}]}]}`)
+	payload := []byte(
+		`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"}]}]}`,
+	)
 	toolPaths := codexSpawnAgentToolPaths(payload)
 	got, optimized := optimizeCodexCollaborationNamespace(payload, toolPaths)
 	if !optimized {
@@ -290,7 +298,8 @@ func TestOptimizeCodexCollaborationNamespaceWithoutModels(t *testing.T) {
 func TestRewriteCodexSpawnAgentDescriptionWithoutModelsStillRemovesEncrypted(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"tools":[{"type":"function","name":"spawn_agent","description":"unchanged","parameters":{"properties":{"message":{"encrypted":true}}}}]}`)
+	payload := []byte((`{"tools":[{"type":"function","name":"spawn_agent","description":"unchanged","` +
+		`parameters":{"properties":{"message":{"encrypted":true}}}}]}`))
 	got := rewriteCodexSpawnAgentDescription(payload, nil)
 	if description := gjson.GetBytes(got, "tools.0.description").String(); description != "unchanged" {
 		t.Fatalf("description = %q, want unchanged", description)
@@ -328,7 +337,10 @@ func TestRewriteCodexSpawnAgentDescriptionEnabledOptimizesTool(t *testing.T) {
 	)
 	defer modelRegistry.UnregisterClient(clientID)
 
-	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","description":"Spawns an agent.","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]}`)
+	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":` +
+		`"function","name":"spawn_agent","description":"Spawns an agent.","para` +
+		`meters":{"properties":{"message":{"type":"string","encrypted":true}}}}` +
+		`]}]}`)
 	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
@@ -351,17 +363,13 @@ func TestRewriteCodexSpawnAgentDescriptionEnabledOptimizesTool(t *testing.T) {
 func TestPrepareCodexMultiAgentV2ToolsOnlyPreparesToolDefinitions(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"input":[
-			{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]},
-			{"type":"additional_tools","role":"developer","tools":[
-				{"type":"namespace","name":"collaboration","tools":[
-					{"type":"function","name":"spawn_agent","description":"Spawns an agent.","parameters":{"properties":{"message":{"encrypted":true}}}},
-					{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}}
-				]}
-			]}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"input\":[\n\t\t\t{\"type\":\"agent_message\",\"content\":[{\"type\":\"" +
+		"encrypted_content\",\"encrypted_content\":\"task\"}]},\n\t\t\t{\"type\":\"additional_tools\",\"" +
+		"role\":\"developer\",\"tools\":[\n\t\t\t\t{\"type\":\"namespace\",\"name\":\"collaboration\",\"" +
+		"tools\":[\n\t\t\t\t\t{\"type\":\"function\",\"name\":\"spawn_agent\",\"description\":\"Spawns an " +
+		"agent.\",\"parameters\":{\"properties\":{\"message\":{\"encrypted\":true}}}},\n\t\t\t\t\t{\"type\":" +
+		"\"function\",\"name\":\"send_message\",\"parameters\":{\"properties\":{\"message\":{\"encrypted\":" +
+		"true}}}}\n\t\t\t\t]}\n\t\t\t]}\n\t\t]\n\t}"))
 	headers := http.Header{"User-Agent": []string{"codex_cli_rs/0.144.1"}}
 	got, prepared := PrepareCodexMultiAgentV2Tools(context.Background(), headers, payload, true, false)
 	if !prepared {
@@ -390,9 +398,10 @@ func TestOptimizeCodexMultiAgentV2RequestSkipsPreparedToolRefresh(t *testing.T) 
 	ginContext.Set(CodexMultiAgentV2ToolsPreparedContextKey, true)
 	ctx := util.WithGinContext(context.Background(), ginContext)
 
-	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","description":"Available model overrides (optional; inherited parent model is preferred):
-- old-model: Old model.
-Spawns an agent.","parameters":{"properties":{"message":{"encrypted":true}}}}]}]}`)
+	payload := []byte(("{\"tools\":[{\"type\":\"namespace\",\"name\":\"collaboration\",\"tools\":[{\"type\":\"" +
+		"function\",\"name\":\"spawn_agent\",\"description\":\"Available model overrides (optional; " +
+		"inherited parent model is preferred):\n- old-model: Old model.\nSpawns an agent.\",\"parameters\":{" +
+		"\"properties\":{\"message\":{\"encrypted\":true}}}}]}]}"))
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got, optimized := OptimizeCodexMultiAgentV2Request(ctx, nil, payload, cfg)
 	if !optimized {
@@ -411,7 +420,11 @@ Spawns an agent.","parameters":{"properties":{"message":{"encrypted":true}}}}]}]
 func TestOptimizeCodexMultiAgentV2RequestNormalizesAgentMessageContentOnly(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"input":[{"type":"agent_message","id":"amsg_1","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Payload:\n"},{"type":"encrypted_content","encrypted_content":"delegated task"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn_1"}}]}`)
+	//goland:noinspection SpellCheckingInspection
+	payload := []byte(`{"input":[{"type":"agent_message","id":"amsg_1","author":"/root","reci` +
+		`pient":"/root/worker","content":[{"type":"input_text","text":"Payload:` +
+		`\n"},{"type":"encrypted_content","encrypted_content":"delegated task"}` +
+		`],"internal_chat_message_metadata_passthrough":{"turn_id":"turn_1"}}]}`)
 	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got, namespaceOptimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
@@ -422,13 +435,15 @@ func TestOptimizeCodexMultiAgentV2RequestNormalizesAgentMessageContentOnly(t *te
 	if message.Get("type").String() != "agent_message" || message.Get("role").Exists() {
 		t.Fatalf("outer agent message changed: %s", got)
 	}
-	if message.Get("content.1.type").String() != "input_text" || message.Get("content.1.text").String() != "delegated task" {
+	if message.Get("content.1.type").String() != "input_text" ||
+		message.Get("content.1.text").String() != "delegated task" {
 		t.Fatalf("encrypted content was not normalized: %s", got)
 	}
 	if message.Get("content.1.encrypted_content").Exists() {
 		t.Fatalf("encrypted_content was preserved: %s", got)
 	}
-	if message.Get("author").String() != "/root" || message.Get("recipient").String() != "/root/worker" || message.Get("internal_chat_message_metadata_passthrough.turn_id").String() != "turn_1" {
+	if message.Get("author").String() != "/root" || message.Get("recipient").String() != "/root/worker" ||
+		message.Get("internal_chat_message_metadata_passthrough.turn_id").String() != "turn_1" {
 		t.Fatalf("agent message metadata changed: %s", got)
 	}
 
@@ -442,7 +457,12 @@ func TestOptimizeCodexMultiAgentV2RequestNormalizesAgentMessageContentOnly(t *te
 	} {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				unchanged, _ := OptimizeCodexMultiAgentV2Request(context.Background(), tt.headers, payload, tt.cfg)
+				unchanged, _ := OptimizeCodexMultiAgentV2Request(
+					context.Background(),
+					tt.headers,
+					payload,
+					tt.cfg,
+				)
 				if string(unchanged) != string(payload) {
 					t.Fatalf("ineligible request changed: %s", unchanged)
 				}
@@ -452,29 +472,43 @@ func TestOptimizeCodexMultiAgentV2RequestNormalizesAgentMessageContentOnly(t *te
 }
 
 func TestOptimizeCodexMultiAgentV2RequestSkipsDotPrefixConflict(t *testing.T) {
-	collaboration := `{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object"}}]}`
+	collaboration := `{"type":"namespace","name":"collaboration","tools":[{"type":"function"` +
+		`,"name":"spawn_agent","parameters":{"type":"object"}}]}`
 	reserved := `{"type":"function","name":"collaboration-optimize.send_message","parameters":{"type":"object"}}`
 	for name, payload := range map[string]string{
-		"top level":        `{"tools":[` + collaboration + `,` + reserved + `]}`,
-		"nested namespace": `{"tools":[` + collaboration + `,{"type":"namespace","name":"user","tools":[` + reserved + `]}]}`,
-		"additional tools": `{"tools":[` + collaboration + `],"input":[{"type":"additional_tools","tools":[` + reserved + `]}]}`,
+		"top level": `{"tools":[` + collaboration + `,` + reserved + `]}`,
+		"nested namespace": `{"tools":[` +
+			collaboration +
+			`,{"type":"namespace","name":"user","tools":[` +
+			reserved +
+			`]}]}`,
+		"additional tools": `{"tools":[` +
+			collaboration +
+			`],"input":[{"type":"additional_tools","tools":[` +
+			reserved +
+			`]}]}`,
 	} {
-		t.Run(name, func(t *testing.T) {
-			if !HasCodexMultiAgentV2NamespaceConflict([]byte(payload)) {
-				t.Fatal("reserved dotted name was not recognized as a conflict")
-			}
-			output, optimized := OptimizeCodexMultiAgentV2Request(context.Background(),
-				http.Header{"User-Agent": {"codex_cli_rs/0.154.0"}}, []byte(payload),
-				&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}})
-			if optimized || gjson.GetBytes(output, "tools.0.name").String() != codexCollaborationNamespace {
-				t.Fatalf("reserved dotted name allowed namespace optimization: %s", output)
-			}
-		})
+		t.Run(
+			name, func(t *testing.T) {
+				if !HasCodexMultiAgentV2NamespaceConflict([]byte(payload)) {
+					t.Fatal("reserved dotted name was not recognized as a conflict")
+				}
+				output, optimized := OptimizeCodexMultiAgentV2Request(
+					context.Background(),
+					http.Header{"User-Agent": {"codex_cli_rs/0.154.0"}}, []byte(payload),
+					&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}},
+				)
+				if optimized || gjson.GetBytes(output, "tools.0.name").String() != codexCollaborationNamespace {
+					t.Fatalf("reserved dotted name allowed namespace optimization: %s", output)
+				}
+			},
+		)
 	}
 }
 
 func TestRewriteCodexMultiAgentV2InputCompatWithoutConfig(t *testing.T) {
-	payload := []byte(`{"input":[{"type":"agent_message","author":"sender","recipient":"worker","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
+	payload := []byte((`{"input":[{"type":"agent_message","author":"sender","recipient":"worker","content":[{"` +
+		`type":"encrypted_content","encrypted_content":"task"}]}]}`))
 	output := RewriteCodexMultiAgentV2Input(context.Background(), nil, payload, nil, true)
 	if gjson.GetBytes(output, "input.0.type").String() != "message" ||
 		gjson.GetBytes(output, "input.0.role").String() != "user" ||
@@ -491,18 +525,13 @@ func TestRewriteCodexMultiAgentV2InputCompatWithoutConfig(t *testing.T) {
 func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"type":"response.completed",
-		"response":{
-			"output":[
-				{"type":"function_call","name":"spawn_agent","namespace":"collaboration-optimize","arguments":{"namespace":"collaboration-optimize","name":"collaboration-optimize__opaque"}},
-				{"type":"function_call","name":"collaboration-optimize__send_message"},
-				{"type":"function_call","name":"collaboration-optimize.send_message"},
-				{"type":"message","namespace":"collaboration-optimize","name":"collaboration-optimize__plain"}
-			],
-			"tools":[{"type":"namespace","name":"collaboration-optimize"}]
-		}
-	}`)
+	payload := []byte(("{\n\t\t\"type\":\"response.completed\",\n\t\t\"response\":{\n\t\t\t\"output\":[\n\t\t" +
+		"\t\t{\"type\":\"function_call\",\"name\":\"spawn_agent\",\"namespace\":\"collaboration-optimize\",\"" +
+		"arguments\":{\"namespace\":\"collaboration-optimize\",\"name\":\"collaboration-optimize__opaque\"}}," +
+		"\n\t\t\t\t{\"type\":\"function_call\",\"name\":\"collaboration-optimize__send_message\"},\n\t\t\t\t{" +
+		"\"type\":\"function_call\",\"name\":\"collaboration-optimize.send_message\"},\n\t\t\t\t{\"type\":\"" +
+		"message\",\"namespace\":\"collaboration-optimize\",\"name\":\"collaboration-optimize__plain\"}\n\t\t" +
+		"\t],\n\t\t\t\"tools\":[{\"type\":\"namespace\",\"name\":\"collaboration-optimize\"}]\n\t\t}\n\t}"))
 	got := RestoreCodexMultiAgentV2Response(payload, true)
 	if namespace := gjson.GetBytes(
 		got, "response.output.0.namespace",
@@ -515,7 +544,9 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	if name := gjson.GetBytes(got, "response.output.2.name").String(); name != "send_message" {
 		t.Fatalf("dotted function name = %q, want send_message", name)
 	}
-	if namespace := gjson.GetBytes(got, "response.output.2.namespace").String(); namespace != codexCollaborationNamespace {
+	if namespace := gjson.GetBytes(
+		got, "response.output.2.namespace",
+	).String(); namespace != codexCollaborationNamespace {
 		t.Fatalf("dotted function namespace = %q, want collaboration", namespace)
 	}
 	if name := gjson.GetBytes(got, "response.tools.0.name").String(); name != codexCollaborationNamespace {
@@ -542,17 +573,13 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 func TestRewriteCodexMultiAgentV2InputRewritesAgentMessage(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"model":"gpt-5.4","input":[{
-		"type":"agent_message",
-		"id":"amsg_019f92ae-84fd-76f0-aa66-5a722dee382e",
-		"author":"/root",
-		"recipient":"/root/arithmetic_problem",
-		"content":[
-			{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/arithmetic_problem\nSender: /root\nPayload:\n"},
-			{"type":"encrypted_content","encrypted_content":"请出一道四则运算题，并给出答案。全程使用简体中文，题目简洁。"}
-		],
-		"internal_chat_message_metadata_passthrough":{"turn_id":"019f92ae-7eae-7371-957e-8f6f734edddc"}
-	}]}`)
+	payload := []byte(("{\"model\":\"gpt-5.4\",\"input\":[{\n\t\t\"type\":\"agent_message\",\n\t\t\"id\":\"" +
+		"amsg_019f92ae-84fd-76f0-aa66-5a722dee382e\",\n\t\t\"author\":\"/root\",\n\t\t\"recipient\":\"/root/" +
+		"arithmetic_problem\",\n\t\t\"content\":[\n\t\t\t{\"type\":\"input_text\",\"text\":\"Message Type: " +
+		"NEW_TASK\\nTask name: /root/arithmetic_problem\\nSender: /root\\nPayload:\\n\"},\n\t\t\t{\"type\":\"" +
+		"encrypted_content\",\"encrypted_content\":\"请出一道四则运算题，并给出答案。全程使用简体中文，题目简洁。\"}\n\t\t],\n\t\t\"" +
+		"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"019f92ae-7eae-7371-957e-8f6f734edddc\"}" +
+		"\n\t}]}"))
 	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got := RewriteCodexMultiAgentV2Input(context.Background(), headers, payload, cfg)
@@ -587,7 +614,9 @@ func TestRewriteCodexMultiAgentV2InputRewritesAgentMessage(t *testing.T) {
 func TestRewriteCodexMultiAgentV2InputConditions(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
+	payload := []byte(
+		`{"input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`,
+	)
 	tests := []struct {
 		name      string
 		cfg       *config.Config
@@ -654,35 +683,53 @@ func TestRewriteCodexMultiAgentV2InputStripsCompatMetadata(t *testing.T) {
 		{name: "native Codex", optimize: true, userAgent: "codex-tui/0.145.0", wantItemType: "message"},
 		{name: "unrelated client", optimize: true, userAgent: "curl/8.7.1", wantItemType: "agent_message"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: test.optimize}}
-			headers := http.Header{"User-Agent": []string{test.userAgent}}
-			output := RewriteCodexMultiAgentV2Input(context.Background(), headers, payload, cfg, test.compat)
-			if got := gjson.GetBytes(output, "input.0.type").String(); got != test.wantItemType {
-				t.Fatalf("agent message type = %q, want %q: %s", got, test.wantItemType, output)
-			}
-			if test.wantItemType == "message" {
-				if gjson.GetBytes(output, "input.0.role").String() != "user" ||
-					gjson.GetBytes(output, "input.0.content.0.type").String() != "input_text" ||
-					gjson.GetBytes(output, "input.0.content.0.text").String() != "task" ||
-					gjson.GetBytes(output, "input.0.content.0.encrypted_content").Exists() {
-					t.Fatalf("agent message content was not preserved as text: %s", output)
+		t.Run(
+			test.name, func(t *testing.T) {
+				cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: test.optimize}}
+				headers := http.Header{"User-Agent": []string{test.userAgent}}
+				output := RewriteCodexMultiAgentV2Input(
+					context.Background(),
+					headers,
+					payload,
+					cfg,
+					test.compat,
+				)
+				if got := gjson.GetBytes(output, "input.0.type").String(); got != test.wantItemType {
+					t.Fatalf("agent message type = %q, want %q: %s", got, test.wantItemType, output)
 				}
-			}
-			for i := 0; i < 2; i++ {
-				for _, field := range []string{"author", "recipient", "internal_chat_message_metadata_passthrough"} {
-					result := gjson.GetBytes(output, fmt.Sprintf("input.%d.%s", i, field))
-					if result.Exists() == test.compat {
-						t.Fatalf("compat=%t, input.%d.%s present=%t: %s", test.compat, i, field, result.Exists(), output)
+				if test.wantItemType == "message" {
+					if gjson.GetBytes(output, "input.0.role").String() != "user" ||
+						gjson.GetBytes(output, "input.0.content.0.type").String() != "input_text" ||
+						gjson.GetBytes(output, "input.0.content.0.text").String() != "task" ||
+						gjson.GetBytes(output, "input.0.content.0.encrypted_content").Exists() {
+						t.Fatalf("agent message content was not preserved as text: %s", output)
 					}
 				}
-			}
-		})
+				for i := range 2 {
+					for _, field := range []string{
+						"author", "recipient", "internal_chat_message_metadata_passthrough",
+					} {
+						result := gjson.GetBytes(output, fmt.Sprintf("input.%d.%s", i, field))
+						if result.Exists() == test.compat {
+							t.Fatalf(
+								"compat=%t, input.%d.%s present=%t: %s",
+								test.compat,
+								i,
+								field,
+								result.Exists(),
+								output,
+							)
+						}
+					}
+				}
+			},
+		)
 	}
 }
 
 func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
-	payload := []byte(`{"model":"test-model","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
+	payload := []byte(`{"model":"test-model","input":[{"type":"agent_message","content":[{"ty` +
+		`pe":"encrypted_content","encrypted_content":"task"}]}]}`)
 	enabledCfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	eligibleHeaders := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
 
@@ -717,9 +764,15 @@ func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
 	for _, tt := range translations {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				got := TranslateRequestWithCodexMultiAgentV2(
-					context.Background(), eligibleHeaders, enabledCfg, sdktranslator.FormatOpenAIResponse, tt.to,
-					tt.model, payload, false,
+				got := translateRequestWithCodexMultiAgentV2(
+					context.Background(),
+					eligibleHeaders,
+					enabledCfg,
+					sdktranslator.FormatOpenAIResponse,
+					tt.to,
+					tt.model,
+					payload,
+					false,
 				)
 				if value := gjson.GetBytes(got, tt.path).String(); value != tt.want {
 					t.Fatalf("%s = %q, want %q; output=%s", tt.path, value, tt.want, got)
@@ -730,7 +783,7 @@ func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
 
 	t.Run(
 		"disabled optimization", func(t *testing.T) {
-			got := TranslateRequestWithCodexMultiAgentV2(
+			got := translateRequestWithCodexMultiAgentV2(
 				context.Background(), eligibleHeaders, &config.Config{}, sdktranslator.FormatOpenAIResponse,
 				sdktranslator.FormatOpenAI, "chat-model", payload, false,
 			)
@@ -742,7 +795,7 @@ func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
 	t.Run(
 		"unrelated client", func(t *testing.T) {
 			headers := http.Header{"User-Agent": []string{"curl/8.7.1"}}
-			got := TranslateRequestWithCodexMultiAgentV2(
+			got := translateRequestWithCodexMultiAgentV2(
 				context.Background(), headers, enabledCfg, sdktranslator.FormatOpenAIResponse,
 				sdktranslator.FormatOpenAI, "chat-model", payload, false,
 			)
@@ -753,7 +806,7 @@ func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
 	)
 	t.Run(
 		"non-Responses source", func(t *testing.T) {
-			got := TranslateRequestWithCodexMultiAgentV2(
+			got := translateRequestWithCodexMultiAgentV2(
 				context.Background(), eligibleHeaders, enabledCfg, sdktranslator.FormatOpenAI,
 				sdktranslator.FormatOpenAI, "test-model", payload, false,
 			)
@@ -765,9 +818,15 @@ func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
 	for _, target := range []sdktranslator.Format{sdktranslator.FormatCodex, sdktranslator.FormatOpenAIResponse} {
 		t.Run(
 			"excluded target "+target.String(), func(t *testing.T) {
-				got := TranslateRequestWithCodexMultiAgentV2(
-					context.Background(), eligibleHeaders, enabledCfg, sdktranslator.FormatOpenAIResponse, target,
-					"test-model", payload, false,
+				got := translateRequestWithCodexMultiAgentV2(
+					context.Background(),
+					eligibleHeaders,
+					enabledCfg,
+					sdktranslator.FormatOpenAIResponse,
+					target,
+					"test-model",
+					payload,
+					false,
 				)
 				if messageType := gjson.GetBytes(got, "input.0.type").String(); messageType != "agent_message" {
 					t.Fatalf("target %s changed agent_message; output=%s", target, got)
@@ -780,9 +839,10 @@ func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
 func TestRewriteCodexSpawnAgentDescriptionDisabledLeavesPayloadUnchanged(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"tools":[{"type":"function","name":"spawn_agent","description":"unchanged","parameters":{"properties":{"message":{"encrypted":true}}}}]}`)
+	payload := []byte((`{"tools":[{"type":"function","name":"spawn_agent","description":"unchanged","` +
+		`parameters":{"properties":{"message":{"encrypted":true}}}}]}`))
 	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
-	got := RewriteCodexSpawnAgentDescription(context.Background(), headers, payload, &config.Config{})
+	got := rewriteCodexMultiAgentV2Request(context.Background(), headers, payload, &config.Config{})
 	if string(got) != string(payload) {
 		t.Fatalf("disabled optimization changed payload: %s", got)
 	}
@@ -794,7 +854,7 @@ func TestRewriteCodexSpawnAgentDescriptionIgnoresOtherUserAgent(t *testing.T) {
 	payload := []byte(`{"tools":[{"type":"function","name":"spawn_agent","description":"unchanged"}]}`)
 	headers := http.Header{"User-Agent": []string{"curl/8.7.1"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
-	got := RewriteCodexSpawnAgentDescription(context.Background(), headers, payload, cfg)
+	got := rewriteCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
 	if string(got) != string(payload) {
 		t.Fatalf("payload changed for unrelated User-Agent: %s", got)
 	}
@@ -803,7 +863,11 @@ func TestRewriteCodexSpawnAgentDescriptionIgnoresOtherUserAgent(t *testing.T) {
 func TestReplaceCodexSpawnAgentModelsNormalizesSectionsAndPreservesInstructions(t *testing.T) {
 	t.Parallel()
 
-	description := codexSpawnAgentModelsHeading + "\n- `old-model`: old\nKeep this multi-agent instruction.\nSpawns an agent.\n" + codexSpawnAgentModelsHeading
+	description := codexSpawnAgentModelsHeading +
+		("\n- `old-model`: old\nKeep this multi-agent " +
+			"instruction.\nSpawns an " +
+			"agent.\n") +
+		codexSpawnAgentModelsHeading
 	got := replaceCodexSpawnAgentModels(description, "- `new-model`: New model.")
 	if strings.Contains(got, "old-model") {
 		t.Fatalf("old model list was preserved: %q", got)
@@ -853,16 +917,11 @@ func TestCodexCollaborationMessageToolPathsFindsAllThreeTools(t *testing.T) {
 func TestCodexCollaborationMessageToolPathsAdditionalTools(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"input":[
-			{"type":"additional_tools","role":"developer","tools":[
-				{"type":"namespace","name":"collaboration","tools":[
-					{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}},
-					{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"encrypted":true}}}}
-				]}
-			]}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"input\":[\n\t\t\t{\"type\":\"additional_tools\",\"role\":\"developer\",\"" +
+		"tools\":[\n\t\t\t\t{\"type\":\"namespace\",\"name\":\"collaboration\",\"tools\":[\n\t\t\t\t\t{\"" +
+		"type\":\"function\",\"name\":\"send_message\",\"parameters\":{\"properties\":{\"message\":{\"" +
+		"encrypted\":true}}}},\n\t\t\t\t\t{\"type\":\"function\",\"name\":\"followup_task\",\"parameters\":{" +
+		"\"properties\":{\"message\":{\"encrypted\":true}}}}\n\t\t\t\t]}\n\t\t\t]}\n\t\t]\n\t}"))
 	paths := codexCollaborationMessageToolPaths(payload)
 	if len(paths) != 2 {
 		t.Fatalf("path count = %d, want 2; paths=%v", len(paths), paths)
@@ -872,15 +931,13 @@ func TestCodexCollaborationMessageToolPathsAdditionalTools(t *testing.T) {
 func TestRemoveCodexCollaborationMessageEncryptionAllTools(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"tools":[
-			{"type":"namespace","name":"collaboration","tools":[
-				{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-				{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-				{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
-			]}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"tools\":[\n\t\t\t{\"type\":\"namespace\",\"name\":\"collaboration\",\"tools\"" +
+		":[\n\t\t\t\t{\"type\":\"function\",\"name\":\"spawn_agent\",\"parameters\":{\"type\":\"object\",\"" +
+		"properties\":{\"message\":{\"type\":\"string\",\"encrypted\":true}}}},\n\t\t\t\t{\"type\":\"" +
+		"function\",\"name\":\"send_message\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\"" +
+		":{\"type\":\"string\",\"encrypted\":true}}}},\n\t\t\t\t{\"type\":\"function\",\"name\":\"" +
+		"followup_task\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"" +
+		",\"encrypted\":true}}}}\n\t\t\t]}\n\t\t]\n\t}"))
 	paths := codexCollaborationMessageToolPaths(payload)
 	got := removeCodexCollaborationMessageEncryption(payload, paths)
 
@@ -903,12 +960,10 @@ func TestRemoveCodexCollaborationMessageEncryptionAllTools(t *testing.T) {
 func TestRemoveCodexCollaborationMessageEncryptionPreservesUnrelatedEncryptedFields(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"tools":[
-			{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true},"data":{"encrypted":"keep-me"}}}},
-			{"type":"function","name":"unrelated_tool","parameters":{"properties":{"message":{"encrypted":true}}}}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"tools\":[\n\t\t\t{\"type\":\"function\",\"name\":\"send_message\",\"" +
+		"parameters\":{\"properties\":{\"message\":{\"type\":\"string\",\"encrypted\":true},\"data\":{\"" +
+		"encrypted\":\"keep-me\"}}}},\n\t\t\t{\"type\":\"function\",\"name\":\"unrelated_tool\",\"" +
+		"parameters\":{\"properties\":{\"message\":{\"encrypted\":true}}}}\n\t\t]\n\t}"))
 	paths := codexCollaborationMessageToolPaths(payload)
 	got := removeCodexCollaborationMessageEncryption(payload, paths)
 
@@ -930,14 +985,11 @@ func TestRemoveCodexCollaborationMessageEncryptionPreservesUnrelatedEncryptedFie
 func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionWithoutSpawnAgent(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"tools":[
-			{"type":"namespace","name":"collaboration","tools":[
-				{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-				{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
-			]}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"tools\":[\n\t\t\t{\"type\":\"namespace\",\"name\":\"collaboration\",\"tools\"" +
+		":[\n\t\t\t\t{\"type\":\"function\",\"name\":\"send_message\",\"parameters\":{\"type\":\"object\",\"" +
+		"properties\":{\"message\":{\"type\":\"string\",\"encrypted\":true}}}},\n\t\t\t\t{\"type\":\"" +
+		"function\",\"name\":\"followup_task\",\"parameters\":{\"type\":\"object\",\"properties\":{\"" +
+		"message\":{\"type\":\"string\",\"encrypted\":true}}}}\n\t\t\t]}\n\t\t]\n\t}"))
 	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
@@ -955,16 +1007,12 @@ func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionWithoutSpawnAgent(t *t
 func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionInAdditionalTools(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"input":[
-			{"type":"additional_tools","role":"developer","tools":[
-				{"type":"namespace","name":"collaboration","tools":[
-					{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-					{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
-				]}
-			]}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"input\":[\n\t\t\t{\"type\":\"additional_tools\",\"role\":\"developer\",\"" +
+		"tools\":[\n\t\t\t\t{\"type\":\"namespace\",\"name\":\"collaboration\",\"tools\":[\n\t\t\t\t\t{\"" +
+		"type\":\"function\",\"name\":\"send_message\",\"parameters\":{\"type\":\"object\",\"properties\":{\"" +
+		"message\":{\"type\":\"string\",\"encrypted\":true}}}},\n\t\t\t\t\t{\"type\":\"function\",\"name\":\"" +
+		"followup_task\",\"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"" +
+		",\"encrypted\":true}}}}\n\t\t\t\t]}\n\t\t\t]}\n\t\t]\n\t}"))
 	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got, _ := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
@@ -979,15 +1027,13 @@ func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionInAdditionalTools(t *t
 func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionFromAllThreeToolsWithSpawnAgent(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"tools":[
-			{"type":"namespace","name":"collaboration","tools":[
-				{"type":"function","name":"spawn_agent","description":"Spawns an agent.","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-				{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-				{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
-			]}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"tools\":[\n\t\t\t{\"type\":\"namespace\",\"name\":\"collaboration\",\"tools\"" +
+		":[\n\t\t\t\t{\"type\":\"function\",\"name\":\"spawn_agent\",\"description\":\"Spawns an agent.\",\"" +
+		"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"encrypted\":" +
+		"true}}}},\n\t\t\t\t{\"type\":\"function\",\"name\":\"send_message\",\"parameters\":{\"type\":\"" +
+		"object\",\"properties\":{\"message\":{\"type\":\"string\",\"encrypted\":true}}}},\n\t\t\t\t{\"type\"" +
+		":\"function\",\"name\":\"followup_task\",\"parameters\":{\"type\":\"object\",\"properties\":{\"" +
+		"message\":{\"type\":\"string\",\"encrypted\":true}}}}\n\t\t\t]}\n\t\t]\n\t}"))
 	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
@@ -1008,11 +1054,8 @@ func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionFromAllThreeToolsWithS
 func TestRemoveCodexCollaborationMessageEncryptionNoOpWithoutEncrypted(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{
-		"tools":[
-			{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string"}}}}
-		]
-	}`)
+	payload := []byte(("{\n\t\t\"tools\":[\n\t\t\t{\"type\":\"function\",\"name\":\"send_message\",\"" +
+		"parameters\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}}}}\n\t\t]\n\t}"))
 	paths := codexCollaborationMessageToolPaths(payload)
 	got := removeCodexCollaborationMessageEncryption(payload, paths)
 	if string(got) != string(payload) {

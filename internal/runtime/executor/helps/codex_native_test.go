@@ -9,6 +9,7 @@ import (
 )
 
 func TestIsNativeCodexRequest(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	tests := []struct {
 		name     string
 		body     string
@@ -67,15 +68,19 @@ func TestIsNativeCodexRequest(t *testing.T) {
 	}
 
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			got := IsNativeCodexRequest([]byte(testCase.body), cliproxyexecutor.Options{
-				SourceFormat:   testCase.source,
-				ResponseFormat: testCase.response,
-				Headers:        testCase.headers,
-			})
-			if got != testCase.want {
-				t.Fatalf("IsNativeCodexRequest() = %t, want %t", got, testCase.want)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				got := IsNativeCodexRequest(
+					[]byte(testCase.body), cliproxyexecutor.Options{
+						SourceFormat:   testCase.source,
+						ResponseFormat: testCase.response,
+						Headers:        testCase.headers,
+					},
+				)
+				if got != testCase.want {
+					t.Fatalf("IsNativeCodexRequest() = %t, want %t", got, testCase.want)
+				}
+			},
+		)
 	}
 }

@@ -80,7 +80,9 @@ func TestCodexResponsesBodyUsesResolvedModelIsCompat(t *testing.T) {
 	cfg.Codex.OptimizeMultiAgentV2 = false
 	compatWithoutOptimization := build(true)
 	if got := gjson.GetBytes(compatWithoutOptimization.Body, "input.0.type").String(); got != "message" {
-		t.Fatalf("disabled optimization skipped compat normalization: type=%q body=%s", got, compatWithoutOptimization.Body)
+		t.Fatalf(
+			"disabled optimization skipped compat normalization: type=%q body=%s", got, compatWithoutOptimization.Body,
+		)
 	}
 	if gjson.GetBytes(compatWithoutOptimization.Body, "input.0.role").String() != "user" ||
 		gjson.GetBytes(compatWithoutOptimization.Body, "input.0.content.0.type").String() != "input_text" ||

@@ -45,9 +45,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, false)
 }
 
-// ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
+// convertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
 // empty or unknown-format signatures for configured compatibility endpoints.
-func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
 	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true)
 }
 
@@ -57,7 +57,12 @@ func convertClaudeRequestToCodex(
 	stream bool,
 	preserveCompatThinkingBlocks bool,
 ) []byte {
-	body, err := convertClaudeRequestToCodexChecked(modelName, inputRawJSON, stream, preserveCompatThinkingBlocks)
+	body, err := convertClaudeRequestToCodexChecked(
+		modelName,
+		inputRawJSON,
+		stream,
+		preserveCompatThinkingBlocks,
+	)
 	if err != nil {
 		log.WithError(err).Warn("Claude to Codex request translation rejected")
 		return nil
@@ -66,7 +71,10 @@ func convertClaudeRequestToCodex(
 }
 
 // ConvertClaudeRequestToCodexWithCompatReturningError reports unsupported user attachments.
-func ConvertClaudeRequestToCodexWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+func ConvertClaudeRequestToCodexWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) (
+	[]byte,
+	error,
+) {
 	return convertClaudeRequestToCodexChecked(modelName, inputRawJSON, stream, true)
 }
 
@@ -144,8 +152,11 @@ func convertClaudeRequestToCodexChecked(
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
 			if messageRole == "system" {
-				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(messageResult.Get("content")); ok {
-					message := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
+				if reminderText,
+					ok := translatorcommon.ClaudeMessageSystemReminderText(messageResult.Get("content")); ok {
+					message := []byte(
+						`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`,
+					)
 					message, _ = sjson.SetBytes(message, "content.0.text", reminderText)
 					if len(pendingToolUseIDs) > 0 {
 						pendingSystemReminders = append(pendingSystemReminders, message)
@@ -158,7 +169,9 @@ func convertClaudeRequestToCodexChecked(
 
 			messageContentsResult := messageResult.Get("content")
 			if messageRole == "user" && len(pendingToolUseIDs) > 0 {
-				messageContentsResult = translatorcommon.AlignClaudeToolResults(messageContentsResult, pendingToolUseIDs)
+				messageContentsResult = translatorcommon.AlignClaudeToolResults(
+					messageContentsResult, pendingToolUseIDs,
+				)
 			}
 			pendingToolUseIDs = nil
 
@@ -210,7 +223,11 @@ func convertClaudeRequestToCodexChecked(
 				turnSendable++
 				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.type", contentIndex), "input_file")
 				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.file_data", contentIndex), dataURL)
-				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.filename", contentIndex), "document.pdf")
+				message, _ = sjson.SetBytes(
+					message,
+					fmt.Sprintf("content.%d.filename", contentIndex),
+					"document.pdf",
+				)
 				contentIndex++
 				hasContent = true
 			}
@@ -323,7 +340,9 @@ func convertClaudeRequestToCodexChecked(
 								toolResultContentType := contentResults[k].Get("type").String()
 								if toolResultContentType == "image" {
 									if part, ok := claudeImageInputPart(contentResults[k].Get("source")); ok {
-										toolResultContent, _ = sjson.SetRawBytes(toolResultContent, strconv.Itoa(toolResultContentIndex), part)
+										toolResultContent, _ = sjson.SetRawBytes(
+											toolResultContent, strconv.Itoa(toolResultContentIndex), part,
+										)
 										toolResultContentIndex++
 									}
 								} else if toolResultContentType == "text" {
@@ -427,7 +446,8 @@ func convertClaudeRequestToCodexChecked(
 
 	// Default to parallel tool calls unless tool_choice explicitly disables them.
 	parallelToolCalls := true
-	if disableParallelToolUse := rootResult.Get("tool_choice.disable_parallel_tool_use"); disableParallelToolUse.Exists() {
+	if disableParallelToolUse :=
+		rootResult.Get("tool_choice.disable_parallel_tool_use"); disableParallelToolUse.Exists() {
 		parallelToolCalls = !disableParallelToolUse.Bool()
 	}
 
@@ -702,7 +722,8 @@ func normalizeToolParameters(raw string) string {
 			}
 		}
 	}
-	if properties := schema.Get("properties"); isObject && (!properties.Exists() || properties.Type == gjson.Null) {
+	if properties := schema.Get("properties"); isObject &&
+		(!properties.Exists() || properties.Type == gjson.Null) {
 		normalized, _ = sjson.SetRawBytes(normalized, "properties", []byte(`{}`))
 	}
 	return string(normalized)

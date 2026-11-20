@@ -85,14 +85,16 @@ func TestNormalizeCodexToolSchemasPreservesAmbiguousUnions(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := []byte(`{"tools":[{"type":"function","name":"f","parameters":{"type":"object",` +
-				`"properties":{"value":` + test.property + `}}}]}`)
-			output := NormalizeCodexToolSchemas(input)
-			if !gjson.GetBytes(output, "tools.0.parameters.properties.value.oneOf").Exists() {
-				t.Fatalf("ambiguous oneOf was changed: %s", output)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				input := []byte(`{"tools":[{"type":"function","name":"f","parameters":{"type":"object",` +
+					`"properties":{"value":` + test.property + `}}}]}`)
+				output := NormalizeCodexToolSchemas(input)
+				if !gjson.GetBytes(output, "tools.0.parameters.properties.value.oneOf").Exists() {
+					t.Fatalf("ambiguous oneOf was changed: %s", output)
+				}
+			},
+		)
 	}
 }
 

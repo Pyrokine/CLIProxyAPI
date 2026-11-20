@@ -22,19 +22,23 @@ func TestCreateClientSecretScopesTokenToIssuerAndSession(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := NewHandler(nil, nil)
 	router := gin.New()
-	router.POST("/v1/realtime/client_secrets", func(c *gin.Context) {
-		c.Set("apiKey", "issuer-key")
-		c.Set("accessProvider", "config-inline")
-		c.Next()
-	}, handler.CreateClientSecret)
+	router.POST(
+		"/v1/realtime/client_secrets", func(c *gin.Context) {
+			c.Set("apiKey", "issuer-key")
+			c.Set("accessProvider", "config-inline")
+			c.Next()
+		}, handler.CreateClientSecret,
+	)
 
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/realtime/client_secrets",
-		strings.NewReader(`{
+		strings.NewReader(
+			`{
 			"session":{"type":"realtime","model":"gpt-realtime","instructions":"help"},
 			"expires_after":{"anchor":"created_at","seconds":60}
-		}`),
+		}`,
+		),
 	)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
@@ -88,9 +92,11 @@ func TestLiveSelectionMetadataUsesIssuerPrincipal(t *testing.T) {
 	c.Set("apiKey", "issuer-key")
 	c.Set(ClientSecretPrincipalContextKey, "sess_ephemeral")
 
-	metadata := liveSelectionMetadata(c, map[string]any{
-		coreexecutor.ExecutionSessionMetadataKey: "call_1",
-	})
+	metadata := liveSelectionMetadata(
+		c, map[string]any{
+			coreexecutor.ExecutionSessionMetadataKey: "call_1",
+		},
+	)
 	if got, want := metadata[coreexecutor.CallerScopeMetadataKey], coresession.CallerScope("issuer-key"); got != want {
 		t.Fatalf("caller scope = %v, want %q", got, want)
 	}
@@ -140,22 +146,24 @@ func TestCreateClientSecretRequiresStandardPrincipal(t *testing.T) {
 			want: http.StatusForbidden,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			router := gin.New()
-			if test.middleware == nil {
-				router.POST("/v1/realtime/client_secrets", handler.CreateClientSecret)
-			} else {
-				router.POST("/v1/realtime/client_secrets", test.middleware, handler.CreateClientSecret)
-			}
-			recorder := httptest.NewRecorder()
-			router.ServeHTTP(
-				recorder,
-				httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{}`)),
-			)
-			if recorder.Code != test.want {
-				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.want, recorder.Body.String())
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				router := gin.New()
+				if test.middleware == nil {
+					router.POST("/v1/realtime/client_secrets", handler.CreateClientSecret)
+				} else {
+					router.POST("/v1/realtime/client_secrets", test.middleware, handler.CreateClientSecret)
+				}
+				recorder := httptest.NewRecorder()
+				router.ServeHTTP(
+					recorder,
+					httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{}`)),
+				)
+				if recorder.Code != test.want {
+					t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.want, recorder.Body.String())
+				}
+			},
+		)
 	}
 }
 
@@ -195,10 +203,12 @@ func TestClientSecretStoreExpiryAndIssuerCapacity(t *testing.T) {
 	}
 
 	now = now.Add(-time.Minute)
-	for index := 0; index < clientSecretMaxEntriesPerIssuer; index++ {
+	for index := range clientSecretMaxEntriesPerIssuer {
 		store.entries[string(rune(index+1))] = clientSecretEntry{
-			authorization: ClientSecretAuthorization{IssuerPrincipal: "issuer", IssuerProvider: "provider", IssuerGeneration: 1},
-			expiresAt:     now.Add(time.Hour),
+			authorization: ClientSecretAuthorization{
+				IssuerPrincipal: "issuer", IssuerProvider: "provider", IssuerGeneration: 1,
+			},
+			expiresAt: now.Add(time.Hour),
 		}
 	}
 	_, _, _, errCreate = store.create(json.RawMessage(`{}`), time.Minute, "issuer", "provider", 1)
@@ -215,8 +225,10 @@ func TestClientSecretStoreExpiryAndIssuerCapacity(t *testing.T) {
 	for index := range clientSecretMaxEntries {
 		key := string(rune(index + 1))
 		globalStore.entries[key] = clientSecretEntry{
-			authorization: ClientSecretAuthorization{IssuerPrincipal: key, IssuerProvider: "provider", IssuerGeneration: 1},
-			expiresAt:     now.Add(time.Hour),
+			authorization: ClientSecretAuthorization{
+				IssuerPrincipal: key, IssuerProvider: "provider", IssuerGeneration: 1,
+			},
+			expiresAt: now.Add(time.Hour),
 		}
 	}
 	_, _, _, errCreate = globalStore.create(json.RawMessage(`{}`), time.Minute, "extra", "provider", 1)
@@ -249,12 +261,14 @@ func TestClientSecretLifetimeBounds(t *testing.T) {
 		},
 		{name: "unsupported anchor", request: expiresAfter("last_use", 60), wantErr: true},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, errLifetime := clientSecretLifetime(test.request)
-			if (errLifetime != nil) != test.wantErr {
-				t.Fatalf("clientSecretLifetime() error = %v, wantErr=%t", errLifetime, test.wantErr)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				_, errLifetime := clientSecretLifetime(test.request)
+				if (errLifetime != nil) != test.wantErr {
+					t.Fatalf("clientSecretLifetime() error = %v, wantErr=%t", errLifetime, test.wantErr)
+				}
+			},
+		)
 	}
 }
 
@@ -262,11 +276,13 @@ func TestCreateClientSecretRejectsUnsupportedSessionType(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := NewHandler(nil, nil)
 	router := gin.New()
-	router.POST("/v1/realtime/client_secrets", func(c *gin.Context) {
-		c.Set("apiKey", "issuer-key")
-		c.Set("accessProvider", "config-inline")
-		c.Next()
-	}, handler.CreateClientSecret)
+	router.POST(
+		"/v1/realtime/client_secrets", func(c *gin.Context) {
+			c.Set("apiKey", "issuer-key")
+			c.Set("accessProvider", "config-inline")
+			c.Next()
+		}, handler.CreateClientSecret,
+	)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(
 		recorder,
@@ -287,24 +303,28 @@ func TestHandlerAppliesClientSecretSessionAndKeepsIssuerOwnership(t *testing.T) 
 	manager := auth.NewManager(nil, nil, nil)
 	executor := &captureExecutor{responseBody: io.NopCloser(strings.NewReader("v=0\r\n"))}
 	manager.RegisterExecutor(executor)
-	registerCredential(t, manager, &auth.Auth{
-		ID:       "codex-oauth",
-		Provider: "codex",
-		Status:   auth.StatusActive,
-		Metadata: map[string]any{"access_token": "oauth-token"},
-	})
+	registerCredential(
+		t, manager, &auth.Auth{
+			ID:       "codex-oauth",
+			Provider: "codex",
+			Status:   auth.StatusActive,
+			Metadata: map[string]any{"access_token": "oauth-token"},
+		},
+	)
 	handler := NewHandler(manager, nil)
 	router := gin.New()
-	router.POST("/v1/realtime/calls", func(c *gin.Context) {
-		c.Set("apiKey", "issuer-key")
-		c.Set("accessProvider", "config-inline")
-		c.Set(ClientSecretPrincipalContextKey, "sess_secret")
-		c.Set(
-			ClientSecretSessionContextKey,
-			json.RawMessage(`{"type":"realtime","model":"gpt-live-1-codex","instructions":"help"}`),
-		)
-		c.Next()
-	}, handler.Handle)
+	router.POST(
+		"/v1/realtime/calls", func(c *gin.Context) {
+			c.Set("apiKey", "issuer-key")
+			c.Set("accessProvider", "config-inline")
+			c.Set(ClientSecretPrincipalContextKey, "sess_secret")
+			c.Set(
+				ClientSecretSessionContextKey,
+				json.RawMessage(`{"type":"realtime","model":"gpt-live-1-codex","instructions":"help"}`),
+			)
+			c.Next()
+		}, handler.Handle,
+	)
 	request := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls", strings.NewReader("v=0\r\n"))
 	request.Header.Set("Authorization", "Bearer ek_secret")
 	request.Header.Set("Content-Type", "application/sdp")
@@ -343,16 +363,20 @@ func TestHandlerAppliesClientSecretSessionAndKeepsIssuerOwnership(t *testing.T) 
 func TestSidebandRejectsMismatchedClientSecretBeforeSelection(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := NewHandler(auth.NewManager(nil, nil, nil), nil)
-	handler.sessions.put("call-123", liveSession{
-		authID:                "codex-oauth",
-		model:                 defaultLiveModel,
-		clientSecretPrincipal: "sess_expected",
-	})
+	handler.sessions.put(
+		"call-123", liveSession{
+			authID:                "codex-oauth",
+			model:                 defaultLiveModel,
+			clientSecretPrincipal: "sess_expected",
+		},
+	)
 	router := gin.New()
-	router.GET("/v1/realtime/calls/:call_id", func(c *gin.Context) {
-		c.Set(ClientSecretPrincipalContextKey, "sess_other")
-		c.Next()
-	}, handler.HandleSideband)
+	router.GET(
+		"/v1/realtime/calls/:call_id", func(c *gin.Context) {
+			c.Set(ClientSecretPrincipalContextKey, "sess_other")
+			c.Next()
+		}, handler.HandleSideband,
+	)
 	request := httptest.NewRequest(http.MethodGet, "/v1/realtime/calls/call-123", nil)
 	request.Header.Set("Connection", "Upgrade")
 	request.Header.Set("Upgrade", "websocket")
@@ -396,11 +420,13 @@ func TestCreateLegacySessionUsesSameIssuerScope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := NewHandler(nil, nil)
 	router := gin.New()
-	router.POST("/v1/realtime/sessions", func(c *gin.Context) {
-		c.Set("apiKey", "issuer-key")
-		c.Set("accessProvider", "config-inline")
-		c.Next()
-	}, handler.CreateLegacySession)
+	router.POST(
+		"/v1/realtime/sessions", func(c *gin.Context) {
+			c.Set("apiKey", "issuer-key")
+			c.Set("accessProvider", "config-inline")
+			c.Next()
+		}, handler.CreateLegacySession,
+	)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(
 		recorder,

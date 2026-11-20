@@ -13,8 +13,10 @@ func TestParseCodexEventErrorInfersStatusFromErrorType(t *testing.T) {
 		wantStatus int
 	}{
 		{
-			name:       "invalid request",
-			payload:    `{"type":"response.failed","response":{"error":{"type":"bad_request_error","message":"bad input"}}}`,
+			name: "invalid request",
+			payload: `{"type":"response.failed","response":{"error":{"type":` +
+				`"bad_request_error","message":"bad ` +
+				`input"}}}`,
 			wantStatus: http.StatusBadRequest,
 		},
 		{
@@ -29,8 +31,10 @@ func TestParseCodexEventErrorInfersStatusFromErrorType(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "rate limit",
-			payload:    `{"type":"response.failed","response":{"error":{"type":"rate_limit_error","message":"try later"}}}`,
+			name: "rate limit",
+			payload: `{"type":"response.failed","response":{"error":{"type":` +
+				`"rate_limit_error","message":"try ` +
+				`later"}}}`,
 			wantStatus: http.StatusTooManyRequests,
 		},
 		{

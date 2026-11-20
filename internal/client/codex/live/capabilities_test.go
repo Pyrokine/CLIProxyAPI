@@ -19,26 +19,32 @@ func TestHandleHangupForwardsPinnedOAuthCallForOwner(t *testing.T) {
 		responseBody: io.NopCloser(strings.NewReader(`{"status":"ok"}`)),
 	}
 	manager.RegisterExecutor(executor)
-	registerCredential(t, manager, &auth.Auth{
-		ID:       "codex-oauth",
-		Provider: "codex",
-		Status:   auth.StatusActive,
-		Metadata: map[string]any{"access_token": "oauth-token"},
-	})
+	registerCredential(
+		t, manager, &auth.Auth{
+			ID:       "codex-oauth",
+			Provider: "codex",
+			Status:   auth.StatusActive,
+			Metadata: map[string]any{"access_token": "oauth-token"},
+		},
+	)
 	handler := NewHandler(manager, nil)
-	handler.sessions.put("call-123", liveSession{
-		authID:         "codex-oauth",
-		model:          defaultLiveModel,
-		ownerPrincipal: "owner-key",
-		ownerProvider:  "config-inline",
-	})
+	handler.sessions.put(
+		"call-123", liveSession{
+			authID:         "codex-oauth",
+			model:          defaultLiveModel,
+			ownerPrincipal: "owner-key",
+			ownerProvider:  "config-inline",
+		},
+	)
 
 	router := gin.New()
-	router.POST("/v1/realtime/calls/:call_id/hangup", func(c *gin.Context) {
-		c.Set("apiKey", "owner-key")
-		c.Set("accessProvider", "config-inline")
-		c.Next()
-	}, handler.HandleHangup)
+	router.POST(
+		"/v1/realtime/calls/:call_id/hangup", func(c *gin.Context) {
+			c.Set("apiKey", "owner-key")
+			c.Set("accessProvider", "config-inline")
+			c.Next()
+		}, handler.HandleHangup,
+	)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(
 		recorder,
@@ -83,28 +89,34 @@ func TestHandleHangupEnforcesOwnerAndRejectsClientSecret(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			handler := NewHandler(auth.NewManager(nil, nil, nil), nil)
-			handler.sessions.put("call-123", liveSession{
-				authID:         "codex-oauth",
-				model:          defaultLiveModel,
-				ownerPrincipal: "owner-key",
-				ownerProvider:  "config-inline",
-			})
-			router := gin.New()
-			router.POST("/v1/realtime/calls/:call_id/hangup", test.middleware, handler.HandleHangup)
-			recorder := httptest.NewRecorder()
-			router.ServeHTTP(
-				recorder,
-				httptest.NewRequest(http.MethodPost, "/v1/realtime/calls/call-123/hangup", nil),
-			)
-			if recorder.Code != http.StatusForbidden {
-				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusForbidden, recorder.Body.String())
-			}
-			if _, ok := handler.sessions.peek("call-123"); !ok {
-				t.Fatal("rejected hangup removed session")
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				handler := NewHandler(auth.NewManager(nil, nil, nil), nil)
+				handler.sessions.put(
+					"call-123", liveSession{
+						authID:         "codex-oauth",
+						model:          defaultLiveModel,
+						ownerPrincipal: "owner-key",
+						ownerProvider:  "config-inline",
+					},
+				)
+				router := gin.New()
+				router.POST("/v1/realtime/calls/:call_id/hangup", test.middleware, handler.HandleHangup)
+				recorder := httptest.NewRecorder()
+				router.ServeHTTP(
+					recorder,
+					httptest.NewRequest(http.MethodPost, "/v1/realtime/calls/call-123/hangup", nil),
+				)
+				if recorder.Code != http.StatusForbidden {
+					t.Fatalf(
+						"status = %d, want %d; body=%s", recorder.Code, http.StatusForbidden, recorder.Body.String(),
+					)
+				}
+				if _, ok := handler.sessions.peek("call-123"); !ok {
+					t.Fatal("rejected hangup removed session")
+				}
+			},
+		)
 	}
 }
 

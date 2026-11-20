@@ -23,12 +23,14 @@ func convertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 
 func convertInteractionsRequestToCodexChecked(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	root := gjson.ParseBytes(inputRawJSON)
-	if err := translatorcommon.RejectDroppedInteractionsUserAttachments(root.Get("input"), false, func(part gjson.Result, native bool) []byte {
-		if native {
-			return nil
-		}
-		return interactionsCodexMessagePart(part, "user")
-	}); err != nil {
+	if err := translatorcommon.RejectDroppedInteractionsUserAttachments(
+		root.Get("input"), false, func(part gjson.Result, native bool) []byte {
+			if native {
+				return nil
+			}
+			return interactionsCodexMessagePart(part, "user")
+		},
+	); err != nil {
 		return nil, err
 	}
 	out := []byte(`{"model":"","instructions":"","input":[]}`)

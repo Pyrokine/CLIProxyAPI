@@ -17,5 +17,7 @@ func init() {
 			NonStream: ConvertCodexResponseToOpenAINonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatOpenAI, sdktranslator.FormatCodex, convertOpenAIRequestToCodexChecked)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatOpenAI, sdktranslator.FormatCodex, convertOpenAIRequestToCodexChecked,
+	)
 }

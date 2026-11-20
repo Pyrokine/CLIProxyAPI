@@ -11,7 +11,8 @@ import (
 )
 
 func TestCodexFunctionCallNonStreamPreservesItemAndCallIDs(t *testing.T) {
-	raw := []byte(`{"id":"response-1","model":"test","output":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":"{}"}]}`)
+	raw := []byte((`{"id":"response-1","model":"test","output":[{"type":"function_call","i` +
+		`d":"item-1","call_id":"call-1","name":"tool","arguments":"{}"}]}`))
 	out := convertCodexResponseToInteractionsNonStream(
 		context.Background(),
 		"test",
@@ -35,7 +36,8 @@ func TestCodexFunctionCallStreamPreservesItemAndCallIDs(t *testing.T) {
 		"test",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool"}}`),
+		[]byte((`data: {"type":"response.output_item.added","output_index":0,"item":{"t` +
+			`ype":"function_call","id":"item-1","call_id":"call-1","name":"tool"}}`)),
 		&state,
 	)
 	if len(out) == 0 {
@@ -61,7 +63,9 @@ func TestCodexFunctionCallStreamPreservesItemAndCallIDs(t *testing.T) {
 }
 
 func TestConvertCodexResponseToInteractionsIncompleteTerminal(t *testing.T) {
-	raw := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+	raw := []byte((`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","` +
+		`incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"` +
+		`output_tokens":2,"total_tokens":3}}}`))
 	nonStreamOut := convertCodexResponseToInteractionsNonStream(
 		context.Background(), "codex-test", nil, nil, raw, nil,
 	)
@@ -97,18 +101,27 @@ func TestCodexResponseToInteractionsValidatesReasoningSignatures(t *testing.T) {
 		{name: "foreign", signature: codexClaudeSignatureForTest()},
 		{name: "invalid", signature: "gpt#invalid"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			raw := []byte(`{"id":"response-1","model":"gpt-test","output":[{"type":"reasoning","encrypted_content":"` + testCase.signature + `","summary":[]}]}`)
-			out := convertCodexResponseToInteractionsNonStream(
-				context.Background(), "gpt-test", nil, nil, raw, nil,
-			)
-			if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
-				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
-			}
-			if testCase.want == "" && gjson.GetBytes(out, "steps.#").Int() != 0 {
-				t.Fatalf("invalid signature-only reasoning produced a step: %s", out)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				raw := []byte(
+					(`{"id":"response-1","model":"gpt-test","output":[{"type":"reasoning",` +
+						`"encrypted_content":` +
+						`"`) +
+						testCase.signature +
+						(`","summary":` +
+							`[]}]}`),
+				)
+				out := convertCodexResponseToInteractionsNonStream(
+					context.Background(), "gpt-test", nil, nil, raw, nil,
+				)
+				if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
+					t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
+				}
+				if testCase.want == "" && gjson.GetBytes(out, "steps.#").Int() != 0 {
+					t.Fatalf("invalid signature-only reasoning produced a step: %s", out)
+				}
+			},
+		)
 	}
 }
 
@@ -120,7 +133,14 @@ func TestCodexResponseToInteractionsStreamPreservesSignatureOnlyReasoning(t *tes
 		"gpt-test",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","encrypted_content":"`+valid+`","summary":[]}}`),
+		[]byte(
+			(`data: {"type":"response.output_item.done","output_index":0,"item":`+
+				`{"type":"reasoning","encrypted_content":`+
+				`"`)+
+				valid+
+				(`","summary":`+
+					`[]}}`),
+		),
 		&state,
 	)
 	for _, event := range events {

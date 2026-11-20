@@ -28,14 +28,17 @@ func appendCodexWebSearchServerToolUse(
 
 	output = append(output, stopOpenCodexClaudeTextBlocks(params)...)
 	output = append(output, emitPendingCodexThinkingBlock(params)...)
-	template := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`)
+	template := []byte((`{"type":"content_block_start","index":0,"content_block":{"type":"serve` +
+		`r_tool_use","id":"","name":"web_search","input":{}}}`))
 	template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 	template, _ = sjson.SetBytes(template, "content_block.id", toolUseID)
 	output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
 
 	if query := codexWebSearchQuery(root, item); query != "" {
 		partialJSON, _ := json.Marshal(map[string]string{"query": query})
-		delta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+		delta := []byte(
+			`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`,
+		)
 		delta, _ = sjson.SetBytes(delta, "index", params.BlockIndex)
 		delta, _ = sjson.SetBytes(delta, "delta.partial_json", string(partialJSON))
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", delta, 2)
@@ -71,7 +74,8 @@ func appendCodexWebSearchToolResult(
 		return output
 	}
 
-	template := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"","content":[]}}`)
+	template := []byte((`{"type":"content_block_start","index":0,"content_block":{"type":"web_s` +
+		`earch_tool_result","tool_use_id":"","content":[]}}`))
 	template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 	template, _ = sjson.SetBytes(template, "content_block.tool_use_id", toolUseID)
 	if content := codexWebSearchResultContent(root, item); len(content) > 0 {
@@ -130,7 +134,9 @@ func codexWebSearchQuery(root, item gjson.Result) string {
 
 func codexWebSearchResultContent(root, item gjson.Result) []byte {
 	var results gjson.Result
-	for _, candidate := range []gjson.Result{item.Get("results"), root.Get("results"), item.Get("action.sources"), root.Get("action.sources")} {
+	for _, candidate := range []gjson.Result{
+		item.Get("results"), root.Get("results"), item.Get("action.sources"), root.Get("action.sources"),
+	} {
 		if candidate.IsArray() {
 			results = candidate
 			break

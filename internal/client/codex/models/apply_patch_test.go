@@ -19,23 +19,29 @@ func TestCodexClientApplyPatchCapabilityUsesTextMetadata(t *testing.T) {
 		{id: "a/b/GROK-IMAGINE-IMAGE-2.0", modalities: []string{"text"}},
 		{id: "grok-imagine-video-1.5-preview", modalities: []string{"text"}},
 	} {
-		t.Run(tc.id, func(t *testing.T) {
-			entry := map[string]any{"input_modalities": tc.modalities, "visibility": "hide", "apply_patch_tool_type": "freeform"}
-			calls := 0
-			applyCodexClientApplyPatchCapability(entry, tc.id, func(id string) bool {
-				calls++
-				if id != tc.id {
-					t.Fatalf("lookup ID = %q, want %q", id, tc.id)
+		t.Run(
+			tc.id, func(t *testing.T) {
+				entry := map[string]any{
+					"input_modalities": tc.modalities, "visibility": "hide", "apply_patch_tool_type": "freeform",
 				}
-				return true
-			})
-			if got := entry["apply_patch_tool_type"]; tc.want && got != "freeform" || !tc.want && got != nil {
-				t.Fatalf("capability = %#v, want enabled=%t", got, tc.want)
-			}
-			if tc.want && calls != 1 || !tc.want && calls != 0 {
-				t.Fatalf("lookup calls = %d, want enabled=%t", calls, tc.want)
-			}
-		})
+				calls := 0
+				applyCodexClientApplyPatchCapability(
+					entry, tc.id, func(id string) bool {
+						calls++
+						if id != tc.id {
+							t.Fatalf("lookup ID = %q, want %q", id, tc.id)
+						}
+						return true
+					},
+				)
+				if got := entry["apply_patch_tool_type"]; tc.want && got != "freeform" || !tc.want && got != nil {
+					t.Fatalf("capability = %#v, want enabled=%t", got, tc.want)
+				}
+				if tc.want && calls != 1 || !tc.want && calls != 0 {
+					t.Fatalf("lookup calls = %d, want enabled=%t", calls, tc.want)
+				}
+			},
+		)
 	}
 }
 
@@ -57,7 +63,9 @@ func TestCodexClientApplyPatchCapabilityCoversCatalogPaths(t *testing.T) {
 			}
 		}
 	}
-	legacy := BuildResponseForClient([]map[string]any{{"id": "gpt-6-sol"}}, func(string) []string { return []string{"codex"} }, false, "0.157.0")
+	legacy := BuildResponseForClient(
+		[]map[string]any{{"id": "gpt-6-sol"}}, func(string) []string { return []string{"codex"} }, false, "0.157.0",
+	)
 	if got := legacy["models"].([]map[string]any)[0]["apply_patch_tool_type"]; got != "freeform" {
 		t.Fatalf("legacy builder behavior = %#v, want freeform", got)
 	}

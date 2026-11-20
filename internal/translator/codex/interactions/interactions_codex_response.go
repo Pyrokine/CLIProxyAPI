@@ -32,14 +32,12 @@ type codexToInteractionsStreamState struct {
 }
 
 func convertCodexResponseToInteractions(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_, _, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	_ = ctx
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
+
 	if param == nil {
 		var local any
 		param = &local
@@ -87,14 +85,12 @@ func convertCodexResponseToInteractions(
 }
 
 func convertCodexResponseToInteractionsNonStream(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_, _, rawJSON []byte,
 	_ *any,
 ) []byte {
-	_ = ctx
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
+
 	root := gjson.ParseBytes(rawJSON)
 	response := root.Get("response")
 	if !response.Exists() {
@@ -141,7 +137,11 @@ func codexStreamPayload(rawJSON []byte) []byte {
 	return rawJSON
 }
 
-func appendCodexInteractionsCreated(out [][]byte, st *codexToInteractionsStreamState, response gjson.Result) [][]byte {
+func appendCodexInteractionsCreated(
+	out [][]byte,
+	st *codexToInteractionsStreamState,
+	response gjson.Result,
+) [][]byte {
 	if st.Started {
 		return out
 	}
@@ -154,11 +154,17 @@ func appendCodexInteractionsCreated(out [][]byte, st *codexToInteractionsStreamS
 	if createdAt := response.Get("created_at"); createdAt.Exists() {
 		st.CreatedAt = createdAt.Int()
 	}
-	created := []byte(`{"interaction":{"id":"","status":"in_progress","object":"interaction","model":""},"event_type":"interaction.created"}`)
+	created := []byte(
+		(`{"interaction":{"id":"","status":"in_progress","object":"interaction",` +
+			`"model":""},"event_type":` +
+			`"interaction.created"}`),
+	)
 	created, _ = sjson.SetBytes(created, "interaction.id", st.ID)
 	created, _ = sjson.SetBytes(created, "interaction.model", st.Model)
 	out = append(out, translatorcommon.SSEEventData("interaction.created", created))
-	statusUpdate := []byte(`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`)
+	statusUpdate := []byte(
+		`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`,
+	)
 	statusUpdate, _ = sjson.SetBytes(statusUpdate, "interaction_id", st.ID)
 	out = append(out, translatorcommon.SSEEventData("interaction.status_update", statusUpdate))
 	st.Started = true
@@ -177,7 +183,9 @@ func appendCodexInteractionsCompleted(
 	if st.CreatedAt > 0 {
 		created = time.Unix(st.CreatedAt, 0).UTC()
 	}
-	completed := []byte(`{"interaction":{"id":"","status":"completed","usage":{},"created":"","updated":"","service_tier":"standard","object":"interaction","model":""},"event_type":"interaction.completed"}`)
+	completed := []byte((`{"interaction":{"id":"","status":"completed","usage":{},"created":"","` +
+		`updated":"","service_tier":"standard","object":"interaction","model":"` +
+		`"},"event_type":"interaction.completed"}`))
 	completed, _ = sjson.SetBytes(completed, "interaction.id", st.ID)
 	completed, _ = sjson.SetBytes(completed, "interaction.created", created.Format(time.RFC3339))
 	completed, _ = sjson.SetBytes(completed, "interaction.updated", time.Now().UTC().Format(time.RFC3339))
@@ -230,7 +238,9 @@ func codexOutputTextDeltaToInteractions(st *codexToInteractionsStreamState, root
 func codexReasoningDeltaToInteractions(st *codexToInteractionsStreamState, root gjson.Result) [][]byte {
 	out := appendCodexInteractionsCreated(nil, st, root.Get("response"))
 	out = ensureCodexInteractionsStep(out, st, "thought", gjson.Result{})
-	delta := []byte(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`)
+	delta := []byte(
+		`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`,
+	)
 	delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 	delta, _ = sjson.SetBytes(delta, "delta.content.text", root.Get("delta").String())
 	return append(out, translatorcommon.SSEEventData("step.delta", delta))
@@ -442,7 +452,9 @@ func appendCodexReasoningItemToInteractionsStream(
 	}
 	out = ensureCodexInteractionsStep(out, st, "thought", item)
 	if signature != "" && !st.ReasoningSignatureSent {
-		delta := []byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`)
+		delta := []byte(
+			`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`,
+		)
 		delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 		delta, _ = sjson.SetBytes(delta, "delta.signature", signature)
 		out = append(out, translatorcommon.SSEEventData("step.delta", delta))
@@ -451,7 +463,9 @@ func appendCodexReasoningItemToInteractionsStream(
 	if text == "" {
 		return out
 	}
-	delta := []byte(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`)
+	delta := []byte(
+		`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`,
+	)
 	delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 	delta, _ = sjson.SetBytes(delta, "delta.content.text", text)
 	return append(out, translatorcommon.SSEEventData("step.delta", delta))
@@ -479,7 +493,11 @@ func appendCodexImageItemToInteractionsStream(
 		return out
 	}
 	out = ensureCodexInteractionsStep(out, st, "model_output", item)
-	delta := []byte(`{"index":0,"delta":{"content":{"type":"image","mime_type":"","data":""},"type":"content"},"event_type":"step.delta"}`)
+	delta := []byte(
+		(`{"index":0,"delta":{"content":{"type":"image","mime_type":"","data":` +
+			`""},"type":"content"},"event_type":` +
+			`"step.delta"}`),
+	)
 	delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 	delta, _ = sjson.SetBytes(
 		delta, "delta.content.mime_type", mimeTypeFromCodexOutputFormat(item.Get("output_format").String()),
@@ -616,7 +634,8 @@ func setCodexInteractionsUsage(out []byte, path string, usage gjson.Result, stre
 		out, _ = sjson.SetBytes(out, path+".total_tokens", totalTokens)
 		out, _ = sjson.SetBytes(out, path+".total_input_tokens", inputTokens)
 		out, _ = sjson.SetRawBytes(
-			out, path+".input_tokens_by_modality", []byte(fmt.Sprintf(`[{"modality":"text","tokens":%d}]`, inputTokens)),
+			out, path+".input_tokens_by_modality",
+			[]byte(fmt.Sprintf(`[{"modality":"text","tokens":%d}]`, inputTokens)),
 		)
 		out, _ = sjson.SetBytes(out, path+".total_cached_tokens", cachedTokens)
 		out, _ = sjson.SetBytes(out, path+".total_output_tokens", outputTokens)

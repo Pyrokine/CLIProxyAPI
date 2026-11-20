@@ -67,27 +67,31 @@ Server 向 HTTP、模型执行和 Live handler 传递同一个 `executionregistr
 Bootstrap 成功保存 `call_id` 时，通过 `Retain` 为真实会话保留独立租约，HTTP 响应结束只释放外层租约
 Session replacement、过期、失败、hangup 或 shutdown 完成 sideband、media 和 Home selection 的关闭后，才释放会话租约
 
-Direct Realtime WebSocket 在会话期间保持活跃，Responses WebSocket 只在实际 turn 中持有租约，动态 Gemini provider 的空闲连接不计为推理
+Direct Realtime WebSocket 在会话期间保持活跃，Responses WebSocket 只在实际 turn 中持有租约，动态 Gemini provider
+的空闲连接不计为推理
 已有媒体会话自然结束后才能完成更新等待，等待最长两分钟，超时恢复接收并保留原会话，不通过关闭媒体连接制造完成确认
 
 独立 guard 使用同一次更新的 loopback token 请求等待，安装前再次验证 attempt、进程实例与暂停期限，并将暂停保留到安装结束，旧确认不能用于新实例
 新进程在监听前读取持久化安装阶段并恢复暂停，后台核实确认 guard 已退出、服务没有待执行的重启任务后恢复接收，状态查询失败时保留暂停
 Guard 由 systemd 限制为最长五分钟，后台核实与 Handler 一起启动和关闭，状态数据库保留完整目标与上一版本身份
-发布构建写入更新协议标识，候选文件缺少当前暂停恢复协议时在安装前拒绝，旧协议文件仍可作为上一版本恢复，恢复失败时保留备份和 session，旧 session 的恢复明确标注身份未完整验证
+发布构建写入更新协议标识，候选文件缺少当前暂停恢复协议时在安装前拒绝，旧协议文件仍可作为上一版本恢复，恢复失败时保留备份和
+session，旧 session 的恢复明确标注身份未完整验证
 
 ## 动态配置
 
-`Handler` 保留 `ConfigProvider`，每次 HTTP 和 sideband 请求读取 server 当前配置；media factory 由 `UpdateConfig` 管理
+`Handler` 保留 `ConfigProvider` 供授权检查和独立 WebSocket 请求读取当前配置，bootstrap 的配置、media factory 和错误状态由
+`UpdateConfig` 同时发布，`currentRuntime` 在同一读锁内取得这三项
 
-`UpdateConfig` 比较 `Codex.LiveMediaRelay`：
+`UpdateConfig` 通过现有 `config.Clone` 保存独立配置快照，再比较 `Codex.LiveMediaRelay`：
 
-- 配置未变化时保留原 factory
-- 配置变化时创建新 factory，并原子替换当前指针和错误状态
+- relay 配置未变化时保留原 factory，同时发布新的配置快照
+- relay 配置变化时创建新 factory，将匹配的配置、factory 和错误状态一并发布
+- 已有请求保留其读取的配置快照，调用方之后修改输入配置保持该快照不变
 - 所有 factory 使用 handler 生命周期内唯一的 `mediaSessionLimiter`
-- 关闭 relay 时当前 factory 设为 nil，现有 session继续运行
+- 关闭 relay 时当前 factory 设为 nil，现有 session 继续运行
 - 降低 `max-sessions` 时不结束 active session，新 session 在 active 数量低于新上限前被拒绝
 
-Media factory 创建错误写内部日志，后续新请求返回固定 unavailable 错误
+Media factory 创建错误与对应配置一并保留，后续新请求返回固定 unavailable 错误；有效配置更新后恢复，初始配置错误继续通过日志与请求错误报告
 
 ## SDP 转换
 
@@ -198,7 +202,7 @@ retained selection
 连接顺序：
 
 1. 准备 OAuth header
-2. 按当前配置建立上游 WebSocket
+2. 按当前配置建立上游 WebSocket，显式代理解析、创建或建连失败时返回错误并保留原代理选择
 3. 绑定上游连接到 Home selection
 4. 使用协商结果升级下游 WebSocket
 5. 绑定下游连接并加入 session resources

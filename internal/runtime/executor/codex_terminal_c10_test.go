@@ -39,7 +39,8 @@ func TestNormalizeCodexParallelToolCalls(t *testing.T) {
 }
 
 func TestPatchCodexCompletedOutputHydratesMissingItemID(t *testing.T) {
-	event := []byte(`{"type":"response.completed","response":{"output":[{"type":"message","id":""},{"type":"function_call","id":"fc-existing"}]}}`)
+	event := []byte(`{"type":"response.completed","response":{"output":[{"type":"message","` +
+		`id":""},{"type":"function_call","id":"fc-existing"}]}}`)
 	items := map[int64][]byte{
 		0: []byte(`{"type":"message","id":"msg-restored"}`),
 		1: []byte(`{"type":"function_call","id":"fc-stream"}`),
@@ -55,6 +56,7 @@ func TestPatchCodexCompletedOutputHydratesMissingItemID(t *testing.T) {
 }
 
 func TestCodexResponsesLiteDetectorAcceptsLowerCaseLiteralHeader(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	headers := http.Header{
 		"x-openai-internal-codex-responses-lite": []string{" false ", " TrUe "},
 	}
@@ -64,8 +66,10 @@ func TestCodexResponsesLiteDetectorAcceptsLowerCaseLiteralHeader(t *testing.T) {
 }
 
 func TestCodexHTTPNonStreamTerminalOutputRespectsNativeMode(t *testing.T) {
-	const outputItem = `{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}`
-	const terminal = `{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
+	const outputItem = `{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"` +
+		`msg-1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}`
+	const terminal = `{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"` +
+		`input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 
 	for _, tt := range []struct {
 		name   string
@@ -74,53 +78,61 @@ func TestCodexHTTPNonStreamTerminalOutputRespectsNativeMode(t *testing.T) {
 		{name: "compatibility", native: false},
 		{name: "native", native: true},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = w.Write([]byte("data: " + outputItem + "\n\ndata: " + terminal + "\n\n"))
-			}))
-			defer server.Close()
+		t.Run(
+			tt.name, func(t *testing.T) {
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, _ *http.Request) {
+							w.Header().Set("Content-Type", "text/event-stream")
+							_, _ = w.Write([]byte("data: " + outputItem + "\n\ndata: " + terminal + "\n\n"))
+						},
+					),
+				)
+				defer server.Close()
 
-			cfg := &config.Config{DisableImageGeneration: config.DisableImageGenerationAll}
-			exec := newCodexExecutor(cfg)
-			opts := cliproxyexecutor.Options{
-				SourceFormat:   sdktranslator.FormatOpenAIResponse,
-				ResponseFormat: sdktranslator.FormatOpenAIResponse,
-			}
-			if tt.native {
-				opts.Headers = http.Header{
-					"x-openai-internal-codex-responses-lite": []string{"true"},
+				cfg := &config.Config{DisableImageGeneration: config.DisableImageGenerationAll}
+				exec := newCodexExecutor(cfg)
+				opts := cliproxyexecutor.Options{
+					SourceFormat:   sdktranslator.FormatOpenAIResponse,
+					ResponseFormat: sdktranslator.FormatOpenAIResponse,
 				}
-			}
-			resp, err := exec.Execute(
-				context.Background(),
-				&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}},
-				cliproxyexecutor.Request{
-					Model:   "gpt-5.5",
-					Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
-				},
-				opts,
-			)
-			if err != nil {
-				t.Fatalf("Execute() error = %v", err)
-			}
-			output := gjson.GetBytes(resp.Payload, "output")
-			if tt.native {
-				if output.Exists() {
-					t.Fatalf("native terminal output was hydrated: %s", resp.Payload)
+				if tt.native {
+					opts.Headers = http.Header{
+						"x-openai-internal-codex-responses-lite": []string{"true"},
+					}
 				}
-				return
-			}
-			if !output.IsArray() || len(output.Array()) != 1 || output.Get("0.id").String() != "msg-1" {
-				t.Fatalf("compatibility terminal output was not hydrated: %s", resp.Payload)
-			}
-		})
+				resp, err := exec.Execute(
+					context.Background(),
+					&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}},
+					cliproxyexecutor.Request{
+						Model:   "gpt-5.5",
+						Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+					},
+					opts,
+				)
+				if err != nil {
+					t.Fatalf("Execute() error = %v", err)
+				}
+				output := gjson.GetBytes(resp.Payload, "output")
+				if tt.native {
+					if output.Exists() {
+						t.Fatalf("native terminal output was hydrated: %s", resp.Payload)
+					}
+					return
+				}
+				if !output.IsArray() || len(output.Array()) != 1 || output.Get("0.id").String() != "msg-1" {
+					t.Fatalf("compatibility terminal output was not hydrated: %s", resp.Payload)
+				}
+			},
+		)
 	}
 }
 
 func TestCodexHTTPStreamTerminalOutputRespectsNativeMode(t *testing.T) {
-	const outputItem = `{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}`
-	const terminal = `{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
+	const outputItem = `{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"` +
+		`msg-1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}`
+	const terminal = `{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"` +
+		`input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
 
 	for _, tt := range []struct {
 		name   string
@@ -129,61 +141,67 @@ func TestCodexHTTPStreamTerminalOutputRespectsNativeMode(t *testing.T) {
 		{name: "compatibility", native: false},
 		{name: "native", native: true},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = w.Write([]byte("data: " + outputItem + "\n\ndata: " + terminal + "\n\n"))
-			}))
-			defer server.Close()
+		t.Run(
+			tt.name, func(t *testing.T) {
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, _ *http.Request) {
+							w.Header().Set("Content-Type", "text/event-stream")
+							_, _ = w.Write([]byte("data: " + outputItem + "\n\ndata: " + terminal + "\n\n"))
+						},
+					),
+				)
+				defer server.Close()
 
-			cfg := &config.Config{DisableImageGeneration: config.DisableImageGenerationAll}
-			exec := newCodexExecutor(cfg)
-			opts := cliproxyexecutor.Options{
-				SourceFormat:   sdktranslator.FormatOpenAIResponse,
-				ResponseFormat: sdktranslator.FormatOpenAIResponse,
-				Stream:         true,
-			}
-			if tt.native {
-				opts.Headers = http.Header{
-					"x-openai-internal-codex-responses-lite": []string{"true"},
+				cfg := &config.Config{DisableImageGeneration: config.DisableImageGenerationAll}
+				exec := newCodexExecutor(cfg)
+				opts := cliproxyexecutor.Options{
+					SourceFormat:   sdktranslator.FormatOpenAIResponse,
+					ResponseFormat: sdktranslator.FormatOpenAIResponse,
+					Stream:         true,
 				}
-			}
-			stream, err := exec.ExecuteStream(
-				context.Background(),
-				&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}},
-				cliproxyexecutor.Request{
-					Model:   "gpt-5.5",
-					Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
-				},
-				opts,
-			)
-			if err != nil {
-				t.Fatalf("ExecuteStream() error = %v", err)
-			}
-			var completed []byte
-			for chunk := range stream.Chunks {
-				if chunk.Err != nil {
-					t.Fatalf("stream chunk error = %v", chunk.Err)
+				if tt.native {
+					opts.Headers = http.Header{
+						"x-openai-internal-codex-responses-lite": []string{"true"},
+					}
 				}
-				payload := jsonPayload(chunk.Payload)
-				if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.completed" {
-					completed = append([]byte(nil), payload...)
+				stream, err := exec.ExecuteStream(
+					context.Background(),
+					&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}},
+					cliproxyexecutor.Request{
+						Model:   "gpt-5.5",
+						Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+					},
+					opts,
+				)
+				if err != nil {
+					t.Fatalf("ExecuteStream() error = %v", err)
 				}
-			}
-			if len(completed) == 0 {
-				t.Fatal("missing response.completed event")
-			}
-			output := gjson.GetBytes(completed, "response.output")
-			if tt.native {
-				if output.Exists() {
-					t.Fatalf("native terminal output was hydrated: %s", completed)
+				var completed []byte
+				for chunk := range stream.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+					payload := jsonPayload(chunk.Payload)
+					if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.completed" {
+						completed = append([]byte(nil), payload...)
+					}
 				}
-				return
-			}
-			if !output.IsArray() || len(output.Array()) != 1 || output.Get("0.id").String() != "msg-1" {
-				t.Fatalf("compatibility terminal output was not hydrated: %s", completed)
-			}
-		})
+				if len(completed) == 0 {
+					t.Fatal("missing response.completed event")
+				}
+				output := gjson.GetBytes(completed, "response.output")
+				if tt.native {
+					if output.Exists() {
+						t.Fatalf("native terminal output was hydrated: %s", completed)
+					}
+					return
+				}
+				if !output.IsArray() || len(output.Array()) != 1 || output.Get("0.id").String() != "msg-1" {
+					t.Fatalf("compatibility terminal output was not hydrated: %s", completed)
+				}
+			},
+		)
 	}
 }
 
@@ -191,7 +209,8 @@ func TestCodexResponsesBodyPreservesSequentialReasoningSummaryDelivery(t *testin
 	cfg := &config.Config{}
 	cfg.DisableImageGeneration = config.DisableImageGenerationAll
 	from := sdktranslator.FormatOpenAIResponse
-	payload := []byte(`{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":"hello"}],"stream_options":{"reasoning_summary_delivery":"sequential_cutoff","include_usage":true}}`)
+	payload := []byte((`{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":"hello"}],"` +
+		`stream_options":{"reasoning_summary_delivery":"sequential_cutoff","include_usage":true}}`))
 
 	prepared, err := codexResponsesBody(
 		context.Background(), cfg, &cliproxyauth.Auth{}, "gpt-5.6-sol", "gpt-5.6-sol", "codex", from,

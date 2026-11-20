@@ -17,18 +17,22 @@ func TestCodexClientApplyPatchCatalogMatchesNativeRouting(t *testing.T) {
 		{name: "mixed", providers: []string{"codex", "gemini"}},
 		{name: "unknown"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			response := BuildResponseForClient([]map[string]any{{"id": "gpt-6-astra"}}, func(string) []string {
-				return test.providers
-			}, false, "0.156.0")
-			models, ok := response["models"].([]map[string]any)
-			if !ok || len(models) != 1 {
-				t.Fatalf("models = %#v, want one model", response["models"])
-			}
-			if got := models[0]["apply_patch_tool_type"]; got != test.want {
-				t.Fatalf("apply_patch_tool_type = %#v, want %#v", got, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				response := BuildResponseForClient(
+					[]map[string]any{{"id": "gpt-6-astra"}}, func(string) []string {
+						return test.providers
+					}, false, "0.156.0",
+				)
+				models, ok := response["models"].([]map[string]any)
+				if !ok || len(models) != 1 {
+					t.Fatalf("models = %#v, want one model", response["models"])
+				}
+				if got := models[0]["apply_patch_tool_type"]; got != test.want {
+					t.Fatalf("apply_patch_tool_type = %#v, want %#v", got, test.want)
+				}
+			},
+		)
 	}
 }
 
@@ -87,9 +91,13 @@ func TestCodexClientNonTemplateCatalogFitsClientLimit(t *testing.T) {
 
 func TestCodexClientCustomInstructionsRemainConfigured(t *testing.T) {
 	const instructions = "Configured instructions for this model"
-	response := BuildResponseForClient([]map[string]any{{
-		"id": "custom-instructions-model", "base_instructions": instructions,
-	}}, nil, false, "0.156.0")
+	response := BuildResponseForClient(
+		[]map[string]any{
+			{
+				"id": "custom-instructions-model", "base_instructions": instructions,
+			},
+		}, nil, false, "0.156.0",
+	)
 	models, ok := response["models"].([]map[string]any)
 	if !ok || len(models) != 1 {
 		t.Fatalf("models = %#v, want one custom model", response["models"])
@@ -104,17 +112,19 @@ func TestCodexClientCustomInstructionsRemainConfigured(t *testing.T) {
 }
 
 func TestCodexClientDevinDisplayName(t *testing.T) {
-	response := BuildResponseForClient([]map[string]any{
-		{"id": "devin/swe-2", "display_name": "SWE-2"},
-		{"id": "tenant/devin/swe-3", "display_name": "SWE-3 (devin)"},
-		{"id": "test-devin-provider-model", "display_name": "Alias"},
-		{"id": "test-standard-provider-model", "display_name": "Standard"},
-	}, func(id string) []string {
-		if id == "test-devin-provider-model" {
-			return []string{"devin"}
-		}
-		return []string{"openai"}
-	}, false, "0.156.0")
+	response := BuildResponseForClient(
+		[]map[string]any{
+			{"id": "devin/swe-2", "display_name": "SWE-2"},
+			{"id": "tenant/devin/swe-3", "display_name": "SWE-3 (devin)"},
+			{"id": "test-devin-provider-model", "display_name": "Alias"},
+			{"id": "test-standard-provider-model", "display_name": "Standard"},
+		}, func(id string) []string {
+			if id == "test-devin-provider-model" {
+				return []string{"devin"}
+			}
+			return []string{"openai"}
+		}, false, "0.156.0",
+	)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models = %#v", response["models"])

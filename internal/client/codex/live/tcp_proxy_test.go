@@ -17,7 +17,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/pion/sdp/v3"
-	"github.com/pion/stun/v3"
+	"github.com/pion/stun/v4"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -134,10 +134,12 @@ func TestPrepareProxiedUpstreamAnswerRejectsUnsafeTargets(t *testing.T) {
 		"reserved target":        "1 1 tcp 1671430143 203.0.113.10 443 typ host tcptype passive",
 		"site-local IPv6 target": "1 1 tcp 1671430143 fec0::1 443 typ host tcptype passive",
 		"wrong port":             "1 1 tcp 1671430143 20.42.0.10 8443 typ host tcptype passive",
-		"relay target":           "1 1 tcp 1671430143 20.42.0.10 443 typ relay raddr 192.0.2.1 rport 5000 tcptype passive",
-		"active target":          "1 1 tcp 1671430143 20.42.0.10 443 typ host tcptype active",
-		"hostname target":        "1 1 tcp 1671430143 proxy.example.com 443 typ host tcptype passive",
-		"mapped IPv4 target":     "1 1 tcp 1671430143 ::ffff:20.42.0.10 443 typ host tcptype passive",
+		"relay target": "1 1 tcp 1671430143 20.42.0.10 443 typ relay raddr 192.0.2.1 rport " +
+			"5000 tcptype " +
+			"passive",
+		"active target":      "1 1 tcp 1671430143 20.42.0.10 443 typ host tcptype active",
+		"hostname target":    "1 1 tcp 1671430143 proxy.example.com 443 typ host tcptype passive",
+		"mapped IPv4 target": "1 1 tcp 1671430143 ::ffff:20.42.0.10 443 typ host tcptype passive",
 	} {
 		t.Run(
 			name, func(t *testing.T) {
@@ -658,7 +660,11 @@ func TestPionActiveTCPCandidatePassesTunnelAuthentication(t *testing.T) {
 	publicAnswer := rewriteTestTCPCandidateTarget(t, remoteDescription.SDP, "20.42.0.20", 443)
 
 	dialer := &recordingProxyDialer{dials: make(chan recordedProxyDial, 1)}
-	rewrittenAnswer, tunnels, errPrepare := prepareProxiedUpstreamAnswer(publicAnswer, localDescription.SDP, dialer)
+	rewrittenAnswer, tunnels, errPrepare := prepareProxiedUpstreamAnswer(
+		publicAnswer,
+		localDescription.SDP,
+		dialer,
+	)
 	if errPrepare != nil {
 		t.Fatalf("prepare proxied Pion answer: %v", errPrepare)
 	}
@@ -794,8 +800,12 @@ func testProxySDP(ufrag, password string, candidates []string) string {
 		{line: "m=application 9 UDP/DTLS/SCTP webrtc-datachannel", mid: "1"},
 	} {
 		_, _ = fmt.Fprintf(
-			&builder, "%s\r\nc=IN IP4 0.0.0.0\r\na=mid:%s\r\na=ice-ufrag:%s\r\na=ice-pwd:%s\r\n", media.line, media.mid,
-			ufrag, password,
+			&builder,
+			"%s\r\nc=IN IP4 0.0.0.0\r\na=mid:%s\r\na=ice-ufrag:%s\r\na=ice-pwd:%s\r\n",
+			media.line,
+			media.mid,
+			ufrag,
+			password,
 		)
 		if media.mid == "0" {
 			for _, candidate := range candidates {

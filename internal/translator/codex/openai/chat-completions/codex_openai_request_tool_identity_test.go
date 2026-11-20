@@ -53,9 +53,12 @@ func TestConvertOpenAIRequestToCodexCustomToolNameRoundTrip(t *testing.T) {
 		"type":"response.completed",
 		"response":{
 			"status":"completed",
-			"output":[{"type":"custom_tool_call","call_id":"call_custom_long","name":"` + shortName + `","input":"patch"}]
-		}
-	}`)
+			"output":[{"type":"custom_tool_call","call_id":"call_custom_long","name":"` +
+		shortName +
+		(`","input":` +
+			"\"patch\"}]\n" +
+			"\t\t}\n\t" +
+			`}`))
 	chatResponse := ConvertCodexResponseToOpenAINonStream(
 		context.Background(),
 		"gpt-5.6-sol",
@@ -344,8 +347,10 @@ func TestConvertOpenAIRequestToCodexCustomResponseFollowUpRoundTrip(t *testing.T
 	if got := assistantMessage.Get("tool_calls.0.type").String(); got != "function" {
 		t.Fatalf("normalized response type = %q, want function; response=%s", got, chatResponse)
 	}
-	if got := assistantMessage.Get("tool_calls.0.function.arguments").String(); got != "patch" {
-		t.Fatalf("normalized arguments = %q, want patch; response=%s", got, chatResponse)
+	if got := assistantMessage.Get("tool_calls.0.function.arguments").String(); !gjson.Valid(got) || gjson.Get(
+		got, "input",
+	).String() != "patch" {
+		t.Fatalf("normalized arguments = %q, want JSON input envelope; response=%s", got, chatResponse)
 	}
 
 	followUpRequest := []byte(`{

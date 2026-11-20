@@ -71,7 +71,11 @@ func TestCodexReasoningReplaySessionKeyIsolatesClaudeCodeAgents(t *testing.T) {
 		Model:   "local-alias-high",
 		Payload: []byte(`{"model":"local-alias","messages":[{"role":"user","content":"next"}]}`),
 	}
-	body := []byte(`{"model":"gpt-5.4","prompt_cache_key":"shared-client-key","input":[{"type":"message","role":"user","content":"next"}]}`)
+	body := []byte(
+		(`{"model":"gpt-5.4","prompt_cache_key":"shared-client-key","input":` +
+			`[{"type":"message","role":"user","content":` +
+			`"next"}]}`),
+	)
 	rootHeaders := http.Header{}
 	rootHeaders.Set("X-Claude-Code-Session-Id", "session-agents")
 	childAHeaders := rootHeaders.Clone()
@@ -82,6 +86,7 @@ func TestCodexReasoningReplaySessionKeyIsolatesClaudeCodeAgents(t *testing.T) {
 
 	root := codexReasoningReplayScopeFromRequest(
 		context.Background(),
+		nil,
 		from,
 		req,
 		cliproxyexecutor.Options{SourceFormat: from, Headers: rootHeaders, Metadata: metadata},
@@ -89,6 +94,7 @@ func TestCodexReasoningReplaySessionKeyIsolatesClaudeCodeAgents(t *testing.T) {
 	)
 	childA := codexReasoningReplayScopeFromRequest(
 		context.Background(),
+		nil,
 		from,
 		req,
 		cliproxyexecutor.Options{SourceFormat: from, Headers: childAHeaders, Metadata: metadata},
@@ -96,6 +102,7 @@ func TestCodexReasoningReplaySessionKeyIsolatesClaudeCodeAgents(t *testing.T) {
 	)
 	childB := codexReasoningReplayScopeFromRequest(
 		context.Background(),
+		nil,
 		from,
 		req,
 		cliproxyexecutor.Options{SourceFormat: from, Headers: childBHeaders, Metadata: metadata},
@@ -107,7 +114,8 @@ func TestCodexReasoningReplaySessionKeyIsolatesClaudeCodeAgents(t *testing.T) {
 	if root.sessionKey != "claude:session-agents:agent:main" {
 		t.Fatalf("root session key = %q", root.sessionKey)
 	}
-	if root.sessionKey == childA.sessionKey || childA.sessionKey == childB.sessionKey || root.sessionKey == childB.sessionKey {
+	if root.sessionKey == childA.sessionKey || childA.sessionKey == childB.sessionKey ||
+		root.sessionKey == childB.sessionKey {
 		t.Fatalf("agent replay scopes are not isolated: root=%#v a=%#v b=%#v", root, childA, childB)
 	}
 }
@@ -233,6 +241,7 @@ func TestCodexReasoningReplayRestoresCumulativeToolTurns(t *testing.T) {
 	}
 	updated, gotScope, err := applyCodexReasoningReplayCacheRequired(
 		ctx,
+		nil,
 		sdktranslator.FromString("claude"),
 		req,
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
@@ -307,6 +316,7 @@ func TestCodexReasoningReplaySkipsDetachedTurnAfterCompaction(t *testing.T) {
 	}
 	updated, _, err := applyCodexReasoningReplayCacheRequired(
 		ctx,
+		nil,
 		sdktranslator.FromString("claude"),
 		req,
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},

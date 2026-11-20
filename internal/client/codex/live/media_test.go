@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
-	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	log "github.com/sirupsen/logrus"
@@ -131,11 +130,13 @@ func TestMediaForwardingStartedLogRedactsProxyCredentials(t *testing.T) {
 
 				matching := 0
 				for _, entry := range hook.AllEntries() {
-					if entry.Message != "codex live remote media forwarding started" || entry.Data["media_session_id"] != session.mediaSessionID {
+					if entry.Message != "codex live remote media forwarding started" ||
+						entry.Data["media_session_id"] != session.mediaSessionID {
 						continue
 					}
 					matching++
-					if entry.Data["connection"] != testCase.connection || entry.Data["credential"] != testCase.credential {
+					if entry.Data["connection"] != testCase.connection ||
+						entry.Data["credential"] != testCase.credential {
 						t.Fatalf("forwarding fields = %#v", entry.Data)
 					}
 					serialized := fmt.Sprint(entry.Data)
@@ -212,6 +213,8 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
+	relay.downstreamAPI = newTestWebRTCAPI(t)
+	relay.upstreamAPI = newTestWebRTCAPI(t)
 	session, relayOffer, errSession := relay.NewSession(
 		context.Background(), clientOffer, mediaSessionRoute{
 			credential: "Voice credential",
@@ -397,23 +400,11 @@ func offerCandidatesAreLoopback(t *testing.T, offer string) bool {
 
 func newTestWebRTCAPI(t *testing.T) *webrtc.API {
 	t.Helper()
-	mediaEngine := &webrtc.MediaEngine{}
-	if errRegister := mediaEngine.RegisterCodec(
-		webrtc.RTPCodecParameters{
-			RTPCodecCapability: opusCodec,
-			PayloadType:        111,
-		}, webrtc.RTPCodecTypeAudio,
-	); errRegister != nil {
-		t.Fatalf("register test Opus codec: %v", errRegister)
+	api, errAPI := newPionAPIWithOptions(config.CodexLiveMediaRelayConfig{}, false, true)
+	if errAPI != nil {
+		t.Fatalf("create loopback test WebRTC API: %v", errAPI)
 	}
-	interceptorRegistry := &interceptor.Registry{}
-	if errRegister := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); errRegister != nil {
-		t.Fatalf("register test interceptors: %v", errRegister)
-	}
-	return webrtc.NewAPI(
-		webrtc.WithMediaEngine(mediaEngine),
-		webrtc.WithInterceptorRegistry(interceptorRegistry),
-	)
+	return api
 }
 
 func completeOffer(t *testing.T, connection *webrtc.PeerConnection) string {
@@ -517,7 +508,8 @@ func assertForwardingAfterRemoteConnected(t *testing.T, hook *logtest.Hook) {
 	connectedIndex := -1
 	forwardingIndex := -1
 	for index, entry := range hook.AllEntries() {
-		if entry.Message == "codex live WebRTC peer connected" && entry.Data["peer"] == "remote" && connectedIndex == -1 {
+		if entry.Message == "codex live WebRTC peer connected" && entry.Data["peer"] == "remote" &&
+			connectedIndex == -1 {
 			connectedIndex = index
 		}
 		if entry.Message == "codex live remote media forwarding started" && forwardingIndex == -1 {

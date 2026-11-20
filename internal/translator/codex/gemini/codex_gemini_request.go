@@ -3,6 +3,8 @@
 // extracting model information, system instructions, message contents, and tool declarations.
 // The package performs JSON data transformation to ensure compatibility
 // between Codex API format and Gemini API's expected format.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (
@@ -263,7 +265,14 @@ func convertGeminiRequestToCodexChecked(modelName string, inputRawJSON []byte, _
 
 	// Fixed flags aligning with Codex expectations
 	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
-	out = setCodexToolChoiceFromGeminiToolConfig(out, root.Get("toolConfig.functionCallingConfig"))
+	config := root.Get("toolConfig.functionCallingConfig")
+	if names := config.Get("allowedFunctionNames").Array(); len(names) == 1 {
+		if mapped := shortMap[names[0].String()]; mapped != "" {
+			raw, _ := sjson.SetBytes([]byte(config.Raw), "allowedFunctionNames.0", mapped)
+			config = gjson.ParseBytes(raw)
+		}
+	}
+	out = setCodexToolChoiceFromGeminiToolConfig(out, config)
 
 	// Convert Gemini thinkingConfig to Codex reasoning.effort.
 	// Note: Google official Python SDK sends snake_case fields (thinking_level/thinking_budget).
@@ -361,7 +370,11 @@ func geminiMediaPartToCodex(part gjson.Result) []byte {
 		}
 		switch {
 		case strings.HasPrefix(mimeType, "image/"):
-			body, _ := json.Marshal(map[string]string{"type": "input_image", "image_url": fmt.Sprintf("data:%s;base64,%s", mimeType, data.String())})
+			body, _ := json.Marshal(
+				map[string]string{
+					"type": "input_image", "image_url": fmt.Sprintf("data:%s;base64,%s", mimeType, data.String()),
+				},
+			)
 			return body
 		case strings.HasPrefix(mimeType, "audio/"):
 			format := "mp3"
@@ -375,10 +388,19 @@ func geminiMediaPartToCodex(part gjson.Result) []byte {
 			case "audio/pcm", "audio/l16":
 				format = "pcm16"
 			}
-			body, _ := json.Marshal(map[string]any{"type": "input_audio", "input_audio": map[string]string{"data": data.String(), "format": format}})
+			body, _ := json.Marshal(
+				map[string]any{
+					"type": "input_audio", "input_audio": map[string]string{"data": data.String(), "format": format},
+				},
+			)
 			return body
 		default:
-			body, _ := json.Marshal(map[string]string{"type": "input_file", "file_data": fmt.Sprintf("data:%s;base64,%s", mimeType, data.String()), "filename": filename})
+			body, _ := json.Marshal(
+				map[string]string{
+					"type": "input_file", "file_data": fmt.Sprintf("data:%s;base64,%s", mimeType, data.String()),
+					"filename": filename,
+				},
+			)
 			return body
 		}
 	}

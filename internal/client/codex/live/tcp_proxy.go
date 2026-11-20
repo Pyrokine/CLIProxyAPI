@@ -15,7 +15,7 @@ import (
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/sdp/v3"
-	"github.com/pion/stun/v3"
+	"github.com/pion/stun/v4"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 )
@@ -220,11 +220,15 @@ func proxiedTCPCandidatePlan(rawCandidate string) (tcpCandidatePlan, bool, error
 		return tcpCandidatePlan{}, false, errors.New("upstream WebRTC TCP proxy candidate address must be an IP")
 	}
 	if address.Is4In6() {
-		return tcpCandidatePlan{}, false, errors.New("upstream WebRTC TCP proxy candidate address must not be IPv4-mapped")
+		return tcpCandidatePlan{}, false, errors.New(
+			"upstream WebRTC TCP proxy candidate address must not be IPv4-mapped",
+		)
 	}
 	address = address.Unmap()
 	if !isPublicProxyTarget(address) {
-		return tcpCandidatePlan{}, false, errors.New("upstream WebRTC TCP proxy candidate address must be globally routable")
+		return tcpCandidatePlan{}, false, errors.New(
+			"upstream WebRTC TCP proxy candidate address must be globally routable",
+		)
 	}
 	fields := strings.Fields(trimmed)
 	if len(fields) < 8 {

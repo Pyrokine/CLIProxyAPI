@@ -41,6 +41,8 @@ Sideband 先连接上游 WebSocket，再升级下游连接；文本帧、二进�
 Sideband 的显式代理优先级为 credential proxy、当前全局 proxy；credential `direct` 或 `none` 可覆盖全局
 proxy；两者都为空时继续读取环境代理，支持 HTTP (S)、SOCKS5 和 SOCKS5H
 
+显式代理解析、创建或建连失败时结束本次连接并返回错误，请求保持原代理选择
+
 ## WebRTC media relay
 
 Media relay 默认关闭，可通过以下配置开启：
@@ -73,6 +75,9 @@ Media relay 固定使用 Opus payload type 111，48 kHz、2 channels；RTP 转�
 条有界队列，单消息上限 256 KiB，发送缓冲上限 1 MiB
 
 `max-sessions` 在全部热更新 generation 之间共享；降低上限或关闭 relay 不会中断现有 session，只影响新 session
+
+新 bootstrap 请求使用同次更新发布的配置与 media factory，代理和 relay 设置保持同代；只更改代理等其他配置时，更新配置快照并复用未变化的
+factory，已有请求的快照保持原值
 
 `disable-private-remote-ips` 只过滤 Desktop-facing remote candidate；默认 `false`，适用于本机或局域网 Codex
 Desktop；互联网部署可显式设为 `true`
@@ -118,6 +123,7 @@ Server shutdown 会主动结束 hijacked sideband WebSocket 和 Pion 资源；�
 - `tcp_proxy.go`：candidate 审查、SDP 改写、STUN 认证和 ICE-TCP tunnel 生命周期
 - `sideband.go`：session store、sideband WebSocket、代理和资源生命周期
 - `live_test.go`：bootstrap、Home、media 接入和错误生命周期测试
+- `runtime_snapshot_contract_test.go`：配置与 relay 同代发布、并发读取和 bootstrap 代理归属测试
 - `media_test.go`：本地 PeerConnection 的 RTP、DataChannel、proxy mode、限流和日志测试
 - `tcp_proxy_test.go`：candidate 安全边界、STUN 认证、timeout、single claim 和 tunnel 测试
 - `sideband_test.go`：sideband、session、代理和关闭行为测试

@@ -40,7 +40,8 @@ func convertCodexResponseToGeminiCLI(
 	return newOutputs
 }
 
-// convertCodexResponseToGeminiCLINonStream converts a non-streaming Codex response to a non-streaming Gemini CLI response.
+// convertCodexResponseToGeminiCLINonStream converts a non-streaming Codex response to a non-streaming Gemini CLI
+// response.
 // This function processes the complete Codex response and transforms it into a single Gemini-compatible
 // JSON response. It wraps the converted response in a "response" object to match the Gemini CLI API structure.
 //

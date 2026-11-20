@@ -30,11 +30,14 @@ const (
 
 var (
 	errInvalidClientSecret    = errors.New("realtime client secret is invalid or expired")
+	errStaleIssuerGeneration  = errors.New("realtime issuing authorization is stale")
 	errClientSecretCapacity   = errors.New("realtime client secret capacity exhausted")
 	errUnsupportedSessionType = errors.New("realtime session type is not supported")
 )
 
 // ClientSecretAuthorization contains the local session configuration associated with an ephemeral key.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ClientSecretAuthorization struct {
 	Principal        string
 	IssuerPrincipal  string
@@ -49,9 +52,10 @@ type clientSecretEntry struct {
 }
 
 type clientSecretStore struct {
-	mu      sync.Mutex
-	entries map[string]clientSecretEntry
-	now     func() time.Time
+	mu               sync.Mutex
+	entries          map[string]clientSecretEntry
+	now              func() time.Time
+	issuerGeneration uint64
 }
 
 type clientSecretExpiresAfter struct {
@@ -104,6 +108,13 @@ func (s *clientSecretStore) create(
 	now := s.currentTime()
 	expiresAt := now.Add(lifetime)
 	s.mu.Lock()
+	if issuerGeneration != 0 && issuerGeneration < s.issuerGeneration {
+		s.mu.Unlock()
+		return "", ClientSecretAuthorization{}, time.Time{}, errStaleIssuerGeneration
+	}
+	if issuerGeneration > s.issuerGeneration {
+		s.issuerGeneration = issuerGeneration
+	}
 	s.removeInvalidLocked(now, issuerGeneration)
 	if len(s.entries) >= clientSecretMaxEntries {
 		s.mu.Unlock()
@@ -161,7 +172,7 @@ func (s *clientSecretStore) currentTime() time.Time {
 func (s *clientSecretStore) removeInvalidLocked(now time.Time, issuerGeneration uint64) {
 	for token, entry := range s.entries {
 		if !entry.expiresAt.After(now) ||
-			(issuerGeneration != 0 && entry.authorization.IssuerGeneration != issuerGeneration) {
+			(issuerGeneration != 0 && entry.authorization.IssuerGeneration < issuerGeneration) {
 			delete(s.entries, token)
 		}
 	}
@@ -272,7 +283,7 @@ func (h *Handler) CreateLegacySession(c *gin.Context) {
 		writeRealtimeError(c, status, errRead.Error(), "invalid_request_error", "invalid_request")
 		return
 	}
-	h.createClientSecret(c, json.RawMessage(body), nil, true)
+	h.createClientSecret(c, body, nil, true)
 }
 
 func (h *Handler) createClientSecret(
@@ -298,7 +309,9 @@ func (h *Handler) createClientSecret(
 	}
 	lifetime, errLifetime := clientSecretLifetime(expiresAfter)
 	if errLifetime != nil {
-		writeRealtimeError(c, http.StatusBadRequest, errLifetime.Error(), "invalid_request_error", "invalid_expires_after")
+		writeRealtimeError(
+			c, http.StatusBadRequest, errLifetime.Error(), "invalid_request_error", "invalid_expires_after",
+		)
 		return
 	}
 	clientSession, upstreamSession, errSession := normalizeClientSecretSession(session)
@@ -329,6 +342,13 @@ func (h *Handler) createClientSecret(
 		issuerGeneration,
 	)
 	if errCreate != nil {
+		if errors.Is(errCreate, errStaleIssuerGeneration) {
+			writeRealtimeError(
+				c, http.StatusUnauthorized, errCreate.Error(), "authentication_error",
+				"realtime_client_secret_issuer_revoked",
+			)
+			return
+		}
 		if errors.Is(errCreate, errClientSecretCapacity) {
 			c.Header("Retry-After", "1")
 			writeRealtimeError(
@@ -377,11 +397,13 @@ func (h *Handler) createClientSecret(
 		c.JSON(http.StatusOK, response)
 		return
 	}
-	c.JSON(http.StatusOK, clientSecretCreateResponse{
-		Value:     token,
-		ExpiresAt: expiresAt.Unix(),
-		Session:   responseSession,
-	})
+	c.JSON(
+		http.StatusOK, clientSecretCreateResponse{
+			Value:     token,
+			ExpiresAt: expiresAt.Unix(),
+			Session:   responseSession,
+		},
+	)
 }
 
 func clientSecretLifetime(expiresAfter *clientSecretExpiresAfter) (time.Duration, error) {
@@ -481,6 +503,19 @@ func requestOwner(c *gin.Context) (string, string) {
 	return strings.TrimSpace(principal), strings.TrimSpace(provider)
 }
 
+// RealtimeRequestModel resolves the model used by a query-based Realtime request.
+func RealtimeRequestModel(c *gin.Context) string {
+	if c != nil {
+		if model := strings.TrimSpace(c.Query("model")); model != "" {
+			return model
+		}
+	}
+	if model := modelFromJSON(clientSecretSession(c)); model != "" {
+		return model
+	}
+	return defaultStandardRealtimeModel
+}
+
 func clientSecretSession(c *gin.Context) json.RawMessage {
 	if c == nil {
 		return nil
@@ -494,10 +529,14 @@ func clientSecretSession(c *gin.Context) json.RawMessage {
 }
 
 func writeRealtimeError(c *gin.Context, status int, message, errorType, code string) {
-	c.JSON(status, gin.H{"error": gin.H{
-		"message": message,
-		"type":    errorType,
-		"param":   nil,
-		"code":    code,
-	}})
+	c.JSON(
+		status, gin.H{
+			"error": gin.H{
+				"message": message,
+				"type":    errorType,
+				"param":   nil,
+				"code":    code,
+			},
+		},
+	)
 }

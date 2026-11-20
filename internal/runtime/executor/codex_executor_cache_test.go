@@ -15,6 +15,7 @@ import (
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -107,7 +108,9 @@ func TestCodexExecutorCompactNormalizesInstructions(t *testing.T) {
 				defer server.Close()
 
 				executor := &codexExecutor{}
-				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+				auth := &cliproxyauth.Auth{
+					Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
+				}
 				req := cliproxyexecutor.Request{Model: "gpt-5.3-codex", Payload: []byte(tt.payload)}
 				opts := cliproxyexecutor.Options{
 					Alt: "responses/compact", SourceFormat: sdktranslator.FromString("openai-response"),
@@ -225,52 +228,67 @@ func TestCodexResponsesBodyInstructionFidelity(t *testing.T) {
 			wantType:    gjson.String,
 		},
 		{
-			name:       "native header missing instructions",
-			payload:    `{"model":"gpt-5.3-codex","input":[]}`,
-			opts:       cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Headers: http.Header{"x-openai-internal-codex-responses-lite": []string{"true"}}},
+			name:    "native header missing instructions",
+			payload: `{"model":"gpt-5.3-codex","input":[]}`,
+			opts: cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse,
+				Headers:      http.Header{"x-openai-internal-codex-responses-lite": []string{"true"}},
+			},
 			wantNative: true,
 		},
 		{
-			name:        "native header null instructions",
-			payload:     `{"model":"gpt-5.3-codex","instructions":null,"input":[]}`,
-			opts:        cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Headers: http.Header{"X-OpenAI-Internal-Codex-Responses-Lite": []string{"true"}}},
+			name:    "native header null instructions",
+			payload: `{"model":"gpt-5.3-codex","instructions":null,"input":[]}`,
+			opts: cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse,
+				Headers:      http.Header{"X-OpenAI-Internal-Codex-Responses-Lite": []string{"true"}},
+			},
 			wantNative:  true,
 			wantPresent: true,
 			wantType:    gjson.Null,
 		},
 		{
-			name:       "native metadata missing instructions",
-			payload:    `{"model":"gpt-5.3-codex","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":true},"input":[]}`,
+			name: "native metadata missing instructions",
+			payload: `{"model":"gpt-5.3-codex","client_metadata":{"ws_request_header_x_opena` +
+				`i_internal_codex_responses_lite":true},"input":[]}`,
 			opts:       cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
 			wantNative: true,
 		},
 	}
 
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			req := cliproxyexecutor.Request{Model: "gpt-5.3-codex", Payload: []byte(testCase.payload)}
-			prepared, err := codexResponsesBody(
-				context.Background(), &config.Config{}, nil, "gpt-5.3-codex", req.Model, "codex",
-				sdktranslator.FromString("openai-response"), testCase.opts, req, true, false,
-			)
-			if err != nil {
-				t.Fatalf("codexResponsesBody error: %v", err)
-			}
-			if prepared.Native != testCase.wantNative {
-				t.Fatalf("Native = %t, want %t", prepared.Native, testCase.wantNative)
-			}
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				req := cliproxyexecutor.Request{Model: "gpt-5.3-codex", Payload: []byte(testCase.payload)}
+				prepared, err := codexResponsesBody(
+					context.Background(), &config.Config{}, nil, "gpt-5.3-codex", req.Model, "codex",
+					sdktranslator.FromString("openai-response"), testCase.opts, req, true, false,
+				)
+				if err != nil {
+					t.Fatalf("codexResponsesBody error: %v", err)
+				}
+				if prepared.Native != testCase.wantNative {
+					t.Fatalf("Native = %t, want %t", prepared.Native, testCase.wantNative)
+				}
 
-			instructions := gjson.GetBytes(prepared.Body, "instructions")
-			if instructions.Exists() != testCase.wantPresent {
-				t.Fatalf("instructions present = %t, want %t in %s", instructions.Exists(), testCase.wantPresent, string(prepared.Body))
-			}
-			if !testCase.wantPresent {
-				return
-			}
-			if instructions.Type != testCase.wantType || instructions.String() != testCase.wantValue {
-				t.Fatalf("instructions = %s (%v), want %q (%v) in %s", instructions.Raw, instructions.Type, testCase.wantValue, testCase.wantType, string(prepared.Body))
-			}
-		})
+				instructions := gjson.GetBytes(prepared.Body, "instructions")
+				if instructions.Exists() != testCase.wantPresent {
+					t.Fatalf(
+						"instructions present = %t, want %t in %s", instructions.Exists(), testCase.wantPresent,
+						string(prepared.Body),
+					)
+				}
+				if !testCase.wantPresent {
+					return
+				}
+				if instructions.Type != testCase.wantType || instructions.String() != testCase.wantValue {
+					t.Fatalf(
+						"instructions = %s (%v), want %q (%v) in %s", instructions.Raw, instructions.Type,
+						testCase.wantValue, testCase.wantType, string(prepared.Body),
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -317,7 +335,7 @@ func TestCodexResponsesBodyPreservesValidReasoningEncryptedContent(t *testing.T)
 	}
 }
 
-func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPromptCacheKey(t *testing.T) {
+func TestCodexExecutorCacheHelper_OpenAIResponses_ModelScopesPromptCacheKey(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ginCtx.Set("apiKey", "test-api-key")
@@ -346,14 +364,14 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPromptCacheKey(t *tes
 	}
 
 	gotKey := gjson.GetBytes(body, "prompt_cache_key").String()
-	if gotKey != expectedKey {
-		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedKey)
+	if gotKey == "" || gotKey == expectedKey {
+		t.Fatalf("prompt_cache_key = %q, want model-scoped identity", gotKey)
 	}
-	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != expectedKey {
-		t.Fatalf("Conversation_id = %q, want %q", gotConversation, expectedKey)
+	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != gotKey {
+		t.Fatalf("Conversation_id = %q, want %q", gotConversation, gotKey)
 	}
-	if gotSession := httpReq.Header.Get("Session-Id"); gotSession != expectedKey {
-		t.Fatalf("Session-Id = %q, want %q", gotSession, expectedKey)
+	if gotSession := httpReq.Header.Get("Session-Id"); gotSession != gotKey {
+		t.Fatalf("Session-Id = %q, want %q", gotSession, gotKey)
 	}
 }
 
@@ -415,13 +433,34 @@ func TestApplyCodexHeadersKeepsPromptCacheSessionOverCodexClientSession(t *testi
 	}
 
 	httpReq, _, _, err := executor.cacheHelper(
-		ctx, sdktranslator.FromString("openai-response"), "https://example.com/responses", nil, req, req.Payload,
-		[]byte(`{"model":"gpt-5.3-codex"}`), nil,
+		ctx,
+		sdktranslator.FromString("openai-response"),
+		"https://example.com/responses",
+		nil,
+		req,
+		req.Payload,
+		[]byte(`{"model":"gpt-5.3-codex"}`),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("cacheHelper error: %v", err)
 	}
-	applyCodexHeaders(httpReq, &cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}}, "token", true, nil)
+	applyCodexHeaders(
+		httpReq,
+		&cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}},
+		"token",
+		true,
+		nil,
+	)
+	expectedKey = uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte(
+			strings.Join(
+				[]string{"cli-proxy-api", "codex", "prompt-cache", "gpt-5.3-codex", expectedKey},
+				"\x00",
+			),
+		),
+	).String()
 
 	if got := httpReq.Header.Get("Session-Id"); got != expectedKey {
 		t.Fatalf("Session-Id = %q, want prompt cache key %q", got, expectedKey)
@@ -449,14 +488,24 @@ codex:
 	executor := &codexExecutor{cfg: cfg}
 	auth := &cliproxyauth.Auth{ID: "auth-1"}
 	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.3-codex",
-		Payload: []byte(`{"model":"gpt-5.3-codex","prompt_cache_key":"client-cache","client_metadata":{"x-codex-installation-id":"client-installation","x-codex-turn-metadata":"{\"prompt_cache_key\":\"client-cache\",\"turn_id\":\"turn-1\",\"window_id\":\"client-cache:0\"}"}}`),
+		Model: "gpt-5.3-codex",
+		Payload: []byte((`{"model":"gpt-5.3-codex","prompt_cache_key":"client-cache","client_metadata":{"x-` +
+			`codex-installation-id":"client-installation","x-codex-turn-metadata":"{\"prompt_cache_key\":\"` +
+			`client-cache\",\"turn_id\":\"turn-1\",\"window_id\":\"client-cache:0\"}"}}`)),
 	}
-	rawJSON := []byte(`{"model":"gpt-5.3-codex","prompt_cache_key":"client-cache","client_metadata":{"x-codex-installation-id":"client-installation","x-codex-turn-metadata":"{\"prompt_cache_key\":\"client-cache\",\"turn_id\":\"turn-1\",\"window_id\":\"client-cache:0\"}"}}`)
+	rawJSON := []byte((`{"model":"gpt-5.3-codex","prompt_cache_key":"client-cache","client_metadata":{"x-` +
+		`codex-installation-id":"client-installation","x-codex-turn-metadata":"{\"prompt_cache_key\":\"` +
+		`client-cache\",\"turn_id\":\"turn-1\",\"window_id\":\"client-cache:0\"}"}}`))
 
 	httpReq, upstreamBody, identityState, err := executor.cacheHelper(
-		context.Background(), sdktranslator.FromString("openai-response"), "https://example.com/responses", auth, req,
-		req.Payload, rawJSON, nil,
+		context.Background(),
+		sdktranslator.FromString("openai-response"),
+		"https://example.com/responses",
+		auth,
+		req,
+		req.Payload,
+		rawJSON,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("cacheHelper error: %v", err)
@@ -513,8 +562,14 @@ codex:
 	req := cliproxyexecutor.Request{Model: "gpt-5.3-codex", Payload: clientBody}
 
 	_, upstreamBody, identityState, err := executor.cacheHelper(
-		context.Background(), sdktranslator.FromString("openai-response"), "https://example.com/responses", auth, req,
-		clientBody, clientBody, nil,
+		context.Background(),
+		sdktranslator.FromString("openai-response"),
+		"https://example.com/responses",
+		auth,
+		req,
+		clientBody,
+		clientBody,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("cacheHelper error: %v", err)
@@ -697,9 +752,13 @@ func TestCodexExecutorGPT6SolDoesNotInjectVersionForClaudeCode(t *testing.T) {
 			func(w http.ResponseWriter, r *http.Request) {
 				gotHeaders = r.Header.Clone()
 				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = w.Write([]byte(
-					"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
-				))
+				_, _ = w.Write(
+					[]byte(
+						"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\"" +
+							",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1," +
+							"\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+					),
+				)
 			},
 		),
 	)
@@ -758,7 +817,13 @@ func TestApplyCodexHeadersRejectsCherryClientIdentity(t *testing.T) {
 	ginCtx.Request.Header.Set("Http-Referer", "https://cherry-ai.com")
 
 	req, err := http.NewRequestWithContext(
-		util.WithGinContext(context.Background(), ginCtx), http.MethodPost, "https://example.com/responses", nil,
+		util.WithGinContext(
+			context.Background(),
+			ginCtx,
+		),
+		http.MethodPost,
+		"https://example.com/responses",
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
@@ -766,7 +831,13 @@ func TestApplyCodexHeadersRejectsCherryClientIdentity(t *testing.T) {
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	req.Header.Set("X-Forwarded-For", "203.0.113.1")
 
-	applyCodexHeaders(req, &cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}}, "token", true, nil)
+	applyCodexHeaders(
+		req,
+		&cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}},
+		"token",
+		true,
+		nil,
+	)
 
 	if got := req.Header.Get("User-Agent"); got != codexUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, codexUserAgent)
@@ -788,7 +859,12 @@ func TestApplyCodexHeadersRejectsCherryClientIdentity(t *testing.T) {
 }
 
 func TestApplyCodexHeadersUsesConfiguredOAuthDefaults(t *testing.T) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/responses", nil)
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		"https://example.com/responses",
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -797,7 +873,13 @@ func TestApplyCodexHeadersUsesConfiguredOAuthDefaults(t *testing.T) {
 		CodexHeaderDefaults: config.CodexHeaderDefaults{UserAgent: "codex_cli_rs/0.132.0 (Linux; x64)"},
 	}
 
-	applyCodexHeaders(req, &cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}}, "token", true, cfg)
+	applyCodexHeaders(
+		req,
+		&cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}},
+		"token",
+		true,
+		cfg,
+	)
 
 	if got := req.Header.Get("User-Agent"); got != cfg.CodexHeaderDefaults.UserAgent {
 		t.Fatalf("User-Agent = %q, want configured default", got)
@@ -811,7 +893,12 @@ func TestApplyCodexHeadersUsesConfiguredOAuthDefaults(t *testing.T) {
 }
 
 func TestApplyCodexHeadersUsesAccountHeaderForOAuth(t *testing.T) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/responses", nil)
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		"https://example.com/responses",
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -842,13 +929,25 @@ func TestApplyCodexHeadersPreservesCodexClientIdentity(t *testing.T) {
 	ginCtx.Request.Header.Set("Originator", "codex_cli_rs")
 
 	req, err := http.NewRequestWithContext(
-		util.WithGinContext(context.Background(), ginCtx), http.MethodPost, "https://example.com/responses", nil,
+		util.WithGinContext(
+			context.Background(),
+			ginCtx,
+		),
+		http.MethodPost,
+		"https://example.com/responses",
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
 
-	applyCodexHeaders(req, &cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}}, "token", true, nil)
+	applyCodexHeaders(
+		req,
+		&cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}},
+		"token",
+		true,
+		nil,
+	)
 
 	if got := req.Header.Get("User-Agent"); got != ginCtx.Request.Header.Get("User-Agent") {
 		t.Fatalf("User-Agent = %q, want Codex client value", got)
@@ -870,13 +969,25 @@ func TestApplyCodexHeadersPreservesLegacyOriginatorOnlyClientIdentity(t *testing
 	ginCtx.Request.Header.Set("Originator", "codex_cli_rs")
 
 	req, err := http.NewRequestWithContext(
-		util.WithGinContext(context.Background(), ginCtx), http.MethodPost, "https://example.com/responses", nil,
+		util.WithGinContext(
+			context.Background(),
+			ginCtx,
+		),
+		http.MethodPost,
+		"https://example.com/responses",
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
 
-	applyCodexHeaders(req, &cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}}, "token", true, nil)
+	applyCodexHeaders(
+		req,
+		&cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}},
+		"token",
+		true,
+		nil,
+	)
 
 	if got := req.Header.Get("Version"); got != "0.131.0" {
 		t.Fatalf("Version = %q, want legacy Codex client value", got)
@@ -899,21 +1010,34 @@ type capturedCodexRequest struct {
 
 func newCodexRoutingHintServer(t *testing.T, captured *capturedCodexRequest) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		captured.path = r.URL.Path
-		captured.model = gjson.GetBytes(body, "model")
-		_, captured.hasHint = r.Header[http.CanonicalHeaderKey(codexRoutingHintHeader)]
-		captured.routingHint = r.Header.Get(codexRoutingHintHeader)
-		captured.serviceTier = gjson.GetBytes(body, "service_tier")
-		if r.URL.Path == "/responses/compact" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"cmp_1","object":"response.compaction","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.5","service_tier":"default","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"))
-	}))
+	return httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				captured.path = r.URL.Path
+				captured.model = gjson.GetBytes(body, "model")
+				_, captured.hasHint = r.Header[http.CanonicalHeaderKey(codexRoutingHintHeader)]
+				captured.routingHint = r.Header.Get(codexRoutingHintHeader)
+				captured.serviceTier = gjson.GetBytes(body, "service_tier")
+				if r.URL.Path == "/responses/compact" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(
+						[]byte(`{"id":"cmp_1","object":"response.compaction","output":[],"usage":{"inp` +
+							`ut_tokens":1,"output_tokens":1,"total_tokens":2}}`),
+					)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write(
+					[]byte(("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\"" +
+						":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.5\",\"service_tier\":\"" +
+						"default\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"" +
+						"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"" +
+						"output_tokens\":1,\"total_tokens\":2}}}\n\n")),
+				)
+			},
+		),
+	)
 }
 
 func codexOAuthTestAuth(baseURL string) *cliproxyauth.Auth {
@@ -937,7 +1061,9 @@ func codexAPIKeyTestAuth(baseURL string) *cliproxyauth.Auth {
 func TestCodexExecutorRoutingHintCarriesRequestedTier(t *testing.T) {
 	const fastClaude = `{"model":"gpt-5.5","max_tokens":64,"speed":"fast","messages":[{"role":"user","content":"hi"}]}`
 	const plainClaude = `{"model":"gpt-5.5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`
-	const aliasedClaude = `{"model":"client-alias","max_tokens":64,"speed":"fast","messages":[{"role":"user","content":"hi"}]}`
+	const aliasedClaude = `{"model":"client-alias","max_tokens":64,"speed":"fast","messages":` +
+		`[{"role":"user","content":` +
+		`"hi"}]}`
 
 	cases := []struct {
 		name     string
@@ -948,63 +1074,83 @@ func TestCodexExecutorRoutingHintCarriesRequestedTier(t *testing.T) {
 		wantHint string
 		wantTier string
 	}{
-		{name: "oauth stream fast", stream: true, payload: fastClaude, wantHint: "model=gpt-5.5;tier=priority", wantTier: "priority"},
-		{name: "oauth non-stream fast", stream: false, payload: fastClaude, wantHint: "model=gpt-5.5;tier=priority", wantTier: "priority"},
-		{name: "oauth stream alias and thinking suffix", stream: true, model: "gpt-5.5(low)", payload: aliasedClaude, wantHint: "model=gpt-5.5;tier=priority", wantTier: "priority"},
-		{name: "oauth non-stream alias and thinking suffix", model: "gpt-5.5(low)", payload: aliasedClaude, wantHint: "model=gpt-5.5;tier=priority", wantTier: "priority"},
+		{
+			name: "oauth stream fast", stream: true, payload: fastClaude, wantHint: "model=gpt-5.5;tier=priority",
+			wantTier: "priority",
+		},
+		{
+			name: "oauth non-stream fast", stream: false, payload: fastClaude, wantHint: "model=gpt-5.5;tier=priority",
+			wantTier: "priority",
+		},
+		{
+			name: "oauth stream alias and thinking suffix", stream: true, model: "gpt-5.5(low)", payload: aliasedClaude,
+			wantHint: "model=gpt-5.5;tier=priority", wantTier: "priority",
+		},
+		{
+			name: "oauth non-stream alias and thinking suffix", model: "gpt-5.5(low)", payload: aliasedClaude,
+			wantHint: "model=gpt-5.5;tier=priority", wantTier: "priority",
+		},
 		{name: "oauth stream standard", stream: true, payload: plainClaude, wantHint: "model=gpt-5.5"},
-		{name: "api key keeps body tier without hint", apiKey: true, stream: true, payload: fastClaude, wantTier: "priority"},
+		{
+			name: "api key keeps body tier without hint", apiKey: true, stream: true, payload: fastClaude,
+			wantTier: "priority",
+		},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var captured capturedCodexRequest
-			server := newCodexRoutingHintServer(t, &captured)
-			defer server.Close()
+		t.Run(
+			tc.name, func(t *testing.T) {
+				var captured capturedCodexRequest
+				server := newCodexRoutingHintServer(t, &captured)
+				defer server.Close()
 
-			auth := codexOAuthTestAuth(server.URL)
-			if tc.apiKey {
-				auth = codexAPIKeyTestAuth(server.URL)
-			}
-			executor := newCodexExecutor(&config.Config{})
-			model := tc.model
-			if model == "" {
-				model = "gpt-5.5"
-			}
-			req := cliproxyexecutor.Request{Model: model, Payload: []byte(tc.payload)}
-			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude"), Stream: tc.stream}
-
-			if tc.stream {
-				result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
-				if err != nil {
-					t.Fatalf("ExecuteStream error: %v", err)
+				auth := codexOAuthTestAuth(server.URL)
+				if tc.apiKey {
+					auth = codexAPIKeyTestAuth(server.URL)
 				}
-				for chunk := range result.Chunks {
-					if chunk.Err != nil {
-						t.Fatalf("stream chunk error: %v", chunk.Err)
+				executor := newCodexExecutor(&config.Config{})
+				model := tc.model
+				if model == "" {
+					model = "gpt-5.5"
+				}
+				req := cliproxyexecutor.Request{Model: model, Payload: []byte(tc.payload)}
+				opts := cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FromString("claude"),
+					Stream:       tc.stream,
+				}
+
+				if tc.stream {
+					result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
+					if err != nil {
+						t.Fatalf("ExecuteStream error: %v", err)
 					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk error: %v", chunk.Err)
+						}
+					}
+				} else if _, err := executor.Execute(context.Background(), auth, req, opts); err != nil {
+					t.Fatalf("Execute error: %v", err)
 				}
-			} else if _, err := executor.Execute(context.Background(), auth, req, opts); err != nil {
-				t.Fatalf("Execute error: %v", err)
-			}
 
-			if captured.model.Type != gjson.String || captured.model.String() != "gpt-5.5" {
-				t.Fatalf("body model = %s, want gpt-5.5", captured.model.Raw)
-			}
-			if tc.wantHint == "" {
-				if captured.hasHint {
-					t.Fatalf("routing hint = %q, want header absent", captured.routingHint)
+				if captured.model.Type != gjson.String || captured.model.String() != "gpt-5.5" {
+					t.Fatalf("body model = %s, want gpt-5.5", captured.model.Raw)
 				}
-			} else if captured.routingHint != tc.wantHint {
-				t.Fatalf("routing hint = %q, want %q", captured.routingHint, tc.wantHint)
-			}
-			if tc.wantTier == "" {
-				if captured.serviceTier.Exists() {
-					t.Fatalf("body service_tier = %s, want absent", captured.serviceTier.Raw)
+				if tc.wantHint == "" {
+					if captured.hasHint {
+						t.Fatalf("routing hint = %q, want header absent", captured.routingHint)
+					}
+				} else if captured.routingHint != tc.wantHint {
+					t.Fatalf("routing hint = %q, want %q", captured.routingHint, tc.wantHint)
 				}
-			} else if captured.serviceTier.String() != tc.wantTier {
-				t.Fatalf("body service_tier = %q, want %q", captured.serviceTier.String(), tc.wantTier)
-			}
-		})
+				if tc.wantTier == "" {
+					if captured.serviceTier.Exists() {
+						t.Fatalf("body service_tier = %s, want absent", captured.serviceTier.Raw)
+					}
+				} else if captured.serviceTier.String() != tc.wantTier {
+					t.Fatalf("body service_tier = %q, want %q", captured.serviceTier.String(), tc.wantTier)
+				}
+			},
+		)
 	}
 }
 
@@ -1014,13 +1160,16 @@ func TestCodexExecutorCompactRoutingHintCarriesRequestedTier(t *testing.T) {
 	defer server.Close()
 
 	executor := newCodexExecutor(&config.Config{})
-	_, err := executor.Execute(context.Background(), codexOAuthTestAuth(server.URL), cliproxyexecutor.Request{
-		Model:   "gpt-5.5(low)",
-		Payload: []byte(`{"model":"client-alias","service_tier":"priority","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("openai-response"),
-		Alt:          "responses/compact",
-	})
+	_, err := executor.Execute(
+		context.Background(), codexOAuthTestAuth(server.URL), cliproxyexecutor.Request{
+			Model: "gpt-5.5(low)",
+			Payload: []byte((`{"model":"client-alias","service_tier":"priority","input":[{"type":"message","` +
+				`role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Alt:          "responses/compact",
+		},
+	)
 	if err != nil {
 		t.Fatalf("compact Execute error: %v", err)
 	}
@@ -1034,7 +1183,10 @@ func TestCodexExecutorCompactRoutingHintCarriesRequestedTier(t *testing.T) {
 		t.Fatalf("body service_tier = %q, want priority", captured.serviceTier.String())
 	}
 	if captured.routingHint != "model="+captured.model.String()+";tier="+captured.serviceTier.String() {
-		t.Fatalf("routing hint = %q, does not match body model %q and tier %q", captured.routingHint, captured.model.String(), captured.serviceTier.String())
+		t.Fatalf(
+			"routing hint = %q, does not match body model %q and tier %q", captured.routingHint,
+			captured.model.String(), captured.serviceTier.String(),
+		)
 	}
 }
 
@@ -1048,10 +1200,21 @@ func TestCodexExecutorOperatorRoutingHintRuleWins(t *testing.T) {
 	clientHeaders := http.Header{}
 	clientHeaders.Set(codexRoutingHintHeader, "model=gpt-5.4-client")
 	executor := newCodexExecutor(&config.Config{})
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gpt-5.5",
-		Payload: []byte(`{"model":"gpt-5.5","max_tokens":64,"speed":"fast","messages":[{"role":"user","content":"hi"}]}`),
-	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude"), Stream: true, Headers: clientHeaders})
+	result, err := executor.ExecuteStream(
+		context.Background(),
+		auth,
+		cliproxyexecutor.Request{
+			Model: "gpt-5.5",
+			Payload: []byte(
+				`{"model":"gpt-5.5","max_tokens":64,"speed":"fast","messages":[{"role":"user","content":"hi"}]}`,
+			),
+		},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("claude"),
+			Stream:       true,
+			Headers:      clientHeaders,
+		},
+	)
 	if err != nil {
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
@@ -1068,60 +1231,98 @@ func TestCodexExecutorOperatorRoutingHintRuleWins(t *testing.T) {
 func TestApplyCodexRoutingHint(t *testing.T) {
 	oauth := codexOAuthTestAuth("")
 
-	t.Run("replaces a hint that did not come from an operator rule", func(t *testing.T) {
-		headers := http.Header{}
-		headers.Set(codexRoutingHintHeader, "model=gpt-5.4-client")
-		applyCodexRoutingHint(context.Background(), headers, oauth, "gpt-5.5", []byte(`{"model":"gpt-5.5","service_tier":"priority"}`), nil)
-		if got := headers.Get(codexRoutingHintHeader); got != "model=gpt-5.5;tier=priority" {
-			t.Fatalf("routing hint = %q, want %q", got, "model=gpt-5.5;tier=priority")
-		}
-	})
+	t.Run(
+		"replaces a hint that did not come from an operator rule", func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set(codexRoutingHintHeader, "model=gpt-5.4-client")
+			applyCodexRoutingHint(
+				context.Background(), headers, oauth, "gpt-5.5",
+				[]byte(`{"model":"gpt-5.5","service_tier":"priority"}`), nil,
+			)
+			if got := headers.Get(codexRoutingHintHeader); got != "model=gpt-5.5;tier=priority" {
+				t.Fatalf("routing hint = %q, want %q", got, "model=gpt-5.5;tier=priority")
+			}
+		},
+	)
 
-	t.Run("keeps the value from an operator auth header rule", func(t *testing.T) {
-		operator := codexOAuthTestAuth("")
-		operator.Attributes["header:x-codex-routing-hint"] = "model=operator"
-		headers := http.Header{}
-		headers.Set(codexRoutingHintHeader, "model=operator")
-		applyCodexRoutingHint(context.Background(), headers, operator, "gpt-5.5", []byte(`{"model":"gpt-5.5","service_tier":"priority"}`), nil)
-		if got := headers.Get(codexRoutingHintHeader); got != "model=operator" {
-			t.Fatalf("routing hint = %q, want operator value kept", got)
-		}
-	})
+	t.Run(
+		"keeps the value from an operator auth header rule", func(t *testing.T) {
+			operator := codexOAuthTestAuth("")
+			operator.Attributes["header:x-codex-routing-hint"] = "model=operator"
+			headers := http.Header{}
+			headers.Set(codexRoutingHintHeader, "model=operator")
+			applyCodexRoutingHint(
+				context.Background(), headers, operator, "gpt-5.5",
+				[]byte(`{"model":"gpt-5.5","service_tier":"priority"}`), nil,
+			)
+			if got := headers.Get(codexRoutingHintHeader); got != "model=operator" {
+				t.Fatalf("routing hint = %q, want operator value kept", got)
+			}
+		},
+	)
 
-	t.Run("derives the hint when a dynamic operator rule resolves to nothing", func(t *testing.T) {
-		operator := codexOAuthTestAuth("")
-		operator.Attributes["header:X-Codex-Routing-Hint"] = "$X-Operator-Hint"
-		headers := http.Header{}
-		headers.Set(codexRoutingHintHeader, "model=gpt-5.4-client")
-		applyCodexRoutingHint(context.Background(), headers, operator, "gpt-5.5", []byte(`{"model":"gpt-5.5","service_tier":"priority"}`), nil)
-		if got := headers.Get(codexRoutingHintHeader); got != "model=gpt-5.5;tier=priority" {
-			t.Fatalf("routing hint = %q, want %q", got, "model=gpt-5.5;tier=priority")
-		}
-	})
+	t.Run(
+		"derives the hint when a dynamic operator rule resolves to nothing", func(t *testing.T) {
+			operator := codexOAuthTestAuth("")
+			operator.Attributes["header:X-Codex-Routing-Hint"] = "$X-Operator-Hint"
+			headers := http.Header{}
+			headers.Set(codexRoutingHintHeader, "model=gpt-5.4-client")
+			applyCodexRoutingHint(
+				context.Background(), headers, operator, "gpt-5.5",
+				[]byte(`{"model":"gpt-5.5","service_tier":"priority"}`), nil,
+			)
+			if got := headers.Get(codexRoutingHintHeader); got != "model=gpt-5.5;tier=priority" {
+				t.Fatalf("routing hint = %q, want %q", got, "model=gpt-5.5;tier=priority")
+			}
+		},
+	)
 
-	t.Run("leaves API-key requests untouched", func(t *testing.T) {
-		headers := http.Header{}
-		headers.Set(codexRoutingHintHeader, "model=client")
-		applyCodexRoutingHint(context.Background(), headers, codexAPIKeyTestAuth(""), "gpt-5.5", []byte(`{"model":"gpt-5.5","service_tier":"priority"}`), nil)
-		if got := headers.Get(codexRoutingHintHeader); got != "model=client" {
-			t.Fatalf("routing hint = %q, want API-key headers unchanged", got)
-		}
-	})
+	t.Run(
+		"leaves API-key requests untouched", func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set(codexRoutingHintHeader, "model=client")
+			applyCodexRoutingHint(
+				context.Background(), headers, codexAPIKeyTestAuth(""), "gpt-5.5",
+				[]byte(`{"model":"gpt-5.5","service_tier":"priority"}`), nil,
+			)
+			if got := headers.Get(codexRoutingHintHeader); got != "model=client" {
+				t.Fatalf("routing hint = %q, want API-key headers unchanged", got)
+			}
+		},
+	)
 
-	t.Run("drops a forwarded hint when the resolved model is empty", func(t *testing.T) {
-		headers := http.Header{}
-		headers.Set(codexRoutingHintHeader, "model=gpt-5.4-client")
-		applyCodexRoutingHint(context.Background(), headers, oauth, "", []byte(`{"model":"gpt-5.5","service_tier":"priority"}`), nil)
-		if _, ok := headers[http.CanonicalHeaderKey(codexRoutingHintHeader)]; ok {
-			t.Fatalf("routing hint = %q, want header absent", headers.Get(codexRoutingHintHeader))
-		}
-	})
+	t.Run(
+		"drops a forwarded hint when the resolved model is empty", func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set(codexRoutingHintHeader, "model=gpt-5.4-client")
+			applyCodexRoutingHint(
+				context.Background(),
+				headers,
+				oauth,
+				"",
+				[]byte(`{"model":"gpt-5.5","service_tier":"priority"}`),
+				nil,
+			)
+			if _, ok := headers[http.CanonicalHeaderKey(codexRoutingHintHeader)]; ok {
+				t.Fatalf("routing hint = %q, want header absent", headers.Get(codexRoutingHintHeader))
+			}
+		},
+	)
 
-	t.Run("ignores a non-string tier", func(t *testing.T) {
-		headers := http.Header{}
-		applyCodexRoutingHint(context.Background(), headers, oauth, "gpt-5.5", []byte(`{"model":"gpt-5.5","service_tier":null}`), nil)
-		if got := headers.Get(codexRoutingHintHeader); got != "model=gpt-5.5" {
-			t.Fatalf("routing hint = %q, want %q", got, "model=gpt-5.5")
-		}
-	})
+	t.Run(
+		"ignores a non-string tier", func(t *testing.T) {
+			headers := http.Header{}
+			applyCodexRoutingHint(
+				context.Background(),
+				headers,
+				oauth,
+				"gpt-5.5",
+				[]byte(`{"model":"gpt-5.5","service_tier":null}`),
+				nil,
+			)
+			if got := headers.Get(codexRoutingHintHeader); got != "model=gpt-5.5" {
+				t.Fatalf("routing hint = %q, want %q", got, "model=gpt-5.5")
+			}
+		},
+	)
 }

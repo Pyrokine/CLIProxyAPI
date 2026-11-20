@@ -37,7 +37,8 @@ func collectStructuredCodexClaudeEvents(t *testing.T, chunks ...string) []codexC
 	events := make([]codexClaudeSSEEvent, 0, len(blocks))
 	for _, block := range blocks {
 		lines := strings.Split(block, "\n")
-		if len(lines) != 2 || !strings.HasPrefix(lines[0], "event: ") || !strings.HasPrefix(lines[1], "data: ") {
+		if len(lines) != 2 || !strings.HasPrefix(lines[0], "event: ") ||
+			!strings.HasPrefix(lines[1], "data: ") {
 			t.Fatalf("invalid SSE block %q", block)
 		}
 		data := strings.TrimPrefix(lines[1], "data: ")
@@ -120,7 +121,11 @@ func assertCodexClaudeBlockLifecycle(t *testing.T, events []codexClaudeSSEEvent)
 			assertMessageStarted(eventIndex, event.Name)
 			blockIndex := int(event.Data.Get("index").Int())
 			if !open[blockIndex] || stopped[blockIndex] {
-				t.Fatalf("event %d emitted delta for block %d before start or after stop", eventIndex, blockIndex)
+				t.Fatalf(
+					"event %d emitted delta for block %d before start or after stop",
+					eventIndex,
+					blockIndex,
+				)
 			}
 		case "content_block_stop":
 			assertMessageStarted(eventIndex, event.Name)
@@ -156,13 +161,17 @@ func assertCodexClaudeBlockLifecycle(t *testing.T, events []codexClaudeSSEEvent)
 	}
 	if messageDeltaCount > 1 || messageStopCount > 1 || errorCount > 1 {
 		t.Fatalf(
-			"duplicate terminal events: message_delta=%d message_stop=%d error=%d", messageDeltaCount, messageStopCount,
+			"duplicate terminal events: message_delta=%d message_stop=%d error=%d",
+			messageDeltaCount,
+			messageStopCount,
 			errorCount,
 		)
 	}
 	if messageStopCount != messageDeltaCount {
 		t.Fatalf(
-			"message terminal event mismatch: message_delta=%d message_stop=%d", messageDeltaCount, messageStopCount,
+			"message terminal event mismatch: message_delta=%d message_stop=%d",
+			messageDeltaCount,
+			messageStopCount,
 		)
 	}
 	if errorCount > 0 && messageStopCount > 0 {
@@ -184,7 +193,8 @@ func TestConvertCodexResponseToClaude_DuplicateCreatedKeepsTextInOneMessage(t *t
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
-		`{"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}`,
+		`{"type":"response.content_part.added","item_id":"msg_1","output_index"`+
+			`:0,"content_index":0,"part":{"type":"output_text","text":""}}`,
 		`{"type":"response.created","response":{"id":"resp_2","model":"gpt-5.5"}}`,
 		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hello"}`,
 		`{"type":"response.content_part.done","item_id":"msg_1","output_index":0,"content_index":0}`,
@@ -210,10 +220,12 @@ func TestConvertCodexResponseToClaude_DuplicateCreatedKeepsToolInOneMessage(t *t
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
-		`{"type":"response.output_item.added","output_index":0,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"lookup","arguments":""}}`,
 		`{"type":"response.created","response":{"id":"resp_2","model":"gpt-5.5"}}`,
 		`{"type":"response.function_call_arguments.delta","item_id":"item_1","output_index":0,"delta":"{}"}`,
-		`{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"lookup","arguments":"{}"}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`,
 	)
 
@@ -253,9 +265,12 @@ func TestConvertCodexResponseToClaude_OrphanFunctionEventsWaitForIdentity(t *tes
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
 		`{"type":"response.function_call_arguments.delta","item_id":"item_1","output_index":1,"delta":"{\"city\":"}`,
-		`{"type":"response.function_call_arguments.done","item_id":"item_1","output_index":1,"arguments":"{\"city\":\"Paris\"}"}`,
-		`{"type":"response.output_item.done","output_index":1,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}`,
-		`{"type":"response.output_item.done","output_index":1,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}`,
+		`{"type":"response.function_call_arguments.done","item_id":"item_1","output_index":1,"arguments":"{\"`+
+			`city\":\"Paris\"}"}`,
+		`{"type":"response.output_item.done","output_index":1,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}`,
+		`{"type":"response.output_item.done","output_index":1,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`,
 	)
 
@@ -282,12 +297,15 @@ func TestConvertCodexResponseToClaude_InterleavedItemsKeepTheirBlockIndexes(t *t
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
-		`{"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}`,
-		`{"type":"response.output_item.added","output_index":1,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}`,
+		`{"type":"response.content_part.added","item_id":"msg_1","output_index"`+
+			`:0,"content_index":0,"part":{"type":"output_text","text":""}}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"lookup","arguments":""}}`,
 		`{"type":"response.function_call_arguments.delta","item_id":"item_1","output_index":1,"delta":"{}"}`,
 		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"answer"}`,
 		`{"type":"response.content_part.done","item_id":"msg_1","output_index":0,"content_index":0}`,
-		`{"type":"response.output_item.done","output_index":1,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}`,
+		`{"type":"response.output_item.done","output_index":1,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"lookup","arguments":"{}"}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`,
 	)
 
@@ -299,7 +317,8 @@ func TestConvertCodexResponseToClaude_InterleavedItemsKeepTheirBlockIndexes(t *t
 	if starts[0].Data.Get("index").Int() != 0 || starts[0].Data.Get("content_block.type").String() != "text" {
 		t.Fatalf("first start = %s, want text index 0", starts[0].Data.Raw)
 	}
-	if starts[1].Data.Get("index").Int() != 1 || starts[1].Data.Get("content_block.type").String() != "tool_use" {
+	if starts[1].Data.Get("index").Int() != 1 ||
+		starts[1].Data.Get("content_block.type").String() != "tool_use" {
 		t.Fatalf("second start = %s, want tool_use index 1", starts[1].Data.Raw)
 	}
 	var text strings.Builder
@@ -325,10 +344,12 @@ func TestConvertCodexResponseToClaude_SeparateContentIndexesUseSeparateTextBlock
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
-		`{"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}`,
+		`{"type":"response.content_part.added","item_id":"msg_1","output_index"`+
+			`:0,"content_index":0,"part":{"type":"output_text","text":""}}`,
 		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"first"}`,
 		`{"type":"response.content_part.done","item_id":"msg_1","output_index":0,"content_index":0}`,
-		`{"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":1,"part":{"type":"output_text","text":""}}`,
+		`{"type":"response.content_part.added","item_id":"msg_1","output_index"`+
+			`:0,"content_index":1,"part":{"type":"output_text","text":""}}`,
 		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":1,"delta":"second"}`,
 		`{"type":"response.content_part.done","item_id":"msg_1","output_index":0,"content_index":1}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`,
@@ -341,7 +362,8 @@ func TestConvertCodexResponseToClaude_SeparateContentIndexesUseSeparateTextBlock
 	if len(starts) != 2 || starts[0].Data.Get("index").Int() != 0 || starts[1].Data.Get("index").Int() != 1 {
 		t.Fatalf("text starts = %#v, want indexes 0 and 1", starts)
 	}
-	if len(deltas) != 2 || deltas[0].Data.Get("delta.text").String() != "first" || deltas[1].Data.Get("delta.text").String() != "second" {
+	if len(deltas) != 2 || deltas[0].Data.Get("delta.text").String() != "first" ||
+		deltas[1].Data.Get("delta.text").String() != "second" {
 		t.Fatalf("text deltas = %#v, want first and second", deltas)
 	}
 	if len(stops) != 2 {
@@ -353,7 +375,9 @@ func TestConvertCodexResponseToClaude_DoneOnlyMessageUsesOneBlockPerTextPart(t *
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
-		`{"type":"response.output_item.done","item_id":"msg_1","output_index":0,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"first"},{"type":"output_text","text":"second"}]}}`,
+		`{"type":"response.output_item.done","item_id":"msg_1","output_index":0`+
+			`,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text`+
+			`","text":"first"},{"type":"output_text","text":"second"}]}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`,
 	)
 
@@ -364,7 +388,8 @@ func TestConvertCodexResponseToClaude_DoneOnlyMessageUsesOneBlockPerTextPart(t *
 	if len(starts) != 2 || starts[0].Data.Get("index").Int() != 0 || starts[1].Data.Get("index").Int() != 1 {
 		t.Fatalf("text starts = %#v, want indexes 0 and 1", starts)
 	}
-	if len(deltas) != 2 || deltas[0].Data.Get("delta.text").String() != "first" || deltas[1].Data.Get("delta.text").String() != "second" {
+	if len(deltas) != 2 || deltas[0].Data.Get("delta.text").String() != "first" ||
+		deltas[1].Data.Get("delta.text").String() != "second" {
 		t.Fatalf("text deltas = %#v, want first and second", deltas)
 	}
 	if len(stops) != 2 {
@@ -377,9 +402,14 @@ func TestConvertCodexResponseToClaude_CompletedClosesOpenBlocks(t *testing.T) {
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
 		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"partial"}`,
-		`{"type":"response.output_item.added","output_index":1,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"lookup","arguments":""}}`,
 		`{"type":"response.function_call_arguments.delta","item_id":"item_1","output_index":1,"delta":"{\"id\":"}`,
-		`{"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","output_index":1,"id":"item_1","call_id":"call_1","name":"lookup","arguments":"{\"id\":1}"}],"usage":{"input_tokens":1,"output_tokens":2}}}`,
+		`{"type":"response.completed","response":{"output":[{"type":"message","`+
+			`content":[{"type":"output_text","text":"partial"}]},{"type":"function_`+
+			`call","output_index":1,"id":"item_1","call_id":"call_1","name":"lookup`+
+			`","arguments":"{\"id\":1}"}],"usage":{"input_tokens":1,"output_tokens"`+
+			`:2}}}`,
 	)
 
 	assertCodexClaudeBlockLifecycle(t, events)
@@ -417,7 +447,9 @@ func TestConvertCodexResponseToClaude_ResponseFailedClosesBlocksAndEndsStream(t 
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
 		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"partial"}`,
-		`{"type":"response.failed","response":{"status":"failed","error":{"type":"api_error","message":"provider failed"}}}`,
+		`{"type":"response.failed","response":{"status":"failed","error":`+
+			`{"type":"api_error","message":"provider `+
+			`failed"}}}`,
 	)
 
 	assertCodexClaudeBlockLifecycle(t, events)
@@ -432,7 +464,8 @@ func TestConvertCodexResponseToClaude_ErrorClosesBlocksAndEndsStream(t *testing.
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
 		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"partial"}`,
-		`{"type":"response.output_item.added","output_index":1,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"lookup","arguments":""}}`,
 		`{"type":"response.error","error":{"type":"api_error","message":"upstream failed"}}`,
 		`{"type":"response.error","error":{"type":"api_error","message":"upstream failed again"}}`,
 		`{"type":"response.output_text.delta","item_id":"msg_2","output_index":2,"content_index":0,"delta":"late"}`,
@@ -452,7 +485,7 @@ func TestConvertCodexResponseToClaude_ErrorClosesBlocksAndEndsStream(t *testing.
 	}
 }
 
-func TestConvertCodexResponseToClaude_DropsUnsignedReasoningSummary(t *testing.T) {
+func TestConvertCodexResponseToClaude_PreservesUnsignedReasoningSummary(t *testing.T) {
 	out := collectCodexClaudeEvents(
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
 		`{"type":"response.reasoning_summary_part.added"}`,
@@ -464,8 +497,8 @@ func TestConvertCodexResponseToClaude_DropsUnsignedReasoningSummary(t *testing.T
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`,
 	)
 
-	if strings.Contains(out, `"type":"thinking"`) || strings.Contains(out, "thinking_delta") {
-		t.Fatalf("unsigned reasoning summary produced Claude thinking block: %s", out)
+	if !strings.Contains(out, `"type":"thinking"`) || !strings.Contains(out, "thinking without signature") {
+		t.Fatalf("unsigned reasoning summary missing: %s", out)
 	}
 	if !strings.Contains(out, `"type":"text_delta"`) {
 		t.Fatalf("text output missing: %s", out)
@@ -473,7 +506,8 @@ func TestConvertCodexResponseToClaude_DropsUnsignedReasoningSummary(t *testing.T
 }
 
 func TestConvertCodexResponseToClaude_EmitsReasoningSignature(t *testing.T) {
-	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw"
+	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMz" +
+		"MzMzMzMzMzMzMzMzMzMzMzMzMzMw"
 	out := collectCodexClaudeEvents(
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
 		`{"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"`+signature+`"}}`,
@@ -492,7 +526,8 @@ func TestConvertCodexResponseToClaude_EmitsReasoningSignature(t *testing.T) {
 }
 
 func TestConvertCodexResponseToClaude_EmitsReasoningWhenSignatureArrivesAfterSummary(t *testing.T) {
-	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw"
+	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMz" +
+		"MzMzMzMzMzMzMzMzMzMzMzMzMzMw"
 	out := collectCodexClaudeEvents(
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
 		`{"type":"response.reasoning_summary_part.added"}`,
@@ -509,7 +544,7 @@ func TestConvertCodexResponseToClaude_EmitsReasoningWhenSignatureArrivesAfterSum
 	}
 }
 
-func TestConvertCodexResponseToClaudeNonStream_DropsUnsignedReasoning(t *testing.T) {
+func TestConvertCodexResponseToClaudeNonStream_PreservesUnsignedReasoning(t *testing.T) {
 	out := ConvertCodexResponseToClaudeNonStream(
 		context.Background(), "gpt-5.5", nil, nil, []byte(`{
 		"type":"response.completed",
@@ -522,8 +557,9 @@ func TestConvertCodexResponseToClaudeNonStream_DropsUnsignedReasoning(t *testing
 	}`), nil,
 	)
 
-	if strings.Contains(string(out), `"type":"thinking"`) || strings.Contains(string(out), "unsigned summary") {
-		t.Fatalf("unsigned nonstream reasoning produced Claude thinking block: %s", out)
+	if !strings.Contains(string(out), `"type":"thinking"`) ||
+		!strings.Contains(string(out), "unsigned summary") {
+		t.Fatalf("unsigned nonstream reasoning missing: %s", out)
 	}
 }
 
@@ -531,8 +567,12 @@ func TestConvertCodexResponseToClaude_EmitsDoneOnlyMessageText(t *testing.T) {
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
-		`{"type":"response.output_item.done","item_id":"msg_1","output_index":0,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"done-only text"}]}}`,
-		`{"type":"response.output_item.done","item_id":"msg_1","output_index":0,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"done-only text"}]}}`,
+		`{"type":"response.output_item.done","item_id":"msg_1","output_index":0`+
+			`,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text`+
+			`","text":"done-only text"}]}}`,
+		`{"type":"response.output_item.done","item_id":"msg_1","output_index":0`+
+			`,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text`+
+			`","text":"done-only text"}]}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`,
 	)
 
@@ -543,7 +583,8 @@ func TestConvertCodexResponseToClaude_EmitsDoneOnlyMessageText(t *testing.T) {
 	if len(starts) != 1 || starts[0].Data.Get("content_block.type").String() != "text" {
 		t.Fatalf("text starts = %#v, want one text block", starts)
 	}
-	if len(deltas) != 1 || deltas[0].Data.Get("delta.type").String() != "text_delta" || deltas[0].Data.Get("delta.text").String() != "done-only text" {
+	if len(deltas) != 1 || deltas[0].Data.Get("delta.type").String() != "text_delta" ||
+		deltas[0].Data.Get("delta.text").String() != "done-only text" {
 		t.Fatalf("text deltas = %#v, want one done-only text delta", deltas)
 	}
 	if len(stops) != 1 {
@@ -552,7 +593,8 @@ func TestConvertCodexResponseToClaude_EmitsDoneOnlyMessageText(t *testing.T) {
 }
 
 func TestConvertCodexResponseToClaudeNonStream_IncludesReasoningSignature(t *testing.T) {
-	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw"
+	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMz" +
+		"MzMzMzMzMzMzMzMzMzMzMzMzMzMw"
 	out := ConvertCodexResponseToClaudeNonStream(
 		context.Background(), "gpt-5.5", nil, nil, []byte(`{
 		"type":"response.completed",
@@ -576,7 +618,9 @@ func TestConvertCodexResponseToClaudeNonStream_IncludesReasoningSignature(t *tes
 
 func TestConvertCodexResponseToClaude_TranslatesCyberPolicyStreamError(t *testing.T) {
 	out := collectCodexClaudeEvents(
-		`{"type":"response.error","error":{"type":"invalid_request","code":"cyber_policy","message":"blocked by policy"}}`,
+		`{"type":"response.error","error":{"type":"invalid_request","code":` +
+			`"cyber_policy","message":"blocked by ` +
+			`policy"}}`,
 	)
 
 	if !strings.Contains(out, "event: error") {
@@ -598,7 +642,8 @@ func TestConvertCodexResponseToClaude_TranslatesStreamErrorWithoutMessage(t *tes
 	if !strings.Contains(out, "event: error") {
 		t.Fatalf("error event missing: %s", out)
 	}
-	if !strings.Contains(out, `"type":"rate_limit_error"`) || !strings.Contains(out, `"message":"rate_limit_error"`) {
+	if !strings.Contains(out, `"type":"rate_limit_error"`) ||
+		!strings.Contains(out, `"message":"rate_limit_error"`) {
 		t.Fatalf("fallback error payload missing: %s", out)
 	}
 }
@@ -617,7 +662,11 @@ func TestConvertCodexResponseToClaude_IncompleteMapsStopReason(t *testing.T) {
 			testCase.name, func(t *testing.T) {
 				events := collectStructuredCodexClaudeEvents(
 					t,
-					`{"type":"response.incomplete","response":{"incomplete_details":{"reason":"`+testCase.reason+`"},"usage":{"input_tokens":1,"output_tokens":2}}}`,
+					`{"type":"response.incomplete","response":{"incomplete_details":`+
+						`{"reason":`+
+						`"`+
+						testCase.reason+
+						`"},"usage":{"input_tokens":1,"output_tokens":2}}}`,
 				)
 				assertCodexClaudeBlockLifecycle(t, events)
 				messageDeltas := codexClaudeEventsByName(events, "message_delta")
@@ -659,7 +708,8 @@ func TestConvertCodexResponseToClaudeNonStreamIncompleteMapsStopReason(t *testin
 func TestConvertCodexResponseToClaudePreservesStopSequence(t *testing.T) {
 	events := collectStructuredCodexClaudeEvents(
 		t,
-		`{"type":"response.completed","response":{"stop_reason":"stop","stop_sequence":"\nEND","usage":{"input_tokens":1,"output_tokens":2}}}`,
+		`{"type":"response.completed","response":{"stop_reason":"stop","stop_sequence":"\nEND","usage":{"`+
+			`input_tokens":1,"output_tokens":2}}}`,
 	)
 	messageDeltas := codexClaudeEventsByName(events, "message_delta")
 	if len(messageDeltas) != 1 {
@@ -677,12 +727,20 @@ func TestConvertCodexResponseToClaudeQueuesFunctionCallsFIFO(t *testing.T) {
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
-		`{"type":"response.output_item.added","output_index":0,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"first"}}`,
-		`{"type":"response.output_item.added","output_index":1,"item":{"id":"item_2","type":"function_call","call_id":"call_2","name":"second"}}`,
-		`{"type":"response.function_call_arguments.done","item_id":"item_2","output_index":1,"arguments":"{\"value\":2}"}`,
-		`{"type":"response.output_item.done","output_index":1,"item":{"id":"item_2","type":"function_call","call_id":"call_2","name":"second","arguments":"{\"value\":2}"}}`,
-		`{"type":"response.function_call_arguments.done","item_id":"item_1","output_index":0,"arguments":"{\"value\":1}"}`,
-		`{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"first","arguments":"{\"value\":1}"}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"it`+
+			`em_1","type":"function_call","call_id":"call_1","name":"first"}}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"id":"it`+
+			`em_2","type":"function_call","call_id":"call_2","name":"second"}}`,
+		`{"type":"response.function_call_arguments.done","item_id":"item_2",`+
+			`"output_index":1,"arguments":"{\"value\":`+
+			`2}"}`,
+		`{"type":"response.output_item.done","output_index":1,"item":{"id":"item_2","type":"function_call","`+
+			`call_id":"call_2","name":"second","arguments":"{\"value\":2}"}}`,
+		`{"type":"response.function_call_arguments.done","item_id":"item_1",`+
+			`"output_index":0,"arguments":"{\"value\":`+
+			`1}"}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"first","arguments":"{\"value\":1}"}}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`,
 	)
 	assertCodexClaudeBlockLifecycle(t, events)
@@ -710,9 +768,13 @@ func TestConvertCodexResponseToClaudeDefersTextWhileFunctionBlockIsOpen(t *testi
 	events := collectStructuredCodexClaudeEvents(
 		t,
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`,
-		`{"type":"response.output_item.added","output_index":0,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup"}}`,
-		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"after tool"}`,
-		`{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"it`+
+			`em_1","type":"function_call","call_id":"call_1","name":"lookup"}}`,
+		`{"type":"response.output_text.delta","item_id":"msg_1","output_index":`+
+			`1,"content_index":0,"delta":"after `+
+			`tool"}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"function_call","`+
+			`call_id":"call_1","name":"lookup","arguments":"{}"}}`,
 		`{"type":"response.content_part.done","item_id":"msg_1","output_index":1,"content_index":0}`,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}`,
 	)
@@ -782,7 +844,11 @@ func TestConvertCodexResponseToClaudeAggregatesReasoningSummaryParts(t *testing.
 	}
 	if strings.Contains(
 		collectCodexClaudeEvents(
-			`{"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"`+earlySignature+`"}}`,
+			`{"type":"response.output_item.added","item":{"type":"reasoning",`+
+				`"encrypted_content":`+
+				`"`+
+				earlySignature+
+				`"}}`,
 			`{"type":"response.output_item.done","item":{"type":"reasoning","encrypted_content":"`+finalSignature+`"}}`,
 		), earlySignature,
 	) {
@@ -833,25 +899,39 @@ func TestConvertCodexResponseToClaudeNonStreamMapsReasoningUsage(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := []byte(`{"type":"response.completed","response":{` +
-				`"id":"resp_1","model":"gpt-5.6",` +
-				`"usage":{"input_tokens":100,"output_tokens":50,` +
-				`"input_tokens_details":{"cache_creation_tokens":10},` +
-				`"output_tokens_details":{"reasoning_tokens":` + test.detail + `}},` +
-				`"output":[]}}`)
-			output := ConvertCodexResponseToClaudeNonStream(context.Background(), "gpt-5.6", nil, nil, input, nil)
-			if got := gjson.GetBytes(output, "usage.cache_creation_input_tokens").Int(); got != 10 {
-				t.Fatalf("cache_creation_input_tokens = %d, want 10; output=%s", got, output)
-			}
-			thinking := gjson.GetBytes(output, "usage.output_tokens_details.thinking_tokens")
-			if thinking.Exists() != test.wantExists {
-				t.Fatalf("thinking_tokens exists = %v, want %v; output=%s", thinking.Exists(), test.wantExists, output)
-			}
-			if test.wantExists && thinking.Int() != test.want {
-				t.Fatalf("thinking_tokens = %d, want %d; output=%s", thinking.Int(), test.want, output)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				input := []byte(`{"type":"response.completed","response":{` +
+					`"id":"resp_1","model":"gpt-5.6",` +
+					`"usage":{"input_tokens":100,"output_tokens":50,` +
+					`"input_tokens_details":{"cache_creation_tokens":10},` +
+					`"output_tokens_details":{"reasoning_tokens":` + test.detail + `}},` +
+					`"output":[]}}`)
+				output := ConvertCodexResponseToClaudeNonStream(
+					context.Background(),
+					"gpt-5.6",
+					nil,
+					nil,
+					input,
+					nil,
+				)
+				if got := gjson.GetBytes(output, "usage.cache_creation_input_tokens").Int(); got != 10 {
+					t.Fatalf("cache_creation_input_tokens = %d, want 10; output=%s", got, output)
+				}
+				thinking := gjson.GetBytes(output, "usage.output_tokens_details.thinking_tokens")
+				if thinking.Exists() != test.wantExists {
+					t.Fatalf(
+						"thinking_tokens exists = %v, want %v; output=%s",
+						thinking.Exists(),
+						test.wantExists,
+						output,
+					)
+				}
+				if test.wantExists && thinking.Int() != test.want {
+					t.Fatalf("thinking_tokens = %d, want %d; output=%s", thinking.Int(), test.want, output)
+				}
+			},
+		)
 	}
 }
 

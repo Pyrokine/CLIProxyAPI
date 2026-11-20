@@ -45,9 +45,11 @@ func translateRequestWithCodexMultiAgentV2(
 			payload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
 		}
 	}
-	return sdktranslator.TranslateRequestEnvelope(ctx, from, to, sdktranslator.RequestEnvelope{
-		Format: from, Model: model, ModelInfo: modelInfo, Body: payload, Stream: stream,
-	})
+	return sdktranslator.TranslateRequestEnvelope(
+		ctx, from, to, sdktranslator.RequestEnvelope{
+			Format: from, Model: model, ModelInfo: modelInfo, Body: payload, Stream: stream,
+		},
+	)
 }
 
 // HasCodexMultiAgentV2NamespaceConflict reports whether the request defines

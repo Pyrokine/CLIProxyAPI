@@ -396,9 +396,11 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 
 	ctx := util.WithGinContext(c.Request.Context(), c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
-	selectionMetadata := liveSelectionMetadata(c, map[string]any{
-		coreexecutor.ExecutionSessionMetadataKey: session.callID,
-	})
+	selectionMetadata := liveSelectionMetadata(
+		c, map[string]any{
+			coreexecutor.ExecutionSessionMetadataKey: session.callID,
+		},
+	)
 	ctx = enrichLiveSessionContext(
 		ctx,
 		liveSelectionHeaders(c),
@@ -492,7 +494,9 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 			if len(responseBody) == 0 {
 				diagnostic = errDial.Error()
 			}
-			log.WithField("status", handshakeResponse.StatusCode).Warnf("codex live sideband upstream handshake failed: %s", logging.SafeDiagnosticForLog(diagnostic))
+			log.WithField(
+				"status", handshakeResponse.StatusCode,
+			).Warnf("codex live sideband upstream handshake failed: %s", logging.SafeDiagnosticForLog(diagnostic))
 		}
 		return
 	}
@@ -502,6 +506,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 			cfg,
 			handshakeResponse.StatusCode,
 			callResponseHeaders(handshakeResponse.Header),
+			handshakeResponse,
 		)
 		if handshakeResponse.Body != nil {
 			if errClose := handshakeResponse.Body.Close(); errClose != nil {
@@ -629,11 +634,13 @@ func handleSidebandDialError(
 		if response.StatusCode > 0 {
 			status = response.StatusCode
 		}
+		copyRealtimeHandshakeHeaders(c.Writer.Header(), response.Header)
 		runtimeexecutor.RecordAPIWebsocketHandshake(
 			ctx,
 			cfg,
 			response.StatusCode,
 			callResponseHeaders(response.Header),
+			response,
 		)
 		if response.Body != nil {
 			var errRead error
@@ -780,6 +787,7 @@ func newSidebandDialer(proxyURL string) *websocket.Dialer {
 	setting, errParse := proxyutil.Parse(proxyURL)
 	if errParse != nil {
 		log.Errorf("codex live sideband: %v", errParse)
+		dialer.Proxy = func(*http.Request) (*url.URL, error) { return nil, errParse }
 		return dialer
 	}
 	switch setting.Mode {
@@ -802,6 +810,7 @@ func newSidebandDialer(proxyURL string) *websocket.Dialer {
 		socksDialer, errSOCKS5 := xproxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, xproxy.Direct)
 		if errSOCKS5 != nil {
 			log.Errorf("codex live sideband: create SOCKS5 dialer failed: %v", errSOCKS5)
+			dialer.Proxy = func(*http.Request) (*url.URL, error) { return nil, errSOCKS5 }
 			return dialer
 		}
 		dialer.Proxy = nil

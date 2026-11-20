@@ -30,6 +30,8 @@ func (h *Handler) HandleRealtimeWebsocket(c *gin.Context) {
 }
 
 // HandleDirectWebsocket relays a standard Realtime WebSocket through Codex OAuth.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	if h == nil || h.authManager == nil {
 		writeRealtimeError(
@@ -53,10 +55,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		return
 	}
 
-	requestedModel := strings.TrimSpace(c.Query("model"))
-	if requestedModel == "" {
-		requestedModel = defaultStandardRealtimeModel
-	}
+	requestedModel := RealtimeRequestModel(c)
 	selectionModel := codexRealtimeModel(requestedModel)
 	tokenSession := clientSecretSession(c)
 	if len(tokenSession) > 0 {
@@ -162,6 +161,11 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		h.handleDirectWebsocketDialError(c, ctx, selection, selected, selectionModel, handshakeResponse, errDial)
 		return
 	}
+	if handshakeResponse != nil {
+		runtimeexecutor.RecordAPIWebsocketHandshake(
+			ctx, cfg, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header), handshakeResponse,
+		)
+	}
 	closeHandshakeBody(handshakeResponse, "direct websocket handshake")
 	closeUpstream := websocketCloseFunc("upstream", upstream)
 	defer func() { _ = closeUpstream() }()
@@ -178,10 +182,12 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 			)
 			return
 		}
-		update, errMarshal := json.Marshal(struct {
-			Type    string          `json:"type"`
-			Session json.RawMessage `json:"session"`
-		}{Type: "session.update", Session: updateSession})
+		update, errMarshal := json.Marshal(
+			struct {
+				Type    string          `json:"type"`
+				Session json.RawMessage `json:"session"`
+			}{Type: "session.update", Session: updateSession},
+		)
 		if errMarshal != nil || upstream.WriteMessage(websocket.TextMessage, update) != nil {
 			writeRealtimeError(
 				c,
@@ -244,7 +250,9 @@ func (h *Handler) handleDirectWebsocketDialError(
 			status = response.StatusCode
 		}
 		copyRealtimeHandshakeHeaders(c.Writer.Header(), response.Header)
-		runtimeexecutor.RecordAPIWebsocketHandshake(ctx, cfg, response.StatusCode, callResponseHeaders(response.Header))
+		runtimeexecutor.RecordAPIWebsocketHandshake(
+			ctx, cfg, response.StatusCode, callResponseHeaders(response.Header), response,
+		)
 		if response.Body != nil {
 			var errRead error
 			responseBody, errRead = readLimitedBody(response.Body)
@@ -258,7 +266,7 @@ func (h *Handler) handleDirectWebsocketDialError(
 	closeHandshakeBody(response, "direct websocket rejected")
 	if selection != nil && status == http.StatusUnauthorized {
 		diagnosticBody := responseBody
-		if len(diagnosticBody) == 0 {
+		if response == nil {
 			diagnosticBody = []byte(errDial.Error())
 		}
 		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, diagnosticBody)

@@ -54,6 +54,7 @@ type captureExecutor struct {
 	responseBody io.ReadCloser
 	statusCode   int
 	headers      http.Header
+	beforeReturn func()
 }
 
 func (*captureExecutor) Identifier() string { return "codex" }
@@ -123,6 +124,9 @@ func (e *captureExecutor) HttpRequest(
 			"X-Connection-Secret": []string{"secret"},
 			"X-Live-Session":      []string{"live-session-123"},
 		}
+	}
+	if e.beforeReturn != nil {
+		e.beforeReturn()
 	}
 	return &http.Response{
 		StatusCode: statusCode,
@@ -313,7 +317,12 @@ func TestHandlerRewritesLiveCallAndSchedulesOAuth(t *testing.T) {
 			t.Errorf("blocked response header %s leaked as %q", blocked, got)
 		}
 	}
-	if traceID := recorder.Header().Get(internallogging.CPATraceIDHeader); !regexp.MustCompile(`^\d{14}-[a-f0-9]+-1234abcd$`).MatchString(traceID) {
+	//goland:noinspection SpellCheckingInspection
+	if traceID := recorder.Header().Get(internallogging.CPATraceIDHeader); !regexp.MustCompile(
+		`^\d{14}-[a-f0-` +
+			`9]+-1234abcd$`,
+	).
+		MatchString(traceID) {
 		t.Fatalf("CPA trace ID = %q", traceID)
 	}
 	if !responseBody.closed.Load() {
@@ -397,7 +406,8 @@ func TestHandlerUsesLiveModelForHomeDispatch(t *testing.T) {
 		t.Fatal("Home upstream response body was not closed")
 	}
 	stored, ok := handler.sessions.peek("call-123")
-	if !ok || stored.homeSelection == nil || !stored.homeSelection.Retained() || !stored.homeSelection.Active() {
+	if !ok || stored.homeSelection == nil || !stored.homeSelection.Retained() ||
+		!stored.homeSelection.Active() {
 		t.Fatalf("stored Home live session = %#v, ok=%t", stored, ok)
 	}
 	if errDrain := registry.Drain(context.Background()); errDrain != nil {
@@ -463,7 +473,11 @@ func TestHandlerRejectsOversizedRequest(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(
 		recorder,
-		httptest.NewRequest(http.MethodPost, "/v1/live", bytes.NewReader(bytes.Repeat([]byte{'x'}, maxBodySize+1))),
+		httptest.NewRequest(
+			http.MethodPost,
+			"/v1/live",
+			bytes.NewReader(bytes.Repeat([]byte{'x'}, maxBodySize+1)),
+		),
 	)
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
@@ -557,6 +571,17 @@ func TestPrepareCallRequestRewritesMultipart(t *testing.T) {
 	}
 }
 
+func TestPrepareCallRequestPreservesRawSDPWhenRelayDisabled(t *testing.T) {
+	body := []byte("v=0\r\no=raw-offer\r\n")
+	prepared, contentType, model, err := prepareCallRequest(body, "application/sdp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(prepared, body) || contentType != "application/sdp" || model != defaultLiveModel {
+		t.Fatalf("raw SDP changed: body=%q contentType=%q model=%q", prepared, contentType, model)
+	}
+}
+
 func TestPrepareCallRequestModelPriority(t *testing.T) {
 	_, _, model, errPrepare := prepareCallRequest(
 		[]byte(`{"model":"top-level","session":{"model":"session-model"}}`),
@@ -607,12 +632,14 @@ func TestRewriteCallRequestModelRejectsNullObjects(t *testing.T) {
 		`null`,
 		`{"session":null}`,
 	} {
-		t.Run(body, func(t *testing.T) {
-			_, _, err := rewriteCallRequestModel([]byte(body), "application/json", defaultLiveModel)
-			if err == nil {
-				t.Fatalf("rewriteCallRequestModel(%s) accepted a null object", body)
-			}
-		})
+		t.Run(
+			body, func(t *testing.T) {
+				_, _, err := rewriteCallRequestModel([]byte(body), "application/json", defaultLiveModel)
+				if err == nil {
+					t.Fatalf("rewriteCallRequestModel(%s) accepted a null object", body)
+				}
+			},
+		)
 	}
 }
 
@@ -817,7 +844,11 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	}
 	mediaSession.closeHandler("test_closed")
 	if !mediaSession.closed.Load() || mediaSession.closeReason != "test_closed" {
-		t.Fatalf("completed media session close state = %t/%q", mediaSession.closed.Load(), mediaSession.closeReason)
+		t.Fatalf(
+			"completed media session close state = %t/%q",
+			mediaSession.closed.Load(),
+			mediaSession.closeReason,
+		)
 	}
 	if mediaSession.closeCount.Load() != 1 {
 		t.Fatalf("media close count = %d, want 1", mediaSession.closeCount.Load())
@@ -829,74 +860,120 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 
 func TestLiveAdmissionWaitsForMediaClose(t *testing.T) {
 	for _, ending := range []string{"complete", "expire", "replacement", "shutdown"} {
-		t.Run(ending, func(t *testing.T) {
-			responseBody := &trackedResponseBody{Reader: strings.NewReader("v=0\r\no=upstream-answer\r\n")}
-			handler := newLocalLiveHandler(t, &captureExecutor{responseBody: responseBody})
-			admission := executionregistry.NewAdmission()
-			handler.SetInferenceAdmission(admission)
-			media := &fakeMediaSession{
-				downstreamSDP: "v=0\r\no=downstream-answer\r\n",
-				closeStarted:  make(chan struct{}),
-				closeAllowed:  make(chan struct{}),
-			}
-			defer close(media.closeAllowed)
-			installFakeMediaRelay(handler, &fakeMediaRelay{session: media, upstreamOffer: "v=0\r\n"})
-			router := gin.New()
-			router.POST("/v1/live", handler.Handle)
-			ctx, releaseHTTP, err := admission.Acquire(context.Background(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			request := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(`{"sdp":"v=0\r\no=desktop-offer\r\n","model":"gpt-live-1-codex"}`)).WithContext(ctx)
-			request.Header.Set("Content-Type", "application/json")
-			response := httptest.NewRecorder()
-			router.ServeHTTP(response, request)
-			releaseHTTP()
-			if response.Code != http.StatusCreated {
-				t.Fatalf("bootstrap status=%d body=%s", response.Code, response.Body.String())
-			}
-			session, ok := handler.sessions.peek("call-123")
-			if !ok {
-				t.Fatal("bootstrap did not retain the media session")
-			}
-			closed := make(chan struct{})
-			go func() {
-				defer close(closed)
-				switch ending {
-				case "complete":
-					handler.sessions.complete(session, "test_complete")
-				case "expire":
-					handler.sessions.expire(session.callID, session.token)
-				case "replacement":
-					handler.sessions.put(session.callID, liveSession{authID: "replacement"})
-				case "shutdown":
-					_ = handler.Close()
+		t.Run(
+			ending, func(t *testing.T) {
+				responseBody := &trackedResponseBody{Reader: strings.NewReader("v=0\r\no=upstream-answer\r\n")}
+				handler := newLocalLiveHandler(t, &captureExecutor{responseBody: responseBody})
+				admission := executionregistry.NewAdmission()
+				handler.SetInferenceAdmission(admission)
+				media := &fakeMediaSession{
+					downstreamSDP: "v=0\r\no=downstream-answer\r\n",
+					closeStarted:  make(chan struct{}),
+					closeAllowed:  make(chan struct{}),
 				}
-			}()
-			select {
-			case <-media.closeStarted:
-			case <-time.After(time.Second):
-				t.Fatal("media close did not start")
-			}
-			waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-			_, err = admission.Drain(waitCtx, "update", time.Now().Add(time.Second))
-			cancel()
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("drain completed before media close returned: %v", err)
-			}
-			media.closeAllowed <- struct{}{}
-			select {
-			case <-closed:
-			case <-time.After(time.Second):
-				t.Fatal("session close did not finish")
-			}
-			confirmation, err := admission.Drain(context.Background(), "next-update", time.Now().Add(time.Second))
-			if err != nil || !admission.Confirm(confirmation) {
-				t.Fatalf("finished media kept its lease: %v", err)
-			}
-			admission.Resume("next-update")
-			_ = handler.Close()
-		})
+				defer close(media.closeAllowed)
+				installFakeMediaRelay(handler, &fakeMediaRelay{session: media, upstreamOffer: "v=0\r\n"})
+				router := gin.New()
+				router.POST("/v1/live", handler.Handle)
+				ctx, releaseHTTP, err := admission.Acquire(context.Background(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request := httptest.NewRequest(
+					http.MethodPost, "/v1/live",
+					strings.NewReader(`{"sdp":"v=0\r\no=desktop-offer\r\n","model":"gpt-live-1-codex"}`),
+				).WithContext(ctx)
+				request.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, request)
+				releaseHTTP()
+				if response.Code != http.StatusCreated {
+					t.Fatalf("bootstrap status=%d body=%s", response.Code, response.Body.String())
+				}
+				session, ok := handler.sessions.peek("call-123")
+				if !ok {
+					t.Fatal("bootstrap did not retain the media session")
+				}
+				closed := make(chan struct{})
+				go func() {
+					defer close(closed)
+					switch ending {
+					case "complete":
+						handler.sessions.complete(session, "test_complete")
+					case "expire":
+						handler.sessions.expire(session.callID, session.token)
+					case "replacement":
+						handler.sessions.put(session.callID, liveSession{authID: "replacement"})
+					case "shutdown":
+						_ = handler.Close()
+					}
+				}()
+				select {
+				case <-media.closeStarted:
+				case <-time.After(time.Second):
+					t.Fatal("media close did not start")
+				}
+				waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+				_, err = admission.Drain(waitCtx, "update", time.Now().Add(time.Second))
+				cancel()
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("drain completed before media close returned: %v", err)
+				}
+				media.closeAllowed <- struct{}{}
+				select {
+				case <-closed:
+				case <-time.After(time.Second):
+					t.Fatal("session close did not finish")
+				}
+				confirmation, err := admission.Drain(
+					context.Background(),
+					"next-update",
+					time.Now().Add(time.Second),
+				)
+				if err != nil || !admission.Confirm(confirmation) {
+					t.Fatalf("finished media kept its lease: %v", err)
+				}
+				admission.Resume("next-update")
+				_ = handler.Close()
+			},
+		)
+	}
+}
+
+func TestHandlerReleasesHomeSelectionWhenMediaSetupFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := auth.NewManager(nil, nil, nil)
+	manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	dispatcher := &homeDispatcher{}
+	manager.PublishHomeDispatch(dispatcher, registry, 1)
+	executor := &captureExecutor{}
+	manager.RegisterExecutor(executor)
+	handler := NewHandler(manager, nil)
+	installFakeMediaRelay(handler, &fakeMediaRelay{err: errors.New("media setup failed")})
+	router := gin.New()
+	router.POST("/v1/live", handler.Handle)
+
+	const boundary = "home-media-error-boundary"
+	body := multipartBody(boundary, "v=0\r\no=desktop-offer\r\n", `{"model":"gpt-live-1-codex"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	if dispatcher.calls.Load() != 1 || executor.calls.Load() != 0 {
+		t.Fatalf("Home dispatches=%d upstream calls=%d", dispatcher.calls.Load(), executor.calls.Load())
+	}
+	if active := len(registry.FreezeInFlight(time.Now()).Executions); active != 0 {
+		t.Fatalf("active Home executions=%d, want 0", active)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := registry.Drain(ctx); err != nil {
+		t.Fatalf("Drain() error = %v", err)
 	}
 }
 
@@ -923,7 +1000,12 @@ func TestHandlerClosesUnretainedMediaSession(t *testing.T) {
 	router.ServeHTTP(recorder, req)
 
 	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusUnauthorized, recorder.Body.String())
+		t.Fatalf(
+			"status = %d, want %d; body=%s",
+			recorder.Code,
+			http.StatusUnauthorized,
+			recorder.Body.String(),
+		)
 	}
 	if !mediaSession.closed.Load() || mediaSession.closeReason != "request_not_retained" {
 		t.Fatalf("unretained media close state = %t/%q", mediaSession.closed.Load(), mediaSession.closeReason)
@@ -959,7 +1041,11 @@ func TestHandlerClosesMediaWhenResponseWriteFails(t *testing.T) {
 		t.Fatalf("status = %d, want %d", writer.status, http.StatusCreated)
 	}
 	if !mediaSession.closed.Load() || mediaSession.closeReason != "response_write_failed" {
-		t.Fatalf("response failure media close state = %t/%q", mediaSession.closed.Load(), mediaSession.closeReason)
+		t.Fatalf(
+			"response failure media close state = %t/%q",
+			mediaSession.closed.Load(),
+			mediaSession.closeReason,
+		)
 	}
 	if _, ok := handler.sessions.peek("call-123"); ok {
 		t.Fatal("response write failure retained a stored session")
@@ -1081,7 +1167,9 @@ func TestHandlerUpdatesMediaRelayConfig(t *testing.T) {
 
 func TestHandlerClearsICEServersFromBothConfigEntrypoints(t *testing.T) {
 	const base = "codex:\n  live-media-relay:\n    enabled: true\n    max-sessions: 2\n"
-	const populated = base + "    ice-servers:\n      - urls: [\"turn:relay.example.org:3478?transport=udp\"]\n        username: test-turn-user\n        credential: test-turn-secret\n"
+	const populated = base + ("    ice-servers:\n      - urls: [\"turn:relay.example.org:3478?transpo" +
+		"rt=udp\"]\n        username: test-turn-user\n        credential: test-" +
+		"turn-secret\n")
 	for _, entrypoint := range []string{"disk", "bytes"} {
 		for _, form := range []struct {
 			name string
@@ -1090,65 +1178,75 @@ func TestHandlerClearsICEServersFromBothConfigEntrypoints(t *testing.T) {
 			{name: "omitted", yaml: base},
 			{name: "empty", yaml: base + "    ice-servers: []\n"},
 		} {
-			t.Run(entrypoint+"/"+form.name, func(t *testing.T) {
-				configPath := filepath.Join(t.TempDir(), "config.yaml")
-				load := func(raw string) *config.Config {
-					t.Helper()
-					var cfg *config.Config
-					var err error
-					if entrypoint == "disk" {
-						if errWrite := os.WriteFile(configPath, []byte(raw), 0o600); errWrite != nil {
-							t.Fatalf("write config: %v", errWrite)
+			t.Run(
+				entrypoint+"/"+form.name, func(t *testing.T) {
+					configPath := filepath.Join(t.TempDir(), "config.yaml")
+					load := func(raw string) *config.Config {
+						t.Helper()
+						var cfg *config.Config
+						var err error
+						if entrypoint == "disk" {
+							if errWrite := os.WriteFile(configPath, []byte(raw), 0o600); errWrite != nil {
+								t.Fatalf("write config: %v", errWrite)
+							}
+							cfg, err = config.LoadConfigOptional(configPath, false)
+						} else {
+							cfg, err = config.ParseConfigBytes([]byte(raw))
 						}
-						cfg, err = config.LoadConfigOptional(configPath, false)
-					} else {
-						cfg, err = config.ParseConfigBytes([]byte(raw))
+						if err != nil {
+							t.Fatalf("load config: %v", err)
+						}
+						return cfg
 					}
-					if err != nil {
-						t.Fatalf("load config: %v", err)
+					current := load(form.yaml)
+					handler := NewHandler(nil, func() *config.Config { return current })
+					t.Cleanup(
+						func() {
+							if errClose := handler.Close(); errClose != nil {
+								t.Errorf("close handler: %v", errClose)
+							}
+						},
+					)
+					relay := func() *pionMediaRelay {
+						t.Helper()
+						factory, errRelay := handler.currentMediaRelay()
+						concrete, ok := factory.(*pionMediaRelay)
+						if errRelay != nil || !ok || concrete == nil {
+							t.Fatalf("media relay type = %T, error = %v", factory, errRelay)
+						}
+						return concrete
 					}
-					return cfg
-				}
-				current := load(form.yaml)
-				handler := NewHandler(nil, func() *config.Config { return current })
-				t.Cleanup(func() {
-					if errClose := handler.Close(); errClose != nil {
-						t.Errorf("close handler: %v", errClose)
+					if len(current.Codex.LiveMediaRelay.ICEServers) != 0 ||
+						len(relay().configuration.ICEServers) != 0 {
+						t.Fatal("initial empty config installed ICE servers")
 					}
-				})
-				relay := func() *pionMediaRelay {
-					t.Helper()
-					factory, errRelay := handler.currentMediaRelay()
-					concrete, ok := factory.(*pionMediaRelay)
-					if errRelay != nil || !ok || concrete == nil {
-						t.Fatalf("media relay type = %T, error = %v", factory, errRelay)
+					current = load(populated)
+					if errUpdate := handler.UpdateConfig(current); errUpdate != nil {
+						t.Fatalf("install ICE servers: %v", errUpdate)
 					}
-					return concrete
-				}
-				if len(current.Codex.LiveMediaRelay.ICEServers) != 0 || len(relay().configuration.ICEServers) != 0 {
-					t.Fatal("initial empty config installed ICE servers")
-				}
-				current = load(populated)
-				if errUpdate := handler.UpdateConfig(current); errUpdate != nil {
-					t.Fatalf("install ICE servers: %v", errUpdate)
-				}
-				previous := relay()
-				if servers := previous.configuration.ICEServers; len(servers) != 1 ||
-					servers[0].Username != "test-turn-user" || servers[0].Credential != "test-turn-secret" {
-					t.Fatalf("populated config did not install the test ICE server: %#v", servers)
-				}
-				current = load(form.yaml)
-				if errUpdate := handler.UpdateConfig(current); errUpdate != nil {
-					t.Fatalf("clear ICE servers: %v", errUpdate)
-				}
-				cleared := relay()
-				if len(current.Codex.LiveMediaRelay.ICEServers) != 0 || len(cleared.configuration.ICEServers) != 0 {
-					t.Fatal("cleared config retained ICE servers for new sessions")
-				}
-				if cleared == previous || cleared.limiter != previous.limiter || len(previous.configuration.ICEServers) != 1 {
-					t.Fatal("config update did not replace the factory while retaining its limiter and prior configuration")
-				}
-			})
+					previous := relay()
+					if servers := previous.configuration.ICEServers; len(servers) != 1 ||
+						servers[0].Username != "test-turn-user" || servers[0].Credential != "test-turn-secret" {
+						t.Fatalf("populated config did not install the test ICE server: %#v", servers)
+					}
+					current = load(form.yaml)
+					if errUpdate := handler.UpdateConfig(current); errUpdate != nil {
+						t.Fatalf("clear ICE servers: %v", errUpdate)
+					}
+					cleared := relay()
+					if len(current.Codex.LiveMediaRelay.ICEServers) != 0 ||
+						len(cleared.configuration.ICEServers) != 0 {
+						t.Fatal("cleared config retained ICE servers for new sessions")
+					}
+					if cleared == previous || cleared.limiter != previous.limiter ||
+						len(previous.configuration.ICEServers) != 1 {
+						t.Fatal(
+							"config update did not replace the factory while retaining its limiter " +
+								"and prior configuration",
+						)
+					}
+				},
+			)
 		}
 	}
 }

@@ -9,19 +9,25 @@ import (
 )
 
 func TestEnsureImageGenerationTool_ResponsesLiteMetadataDoesNotInjectTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"},"input":[{"role":"user","content":"hello"}]}`)
+	body := []byte((`{"model":"gpt-5.6-sol","client_metadata":{"` +
+		`ws_request_header_x_openai_internal_codex_responses_lite":"true"},"input":[{"role":"user","content":` +
+		`"hello"}]}`))
 	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, nil)
 
 	if string(result) != string(body) {
 		t.Fatalf("expected responses-lite body to be unchanged, got %s", string(result))
 	}
 	if gjson.GetBytes(result, "tools").Exists() {
-		t.Fatalf("expected no injected tools for responses-lite request, got %s", gjson.GetBytes(result, "tools").Raw)
+		t.Fatalf(
+			"expected no injected tools for responses-lite request, got %s",
+			gjson.GetBytes(result, "tools").Raw,
+		)
 	}
 }
 
 func TestEnsureImageGenerationTool_ResponsesLiteBooleanMetadataDoesNotInjectTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":true},"input":"hello"}`)
+	body := []byte((`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_` +
+		`internal_codex_responses_lite":true},"input":"hello"}`))
 	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, nil)
 
 	if string(result) != string(body) {
@@ -41,7 +47,8 @@ func TestEnsureImageGenerationTool_ResponsesLiteHeaderDoesNotInjectTool(t *testi
 }
 
 func TestEnsureImageGenerationTool_ResponsesLiteFalseMetadataStillInjectsTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"false"},"input":"hello"}`)
+	body := []byte((`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_` +
+		`internal_codex_responses_lite":"false"},"input":"hello"}`))
 	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, nil)
 
 	if got := gjson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
@@ -87,7 +94,11 @@ func TestEnsureImageGenerationTool_ExistingToolsWithoutImageGen(t *testing.T) {
 }
 
 func TestEnsureImageGenerationTool_AlreadyPresent(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation","output_format":"webp"},{"type":"function","name":"f1"}]}`)
+	body := []byte(
+		(`{"model":"gpt-5.4","tools":[{"type":"image_generation",` +
+			`"output_format":"webp"},{"type":"function","name":` +
+			`"f1"}]}`),
+	)
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
 	tools := gjson.GetBytes(result, "tools")
@@ -101,7 +112,8 @@ func TestEnsureImageGenerationTool_AlreadyPresent(t *testing.T) {
 }
 
 func TestEnsureImageGenerationTool_ImageGenNamespaceDoesNotInjectTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen","parameters":{}}]}]}`)
+	body := []byte((`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"image_gen","to` +
+		`ols":[{"type":"function","name":"imagegen","parameters":{}}]}]}`))
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
 	if string(result) != string(body) {
@@ -110,7 +122,9 @@ func TestEnsureImageGenerationTool_ImageGenNamespaceDoesNotInjectTool(t *testing
 }
 
 func TestEnsureImageGenerationTool_FlattenedImageGenFunctionDoesNotInjectTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"function","name":"image_gen.imagegen","parameters":{}}]}`)
+	body := []byte(
+		`{"model":"gpt-5.4","tools":[{"type":"function","name":"image_gen.imagegen","parameters":{}}]}`,
+	)
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
 	if string(result) != string(body) {
@@ -119,7 +133,8 @@ func TestEnsureImageGenerationTool_FlattenedImageGenFunctionDoesNotInjectTool(t 
 }
 
 func TestEnsureImageGenerationTool_SimilarNamespaceStillInjectsTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"image_tools","tools":[{"type":"function","name":"imagegen","parameters":{}}]}]}`)
+	body := []byte((`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"image_tools","` +
+		`tools":[{"type":"function","name":"imagegen","parameters":{}}]}]}`))
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
 	tools := gjson.GetBytes(result, "tools").Array()

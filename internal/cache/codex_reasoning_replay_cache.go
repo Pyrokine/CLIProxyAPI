@@ -122,12 +122,18 @@ func cacheCodexReasoningReplayItemsBestEffort(
 	client, homeMode, scopeID, errClient := codexReasoningReplayRuntime(ctx)
 	if homeMode {
 		if errClient != nil {
-			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errClient)
+			log.Errorf(
+				"home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v",
+				errClient,
+			)
 			return false
 		}
 		raw, errMarshal := json.Marshal(normalized)
 		if errMarshal != nil {
-			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errMarshal)
+			log.Errorf(
+				"home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v",
+				errMarshal,
+			)
 			return false
 		}
 		written, errSet := client.KVSet(
@@ -176,7 +182,10 @@ func AppendCodexReasoningReplayItemsBestEffort(
 	client, homeMode, scopeID, errClient := codexReasoningReplayRuntime(ctx)
 	if homeMode {
 		if errClient != nil {
-			log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errClient)
+			log.Errorf(
+				"home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v",
+				errClient,
+			)
 			return false
 		}
 		kvKey := codexReasoningReplayKVKey(modelName, sessionKey)
@@ -187,24 +196,36 @@ func AppendCodexReasoningReplayItemsBestEffort(
 			}
 			existingRaw, found, errGet := client.KVGet(ctx, kvKey)
 			if errGet != nil {
-				log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errGet)
+				log.Errorf(
+					"home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v",
+					errGet,
+				)
 				return false
 			}
 			if len(existingRaw) > codexReasoningReplayCacheMaxSerializedBytes {
-				log.Error("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: value exceeds serialized size limit")
+				log.Error(
+					"home kv best-effort codex reasoning replay append failed prefix=cpa:" +
+						"codex:*: value exceeds serialized size " +
+						"limit",
+				)
 				return false
 			}
 			var existing [][]byte
 			if found {
 				if errUnmarshal := json.Unmarshal(existingRaw, &existing); errUnmarshal != nil {
 					log.Errorf(
-						"home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errUnmarshal,
+						"home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v",
+						errUnmarshal,
 					)
 					return false
 				}
 				normalizedExisting, okExisting := normalizeCodexReasoningReplayItems(existing)
 				if !okExisting || len(normalizedExisting) != len(existing) {
-					log.Error("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: existing value is invalid")
+					log.Error(
+						"home kv best-effort codex reasoning replay append failed prefix=cpa:" +
+							"codex:*: existing value is " +
+							"invalid",
+					)
 					return false
 				}
 				existing = normalizedExisting
@@ -213,7 +234,8 @@ func AppendCodexReasoningReplayItemsBestEffort(
 			raw, errMarshal := json.Marshal(combined)
 			if errMarshal != nil {
 				log.Errorf(
-					"home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errMarshal,
+					"home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v",
+					errMarshal,
 				)
 				return false
 			}
@@ -226,7 +248,10 @@ func AppendCodexReasoningReplayItemsBestEffort(
 				codexReasoningReplayCacheTTL,
 			)
 			if errCAS != nil {
-				log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errCAS)
+				log.Errorf(
+					"home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v",
+					errCAS,
+				)
 				return false
 			}
 			if written {
@@ -264,7 +289,8 @@ func appendCodexReasoningReplayTurn(existing, turn [][]byte) [][]byte {
 		existing = nil
 	}
 	turnID := ""
-	if len(turn) > 0 && strings.TrimSpace(gjson.GetBytes(turn[0], "type").String()) == CodexReasoningReplayTurnType {
+	if len(turn) > 0 &&
+		strings.TrimSpace(gjson.GetBytes(turn[0], "type").String()) == CodexReasoningReplayTurnType {
 		turnID = strings.TrimSpace(gjson.GetBytes(turn[0], "id").String())
 	}
 	if turnID != "" {
@@ -287,7 +313,8 @@ func trimCodexReasoningReplayItems(items [][]byte) [][]byte {
 		totalBytes := 0
 		for index, item := range items {
 			totalBytes += len(item)
-			if index > 0 && strings.TrimSpace(gjson.GetBytes(item, "type").String()) == CodexReasoningReplayTurnType {
+			if index > 0 &&
+				strings.TrimSpace(gjson.GetBytes(item, "type").String()) == CodexReasoningReplayTurnType {
 				turnStarts = append(turnStarts, index)
 			}
 		}
@@ -531,7 +558,10 @@ func inspectGPTReasoningSignature(rawSignature string) error {
 		return fmt.Errorf("empty GPT reasoning signature")
 	}
 	if len(sig) > maxGPTReasoningSignatureLen {
-		return fmt.Errorf("GPT reasoning signature exceeds maximum length (%d bytes)", maxGPTReasoningSignatureLen)
+		return fmt.Errorf(
+			"GPT reasoning signature exceeds maximum length (%d bytes)",
+			maxGPTReasoningSignatureLen,
+		)
 	}
 	if index, r, ok := firstInvalidGPTReasoningSignatureChar(sig); ok {
 		return fmt.Errorf(
@@ -556,7 +586,8 @@ func inspectGPTReasoningSignature(rawSignature string) error {
 	ciphertextLen := len(decoded) - 1 - 8 - 16 - 32
 	if ciphertextLen <= 0 || ciphertextLen%16 != 0 {
 		return fmt.Errorf(
-			"invalid GPT reasoning signature: ciphertext length %d is not a positive AES block multiple", ciphertextLen,
+			"invalid GPT reasoning signature: ciphertext length %d is not a positive AES block multiple",
+			ciphertextLen,
 		)
 	}
 	return nil

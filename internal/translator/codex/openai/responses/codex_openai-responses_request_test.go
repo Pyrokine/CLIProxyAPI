@@ -3,10 +3,13 @@ package responses
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // noinspection GoUnusedGlobalVariable
@@ -402,7 +405,11 @@ func TestNormalizeCodexBuiltinTools(t *testing.T) {
 }
 
 func TestConvertOpenAIResponsesRequestToCodexReusesNormalizedPayload(t *testing.T) {
-	inputJSON := []byte(`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"service_tier":"priority","tools":[{"type":"function","name":"do_work"}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"do_work"}]},"input":[{"type":"message","role":"user","content":"hello"},{"type":"message","role":"assistant","content":"hi"}]}`)
+	inputJSON := []byte((`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":` +
+		`["reasoning.encrypted_content"],"service_tier":"priority","tools":[{"type":"function","name":"` +
+		`do_work"}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"do_work"}]},"` +
+		`input":[{"type":"message","role":"user","content":"hello"},{"type":"message","role":"assistant","` +
+		`content":"hi"}]}`))
 
 	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
 
@@ -518,7 +525,6 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 		"max_completion_tokens",
 		"temperature",
 		"top_p",
-		"stream_options",
 		"service_tier",
 		"truncation",
 		"context_management",
@@ -528,10 +534,17 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 			t.Fatalf("%s should be removed: %s", path, output)
 		}
 	}
+	if got := gjson.GetBytes(
+		output, "stream_options",
+	).Raw; got != `{"reasoning_summary_delivery":"sequential_cutoff"}` {
+		t.Fatalf("stream_options = %s, want declared reasoning_summary_delivery only", got)
+	}
 }
 
 func TestConvertOpenAIResponsesRequestToCodexNormalizesTopLevelToolChoiceAlias(t *testing.T) {
-	inputJSON := []byte(`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"input":[{"type":"message","role":"user","content":"hello"}],"tool_choice":{"type":"web_search_preview_2025_03_11"}}`)
+	inputJSON := []byte((`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":` +
+		`["reasoning.encrypted_content"],"input":[{"type":"message","role":"user","content":"hello"}],"` +
+		`tool_choice":{"type":"web_search_preview_2025_03_11"}}`))
 
 	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
 
@@ -575,6 +588,91 @@ func TestConvertOpenAIResponsesRequestToCodexPreservesConfigurationUpdates(t *te
 	}
 }
 
+func BenchmarkConvertSystemRoleToDeveloperLargeInput(b *testing.B) {
+	cases := []struct {
+		name      string
+		inputJSON []byte
+	}{
+		{"200_input_1_system", makeLargeResponsesInputForBenchmark(200, 200)},
+		{"200_input_2_system", makeLargeResponsesInputForBenchmark(200, 100)},
+		{"2000_input_20_system", makeLargeResponsesInputForBenchmark(2000, 100)},
+	}
+	benchmarks := []struct {
+		name string
+		fn   func([]byte) []byte
+	}{
+		{"previous_root_path_rewrite", convertSystemRoleToDeveloperPreviousRootPathRewriteForBenchmark},
+		{
+			"current_rebuilt_input_raw", func(input []byte) []byte {
+				return convertSystemRoleToDeveloperWithInput(input, util.GetGJSONBytesNoCopy(input, "input"))
+			},
+		},
+	}
+	for _, testCase := range cases {
+		want := convertSystemRoleToDeveloperPreviousRootPathRewriteForBenchmark(testCase.inputJSON)
+		for _, benchmark := range benchmarks {
+			b.Run(
+				testCase.name+"/"+benchmark.name, func(b *testing.B) {
+					output := benchmark.fn(testCase.inputJSON)
+					if !gjson.ValidBytes(output) || !bytes.Equal(output, want) {
+						b.Fatal("role conversion changed the original message history")
+					}
+					if got := gjson.GetBytes(output, "input.0.role").String(); got != "developer" {
+						b.Fatalf("input.0.role = %q, want developer", got)
+					}
+					if got := gjson.GetBytes(output, "input.1.role").String(); got != "user" {
+						b.Fatalf("input.1.role = %q, want user", got)
+					}
+					b.ReportAllocs()
+					b.SetBytes(int64(len(testCase.inputJSON)))
+					b.ResetTimer()
+					for b.Loop() {
+						benchmarkConvertNormalizedOutput = benchmark.fn(testCase.inputJSON)
+					}
+				},
+			)
+		}
+	}
+}
+
+func makeLargeResponsesInputForBenchmark(inputCount, systemEvery int) []byte {
+	var builder strings.Builder
+	builder.Grow(inputCount * 96)
+	builder.WriteString(`{"model":"gpt-5.2","input":[`)
+	for i := range inputCount {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		role := "user"
+		if i%systemEvery == 0 {
+			role = "system"
+		}
+		builder.WriteString(`{"type":"message","role":"`)
+		builder.WriteString(role)
+		builder.WriteString(`","content":[{"type":"input_text","text":"message `)
+		builder.WriteString(strconv.Itoa(i))
+		builder.WriteString(`"}]}`)
+	}
+	builder.WriteString(`]}`)
+	return []byte(builder.String())
+}
+
+func convertSystemRoleToDeveloperPreviousRootPathRewriteForBenchmark(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+	inputArray := inputResult.Array()
+	result := rawJSON
+	for i := range len(inputArray) {
+		rolePath := fmt.Sprintf("input.%d.role", i)
+		if gjson.GetBytes(result, rolePath).String() == "system" {
+			result, _ = sjson.SetBytes(result, rolePath, "developer")
+		}
+	}
+	return result
+}
+
 func BenchmarkConvertOpenAIResponsesRequestToCodexNormalizedPayload(b *testing.B) {
 	cases := []struct {
 		name      string
@@ -588,11 +686,16 @@ func BenchmarkConvertOpenAIResponsesRequestToCodexNormalizedPayload(b *testing.B
 	for _, testCase := range cases {
 		b.Run(
 			testCase.name, func(b *testing.B) {
+				output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", testCase.inputJSON, true)
+				if len(output) == 0 || &output[0] != &testCase.inputJSON[0] || !bytes.Equal(
+					output, testCase.inputJSON,
+				) {
+					b.Fatal("canonical Codex request was changed or copied")
+				}
 				b.ReportAllocs()
 				b.SetBytes(int64(len(testCase.inputJSON)))
 				b.ResetTimer()
 
-				var output []byte
 				for b.Loop() {
 					output = ConvertOpenAIResponsesRequestToCodex(
 						"gpt-5.6",
@@ -609,7 +712,10 @@ func BenchmarkConvertOpenAIResponsesRequestToCodexNormalizedPayload(b *testing.B
 func makeNormalizedResponsesRequestForBenchmark(contentBytes int) []byte {
 	var builder strings.Builder
 	builder.Grow(contentBytes + 256)
-	builder.WriteString(`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"input":[{"type":"message","role":"user","content":"`)
+	builder.WriteString(
+		`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":` +
+			`["reasoning.encrypted_content"],"input":[{"type":"message","role":"user","content":"`,
+	)
 	builder.WriteString(strings.Repeat("x", contentBytes))
 	builder.WriteString(`"}]}`)
 	return []byte(builder.String())
@@ -627,19 +733,23 @@ func TestCodexSourcesRequireExplicitArrayInclude(t *testing.T) {
 		{`["web_search_call.action.sources"]`, true},
 		{`["web_search_call.action.sources","web_search_call.action.sources",1]`, true},
 	} {
-		t.Run(tc.include, func(t *testing.T) {
-			out := ConvertOpenAIResponsesRequestToCodex("fixture-model", []byte(`{"input":"hello","include":`+tc.include+`}`), true)
-			include := gjson.GetBytes(out, "include").Array()
-			want := 1
-			if tc.sources {
-				want = 2
-			}
-			if len(include) != want || include[0].String() != "reasoning.encrypted_content" {
-				t.Fatalf("include changed: %s", out)
-			}
-			if tc.sources && include[1].String() != "web_search_call.action.sources" {
-				t.Fatalf("sources include missing: %s", out)
-			}
-		})
+		t.Run(
+			tc.include, func(t *testing.T) {
+				out := ConvertOpenAIResponsesRequestToCodex(
+					"fixture-model", []byte(`{"input":"hello","include":`+tc.include+`}`), true,
+				)
+				include := gjson.GetBytes(out, "include").Array()
+				want := 1
+				if tc.sources {
+					want = 2
+				}
+				if len(include) != want || include[0].String() != "reasoning.encrypted_content" {
+					t.Fatalf("include changed: %s", out)
+				}
+				if tc.sources && include[1].String() != "web_search_call.action.sources" {
+					t.Fatalf("sources include missing: %s", out)
+				}
+			},
+		)
 	}
 }

@@ -274,10 +274,12 @@ func TestHandleSidebandReusesRetainedHomeSelection(t *testing.T) {
 	router := newTestGinEngine()
 	router.POST("/v1/live", handler.Handle)
 	sidebandDone := make(chan struct{})
-	router.GET("/v1/live/:call_id", func(c *gin.Context) {
-		handler.HandleSideband(c)
-		close(sidebandDone)
-	})
+	router.GET(
+		"/v1/live/:call_id", func(c *gin.Context) {
+			handler.HandleSideband(c)
+			close(sidebandDone)
+		},
+	)
 	server := httptest.NewServer(router)
 	defer server.Close()
 
@@ -561,6 +563,63 @@ func TestProxyURLForAuthPrecedence(t *testing.T) {
 	}
 	if got := proxyURLForAuth(nil, nil); got != "" {
 		t.Fatalf("empty proxy = %q", got)
+	}
+}
+
+func TestNewSidebandDialerKeepsExplicitProxyFailures(t *testing.T) {
+	proxyRequests := make(chan struct{}, 1)
+	rejectingProxy := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				proxyRequests <- struct{}{}
+				w.WriteHeader(http.StatusProxyAuthRequired)
+			},
+		),
+	)
+	defer rejectingProxy.Close()
+	//goland:noinspection HttpUrlsUsage
+	for _, proxyURL := range []string{
+		"ftp://proxy.invalid:21", "http://", "socks5://127.0.0.1:invalid", rejectingProxy.URL,
+	} {
+		t.Run(
+			proxyURL, func(t *testing.T) {
+				targetRequests := make(chan struct{}, 1)
+				target := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, _ *http.Request) {
+							targetRequests <- struct{}{}
+							w.WriteHeader(http.StatusBadGateway)
+						},
+					),
+				)
+				defer target.Close()
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				dialer := newSidebandDialer(proxyURL)
+				conn, response, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(target.URL, "http"), nil)
+				if conn != nil {
+					_ = conn.Close()
+				}
+				if response != nil && response.Body != nil {
+					_ = response.Body.Close()
+				}
+				if err == nil {
+					t.Error("failed explicit proxy returned a successful connection")
+				}
+				select {
+				case <-targetRequests:
+					t.Error("failed explicit proxy sent the request through another route")
+				default:
+				}
+				if proxyURL == rejectingProxy.URL {
+					select {
+					case <-proxyRequests:
+					default:
+						t.Error("configured HTTP proxy did not receive the handshake")
+					}
+				}
+			},
+		)
 	}
 }
 

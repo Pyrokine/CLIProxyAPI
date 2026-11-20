@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	cliproxysession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
@@ -20,6 +22,8 @@ import (
 )
 
 const codexDefaultBaseURL = "https://chatgpt.com/backend-api/codex"
+
+const codexConfiguredPromptCacheMetadataKey = "cliproxy.codex.configured_prompt_cache"
 
 // codexResolveBase extracts the base model name, API key and base URL from auth
 // and the raw model string. If no base URL is configured, it falls back to the
@@ -93,6 +97,7 @@ func codexPromptCacheModelName(model string) string {
 
 // codexResponsesBodyResult holds the outputs of codexResponsesBody.
 type codexResponsesBodyResult struct {
+	auth                   *cliproxyauth.Auth
 	Body                   []byte
 	OriginalPayload        []byte
 	OptimizedMultiAgentV2  bool
@@ -153,12 +158,6 @@ func codexResponsesBody(
 	requestedModel := payloadRequestedModel(opts, model)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body = sanitizeOpenAIResponsesReasoningEncryptedContent(
-		ctx,
-		"codex",
-		body,
-		isCompat,
-	)
 	body, err = preserveCodexPreviousResponseID(body, req.Payload)
 	if err != nil {
 		return codexResponsesBodyResult{}, err
@@ -168,14 +167,16 @@ func codexResponsesBody(
 		body, _ = sjson.SetBytes(body, "stream_options.reasoning_summary_delivery", reasoningSummaryDelivery.Value())
 	}
 	prepared := codexResponsesBodyResult{
-		Body:                   body,
-		OriginalPayload:        originalPayload,
-		Native:                 nativeRequest,
-		baseModel:              baseModel,
-		requestedModel:         requestedModel,
-		from:                   from,
-		originalTranslated:     bytes.Clone(originalTranslated),
-		imageGenerationEnabled: (cfg == nil || cfg.DisableImageGeneration == config.DisableImageGenerationOff) && !isCodexFreePlanAuth(auth),
+		auth:               auth,
+		Body:               body,
+		OriginalPayload:    originalPayload,
+		Native:             nativeRequest,
+		baseModel:          baseModel,
+		requestedModel:     requestedModel,
+		from:               from,
+		originalTranslated: bytes.Clone(originalTranslated),
+		imageGenerationEnabled: (cfg == nil || cfg.DisableImageGeneration == config.DisableImageGenerationOff) &&
+			!isCodexFreePlanAuth(auth),
 	}
 	if !deferPayloadRules {
 		if err := prepared.finalize(ctx, cfg, req, opts, executorID); err != nil {
@@ -208,14 +209,18 @@ func codexPayloadFinalizer(
 	ctx context.Context,
 	cfg *config.Config,
 	prepared *codexResponsesBodyResult,
-	req cliproxyexecutor.Request,
+	req *cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 	executorID string,
 ) func([]byte) ([]byte, error) {
 	opts.Headers = opts.Headers.Clone()
+	req.Metadata = maps.Clone(req.Metadata)
+	if req.Metadata == nil {
+		req.Metadata = make(map[string]any)
+	}
 	return func(body []byte) ([]byte, error) {
 		prepared.Body = body
-		if err := prepared.finalize(ctx, cfg, req, opts, executorID); err != nil {
+		if err := prepared.finalize(ctx, cfg, *req, opts, executorID); err != nil {
 			return nil, err
 		}
 		return prepared.Body, nil
@@ -230,14 +235,26 @@ func (p *codexResponsesBodyResult) finalize(
 	executorID string,
 ) error {
 	to := sdktranslator.FormatCodex
+	requestPath := payloadRequestPath(opts)
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FormatOpenAIResponse
+		requestPath = "/v1/responses/compact"
 	}
-	body, touched := applyPayloadConfigWithRequestTracked(cfg, p.baseModel, to.String(), p.from.String(), "", p.Body, p.originalTranslated,
-		p.requestedModel, payloadRequestPath(opts), opts.Headers, executorID, "tools")
+	body, touched := applyPayloadConfigWithRequestTracked(
+		cfg, p.baseModel, to.String(), p.from.String(), "", helps.SanitizeCodexInputItemIDs(p.Body),
+		p.originalTranslated,
+		p.requestedModel, requestPath, opts.Headers, executorID, "tools", "prompt_cache_key",
+	)
+	if err := bindFinalModelContext(&req, p.auth, opts, gjson.GetBytes(body, "model").String()); err != nil {
+		return err
+	}
+	if req.Metadata != nil {
+		req.Metadata[codexConfiguredPromptCacheMetadataKey] = touched["prompt_cache_key"]
+	}
 	if p.imageGenerationEnabled && !touched["tools"] {
 		body = ensureImageGenerationTool(body, gjson.GetBytes(body, "model").String(), nil, opts.Headers)
 	}
+	body = translatorcommon.NormalizeCodexStreamOptions(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex", body, helps.APIKeyModelIsCompat(req))
 	if opts.Alt == "responses/compact" {
 		body, _ = sjson.DeleteBytes(body, "stream")
@@ -254,7 +271,9 @@ func (p *codexResponsesBodyResult) finalize(
 	body = helps.NormalizeCodexToolSchemas(body)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
-	body, optimized := helps.OptimizeCodexMultiAgentV2Request(ctx, opts.Headers, body, cfg, helps.APIKeyModelIsCompat(req))
+	body, optimized := helps.OptimizeCodexMultiAgentV2Request(
+		ctx, opts.Headers, body, cfg, helps.APIKeyModelIsCompat(req),
+	)
 	if err := validateCodexResponsesToolNames(body, sourceFormatEqual(p.from, sdktranslator.FormatClaude)); err != nil {
 		return statusErr{code: http.StatusBadRequest, msg: "codex executor: " + err.Error()}
 	}

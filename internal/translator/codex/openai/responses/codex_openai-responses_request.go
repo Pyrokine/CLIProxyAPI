@@ -36,8 +36,8 @@ func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool)
 		"max_completion_tokens",
 		"temperature",
 		"top_p",
-		"stream_options",
 	)
+	rawJSON = translatorcommon.NormalizeCodexStreamOptions(rawJSON)
 	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() {
 		tier := strings.ToLower(strings.TrimSpace(serviceTier.String()))
 		if tier == "fast" {
@@ -69,7 +69,8 @@ func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 	for index, item := range util.GetGJSONBytesNoCopy(rawJSON, "input").Array() {
 		arguments := item.Get("arguments")
-		if item.Get("type").String() == "function_call" && arguments.Type == gjson.String && strings.TrimSpace(arguments.String()) == "" {
+		if item.Get("type").String() == "function_call" && arguments.Type == gjson.String &&
+			strings.TrimSpace(arguments.String()) == "" {
 			rawJSON, _ = sjson.SetBytes(rawJSON, "input."+strconv.Itoa(index)+".arguments", "{}")
 		}
 	}

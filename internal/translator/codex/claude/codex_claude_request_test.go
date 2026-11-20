@@ -54,7 +54,9 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 				]
 			}`,
 			wantHasDeveloper: false,
-			wantTexts:        []string{"<system-reminder>\nFollow the project instructions\n</system-reminder>"},
+			wantTexts: []string{
+				"<system-reminder>\nFollow the project instructions\n</system-reminder>",
+			},
 		},
 		{
 			name: "Array system field with filtered billing header",
@@ -113,7 +115,8 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 }
 
 func TestConvertClaudeRequestToCodex_AssistantThinkingSignatureBecomesReasoningInput(t *testing.T) {
-	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw"
+	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMz" +
+		"MzMzMzMzMzMzMzMzMzMzMzMzMzMw"
 	inputJSON := `{
 		"model": "gpt-5.5",
 		"messages": [{
@@ -205,7 +208,10 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 
 				if got := resultJSON.Get("parallel_tool_calls").Bool(); got != tt.wantParallelToolCalls {
 					t.Fatalf(
-						"parallel_tool_calls = %v, want %v. Output: %s", got, tt.wantParallelToolCalls, string(result),
+						"parallel_tool_calls = %v, want %v. Output: %s",
+						got,
+						tt.wantParallelToolCalls,
+						string(result),
 					)
 				}
 			},
@@ -259,12 +265,19 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 				serviceTierResult := gjson.GetBytes(result, "service_tier")
 				if serviceTierResult.Exists() != test.wantExists {
 					t.Fatalf(
-						"service_tier exists = %v, want %v; output=%s", serviceTierResult.Exists(), test.wantExists,
+						"service_tier exists = %v, want %v; output=%s",
+						serviceTierResult.Exists(),
+						test.wantExists,
 						result,
 					)
 				}
 				if test.wantExists && serviceTierResult.String() != test.want {
-					t.Fatalf("service_tier = %q, want %q; output=%s", serviceTierResult.String(), test.want, result)
+					t.Fatalf(
+						"service_tier = %q, want %q; output=%s",
+						serviceTierResult.String(),
+						test.want,
+						result,
+					)
 				}
 			},
 		)
@@ -289,7 +302,8 @@ func TestConvertClaudeRequestToCodex_EscapesOutputStringsAsJSON(t *testing.T) {
 }
 
 func TestConvertClaudeRequestToCodex_PreservesMixedRequestSemantics(t *testing.T) {
-	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw"
+	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMz" +
+		"MzMzMzMzMzMzMzMzMzMzMzMzMzMw"
 	inputJSON := `{
 		"system": [
 			{"type": "text", "text": "x-anthropic-billing-header: tenant-123"},
@@ -411,7 +425,9 @@ func TestConvertClaudeRequestToCodexOutputConfigFormat(t *testing.T) {
 	}{
 		{
 			name: "complete nested required schema remains strict",
-			format: `{"type":"json_schema","name":"answer","schema":{"$schema":"draft","$id":"root","type":"object","properties":{` +
+			format: `{"type":"json_schema","name":"answer","schema":{"$schema":"draft",` +
+				`"$id":"root","type":"object","properties":` +
+				`{` +
 				`"answer":{"$id":"field","type":"string","pattern":"^\\p{L}+$"},` +
 				`"meta":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}` +
 				`},"required":["answer","meta"]}}`,
@@ -447,33 +463,40 @@ func TestConvertClaudeRequestToCodexOutputConfigFormat(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := []byte(`{"messages":[],"output_config":{"format":` + test.format + `}}`)
-			output := ConvertClaudeRequestToCodex("gpt-5.6", input, false)
-			format := gjson.GetBytes(output, "text.format")
-			if format.Exists() != test.wantFormat {
-				t.Fatalf("text.format exists = %v, want %v; output=%s", format.Exists(), test.wantFormat, output)
-			}
-			if !test.wantFormat {
-				return
-			}
-			if got := format.Get("name").String(); got != test.wantName {
-				t.Fatalf("name = %q, want %q; output=%s", got, test.wantName, output)
-			}
-			if strict := format.Get("strict"); !strict.Exists() || strict.Bool() != test.wantStrict {
-				t.Fatalf("strict = %s, want %v; output=%s", strict.Raw, test.wantStrict, output)
-			}
-			for _, path := range []string{
-				"schema.$schema",
-				"schema.$id",
-				"schema.properties.answer.$id",
-				"schema.properties.answer.pattern",
-			} {
-				if format.Get(path).Exists() {
-					t.Fatalf("%s should be removed: %s", path, output)
+		t.Run(
+			test.name, func(t *testing.T) {
+				input := []byte(`{"messages":[],"output_config":{"format":` + test.format + `}}`)
+				output := ConvertClaudeRequestToCodex("gpt-5.6", input, false)
+				format := gjson.GetBytes(output, "text.format")
+				if format.Exists() != test.wantFormat {
+					t.Fatalf(
+						"text.format exists = %v, want %v; output=%s",
+						format.Exists(),
+						test.wantFormat,
+						output,
+					)
 				}
-			}
-		})
+				if !test.wantFormat {
+					return
+				}
+				if got := format.Get("name").String(); got != test.wantName {
+					t.Fatalf("name = %q, want %q; output=%s", got, test.wantName, output)
+				}
+				if strict := format.Get("strict"); !strict.Exists() || strict.Bool() != test.wantStrict {
+					t.Fatalf("strict = %s, want %v; output=%s", strict.Raw, test.wantStrict, output)
+				}
+				for _, path := range []string{
+					"schema.$schema",
+					"schema.$id",
+					"schema.properties.answer.$id",
+					"schema.properties.answer.pattern",
+				} {
+					if format.Get(path).Exists() {
+						t.Fatalf("%s should be removed: %s", path, output)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -523,6 +546,7 @@ func TestConvertClaudeRequestToCodexNormalizesToolInputSchemas(t *testing.T) {
 }
 
 func TestConvertClaudeRequestToCodexPreservesBase64PDFDocumentContent(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	inputJSON := `{
 		"messages":[{
 			"role":"user",
@@ -623,62 +647,96 @@ func TestConvertClaudeRequestToCodex_LargeRequestKeepsToolNamesConsistent(t *tes
 func TestConvertClaudeRequestToCodex_ToolChoiceMatchesDeclaration(t *testing.T) {
 	longName := "mcp__" + strings.Repeat("provider_", 10) + "__lookup"
 	for _, mode := range []string{"auto", "any", "none", "tool"} {
-		t.Run(mode, func(t *testing.T) {
-			payload, err := json.Marshal(map[string]any{
-				"messages":    []map[string]any{{"role": "user", "content": "hello"}},
-				"tools":       []map[string]any{{"name": longName, "input_schema": map[string]any{"type": "object"}}},
-				"tool_choice": map[string]any{"type": mode, "name": longName, "disable_parallel_tool_use": true},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			out := ConvertClaudeRequestToCodex("gpt-fixture", payload, false)
-			root := gjson.ParseBytes(out)
-			want := map[string]string{"auto": "auto", "any": "required", "none": "none"}[mode]
-			if mode == "tool" {
-				if root.Get("tool_choice.type").String() != "function" || root.Get("tool_choice.name").String() != root.Get("tools.0.name").String() {
-					t.Fatalf("tool choice does not name the declared function: %s", out)
+		t.Run(
+			mode, func(t *testing.T) {
+				payload, err := json.Marshal(
+					map[string]any{
+						"messages": []map[string]any{{"role": "user", "content": "hello"}},
+						"tools": []map[string]any{
+							{
+								"name": longName, "input_schema": map[string]any{"type": "object"},
+							},
+						},
+						"tool_choice": map[string]any{
+							"type": mode, "name": longName, "disable_parallel_tool_use": true,
+						},
+					},
+				)
+				if err != nil {
+					t.Fatal(err)
 				}
-			} else if root.Get("tool_choice").String() != want {
-				t.Fatalf("tool_choice = %s, want %q", root.Get("tool_choice").Raw, want)
-			}
-			if root.Get("parallel_tool_calls").Bool() {
-				t.Fatalf("parallel_tool_calls was not disabled: %s", out)
-			}
-		})
+				out := ConvertClaudeRequestToCodex("gpt-fixture", payload, false)
+				root := gjson.ParseBytes(out)
+				want := map[string]string{"auto": "auto", "any": "required", "none": "none"}[mode]
+				if mode == "tool" {
+					if root.Get("tool_choice.type").String() != "function" ||
+						root.Get("tool_choice.name").String() != root.Get("tools.0.name").String() {
+						t.Fatalf("tool choice does not name the declared function: %s", out)
+					}
+				} else if root.Get("tool_choice").String() != want {
+					t.Fatalf("tool_choice = %s, want %q", root.Get("tool_choice").Raw, want)
+				}
+				if root.Get("parallel_tool_calls").Bool() {
+					t.Fatalf("parallel_tool_calls was not disabled: %s", out)
+				}
+			},
+		)
 	}
 }
 
 func TestConvertClaudeRequestToCodex_WebSearchChoiceUsesDeclaredName(t *testing.T) {
 	for _, toolType := range []string{"web_search_20250305", "web_search_20260209"} {
 		for _, choice := range []string{"browser_search", "web_search"} {
-			t.Run(toolType+"/"+choice, func(t *testing.T) {
-				payload := []byte(`{"messages":[{"role":"user","content":"query"}],"tools":[{"type":"` + toolType + `","name":"browser_search","allowed_domains":["example.invalid"],"user_location":{"type":"approximate","country":"CN"}},{"name":"web_search","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"` + choice + `"}}`)
-				out := ConvertClaudeRequestToCodex("gpt-fixture", payload, true)
-				root := gjson.ParseBytes(out)
-				if root.Get("tools.0.type").String() != "web_search" || root.Get("tools.0.filters.allowed_domains.0").String() != "example.invalid" || root.Get("tools.0.user_location.country").String() != "CN" || root.Get("include.1").String() != "web_search_call.action.sources" {
-					t.Fatalf("search declaration or source delivery missing: %s", out)
-				}
-				wantType := "web_search"
-				if choice == "web_search" {
-					wantType = "function"
-					if root.Get("tool_choice.name").String() != root.Get("tools.1.name").String() {
-						t.Fatalf("ordinary function choice changed: %s", out)
+			t.Run(
+				toolType+"/"+choice, func(t *testing.T) {
+					payload := []byte(
+						`{"messages":[{"role":"user","content":"query"}],"tools":[{"type":"` +
+							toolType +
+							(`","name":"browser_search","allowed_domains":["example.invalid"],"user_` +
+								`location":{"type":"approximate","country":"CN"}},{"name":"web_search",` +
+								`"input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name"` +
+								`:"`) + choice + `"}}`,
+					)
+					out := ConvertClaudeRequestToCodex("gpt-fixture", payload, true)
+					root := gjson.ParseBytes(out)
+					if root.Get("tools.0.type").String() != "web_search" ||
+						root.Get("tools.0.filters.allowed_domains.0").String() != "example.invalid" ||
+						root.Get("tools.0.user_location.country").String() != "CN" ||
+						root.Get("include.1").String() != "web_search_call.action.sources" {
+						t.Fatalf("search declaration or source delivery missing: %s", out)
 					}
-				}
-				if root.Get("tool_choice.type").String() != wantType {
-					t.Fatalf("tool choice = %s, want %s", root.Get("tool_choice").Raw, wantType)
-				}
-			})
+					wantType := "web_search"
+					if choice == "web_search" {
+						wantType = "function"
+						if root.Get("tool_choice.name").String() != root.Get("tools.1.name").String() {
+							t.Fatalf("ordinary function choice changed: %s", out)
+						}
+					}
+					if root.Get("tool_choice.type").String() != wantType {
+						t.Fatalf("tool choice = %s, want %s", root.Get("tool_choice").Raw, wantType)
+					}
+				},
+			)
 		}
 	}
 }
 
 func TestConvertClaudeRequestToCodex_SystemReminderFollowsPairedResults(t *testing.T) {
-	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"one","input":{}},{"type":"tool_use","id":"call_2","name":"two","input":{}}]},{"role":"system","content":"reminder"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"two"},{"type":"tool_result","tool_use_id":"call_1","content":"one"},{"type":"text","text":"continue"}]}]}`)
+	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c` +
+		`all_1","name":"one","input":{}},{"type":"tool_use","id":"call_2","name` +
+		`":"two","input":{}}]},{"role":"system","content":"reminder"},{"role":"` +
+		`user","content":[{"type":"tool_result","tool_use_id":"call_2","content` +
+		`":"two"},{"type":"tool_result","tool_use_id":"call_1","content":"one"}` +
+		`,{"type":"text","text":"continue"}]}]}`)
 	out := ConvertClaudeRequestToCodex("gpt-fixture", payload, false)
 	items := gjson.GetBytes(out, "input").Array()
-	if len(items) != 6 || items[2].Get("type").String() != "function_call_output" || items[2].Get("call_id").String() != "call_1" || items[3].Get("call_id").String() != "call_2" || !strings.Contains(items[4].Get("content.0.text").String(), "reminder") || items[5].Get("content.0.text").String() != "continue" {
+	if len(items) != 6 || items[2].Get("type").String() != "function_call_output" ||
+		items[2].Get("call_id").String() != "call_1" ||
+		items[3].Get("call_id").String() != "call_2" ||
+		!strings.Contains(
+			items[4].Get("content.0.text").String(), "reminder",
+		) ||
+		items[5].Get("content.0.text").String() != "continue" {
 		t.Fatalf("tool results or reminder moved incorrectly: %s", out)
 	}
 }
@@ -689,26 +747,44 @@ func TestConvertClaudeRequestToCodex_GrokSignatureUsesTargetModel(t *testing.T) 
 		bytes[i] = byte(i)
 	}
 	signature := base64.RawStdEncoding.EncodeToString(bytes)
-	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":"` + signature + `"},{"type":"text","text":"answer"}]}]}`)
+	payload := []byte(
+		`{"messages":[{"role":"assistant","content":[{"type":"thinking",` +
+			`"thinking":"summary","signature":` +
+			`"` +
+			signature +
+			`"},{"type":"text","text":"answer"}]}]}`,
+	)
 	for _, model := range []string{"grok-fixture", "grok-fixture(high)", "gpt-fixture", "claude-fixture"} {
-		t.Run(model, func(t *testing.T) {
-			out := ConvertClaudeRequestToCodex(model, payload, false)
-			item := gjson.GetBytes(out, "input.0")
-			if strings.HasPrefix(model, "grok") {
-				if item.Get("type").String() != "reasoning" || item.Get("encrypted_content").String() != signature {
-					t.Fatalf("native Grok reasoning was not preserved: %s", out)
+		t.Run(
+			model, func(t *testing.T) {
+				out := ConvertClaudeRequestToCodex(model, payload, false)
+				item := gjson.GetBytes(out, "input.0")
+				if strings.HasPrefix(model, "grok") {
+					if item.Get("type").String() != "reasoning" ||
+						item.Get("encrypted_content").String() != signature {
+						t.Fatalf("native Grok reasoning was not preserved: %s", out)
+					}
+				} else if item.Get("type").String() != "message" {
+					t.Fatalf("foreign reasoning reached a non-Grok target: %s", out)
 				}
-			} else if item.Get("type").String() != "message" {
-				t.Fatalf("foreign reasoning reached a non-Grok target: %s", out)
-			}
-		})
+			},
+		)
 	}
 }
 
 func TestNormalizeToolParameters_PreservesUnionsAndLiteralData(t *testing.T) {
-	out := normalizeToolParameters(`{"type":["object","null"],"properties":{"$id":{"type":"string","$id":"metadata"},"config":{"default":{"$id":"literal","pattern":"\\p{L}"}},"count":{"default":9007199254740993}},"anyOf":[{"required":["$id"]},{"required":["config"]}]}`)
+	out := normalizeToolParameters(
+		`{"type":["object","null"],"properties":{"$id":{"type":"string","$id":"` +
+			`metadata"},"config":{"default":{"$id":"literal","pattern":"\\p{L}"}},"count":{"default":` +
+			`9007199254740993}},"anyOf":[{"required":["$id"]},{"required":["config"]}]}`,
+	)
 	root := gjson.Parse(out)
-	if root.Get("type").Raw != `["object","null"]` || root.Get("anyOf.#").Int() != 2 || !root.Get("properties.$id").Exists() || root.Get("properties.$id.$id").Exists() || root.Get("properties.config.default.$id").String() != "literal" || root.Get("properties.config.default.pattern").String() != `\p{L}` || root.Get("properties.count.default").Raw != "9007199254740993" {
+	if root.Get("type").Raw != `["object","null"]` || root.Get("anyOf.#").Int() != 2 ||
+		!root.Get("properties.$id").Exists() ||
+		root.Get("properties.$id.$id").Exists() ||
+		root.Get("properties.config.default.$id").String() != "literal" ||
+		root.Get("properties.config.default.pattern").String() != `\p{L}` ||
+		root.Get("properties.count.default").Raw != "9007199254740993" {
 		t.Fatalf("Schema or literal data changed: %s", out)
 	}
 }

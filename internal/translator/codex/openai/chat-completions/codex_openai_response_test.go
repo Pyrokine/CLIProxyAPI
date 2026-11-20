@@ -8,7 +8,9 @@ import (
 )
 
 func TestConvertCodexResponseToOpenAIIncompleteTerminal(t *testing.T) {
-	terminal := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.5","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+	terminal := []byte((`{"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.5","status":"` +
+		`incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":` +
+		`1,"output_tokens":2,"total_tokens":3}}}`))
 
 	var param any
 	streamOut := ConvertCodexResponseToOpenAI(
@@ -39,8 +41,15 @@ func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *test
 	modelName := "gpt-5.3-codex"
 
 	out := ConvertCodexResponseToOpenAI(
-		ctx, modelName, nil, nil,
-		[]byte(`data: {"type":"response.created","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.3-codex"}}`),
+		ctx,
+		modelName,
+		nil,
+		nil,
+		[]byte(
+			`data: {"type":"response.created","response":{"id":"resp_123",`+
+				`"created_at":1700000000,"model":`+
+				`"gpt-5.3-codex"}}`,
+		),
 		&param,
 	)
 	if len(out) != 0 {
@@ -116,7 +125,9 @@ func TestConvertCodexResponseToOpenAI_NonStreamMultiMessageEmptyTrailingKeepsCon
 }
 
 func TestConvertCodexResponseToOpenAINonStreamKeepsAssistantRole(t *testing.T) {
-	input := []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}`)
+	input := []byte(`{"type":"response.completed","response":{"status":"completed","output"` +
+		`:[{"type":"message","content":[{"type":"output_text","text":"hello"}]}` +
+		`]}}`)
 
 	output := ConvertCodexResponseToOpenAINonStream(
 		context.Background(),
@@ -140,7 +151,9 @@ func TestConvertCodexResponseToOpenAIForwardsCacheWriteTokens(t *testing.T) {
 		"gpt-5.4",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.created","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4"}}`),
+		[]byte(
+			`data: {"type":"response.created","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4"}}`,
+		),
 		&param,
 	)
 	stream := ConvertCodexResponseToOpenAI(
@@ -148,7 +161,11 @@ func TestConvertCodexResponseToOpenAIForwardsCacheWriteTokens(t *testing.T) {
 		"gpt-5.4",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens_details":{"cache_write_tokens":0}}}}`),
+		[]byte(
+			`data: {"type":"response.completed","response":{"usage":`+
+				`{"input_tokens_details":{"cache_write_tokens":`+
+				`0}}}}`,
+		),
 		&param,
 	)
 	if len(stream) != 1 {
@@ -169,7 +186,11 @@ func TestConvertCodexResponseToOpenAIForwardsCacheWriteTokens(t *testing.T) {
 		"gpt-5.4",
 		nil,
 		nil,
-		[]byte(`{"type":"response.completed","response":{"usage":{"input_tokens_details":{"cache_write_tokens":40}},"output":[]}}`),
+		[]byte(
+			`{"type":"response.completed","response":{"usage":`+
+				`{"input_tokens_details":{"cache_write_tokens":40}},"output":`+
+				`[]}}`,
+		),
 		nil,
 	)
 	for _, path := range []string{
@@ -189,7 +210,12 @@ func TestConvertCodexResponseToOpenAIPreservesCacheWriteIntegerPrecision(t *test
 		"gpt-5.6",
 		nil,
 		nil,
-		[]byte(`{"type":"response.completed","response":{"usage":{"input_tokens_details":{"cache_write_tokens":`+large+`}},"output":[]}}`),
+		[]byte(
+			`{"type":"response.completed","response":{"usage":`+
+				`{"input_tokens_details":{"cache_write_tokens":`+
+				large+
+				`}},"output":[]}}`,
+		),
 		nil,
 	)
 	for _, path := range []string{
@@ -202,8 +228,20 @@ func TestConvertCodexResponseToOpenAIPreservesCacheWriteIntegerPrecision(t *test
 	}
 
 	for _, invalid := range []string{"-1", "1.5", `"40"`, "true"} {
-		input := []byte(`{"type":"response.completed","response":{"usage":{"input_tokens_details":{"cache_write_tokens":` + invalid + `}},"output":[]}}`)
-		invalidOutput := ConvertCodexResponseToOpenAINonStream(context.Background(), "gpt-5.6", nil, nil, input, nil)
+		input := []byte(
+			`{"type":"response.completed","response":{"usage":` +
+				`{"input_tokens_details":{"cache_write_tokens":` +
+				invalid +
+				`}},"output":[]}}`,
+		)
+		invalidOutput := ConvertCodexResponseToOpenAINonStream(
+			context.Background(),
+			"gpt-5.6",
+			nil,
+			nil,
+			input,
+			nil,
+		)
 		if gjson.GetBytes(invalidOutput, "usage.prompt_tokens_details.cache_write_tokens").Exists() ||
 			gjson.GetBytes(invalidOutput, "usage.prompt_tokens_details.cached_creation_tokens").Exists() {
 			t.Fatalf("invalid cache write value %s survived: %s", invalid, invalidOutput)
@@ -219,7 +257,11 @@ func TestConvertCodexResponseToOpenAIPreservesServiceTierAcrossStream(t *testing
 		"gpt-5.6",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6","service_tier":" priority "}}`),
+		[]byte(
+			`data: {"type":"response.created","response":{"id":"resp_1","model":`+
+				`"gpt-5.6","service_tier":" priority `+
+				`"}}`,
+		),
 		&param,
 	)
 	if len(created) != 0 {
@@ -274,7 +316,8 @@ func TestConvertCodexResponseToOpenAIMapsReasoningText(t *testing.T) {
 		{raw: `data: {"type":"response.reasoning_text.done"}`, want: "\n\n"},
 	} {
 		chunks := ConvertCodexResponseToOpenAI(ctx, "gpt-5.6", nil, nil, []byte(event.raw), &param)
-		if len(chunks) != 1 || gjson.GetBytes(chunks[0], "choices.0.delta.reasoning_content").String() != event.want {
+		if len(chunks) != 1 ||
+			gjson.GetBytes(chunks[0], "choices.0.delta.reasoning_content").String() != event.want {
 			t.Fatalf("reasoning event %s mapped to %q, want %q", event.raw, chunks, event.want)
 		}
 	}
@@ -284,10 +327,11 @@ func TestConvertCodexResponseToOpenAIMapsReasoningText(t *testing.T) {
 		"gpt-5.6",
 		nil,
 		nil,
-		[]byte(`{"type":"response.completed","response":{"output":[
-			{"type":"reasoning","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":" then full"}]},
-			{"type":"message","content":[{"type":"output_text","text":"answer"}]}
-		]}}`),
+		[]byte("{\"type\":\"response.completed\",\"response\":{\"output\":[\n\t\t\t{\""+
+			`type":"reasoning","summary":[{"type":"summary_text","text":"summary"}]`+
+			`,"content":[{"type":"reasoning_text","text":" then full"}]},`+
+			"\n\t\t\t{\"type\":\"message\",\"content\":[{\"type\":\"output_text\","+
+			"\"text\":\"answer\"}]}\n\t\t]}}"),
 		nil,
 	)
 	if got := gjson.GetBytes(nonStream, "choices.0.message.reasoning_content").String(); got != "summary then full" {
@@ -304,7 +348,9 @@ func TestConvertCodexResponseToOpenAIMatchesDoneByCallIDWhenItemIDAppearsLate(t 
 		"gpt-5.6-terra",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"TaskCreate","arguments":""}}`),
+		[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"t`+
+			`ype":"function_call","call_id":"call_1","name":"TaskCreate","arguments`+
+			`":""}}`),
 		&param,
 	)
 	if len(added) != 1 {
@@ -316,7 +362,9 @@ func TestConvertCodexResponseToOpenAIMatchesDoneByCallIDWhenItemIDAppearsLate(t 
 		"gpt-5.6-terra",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"TaskCreate","arguments":"{\"subject\":\"test\"}"}}`),
+		[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id`+
+			`":"fc_1","type":"function_call","call_id":"call_1","name":"TaskCreate"`+
+			`,"arguments":"{\"subject\":\"test\"}"}}`),
 		&param,
 	)
 	if len(done) != 1 {
@@ -338,10 +386,16 @@ func TestConvertCodexResponseToOpenAIDoesNotUseCurrentStateForConflictingIdentit
 	ctx := context.Background()
 	var param any
 	for _, event := range []string{
-		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"first","arguments":""}}`,
-		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_2","name":"second","arguments":""}}`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"t` +
+			`ype":"function_call","call_id":"call_1","name":"first","arguments":""}` +
+			`}`,
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"t` +
+			`ype":"function_call","call_id":"call_2","name":"second","arguments":""` +
+			`}}`,
 	} {
-		if chunks := ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-terra", nil, nil, []byte(event), &param); len(chunks) != 1 {
+		if chunks := ConvertCodexResponseToOpenAI(
+			ctx, "gpt-5.6-terra", nil, nil, []byte(event), &param,
+		); len(chunks) != 1 {
 			t.Fatalf("added chunks = %d, want 1", len(chunks))
 		}
 	}
@@ -351,7 +405,8 @@ func TestConvertCodexResponseToOpenAIDoesNotUseCurrentStateForConflictingIdentit
 		"gpt-5.6-terra",
 		nil,
 		nil,
-		[]byte(`data: {"type":"response.function_call_arguments.delta","item_id":"fc_unknown","call_id":"call_unknown","output_index":99,"delta":"wrong"}`),
+		[]byte((`data: {"type":"response.function_call_arguments.delta","item_id":"fc_unknown","call_id":"` +
+			`call_unknown","output_index":99,"delta":"wrong"}`)),
 		&param,
 	)
 	if len(conflict) != 0 {

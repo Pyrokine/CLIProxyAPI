@@ -52,7 +52,9 @@ func TestConvertCodexResponseToOpenAIResponsesPreservesExistingModel(t *testing.
 }
 
 func TestConvertCodexResponseToOpenAIResponsesNonStreamIncomplete(t *testing.T) {
-	raw := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+	raw := []byte((`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","` +
+		`incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"` +
+		`output_tokens":2,"total_tokens":3}}}`))
 
 	out := ConvertCodexResponseToOpenAIResponsesNonStream(
 		context.Background(), "gpt-5.5", nil, nil, raw, nil,

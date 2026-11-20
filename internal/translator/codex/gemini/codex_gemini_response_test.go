@@ -8,7 +8,9 @@ import (
 )
 
 func TestConvertCodexResponseToGeminiIncompleteTerminal(t *testing.T) {
-	terminal := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.5","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+	terminal := []byte((`{"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.5","status":"` +
+		`incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":` +
+		`1,"output_tokens":2,"total_tokens":3}}}`))
 
 	var param any
 	streamOut := ConvertCodexResponseToGemini(
@@ -35,8 +37,12 @@ func TestConvertCodexResponseToGemini_StreamEmptyOutputUsesOutputItemDoneMessage
 	var param any
 
 	chunks := [][]byte{
-		[]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"output_index\":0}"),
-		[]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
+		[]byte(("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"mes" +
+			"sage\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\"," +
+			"\"text\":\"ok\"}]},\"output_index\":0}")),
+		[]byte(
+			"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}",
+		),
 	}
 
 	var outputs [][]byte

@@ -58,6 +58,7 @@ type Handler struct {
 	clientSecrets        *clientSecretStore
 	sidebandAPIBaseURL   string
 	mediaRelayMu         sync.RWMutex
+	runtimeConfig        *config.Config
 	mediaRelay           mediaRelayFactory
 	mediaRelayErr        error
 	mediaRelayConfig     config.CodexLiveMediaRelayConfig
@@ -80,6 +81,7 @@ func NewHandler(authManager *auth.Manager, configProvider ConfigProvider) *Handl
 		sidebandAPIBaseURL: defaultSidebandAPIBaseURL,
 	}
 	if errUpdate := handler.UpdateConfig(handler.configSnapshot()); errUpdate != nil {
+		handler.mediaRelayErr = errUpdate
 		log.WithError(errUpdate).Error("failed to configure Codex Live media relay")
 	}
 	return handler
@@ -90,15 +92,20 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	if h == nil {
 		return nil
 	}
+	runtimeConfig, errClone := config.Clone(cfg)
+	if errClone != nil {
+		return fmt.Errorf("copy Codex live runtime configuration: %w", errClone)
+	}
 	var relayConfig config.CodexLiveMediaRelayConfig
-	if cfg != nil {
-		relayConfig = cfg.Codex.LiveMediaRelay
+	if runtimeConfig != nil {
+		relayConfig = runtimeConfig.Codex.LiveMediaRelay
 	}
 
 	h.mediaRelayMu.Lock()
 	previousConfig := h.mediaRelayConfig
 	previouslyConfigured := h.mediaRelayConfigured
 	if previouslyConfigured && reflect.DeepEqual(previousConfig, relayConfig) {
+		h.runtimeConfig = runtimeConfig
 		currentErr := h.mediaRelayErr
 		h.mediaRelayMu.Unlock()
 		return currentErr
@@ -111,6 +118,7 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	if relayConfig.Enabled {
 		relay, relayErr = newPionMediaRelayWithLimiter(relayConfig, h.mediaLimiter)
 	}
+	h.runtimeConfig = runtimeConfig
 	h.mediaRelay = relay
 	h.mediaRelayErr = relayErr
 	h.mediaRelayConfig = relayConfig
@@ -148,10 +156,11 @@ func (h *Handler) currentRuntime() (*config.Config, mediaRelayFactory, error) {
 		return nil, nil, nil
 	}
 	h.mediaRelayMu.RLock()
+	cfg := h.runtimeConfig
 	relay := h.mediaRelay
 	relayErr := h.mediaRelayErr
 	h.mediaRelayMu.RUnlock()
-	return h.configSnapshot(), relay, relayErr
+	return cfg, relay, relayErr
 }
 
 func (h *Handler) currentMediaRelay() (mediaRelayFactory, error) {
@@ -199,12 +208,16 @@ func (h *Handler) Handle(c *gin.Context) {
 	upstreamBody, upstreamContentType, model, errPayload := prepareCallRequest(body, c.GetHeader("Content-Type"))
 	requestedModel := model
 	if errPayload == nil {
+		session := clientSecretSession(c)
 		upstreamBody, upstreamContentType, model, errPayload = applyClientSecretCallSession(
 			upstreamBody,
 			upstreamContentType,
 			model,
-			clientSecretSession(c),
+			session,
 		)
+		if len(session) > 0 {
+			requestedModel = model
+		}
 	}
 	if errPayload == nil {
 		upstreamBody, model, errPayload = rewriteCallRequestModel(upstreamBody, upstreamContentType, model)
@@ -380,7 +393,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 
 	responseHeaders := callResponseHeaders(resp.Header)
-	runtimeexecutor.RecordAPIResponseMetadata(ctx, runtimeConfig, resp.StatusCode, responseHeaders)
+	runtimeexecutor.RecordAPIResponseMetadata(ctx, runtimeConfig, resp.StatusCode, responseHeaders, resp)
 	responseBody, errResponse := readLimitedBody(resp.Body)
 	runtimeexecutor.AppendAPIResponseChunk(ctx, runtimeConfig, responseBody)
 	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
@@ -398,7 +411,9 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
-		log.WithField("status", resp.StatusCode).Warnf("codex live upstream request failed: %s", logging.SafeDiagnosticForLog(string(responseBody)))
+		log.WithField("status", resp.StatusCode).Warnf(
+			"codex live upstream request failed: %s", logging.SafeDiagnosticForLog(string(responseBody)),
+		)
 	}
 	responseBodyToWrite := responseBody
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
@@ -562,7 +577,10 @@ func (h *Handler) authorizeRealtimeModel(c *gin.Context, requestedModel string) 
 	if RealtimeModelAllowed(h.configSnapshot(), principal, requestedModel) {
 		return true
 	}
-	writeRealtimeError(c, http.StatusForbidden, "Realtime request is not permitted by this API key policy", "permission_error", "realtime_api_key_restricted")
+	writeRealtimeError(
+		c, http.StatusForbidden, "Realtime request is not permitted by this API key policy", "permission_error",
+		"realtime_api_key_restricted",
+	)
 	return false
 }
 
@@ -951,7 +969,7 @@ func writeResponseHeaders(destination, source http.Header) {
 }
 
 func writeLiveError(c *gin.Context, status int, message string) {
-	if c != nil && c.Request != nil && c.Request.URL != nil &&
+	if c.Request != nil && c.Request.URL != nil &&
 		strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
 		errorType := "api_error"
 		if status >= http.StatusBadRequest && status < http.StatusInternalServerError {

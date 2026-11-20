@@ -23,7 +23,9 @@ func TestConvertCodexResponseToOpenAICustomToolCallStream(t *testing.T) {
 	var param any
 	out := sendCodexToolCallEvent(
 		t, &param,
-		`{"type":"response.output_item.added","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":""}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"ct`+
+			`c_1","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPat`+
+			`ch","input":""}}`,
 	)
 	if len(out) != 1 {
 		t.Fatalf("announcement chunks = %d, want 1", len(out))
@@ -41,7 +43,8 @@ func TestConvertCodexResponseToOpenAICustomToolCallStream(t *testing.T) {
 
 	for _, delta := range []string{"first", "second"} {
 		out = sendCodexToolCallEvent(
-			t, &param,
+			t,
+			&param,
 			`{"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":"`+delta+`"}`,
 		)
 		if len(out) != 1 {
@@ -52,10 +55,15 @@ func TestConvertCodexResponseToOpenAICustomToolCallStream(t *testing.T) {
 		}
 	}
 
+	//goland:noinspection SpellCheckingInspection
 	for _, event := range []string{
 		`{"type":"response.custom_tool_call_input.done","item_id":"ctc_1","output_index":0,"input":"firstsecond"}`,
-		`{"type":"response.output_item.done","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"firstsecond"}}`,
-		`{"type":"response.output_item.done","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"firstsecond"}}`,
+		(`{"type":"response.output_item.done","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call",` +
+			`"call_id":"call_apply","name":"ApplyPatc`) +
+			`h","input":"firstsecond"}}`,
+		(`{"type":"response.output_item.done","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call",` +
+			`"call_id":"call_apply","name":"ApplyPatc`) +
+			`h","input":"firstsecond"}}`,
 	} {
 		if out = sendCodexToolCallEvent(t, &param, event); len(out) != 0 {
 			t.Fatalf("terminal event emitted %d duplicate chunks for %s", len(out), event)
@@ -63,7 +71,8 @@ func TestConvertCodexResponseToOpenAICustomToolCallStream(t *testing.T) {
 	}
 
 	out = sendCodexToolCallEvent(
-		t, &param,
+		t,
+		&param,
 		`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
 	)
 	if len(out) != 1 {
@@ -78,21 +87,25 @@ func TestConvertCodexResponseToOpenAIInterleavedToolCallsUseIdentity(t *testing.
 	var param any
 	out := sendCodexToolCallEvent(
 		t, &param,
-		`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_lookup","name":"lookup","arguments":""}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","`+
+			`call_id":"call_lookup","name":"lookup","arguments":""}}`,
 	)
 	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.index").Int(); got != 0 {
 		t.Fatalf("function index = %d, want 0", got)
 	}
 	out = sendCodexToolCallEvent(
 		t, &param,
-		`{"type":"response.output_item.added","output_index":1,"item":{"id":"ctc_2","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":""}}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"id":"ct`+
+			`c_2","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPat`+
+			`ch","input":""}}`,
 	)
 	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.index").Int(); got != 1 {
 		t.Fatalf("custom index = %d, want 1", got)
 	}
 
 	out = sendCodexToolCallEvent(
-		t, &param,
+		t,
+		&param,
 		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"query\":"}`,
 	)
 	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.index").Int(); got != 0 {
@@ -112,16 +125,21 @@ func TestConvertCodexResponseToOpenAIInterleavedToolCallsUseIdentity(t *testing.
 	}
 
 	out = sendCodexToolCallEvent(
-		t, &param,
-		`{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"query\":\"test\"}"}`,
+		t,
+		&param,
+		`{"type":"response.function_call_arguments.done","item_id":"fc_1",`+
+			`"output_index":0,"arguments":"{\"query\":`+
+			`\"test\"}"}`,
 	)
 	if len(out) != 1 || gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.index").Int() != 0 ||
 		gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String() != `"test"}` {
 		t.Fatalf("function snapshot tail not delivered: %s", out)
 	}
 	for _, event := range []string{
-		`{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{\"query\":\"test\"}"}}`,
-		`{"type":"response.output_item.done","output_index":1,"item":{"id":"ctc_2","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"patch"}}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","` +
+			`call_id":"call_lookup","name":"lookup","arguments":"{\"query\":\"test\"}"}}`,
+		`{"type":"response.output_item.done","output_index":1,"item":{"id":"ctc_2","type":"custom_tool_call",` +
+			`"call_id":"call_apply","name":"ApplyPatch","input":"patch"}}`,
 	} {
 		if out = sendCodexToolCallEvent(t, &param, event); len(out) != 0 {
 			t.Fatalf("terminal event emitted %d duplicate chunks for %s", len(out), event)
@@ -133,16 +151,21 @@ func TestConvertCodexResponseToOpenAIEmptyDeltaUsesDoneFallback(t *testing.T) {
 	var param any
 	_ = sendCodexToolCallEvent(
 		t, &param,
-		`{"type":"response.output_item.added","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":""}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"ct`+
+			`c_1","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPat`+
+			`ch","input":""}}`,
 	)
 	out := sendCodexToolCallEvent(
-		t, &param, `{"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":""}`,
+		t,
+		&param,
+		`{"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":""}`,
 	)
 	if len(out) != 0 {
 		t.Fatalf("empty delta emitted %d chunks", len(out))
 	}
 	out = sendCodexToolCallEvent(
-		t, &param,
+		t,
+		&param,
 		`{"type":"response.custom_tool_call_input.done","item_id":"ctc_1","output_index":0,"input":"full patch"}`,
 	)
 	if len(out) != 1 {
@@ -157,7 +180,8 @@ func TestConvertCodexResponseToOpenAIUnknownExplicitIdentityDoesNotUseCurrentCal
 	var param any
 	_ = sendCodexToolCallEvent(
 		t, &param,
-		`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_lookup","name":"lookup","arguments":""}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","`+
+			`call_id":"call_lookup","name":"lookup","arguments":""}}`,
 	)
 	out := sendCodexToolCallEvent(
 		t, &param, `{"type":"response.function_call_arguments.delta","item_id":"missing","delta":"wrong"}`,
@@ -178,7 +202,8 @@ func TestConvertCodexResponseToOpenAIUnknownExplicitIdentityDoesNotUseCurrentCal
 
 func TestConvertCodexResponseToOpenAIToolCallDoneWithoutAdded(t *testing.T) {
 	var param any
-	event := `{"type":"response.output_item.done","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"full patch"}}`
+	event := `{"type":"response.output_item.done","output_index":0,"item":{"id":"ctc_1","type":"` +
+		`custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"full patch"}}`
 	out := sendCodexToolCallEvent(t, &param, event)
 	if len(out) != 1 {
 		t.Fatalf("fallback chunks = %d, want 1", len(out))
@@ -199,7 +224,9 @@ func TestConvertCodexResponseToOpenAIToolCallDoneWithoutAdded(t *testing.T) {
 }
 
 func TestConvertCodexResponseToOpenAINonStreamCustomToolCall(t *testing.T) {
-	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.5","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"full patch"}]}}`)
+	raw := []byte((`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"` +
+		`gpt-5.5","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output"` +
+		`:[{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"full patch"}]}}`))
 	out := ConvertCodexResponseToOpenAINonStream(context.Background(), "gpt-5.5", nil, nil, raw, nil)
 	toolCall := gjson.GetBytes(out, "choices.0.message.tool_calls.0")
 	if got := toolCall.Get("id").String(); got != "call_apply" {

@@ -29,7 +29,7 @@ func (h *Handler) HandleTranscriptionSession(c *gin.Context) {
 // HandleSIPControl reports that the Codex OAuth upstream has no SIP dialog capability.
 func (h *Handler) HandleSIPControl(c *gin.Context) {
 	action := "control"
-	if c != nil && c.Request != nil && c.Request.URL != nil {
+	if c.Request != nil && c.Request.URL != nil {
 		parts := strings.Split(strings.Trim(c.Request.URL.Path, "/"), "/")
 		if len(parts) > 0 && strings.TrimSpace(parts[len(parts)-1]) != "" {
 			action = parts[len(parts)-1]
@@ -96,9 +96,11 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 	}
 
 	ctx := util.WithGinContext(c.Request.Context(), c)
-	selectionMetadata := liveSelectionMetadata(c, map[string]any{
-		coreexecutor.ExecutionSessionMetadataKey: callID,
-	})
+	selectionMetadata := liveSelectionMetadata(
+		c, map[string]any{
+			coreexecutor.ExecutionSessionMetadataKey: callID,
+		},
+	)
 	ctx = enrichLiveSessionContext(
 		ctx,
 		liveSelectionHeaders(c),
@@ -214,7 +216,9 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 			log.Errorf("codex realtime hangup: close response body error: %v", errClose)
 		}
 	}()
-	runtimeexecutor.RecordAPIResponseMetadata(ctx, cfg, response.StatusCode, callResponseHeaders(response.Header))
+	runtimeexecutor.RecordAPIResponseMetadata(
+		ctx, cfg, response.StatusCode, callResponseHeaders(response.Header), response,
+	)
 	responseBody, errResponse := readLimitedBody(response.Body)
 	runtimeexecutor.AppendAPIResponseChunk(ctx, cfg, responseBody)
 	if selection != nil && response.StatusCode == http.StatusUnauthorized {
@@ -265,10 +269,12 @@ func (h *Handler) hangupSelection(
 	}
 	selectionOpts := coreexecutor.Options{
 		Headers: liveSelectionHeaders(c),
-		Metadata: liveSelectionMetadata(c, map[string]any{
-			coreexecutor.PinnedAuthMetadataKey:       session.authID,
-			coreexecutor.ExecutionSessionMetadataKey: callID,
-		}),
+		Metadata: liveSelectionMetadata(
+			c, map[string]any{
+				coreexecutor.PinnedAuthMetadataKey:       session.authID,
+				coreexecutor.ExecutionSessionMetadataKey: callID,
+			},
+		),
 	}
 	selection, selected, errSelect := h.selectOAuth(ctx, session.model, selectionOpts)
 	return selection, selected, selection != nil, errSelect

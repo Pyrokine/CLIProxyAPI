@@ -25,7 +25,8 @@ func translateCodexClaudeChunks(t *testing.T, chunks [][]byte) [][]byte {
 	var outputs [][]byte
 	for _, chunk := range chunks {
 		outputs = append(
-			outputs, ConvertCodexResponseToClaude(context.Background(), "gpt-5", originalRequest, nil, chunk, &state)...,
+			outputs,
+			ConvertCodexResponseToClaude(context.Background(), "gpt-5", originalRequest, nil, chunk, &state)...,
 		)
 	}
 	return outputs
@@ -142,28 +143,72 @@ func TestConvertCodexResponseToClaude_StreamSerializesInterleavedNamedFunctionCa
 			name: "first call finishes first",
 			chunks: [][]byte{
 				[]byte(`data: {"type":"response.created","response":{"id":"resp_parallel","model":"gpt-5"}}`),
-				[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_a","name":"Read"},"output_index":1}`),
-				[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_b","name":"Read"},"output_index":2}`),
-				[]byte(`data: {"type":"response.function_call_arguments.delta","delta":"{\"file_path\":\"a\"}","output_index":1}`),
-				[]byte(`data: {"type":"response.function_call_arguments.delta","delta":"{\"file_path\":\"b\"}","output_index":2}`),
-				[]byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"file_path\":\"a\"}","output_index":1}`),
-				[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_a","name":"Read","arguments":"{\"file_path\":\"a\"}"},"output_index":1}`),
-				[]byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"file_path\":\"b\"}","output_index":2}`),
-				[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_b","name":"Read","arguments":"{\"file_path\":\"b\"}"},"output_index":2}`),
+				[]byte((`data: {"type":"response.output_item.added","item":{"type":"function_ca` +
+					`ll","call_id":"call_a","name":"Read"},"output_index":1}`)),
+				[]byte((`data: {"type":"response.output_item.added","item":{"type":"function_ca` +
+					`ll","call_id":"call_b","name":"Read"},"output_index":2}`)),
+				[]byte(
+					(`data: {"type":"response.function_call_arguments.delta","delta":` +
+						`"{\"file_path\":\"a\"}","output_index":` +
+						`1}`),
+				),
+				[]byte(
+					(`data: {"type":"response.function_call_arguments.delta","delta":` +
+						`"{\"file_path\":\"b\"}","output_index":` +
+						`2}`),
+				),
+				[]byte(
+					(`data: {"type":"response.function_call_arguments.done","arguments":` +
+						`"{\"file_path\":\"a\"}","output_index":` +
+						`1}`),
+				),
+				[]byte((`data: {"type":"response.output_item.done","item":{"type":"function_cal` +
+					`l","call_id":"call_a","name":"Read","arguments":"{\"file_path\":\"a\"}` +
+					`"},"output_index":1}`)),
+				[]byte(
+					(`data: {"type":"response.function_call_arguments.done","arguments":` +
+						`"{\"file_path\":\"b\"}","output_index":` +
+						`2}`),
+				),
+				[]byte((`data: {"type":"response.output_item.done","item":{"type":"function_cal` +
+					`l","call_id":"call_b","name":"Read","arguments":"{\"file_path\":\"b\"}` +
+					`"},"output_index":2}`)),
 			},
 		},
 		{
 			name: "second call finishes first",
 			chunks: [][]byte{
 				[]byte(`data: {"type":"response.created","response":{"id":"resp_parallel","model":"gpt-5"}}`),
-				[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_a","name":"Read"},"output_index":1}`),
-				[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_b","name":"Read"},"output_index":2}`),
-				[]byte(`data: {"type":"response.function_call_arguments.delta","delta":"{\"file_path\":\"b\"}","output_index":2}`),
-				[]byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"file_path\":\"b\"}","output_index":2}`),
-				[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_b","name":"Read","arguments":"{\"file_path\":\"b\"}"},"output_index":2}`),
-				[]byte(`data: {"type":"response.function_call_arguments.delta","delta":"{\"file_path\":\"a\"}","output_index":1}`),
-				[]byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"file_path\":\"a\"}","output_index":1}`),
-				[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_a","name":"Read","arguments":"{\"file_path\":\"a\"}"},"output_index":1}`),
+				[]byte((`data: {"type":"response.output_item.added","item":{"type":"function_ca` +
+					`ll","call_id":"call_a","name":"Read"},"output_index":1}`)),
+				[]byte((`data: {"type":"response.output_item.added","item":{"type":"function_ca` +
+					`ll","call_id":"call_b","name":"Read"},"output_index":2}`)),
+				[]byte(
+					(`data: {"type":"response.function_call_arguments.delta","delta":` +
+						`"{\"file_path\":\"b\"}","output_index":` +
+						`2}`),
+				),
+				[]byte(
+					(`data: {"type":"response.function_call_arguments.done","arguments":` +
+						`"{\"file_path\":\"b\"}","output_index":` +
+						`2}`),
+				),
+				[]byte((`data: {"type":"response.output_item.done","item":{"type":"function_cal` +
+					`l","call_id":"call_b","name":"Read","arguments":"{\"file_path\":\"b\"}` +
+					`"},"output_index":2}`)),
+				[]byte(
+					(`data: {"type":"response.function_call_arguments.delta","delta":` +
+						`"{\"file_path\":\"a\"}","output_index":` +
+						`1}`),
+				),
+				[]byte(
+					(`data: {"type":"response.function_call_arguments.done","arguments":` +
+						`"{\"file_path\":\"a\"}","output_index":` +
+						`1}`),
+				),
+				[]byte((`data: {"type":"response.output_item.done","item":{"type":"function_cal` +
+					`l","call_id":"call_a","name":"Read","arguments":"{\"file_path\":\"a\"}` +
+					`"},"output_index":1}`)),
 			},
 		},
 	}
@@ -186,16 +231,21 @@ func TestConvertCodexResponseToClaude_StreamDefersOtherContentUntilFunctionCalls
 		secondBlock  string
 	}{
 		{
-			name:         "named active call",
-			functionCall: []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_a","name":"Read"},"output_index":0}`),
-			firstBlock:   "tool_use",
-			secondBlock:  "text",
+			name: "named active call",
+			functionCall: []byte((`data: {"type":"response.output_item.added","item":{"type":"function_ca` +
+				`ll","call_id":"call_a","name":"Read"},"output_index":0}`)),
+			firstBlock:  "tool_use",
+			secondBlock: "text",
 		},
 		{
-			name:         "unnamed pending call",
-			functionCall: []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_a"},"output_index":0}`),
-			firstBlock:   "text",
-			secondBlock:  "tool_use",
+			name: "unnamed pending call",
+			functionCall: []byte(
+				(`data: {"type":"response.output_item.added","item":{"type":` +
+					`"function_call","call_id":"call_a"},"output_index":` +
+					`0}`),
+			),
+			firstBlock:  "text",
+			secondBlock: "tool_use",
 		},
 	}
 
@@ -205,14 +255,38 @@ func TestConvertCodexResponseToClaude_StreamDefersOtherContentUntilFunctionCalls
 				chunks := [][]byte{
 					[]byte(`data: {"type":"response.created","response":{"id":"resp_mixed","model":"gpt-5"}}`),
 					test.functionCall,
-					[]byte(`data: {"type":"response.output_item.added","item":{"type":"message","status":"in_progress"},"output_index":1}`),
-					[]byte(`data: {"type":"response.content_part.added","part":{"type":"output_text"},"content_index":0,"output_index":1}`),
+					[]byte(
+						(`data: {"type":"response.output_item.added","item":{"type":"message",` +
+							`"status":"in_progress"},"output_index":` +
+							`1}`),
+					),
+					[]byte(
+						(`data: {"type":"response.content_part.added","part":{"type":` +
+							`"output_text"},"content_index":0,"output_index":` +
+							`1}`),
+					),
 					[]byte(`data: {"type":"response.output_text.delta","delta":"done","output_index":1}`),
-					[]byte(`data: {"type":"response.content_part.done","part":{"type":"output_text"},"content_index":0,"output_index":1}`),
-					[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","status":"completed"},"output_index":1}`),
-					[]byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"file_path\":\"a\"}","output_index":0}`),
-					[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_a","name":"Read","arguments":"{\"file_path\":\"a\"}"},"output_index":0}`),
-					[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`),
+					[]byte(
+						(`data: {"type":"response.content_part.done","part":{"type":` +
+							`"output_text"},"content_index":0,"output_index":` +
+							`1}`),
+					),
+					[]byte(
+						(`data: {"type":"response.output_item.done","item":{"type":"message",` +
+							`"status":"completed"},"output_index":` +
+							`1}`),
+					),
+					[]byte(
+						(`data: {"type":"response.function_call_arguments.done","arguments":` +
+							`"{\"file_path\":\"a\"}","output_index":` +
+							`0}`),
+					),
+					[]byte((`data: {"type":"response.output_item.done","item":{"type":"function_cal` +
+						`l","call_id":"call_a","name":"Read","arguments":"{\"file_path\":\"a\"}` +
+						`"},"output_index":0}`)),
+					[]byte(
+						`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
+					),
 				}
 
 				blocks := assertCodexClaudeContentBlockLifecycle(t, translateCodexClaudeChunks(t, chunks))
@@ -245,15 +319,28 @@ func TestConvertCodexResponseToClaude_StreamDefersOtherContentUntilFunctionCalls
 func TestConvertCodexResponseToClaude_StreamDeferredTextClosesBeforeThinkingStarts(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"type":"response.created","response":{"id":"resp_mixed","model":"gpt-5"}}`),
-		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_a","name":"Read"},"output_index":0}`),
-		[]byte(`data: {"type":"response.content_part.added","part":{"type":"output_text"},"content_index":0,"output_index":1}`),
+		[]byte((`data: {"type":"response.output_item.added","item":{"type":"function_ca` +
+			`ll","call_id":"call_a","name":"Read"},"output_index":0}`)),
+		[]byte(
+			(`data: {"type":"response.content_part.added","part":{"type":` +
+				`"output_text"},"content_index":0,"output_index":` +
+				`1}`),
+		),
 		[]byte(`data: {"type":"response.output_text.delta","delta":"answer","output_index":1}`),
-		[]byte(`data: {"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"enc_initial"},"output_index":2}`),
+		[]byte((`data: {"type":"response.output_item.added","item":{"type":"reasoning",` +
+			`"encrypted_content":"enc_initial"},"output_index":2}`)),
 		[]byte(`data: {"type":"response.reasoning_summary_part.added","output_index":2}`),
 		[]byte(`data: {"type":"response.reasoning_summary_text.delta","delta":"thought","output_index":2}`),
-		[]byte(`data: {"type":"response.output_item.done","item":{"type":"reasoning","encrypted_content":"enc_final"},"output_index":2}`),
-		[]byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"file_path\":\"a\"}","output_index":0}`),
-		[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_a","name":"Read","arguments":"{\"file_path\":\"a\"}"},"output_index":0}`),
+		[]byte((`data: {"type":"response.output_item.done","item":{"type":"reasoning","` +
+			`encrypted_content":"enc_final"},"output_index":2}`)),
+		[]byte(
+			(`data: {"type":"response.function_call_arguments.done","arguments":` +
+				`"{\"file_path\":\"a\"}","output_index":` +
+				`0}`),
+		),
+		[]byte((`data: {"type":"response.output_item.done","item":{"type":"function_cal` +
+			`l","call_id":"call_a","name":"Read","arguments":"{\"file_path\":\"a\"}` +
+			`"},"output_index":0}`)),
 		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`),
 	}
 
@@ -275,9 +362,20 @@ func TestConvertCodexResponseToClaude_StreamDeferredTextClosesBeforeThinkingStar
 func TestConvertCodexResponseToClaude_StreamTerminalMatchesFunctionCallsByOutputIndex(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"type":"response.created","response":{"id":"resp_parallel","model":"gpt-5"}}`),
-		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","name":"Read"},"output_index":0}`),
-		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","name":"Read"},"output_index":1}`),
-		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","name":"Read","arguments":"{\"file_path\":\"a\"}"},{"type":"function_call","name":"Read","arguments":"{\"file_path\":\"b\"}"}]}}`),
+		[]byte(
+			(`data: {"type":"response.output_item.added","item":{"type":` +
+				`"function_call","name":"Read"},"output_index":` +
+				`0}`),
+		),
+		[]byte(
+			(`data: {"type":"response.output_item.added","item":{"type":` +
+				`"function_call","name":"Read"},"output_index":` +
+				`1}`),
+		),
+		[]byte((`data: {"type":"response.completed","response":{"usage":{"input_tokens"` +
+			`:1,"output_tokens":1},"output":[{"type":"function_call","name":"Read",` +
+			`"arguments":"{\"file_path\":\"a\"}"},{"type":"function_call","name":"R` +
+			`ead","arguments":"{\"file_path\":\"b\"}"}]}}`)),
 	}
 
 	blocks := assertCodexClaudeContentBlockLifecycle(t, translateCodexClaudeChunks(t, chunks))
@@ -296,12 +394,28 @@ func TestConvertCodexResponseToClaude_StreamTerminalHydratesInterleavedFunctionC
 	for _, terminalType := range []string{"response.completed", "response.incomplete"} {
 		t.Run(
 			terminalType, func(t *testing.T) {
-				terminal := `data: {"type":"` + terminalType + `","response":{"usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","call_id":"call_a","name":"Read","arguments":"{\"file_path\":\"a\"}"},{"type":"function_call","call_id":"call_b","name":"Read","arguments":"{\"file_path\":\"b\"}"}]}}`
+				terminal := (`data: {"type":` +
+					`"`) +
+					terminalType +
+					((`","response":{"usage":{"input_tokens":1,` +
+						`"output_tokens":1},"output":` +
+						`[{`) +
+						`"type":"function_call","call_id":"call_a","name":"Read","arguments":"{` +
+						`\"file_path\":\"a\"}"},{"type":"function_call","call_id":"call_b","nam` +
+						`e":"Read","arguments":"{\"file_path\":\"b\"}"}]}}`)
 				chunks := [][]byte{
-					[]byte(`data: {"type":"response.created","response":{"id":"resp_parallel","model":"gpt-5"}}`),
-					[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_a","name":"Read"},"output_index":0}`),
-					[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_b","name":"Read"},"output_index":1}`),
-					[]byte(`data: {"type":"response.function_call_arguments.delta","delta":"{\"file_path\":","output_index":0}`),
+					[]byte(
+						`data: {"type":"response.created","response":{"id":"resp_parallel","model":"gpt-5"}}`,
+					),
+					[]byte((`data: {"type":"response.output_item.added","item":{"type":"function_ca` +
+						`ll","call_id":"call_a","name":"Read"},"output_index":0}`)),
+					[]byte((`data: {"type":"response.output_item.added","item":{"type":"function_ca` +
+						`ll","call_id":"call_b","name":"Read"},"output_index":1}`)),
+					[]byte(
+						(`data: {"type":"response.function_call_arguments.delta","delta":` +
+							`"{\"file_path\":","output_index":` +
+							`0}`),
+					),
 					[]byte(terminal),
 				}
 

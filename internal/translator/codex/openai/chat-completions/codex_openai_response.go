@@ -29,6 +29,7 @@ type toolCallStreamState struct {
 	Index         int
 	Arguments     strings.Builder
 	ArgumentsDone bool
+	WrapInput     bool
 	Done          bool
 }
 
@@ -41,6 +42,19 @@ func (state *toolCallStreamState) completeArguments(arguments string) (string, e
 	state.Arguments.WriteString(tail)
 	state.ArgumentsDone = true
 	return tail, nil
+}
+
+func (state *toolCallStreamState) argumentDelta(delta string, completed, wasDone bool) string {
+	if !state.WrapInput {
+		return delta
+	}
+	wrapped := translatorcommon.WrapResponsesCustomToolInput(gjson.Result{Type: gjson.String, Str: delta})
+	quoted := gjson.Get(wrapped, "input").Raw
+	delta = quoted[1 : len(quoted)-1]
+	if completed && !wasDone {
+		delta += `"}`
+	}
+	return delta
 }
 
 // convertCliToOpenAIParams holds parameters for response conversion.
@@ -61,6 +75,7 @@ type convertCliToOpenAIParams struct {
 	responseError        error
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (params *convertCliToOpenAIParams) ResponseTranslationError() error {
 	return params.responseError
 }
@@ -101,7 +116,9 @@ func ConvertCodexResponseToOpenAI(
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
 	// Initialize the OpenAI SSE template.
-	template := []byte(`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":null,"native_finish_reason":null}]}`)
+	template := []byte((`{"id":"","object":"chat.completion.chunk","created":12345,"model":"mod` +
+		`el","choices":[{"index":0,"delta":{},"finish_reason":null,"native_fini` +
+		`sh_reason":null}]}`))
 
 	rootResult := gjson.ParseBytes(rawJSON)
 	params := (*param).(*convertCliToOpenAIParams)
@@ -145,7 +162,9 @@ func ConvertCodexResponseToOpenAI(
 			}
 			text.WriteString(completeText(event, int64(index), part.Get("text").String()))
 			offset := params.textPartOffsets[codexTextPartKey(event, int64(index))]
-			citations = append(citations, codexChatURLCitations(part.Get("annotations"), offset, params.citationKeys)...)
+			citations = append(
+				citations, codexChatURLCitations(part.Get("annotations"), offset, params.citationKeys)...,
+			)
 		}
 		return text.String(), citations
 	}
@@ -157,7 +176,9 @@ func ConvertCodexResponseToOpenAI(
 			template, _ = sjson.SetBytes(template, "choices.0.delta.content", text)
 		}
 		if len(citations) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices.0.delta.annotations", translatorcommon.JoinRawArray(citations))
+			template, _ = sjson.SetRawBytes(
+				template, "choices.0.delta.annotations", translatorcommon.JoinRawArray(citations),
+			)
 		}
 	}
 
@@ -202,16 +223,26 @@ func ConvertCodexResponseToOpenAI(
 				name = original
 			}
 			call, _ = sjson.SetBytes(call, "function.name", name)
+			state.WrapInput = item.Get("type").String() == "custom_tool_call" && name == "apply_patch" &&
+				translatorcommon.NewResponsesToolIdentity(originalRequestRawJSON).IsCustom(name)
+			if state.WrapInput {
+				call, _ = sjson.SetBytes(call, "function.arguments", `{"input":"`)
+			}
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 		}
 		registerToolCallState(params, event, item, state)
 		if completed {
+			wasDone := state.ArgumentsDone
 			tail, err := state.completeArguments(codexToolCallArguments(item))
 			if err != nil {
 				params.responseError = err
 				return false
 			}
 			state.Done = true
+			tail = state.argumentDelta(tail, true, wasDone)
+			if emit && state.WrapInput {
+				tail = `{"input":"` + tail
+			}
 			call, _ = sjson.SetBytes(call, "function.arguments", tail)
 			emit = emit || tail != ""
 		}
@@ -266,7 +297,8 @@ func ConvertCodexResponseToOpenAI(
 			)
 		}
 		template = setCodexCacheWriteTokens(template, usageResult)
-		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
+		if reasoningTokensResult :=
+			usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
 			template, _ = sjson.SetBytes(
 				template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int(),
 			)
@@ -287,7 +319,13 @@ func ConvertCodexResponseToOpenAI(
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.content", text)
 		}
-	} else if dataType == "response.output_text.annotation.added" || dataType == "response.output_text.done" || dataType == "response.content_part.done" {
+	} else if dataType ==
+		"response.output_text.annotation.added" ||
+		dataType ==
+			"response.output_text.done" ||
+		dataType ==
+			("response.conte"+
+				"nt_part.done") {
 		text := ""
 		if dataType == "response.output_text.done" {
 			text = completeText(rootResult, rootResult.Get("content_index").Int(), rootResult.Get("text").String())
@@ -341,7 +379,11 @@ func ConvertCodexResponseToOpenAI(
 			return nil
 		}
 
-	} else if dataType == "response.function_call_arguments.delta" || dataType == "response.custom_tool_call_input.delta" {
+	} else if dataType ==
+		"response.function_call_arguments.delta" ||
+		dataType ==
+			("response.custom_tool_call_"+
+				"input.delta") {
 		p := (*param).(*convertCliToOpenAIParams)
 		state := findToolCallState(p, rootResult, gjson.Result{})
 		deltaValue := rootResult.Get("delta").String()
@@ -352,22 +394,30 @@ func ConvertCodexResponseToOpenAI(
 
 		functionCallItemTemplate := []byte(`{"index":0,"function":{"arguments":""}}`)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "index", state.Index)
-		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", deltaValue)
+		functionCallItemTemplate, _ = sjson.SetBytes(
+			functionCallItemTemplate, "function.arguments", state.argumentDelta(deltaValue, false, false),
+		)
 
 		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
 		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
 
-	} else if dataType == "response.function_call_arguments.done" || dataType == "response.custom_tool_call_input.done" {
+	} else if dataType ==
+		"response.function_call_arguments.done" ||
+		dataType ==
+			("response.custom_tool_call_i"+
+				"nput.done") {
 		p := (*param).(*convertCliToOpenAIParams)
 		state := findToolCallState(p, rootResult, gjson.Result{})
 		if state == nil {
 			return [][]byte{}
 		}
+		wasDone := state.ArgumentsDone
 		tail, err := state.completeArguments(rootResult.Get(codexToolCallArgumentsField(dataType)).String())
 		if err != nil {
 			params.responseError = err
 			return nil
 		}
+		tail = state.argumentDelta(tail, true, wasDone)
 		if tail == "" {
 			return nil
 		}
@@ -444,7 +494,9 @@ func ConvertCodexResponseToOpenAINonStream(
 
 	responseResult := rootResult.Get("response")
 
-	template := []byte(`{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
+	template := []byte((`{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[{"` +
+		`index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"` +
+		`finish_reason":null,"native_finish_reason":null}]}`))
 	if tier := codexResponseServiceTier(responseResult); tier != "" {
 		template, _ = sjson.SetBytes(template, "service_tier", tier)
 	} else if tier := codexResponseServiceTier(rootResult); tier != "" {
@@ -485,7 +537,8 @@ func ConvertCodexResponseToOpenAINonStream(
 			)
 		}
 		template = setCodexCacheWriteTokens(template, usageResult)
-		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
+		if reasoningTokensResult :=
+			usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
 			template, _ = sjson.SetBytes(
 				template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int(),
 			)
@@ -535,7 +588,11 @@ func ConvertCodexResponseToOpenAINonStream(
 						if contentItem.Get("type").String() == "output_text" {
 							text := contentItem.Get("text").String()
 							contentText.WriteString(text)
-							messageAnnotations = append(messageAnnotations, codexChatURLCitations(contentItem.Get("annotations"), contentRuneOffset, annotationKeys)...)
+							messageAnnotations = append(
+								messageAnnotations, codexChatURLCitations(
+									contentItem.Get("annotations"), contentRuneOffset, annotationKeys,
+								)...,
+							)
 							contentRuneOffset += int64(utf8.RuneCountInString(text))
 						}
 					}
@@ -546,7 +603,9 @@ func ConvertCodexResponseToOpenAINonStream(
 				}
 			case "function_call", "custom_tool_call":
 				// Handle function and custom tool call content.
-				functionCallTemplate := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+				functionCallTemplate := []byte(
+					`{"id":"","type":"function","function":{"name":"","arguments":""}}`,
+				)
 
 				if callIdResult := outputItem.Get("call_id"); callIdResult.Exists() {
 					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "id", callIdResult.String())
@@ -561,11 +620,13 @@ func ConvertCodexResponseToOpenAINonStream(
 					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", n)
 				}
 
-				functionCallTemplate, _ = sjson.SetBytes(
-					functionCallTemplate,
-					"function.arguments",
-					codexToolCallArguments(outputItem),
-				)
+				arguments := codexToolCallArguments(outputItem)
+				name := gjson.GetBytes(functionCallTemplate, "function.name").String()
+				if outputType == "custom_tool_call" && name == "apply_patch" &&
+					translatorcommon.NewResponsesToolIdentity(originalRequestRawJSON).IsCustom(name) {
+					arguments = translatorcommon.WrapResponsesCustomToolInput(outputItem.Get("input"))
+				}
+				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", arguments)
 
 				toolCalls = append(toolCalls, functionCallTemplate)
 			}
@@ -577,11 +638,17 @@ func ConvertCodexResponseToOpenAINonStream(
 		}
 
 		if reasoningText.String() != "" {
-			template, _ = sjson.SetBytes(template, "choices.0.message.reasoning_content", reasoningText.String())
+			template, _ = sjson.SetBytes(
+				template,
+				"choices.0.message.reasoning_content",
+				reasoningText.String(),
+			)
 		}
 
 		if len(messageAnnotations) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices.0.message.annotations", translatorcommon.JoinRawArray(messageAnnotations))
+			template, _ = sjson.SetRawBytes(
+				template, "choices.0.message.annotations", translatorcommon.JoinRawArray(messageAnnotations),
+			)
 		}
 
 		// Add tool calls if any
@@ -719,7 +786,11 @@ func codexChatImage(item gjson.Result, field string) []byte {
 		return nil
 	}
 	image := []byte(`{"type":"image_url","image_url":{"url":""}}`)
-	image, _ = sjson.SetBytes(image, "image_url.url", "data:image/"+format+";base64,"+strings.TrimSpace(data.String()))
+	image, _ = sjson.SetBytes(
+		image,
+		"image_url.url",
+		"data:image/"+format+";base64,"+strings.TrimSpace(data.String()),
+	)
 	return image
 }
 

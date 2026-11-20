@@ -177,22 +177,18 @@ func TestToolCallWithContent(t *testing.T) {
 }
 
 func TestToolCallOutputWithMultimodalContent(t *testing.T) {
-	input := []byte(`{
-		"model": "gpt-4o",
-		"messages": [
-			{"role":"user","content":"Show result."},
-			{"role":"assistant","content":null,"tool_calls":[{"id":"call_output_1","type":"function","function":{"name":"render_output","arguments":"{}"}}]},
-			{"role":"tool","tool_call_id":"call_output_1","content":[
-				{"type":"text","text":"Rendered result attached."},
-				{"type":"image_url","image_url":{"url":"https://example.com/generated.png","detail":"high"}},
-				{"type":"image_url","image_url":{"file_id":"file-img-123"}},
-				{"type":"file","file":{"file_id":"file-doc-123","filename":"doc.pdf"}},
-				{"type":"file","file":{"file_data":"SGVsbG8=","filename":"inline.txt"}},
-				{"type":"file","file":{"file_url":"https://example.com/report.pdf","filename":"report.pdf"}}
-			]}
-		],
-		"tools": [{"type":"function","function":{"name":"render_output","description":"Render output","parameters":{"type":"object","properties":{}}}}]
-	}`)
+	input := []byte(("{\n\t\t\"model\": \"gpt-4o\",\n\t\t\"messages\": [\n\t\t\t{\"role\":\"user\",\"content\"" +
+		":\"Show result.\"},\n\t\t\t{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"" +
+		"call_output_1\",\"type\":\"function\",\"function\":{\"name\":\"render_output\",\"arguments\":\"{}\"}" +
+		"}]},\n\t\t\t{\"role\":\"tool\",\"tool_call_id\":\"call_output_1\",\"content\":[\n\t\t\t\t{\"type\":" +
+		"\"text\",\"text\":\"Rendered result attached.\"},\n\t\t\t\t{\"type\":\"image_url\",\"image_url\":{\"" +
+		"url\":\"https://example.com/generated.png\",\"detail\":\"high\"}},\n\t\t\t\t{\"type\":\"image_url\"," +
+		"\"image_url\":{\"file_id\":\"file-img-123\"}},\n\t\t\t\t{\"type\":\"file\",\"file\":{\"file_id\":\"" +
+		"file-doc-123\",\"filename\":\"doc.pdf\"}},\n\t\t\t\t{\"type\":\"file\",\"file\":{\"file_data\":\"" +
+		"SGVsbG8=\",\"filename\":\"inline.txt\"}},\n\t\t\t\t{\"type\":\"file\",\"file\":{\"file_url\":\"" +
+		"https://example.com/report.pdf\",\"filename\":\"report.pdf\"}}\n\t\t\t]}\n\t\t],\n\t\t\"tools\": [{" +
+		"\"type\":\"function\",\"function\":{\"name\":\"render_output\",\"description\":\"Render output\",\"" +
+		"parameters\":{\"type\":\"object\",\"properties\":{}}}}]\n\t}"))
 
 	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	output := gjson.GetBytes(out, "input.2.output")
@@ -206,37 +202,36 @@ func TestToolCallOutputWithMultimodalContent(t *testing.T) {
 	if parts[0].Get("type").String() != "input_text" || parts[0].Get("text").String() != "Rendered result attached." {
 		t.Fatalf("part 0: expected input_text with rendered text, got %s", parts[0].Raw)
 	}
-	if parts[1].Get("type").String() != "input_image" || parts[1].Get("image_url").String() != "https://example.com/generated.png" || parts[1].Get("detail").String() != "high" {
+	if parts[1].Get("type").String() != "input_image" ||
+		parts[1].Get("image_url").String() != "https://example.com/generated.png" ||
+		parts[1].Get("detail").String() != "high" {
 		t.Fatalf("part 1: expected url-backed input_image, got %s", parts[1].Raw)
 	}
 	if parts[2].Get("type").String() != "input_image" || parts[2].Get("file_id").String() != "file-img-123" {
 		t.Fatalf("part 2: expected file_id-backed input_image, got %s", parts[2].Raw)
 	}
-	if parts[3].Get("type").String() != "input_file" || parts[3].Get("file_id").String() != "file-doc-123" || parts[3].Get("filename").String() != "doc.pdf" {
+	if parts[3].Get("type").String() != "input_file" || parts[3].Get("file_id").String() != "file-doc-123" ||
+		parts[3].Get("filename").String() != "doc.pdf" {
 		t.Fatalf("part 3: expected file_id-backed input_file, got %s", parts[3].Raw)
 	}
 	if parts[4].Get("type").String() != "input_file" || parts[4].Get("file_data").String() != "SGVsbG8=" {
 		t.Fatalf("part 4: expected file_data-backed input_file, got %s", parts[4].Raw)
 	}
-	if parts[5].Get("type").String() != "input_file" || parts[5].Get("file_url").String() != "https://example.com/report.pdf" {
+	if parts[5].Get("type").String() != "input_file" ||
+		parts[5].Get("file_url").String() != "https://example.com/report.pdf" {
 		t.Fatalf("part 5: expected file_url-backed input_file, got %s", parts[5].Raw)
 	}
 }
 
 func TestToolCallOutputFallsBackForInvalidStructuredParts(t *testing.T) {
-	input := []byte(`{
-		"model": "gpt-4o",
-		"messages": [
-			{"role":"user","content":"Check tool output."},
-			{"role":"assistant","content":null,"tool_calls":[{"id":"call_invalid_parts","type":"function","function":{"name":"inspect","arguments":"{}"}}]},
-			{"role":"tool","tool_call_id":"call_invalid_parts","content":[
-				{"type":"image_url","image_url":{"detail":"low"}},
-				{"type":"file","file":{"filename":"orphan.txt"}},
-				{"type":"unknown_type","foo":"bar","nested":{"a":1}}
-			]}
-		],
-		"tools": [{"type":"function","function":{"name":"inspect","description":"Inspect","parameters":{"type":"object","properties":{}}}}]
-	}`)
+	input := []byte(("{\n\t\t\"model\": \"gpt-4o\",\n\t\t\"messages\": [\n\t\t\t{\"role\":\"user\",\"content\"" +
+		":\"Check tool output.\"},\n\t\t\t{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"" +
+		"call_invalid_parts\",\"type\":\"function\",\"function\":{\"name\":\"inspect\",\"arguments\":\"{}\"}}" +
+		"]},\n\t\t\t{\"role\":\"tool\",\"tool_call_id\":\"call_invalid_parts\",\"content\":[\n\t\t\t\t{\"" +
+		"type\":\"image_url\",\"image_url\":{\"detail\":\"low\"}},\n\t\t\t\t{\"type\":\"file\",\"file\":{\"" +
+		"filename\":\"orphan.txt\"}},\n\t\t\t\t{\"type\":\"unknown_type\",\"foo\":\"bar\",\"nested\":{\"a\":" +
+		"1}}\n\t\t\t]}\n\t\t],\n\t\t\"tools\": [{\"type\":\"function\",\"function\":{\"name\":\"inspect\",\"" +
+		"description\":\"Inspect\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]\n\t}"))
 
 	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	parts := gjson.GetBytes(out, "input.2.output").Array()
@@ -271,15 +266,14 @@ func TestToolCallOutputWithNonStringJSONContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				input := []byte(`{
-				"model":"gpt-4o",
-				"messages":[
-					{"role":"user","content":"Check tool output."},
-					{"role":"assistant","content":null,"tool_calls":[{"id":"call_json","type":"function","function":{"name":"inspect","arguments":"{}"}}]},
-					{"role":"tool","tool_call_id":"call_json","content":` + tt.content + `}
-				],
-				"tools":[{"type":"function","function":{"name":"inspect","description":"Inspect","parameters":{"type":"object","properties":{}}}}]
-			}`)
+				input := []byte(("{\n\t\t\t\t\"model\":\"gpt-4o\",\n\t\t\t\t\"messages\":[\n\t\t\t\t\t{\"" +
+					"role\":\"user\",\"content\":\"Check tool output.\"},\n\t\t\t\t\t{\"role\":\"assistant\"," +
+					"\"content\":null,\"tool_calls\":[{\"id\":\"call_json\",\"type\":\"function\",\"" +
+					"function\":{\"name\":\"inspect\",\"arguments\":\"{}\"}}]},\n\t\t\t\t\t{\"role\":\"tool\"" +
+					",\"tool_call_id\":\"call_json\",\"content\":") + tt.content +
+					("}\n\t\t\t\t],\n\t\t\t\t\"tools\":[{\"type\":\"function\",\"function\":" +
+						`{"name":"inspect","description":"Inspect","parameters":{"type":"object` +
+						"\",\"properties\":{}}}}]\n\t\t\t}"))
 
 				out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 				output := gjson.GetBytes(out, "input.2.output")
@@ -456,36 +450,19 @@ func TestNoSpuriousEmptyAssistantMessage(t *testing.T) {
 
 // Two rounds of tool calling in one conversation, with a text reply in between.
 func TestMultiTurnToolCalling(t *testing.T) {
-	input := []byte(`{
-		"model": "gpt-4o",
-		"messages": [
-			{"role": "user", "content": "Weather in Paris?"},
-			{
-				"role": "assistant",
-				"content": null,
-				"tool_calls": [{"id": "call_r1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}]
-			},
-			{"role": "tool", "tool_call_id": "call_r1", "content": "sunny"},
-			{"role": "assistant", "content": "It is sunny in Paris."},
-			{"role": "user", "content": "And London?"},
-			{
-				"role": "assistant",
-				"content": null,
-				"tool_calls": [{"id": "call_r2", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"London\"}"}}]
-			},
-			{"role": "tool", "tool_call_id": "call_r2", "content": "rainy"}
-		],
-		"tools": [
-			{
-				"type": "function",
-				"function": {
-					"name": "get_weather",
-					"description": "Get weather",
-					"parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
-				}
-			}
-		]
-	}`)
+	input := []byte(("{\n\t\t\"model\": \"gpt-4o\",\n\t\t\"messages\": [\n\t\t\t{\"role\": \"user\", \"" +
+		"content\": \"Weather in Paris?\"},\n\t\t\t{\n\t\t\t\t\"role\": \"assistant\",\n\t\t\t\t\"content\": " +
+		"null,\n\t\t\t\t\"tool_calls\": [{\"id\": \"call_r1\", \"type\": \"function\", \"function\": {\"" +
+		"name\": \"get_weather\", \"arguments\": \"{\\\"city\\\":\\\"Paris\\\"}\"}}]\n\t\t\t},\n\t\t\t{\"" +
+		"role\": \"tool\", \"tool_call_id\": \"call_r1\", \"content\": \"sunny\"},\n\t\t\t{\"role\": \"" +
+		"assistant\", \"content\": \"It is sunny in Paris.\"},\n\t\t\t{\"role\": \"user\", \"content\": \"" +
+		"And London?\"},\n\t\t\t{\n\t\t\t\t\"role\": \"assistant\",\n\t\t\t\t\"content\": null,\n\t\t\t\t\"" +
+		"tool_calls\": [{\"id\": \"call_r2\", \"type\": \"function\", \"function\": {\"name\": \"" +
+		"get_weather\", \"arguments\": \"{\\\"city\\\":\\\"London\\\"}\"}}]\n\t\t\t},\n\t\t\t{\"role\": \"" +
+		"tool\", \"tool_call_id\": \"call_r2\", \"content\": \"rainy\"}\n\t\t],\n\t\t\"tools\": [\n\t\t\t{\n" +
+		"\t\t\t\t\"type\": \"function\",\n\t\t\t\t\"function\": {\n\t\t\t\t\t\"name\": \"get_weather\",\n\t\t" +
+		"\t\t\t\"description\": \"Get weather\",\n\t\t\t\t\t\"parameters\": {\"type\": \"object\", \"" +
+		"properties\": {\"city\": {\"type\": \"string\"}}}\n\t\t\t\t}\n\t\t\t}\n\t\t]\n\t}"))
 
 	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
@@ -656,26 +633,17 @@ func TestEmptyStringContent(t *testing.T) {
 
 // Every function_call_output must have a matching function_call by call_id.
 func TestCallIDsMatchBetweenCallAndOutput(t *testing.T) {
-	input := []byte(`{
-		"model": "gpt-4o",
-		"messages": [
-			{"role": "user", "content": "Multi-tool"},
-			{
-				"role": "assistant",
-				"content": null,
-				"tool_calls": [
-					{"id": "id_a", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
-					{"id": "id_b", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}}
-				]
-			},
-			{"role": "tool", "tool_call_id": "id_a", "content": "res_a"},
-			{"role": "tool", "tool_call_id": "id_b", "content": "res_b"}
-		],
-		"tools": [
-			{"type": "function", "function": {"name": "tool_a", "description": "A", "parameters": {"type": "object", "properties": {}}}},
-			{"type": "function", "function": {"name": "tool_b", "description": "B", "parameters": {"type": "object", "properties": {}}}}
-		]
-	}`)
+	input := []byte(("{\n\t\t\"model\": \"gpt-4o\",\n\t\t\"messages\": [\n\t\t\t{\"role\": \"user\", \"" +
+		"content\": \"Multi-tool\"},\n\t\t\t{\n\t\t\t\t\"role\": \"assistant\",\n\t\t\t\t\"content\": null,\n" +
+		"\t\t\t\t\"tool_calls\": [\n\t\t\t\t\t{\"id\": \"id_a\", \"type\": \"function\", \"function\": {\"" +
+		"name\": \"tool_a\", \"arguments\": \"{}\"}},\n\t\t\t\t\t{\"id\": \"id_b\", \"type\": \"function\", " +
+		"\"function\": {\"name\": \"tool_b\", \"arguments\": \"{}\"}}\n\t\t\t\t]\n\t\t\t},\n\t\t\t{\"role\": " +
+		"\"tool\", \"tool_call_id\": \"id_a\", \"content\": \"res_a\"},\n\t\t\t{\"role\": \"tool\", \"" +
+		"tool_call_id\": \"id_b\", \"content\": \"res_b\"}\n\t\t],\n\t\t\"tools\": [\n\t\t\t{\"type\": \"" +
+		"function\", \"function\": {\"name\": \"tool_a\", \"description\": \"A\", \"parameters\": {\"type\": " +
+		"\"object\", \"properties\": {}}}},\n\t\t\t{\"type\": \"function\", \"function\": {\"name\": \"" +
+		"tool_b\", \"description\": \"B\", \"parameters\": {\"type\": \"object\", \"properties\": {}}}}\n\t\t" +
+		"]\n\t}"))
 
 	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)

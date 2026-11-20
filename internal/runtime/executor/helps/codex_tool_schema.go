@@ -36,20 +36,22 @@ func normalizeCodexToolList(tools gjson.Result) ([]byte, bool) {
 	}
 	var updated []byte
 	offset := 0
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		updatedTool, changed := normalizeCodexTool(tool)
-		if !changed {
+	tools.ForEach(
+		func(_, tool gjson.Result) bool {
+			updatedTool, changed := normalizeCodexTool(tool)
+			if !changed {
+				return true
+			}
+			if updated == nil {
+				updated = make([]byte, 0, len(tools.Raw))
+			}
+			start := tool.Index - tools.Index
+			updated = append(updated, tools.Raw[offset:start]...)
+			updated = append(updated, updatedTool...)
+			offset = start + len(tool.Raw)
 			return true
-		}
-		if updated == nil {
-			updated = make([]byte, 0, len(tools.Raw))
-		}
-		start := tool.Index - tools.Index
-		updated = append(updated, tools.Raw[offset:start]...)
-		updated = append(updated, updatedTool...)
-		offset = start + len(tool.Raw)
-		return true
-	})
+		},
+	)
 	if updated == nil {
 		return nil, false
 	}

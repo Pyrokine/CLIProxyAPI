@@ -18,7 +18,10 @@ func init() {
 			TokenCount: tokenCount,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatClaude, sdktranslator.FormatCodex, func(model string, body []byte, stream bool) ([]byte, error) {
-		return convertClaudeRequestToCodexChecked(model, body, stream, false)
-	})
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatClaude, sdktranslator.FormatCodex,
+		func(model string, body []byte, stream bool) ([]byte, error) {
+			return convertClaudeRequestToCodexChecked(model, body, stream, false)
+		},
+	)
 }

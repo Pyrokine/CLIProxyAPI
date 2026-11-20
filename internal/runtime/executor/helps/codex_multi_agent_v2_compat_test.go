@@ -10,7 +10,9 @@ import (
 )
 
 func TestOptimizeCodexMultiAgentV2RequestRewritesAgentMessageForCompatModel(t *testing.T) {
-	payload := []byte(`{"input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
+	payload := []byte(
+		`{"input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`,
+	)
 	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 

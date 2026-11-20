@@ -1,12 +1,13 @@
 package executor
 
 import (
-	"github.com/gorilla/websocket"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestCodexPongDoesNotWaitForApplicationWrite(t *testing.T) {
@@ -14,23 +15,29 @@ func TestCodexPongDoesNotWaitForApplicationWrite(t *testing.T) {
 	serverConnCh := make(chan *websocket.Conn, 1)
 	pongReceived := make(chan string, 1)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade websocket: %v", err)
-			return
-		}
-		conn.SetPongHandler(func(appData string) error {
-			pongReceived <- appData
-			return nil
-		})
-		serverConnCh <- conn
-		for {
-			if _, _, errRead := conn.ReadMessage(); errRead != nil {
-				return
-			}
-		}
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					t.Errorf("upgrade websocket: %v", err)
+					return
+				}
+				conn.SetPongHandler(
+					func(appData string) error {
+						pongReceived <- appData
+						return nil
+					},
+				)
+				serverConnCh <- conn
+				for {
+					if _, _, errRead := conn.ReadMessage(); errRead != nil {
+						return
+					}
+				}
+			},
+		),
+	)
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
