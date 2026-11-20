@@ -11,7 +11,8 @@ go get github.com/Pyrokine/CLIProxyAPI/v6/sdk/access
 
 ## Provider registry
 
-`RegisterProvider(type, provider)` stores an initialized provider under a type identifier. The first registration of each
+`RegisterProvider(type, provider)` stores an initialized provider under a type identifier. The first registration of
+each
 type fixes its position. A later registration with the same type replaces the instance without changing that position.
 `RegisteredProviders()` returns the current instances in registration order.
 
@@ -42,7 +43,8 @@ default:
 ```
 
 `Manager.Authenticate` returns the first success. `AuthErrorCodeNotHandled` advances to the next provider.
-`AuthErrorCodeNoCredentials` and `AuthErrorCodeInvalidCredential` are accumulated; invalid credentials take precedence if
+`AuthErrorCodeNoCredentials` and `AuthErrorCodeInvalidCredential` are accumulated; invalid credentials take precedence
+if
 no provider succeeds. Internal errors return immediately.
 
 ## Built-in `config-api-key` provider
@@ -56,7 +58,8 @@ The provider accepts these headers:
 - `X-Goog-Api-Key: <key>`
 - `X-Api-Key: <key>`
 
-The query parameters `?key=` and `?auth_token=` are accepted only when `allow-query-auth: true` is configured. Successful
+The query parameters `?key=` and `?auth_token=` are accepted only when `allow-query-auth: true` is configured.
+Successful
 results set `Metadata["source"]` to `authorization`, `x-goog-api-key`, `x-api-key`, `query-key`, or
 `query-auth-token`.
 
@@ -66,7 +69,8 @@ api-keys:
 allow-query-auth: false
 ```
 
-Configured keys must contain at least eight printable ASCII characters. Comparison is constant-time across all configured
+Configured keys must contain at least eight printable ASCII characters. Comparison is constant-time across all
+configured
 keys.
 
 ## Write a custom provider
@@ -83,10 +87,13 @@ import (
     sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 )
 
+//goland:noinspection GoUnusedType
 type provider struct{}
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (*provider) Identifier() string { return "partner-token" }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (p *provider) Authenticate(
     _ context.Context,
     request *http.Request,
@@ -134,7 +141,8 @@ service, err := cliproxy.NewBuilder().
     Build()
 ```
 
-`Build` registers the config-backed provider and initializes the manager snapshot. The service repeats that update after a
+`Build` registers the config-backed provider and initializes the manager snapshot. The service repeats that update after
+a
 configuration change. Custom provider implementations that change at runtime must register the replacement instance and
 refresh the snapshot:
 

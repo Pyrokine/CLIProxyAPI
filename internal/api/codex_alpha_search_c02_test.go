@@ -410,7 +410,7 @@ func TestRouteCodexAlphaSearchRequestUsesExistingInterceptorChain(t *testing.T) 
 	ginContext.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(""))
 	router := &c02RequestRouter{}
 
-	body, headers, routing := routeCodexAlphaSearchRequest(
+	body, headers, routing, errRoute := routeCodexAlphaSearchRequest(
 		router,
 		context.Background(),
 		ginContext,
@@ -418,6 +418,9 @@ func TestRouteCodexAlphaSearchRequestUsesExistingInterceptorChain(t *testing.T) 
 		codexAlphaSearchRouting{ID: "original-session", Model: "original-model"},
 	)
 
+	if errRoute != nil {
+		t.Fatalf("route request: %v", errRoute)
+	}
 	if routing.ID != "routed-session" || routing.Model != "routed-model" {
 		t.Fatalf("routing = %#v, want routed values", routing)
 	}

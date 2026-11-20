@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -89,7 +90,8 @@ func restoreCodexAlphaSearchModel(body, originalBody []byte) []byte {
 		return body
 	}
 	var originalPayload map[string]json.RawMessage
-	if errUnmarshal := json.Unmarshal(originalBody, &originalPayload); errUnmarshal != nil || originalPayload == nil {
+	if errUnmarshal := json.Unmarshal(originalBody, &originalPayload); errUnmarshal != nil ||
+		originalPayload == nil {
 		return body
 	}
 	originalModel, hadOriginalModel := originalPayload["model"]
@@ -105,6 +107,13 @@ func restoreCodexAlphaSearchModel(body, originalBody []byte) []byte {
 		}
 		delete(payload, "model")
 	}
+	if maps.EqualFunc(
+		payload, originalPayload, func(left, right json.RawMessage) bool {
+			return string(left) == string(right)
+		},
+	) {
+		return originalBody
+	}
 	restoredBody, errMarshal := json.Marshal(payload)
 	if errMarshal != nil {
 		return body
@@ -116,10 +125,46 @@ func codexAlphaSearchStatus(err error, fallback int) int {
 	return clienterror.HTTPStatusFromErrorOr(err, fallback)
 }
 
+func codexAlphaSearchTerminationError(
+	response pluginapi.RequestInterceptResponse,
+) *coreexecutor.RequestTerminatedError {
+	if !response.Terminate {
+		return nil
+	}
+	status := response.StatusCode
+	if status < http.StatusOK || status > 599 {
+		status = http.StatusForbidden
+	}
+	return &coreexecutor.RequestTerminatedError{
+		HTTPStatus: status,
+		Header:     response.ResponseHeaders.Clone(),
+		Body:       append([]byte(nil), response.ResponseBody...),
+	}
+}
+
+func codexAlphaSearchErrorResponse(err error) *handlers.ErrorMessage {
+	response := &handlers.ErrorMessage{
+		StatusCode: codexAlphaSearchStatus(err, http.StatusBadGateway),
+		Error:      err,
+	}
+	if terminated, ok := errors.AsType[*coreexecutor.RequestTerminatedError](err); ok {
+		response.DirectResponse = true
+		response.Body = terminated.ResponseBody()
+		response.Headers = terminated.ResponseHeaders()
+	}
+	return response
+}
+
 type codexAlphaSearchRequestRouter interface {
 	HasRequestInterceptors() bool
-	InterceptRequestBeforeAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
-	InterceptRequestAfterAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
+	InterceptRequestBeforeAuth(
+		context.Context,
+		pluginapi.RequestInterceptRequest,
+	) pluginapi.RequestInterceptResponse
+	InterceptRequestAfterAuth(
+		context.Context,
+		pluginapi.RequestInterceptRequest,
+	) pluginapi.RequestInterceptResponse
 }
 
 func routeCodexAlphaSearchRequest(
@@ -128,10 +173,10 @@ func routeCodexAlphaSearchRequest(
 	c *gin.Context,
 	body []byte,
 	routing codexAlphaSearchRouting,
-) ([]byte, http.Header, codexAlphaSearchRouting) {
+) ([]byte, http.Header, codexAlphaSearchRouting, *coreexecutor.RequestTerminatedError) {
 	headers := c.Request.Header.Clone()
 	if router == nil || !router.HasRequestInterceptors() {
-		return body, headers, routing
+		return body, headers, routing, nil
 	}
 	metadata := map[string]any{
 		coreexecutor.RequestedModelMetadataKey: strings.TrimSpace(routing.Model),
@@ -149,6 +194,9 @@ func routeCodexAlphaSearchRequest(
 			Metadata:       metadata,
 		},
 	)
+	if errTerminate := codexAlphaSearchTerminationError(response); errTerminate != nil {
+		return body, headers, routing, errTerminate
+	}
 	if response.Headers != nil {
 		headers = response.Headers.Clone()
 	}
@@ -165,7 +213,7 @@ func routeCodexAlphaSearchRequest(
 			routing = routed
 		}
 	}
-	return body, headers, routing
+	return body, headers, routing, nil
 }
 
 func codexAlphaSearchHeaderValuesEqual(left, right []string) bool {
@@ -214,18 +262,21 @@ func interceptCodexAlphaSearchAfterAuth(
 	router codexAlphaSearchRequestRouter,
 	ctx context.Context,
 	request pluginapi.RequestInterceptRequest,
-) ([]byte, http.Header) {
+) ([]byte, http.Header, *coreexecutor.RequestTerminatedError) {
 	if router == nil || !router.HasRequestInterceptors() {
-		return request.Body, request.Headers
+		return request.Body, request.Headers, nil
 	}
 	response := router.InterceptRequestAfterAuth(ctx, request)
+	if errTerminate := codexAlphaSearchTerminationError(response); errTerminate != nil {
+		return request.Body, request.Headers, errTerminate
+	}
 	if response.Headers != nil {
 		request.Headers = response.Headers.Clone()
 	}
 	if len(response.Body) > 0 {
 		request.Body = response.Body
 	}
-	return request.Body, request.Headers
+	return request.Body, request.Headers, nil
 }
 
 func homeSelectionAttemptContext(
@@ -255,7 +306,10 @@ func (s *Server) codexAlphaSearchWithRouter(c *gin.Context, router codexAlphaSea
 
 	rawBody, errRead := io.ReadAll(io.LimitReader(c.Request.Body, codexAlphaSearchRequestLimit+1))
 	if errRead != nil {
-		c.JSON(codexAlphaSearchStatus(errRead, http.StatusBadRequest), gin.H{"error": "Failed to read search request"})
+		c.JSON(
+			codexAlphaSearchStatus(errRead, http.StatusBadRequest),
+			gin.H{"error": "Failed to read search request"},
+		)
 		return
 	}
 	if len(rawBody) > codexAlphaSearchRequestLimit {
@@ -277,7 +331,11 @@ func (s *Server) codexAlphaSearchWithRouter(c *gin.Context, router codexAlphaSea
 	_ = json.Unmarshal(body, &routing)
 	requestedModel := strings.TrimSpace(routing.Model)
 	ctx := util.WithGinContext(c.Request.Context(), c)
-	body, selectionHeaders, routing := routeCodexAlphaSearchRequest(router, ctx, c, body, routing)
+	body, selectionHeaders, routing, errRoute := routeCodexAlphaSearchRequest(router, ctx, c, body, routing)
+	if errRoute != nil {
+		s.handlers.WriteErrorResponse(c, codexAlphaSearchErrorResponse(errRoute))
+		return
+	}
 	if sessionID := cliproxysession.NormalizeExplicitID(routing.ID); sessionID != "" {
 		selectionHeaders.Set("X-Session-ID", sessionID)
 	}
@@ -291,182 +349,233 @@ func (s *Server) codexAlphaSearchWithRouter(c *gin.Context, router codexAlphaSea
 		},
 	}
 
-	var selection *auth.HomeDispatchSelection
-	var selected *auth.Auth
-	var errSelection error
-	if s.handlers.AuthManager.HomeEnabled() {
-		selection, errSelection = s.handlers.AuthManager.SelectHomeAuthWithCredentialPolicy(
-			ctx,
-			"codex",
-			selectionModel,
-			auth.CredentialPolicyCodexAlphaSearchV1,
-			selectionOpts,
-		)
-		if selection != nil {
-			selected = selection.CloneAuth()
-		}
-	} else {
-		selected, errSelection = s.handlers.AuthManager.SelectAuthWithCredentialPolicy(
-			ctx,
-			"codex",
-			selectionModel,
-			auth.CredentialPolicyCodexAlphaSearchV1,
-			selectionOpts,
-		)
-	}
-	if errSelection != nil {
-		for _, value := range auth.SafeResponseHeaders(errSelection).Values("Retry-After") {
-			c.Writer.Header().Add("Retry-After", value)
-		}
-		c.JSON(
-			codexAlphaSearchStatus(errSelection, http.StatusServiceUnavailable), gin.H{"error": errSelection.Error()},
-		)
-		return
-	}
-	if selected == nil {
-		if selection != nil {
-			selection.End("missing_auth")
-		}
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth unavailable"})
-		return
-	}
-	logging.SetGinCPATraceID(c, selected.EnsureIndex())
-
-	if selection != nil {
-		attemptCtx, releaseAttempt, errAttempt := homeSelectionAttemptContext(ctx, selection)
-		if errAttempt != nil {
-			selection.End("attempt_bind_failed")
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errAttempt.Error()})
-			return
-		}
-		ctx = attemptCtx
-		defer releaseAttempt()
-	}
-
-	upstreamRequestBody := sanitizeCodexAlphaSearchBody(body)
-	baseHeaders := codexAlphaSearchUpstreamHeaders(c.Request.Header, selectionHeaders)
-
-	errMissingBaseURL := errors.New("codex Alpha Search API key base URL unavailable")
-	performRequest := func(current *auth.Auth) (*http.Response, error) {
-		headers := baseHeaders.Clone()
-		if accountID, ok := current.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
-			headers.Set("Chatgpt-Account-Id", accountID)
-		}
-		upstreamURL := codexAlphaSearchOAuthURL
-		upstreamModel := requestedModel
-		requestBody := restoreCodexAlphaSearchModel(upstreamRequestBody, clientBody)
-		if current.AuthKind() == auth.AuthKindAPIKey {
-			baseURL := ""
-			if current.Attributes != nil {
-				baseURL = strings.TrimSpace(current.Attributes["base_url"])
+	policyError := s.handlers.ExecuteHTTPWithAPIKeyPolicy(
+		ctx, codexAlphaSearchSourceFormat, "codex", requestedModel, selectionModel,
+		func(ctx context.Context, model string, dispatch func()) *handlers.ErrorMessage {
+			if model != selectionModel {
+				body = rewriteCodexAlphaSearchModel(body, model)
+				clientBody = rewriteCodexAlphaSearchModel(clientBody, model)
 			}
-			if baseURL == "" {
-				return nil, errMissingBaseURL
-			}
-			upstreamURL = strings.TrimRight(baseURL, "/") + "/alpha/search"
-			upstreamModel = s.handlers.AuthManager.ResolveExecutionModel(current, selectionModel)
-			requestBody = rewriteCodexAlphaSearchModel(upstreamRequestBody, upstreamModel)
-		}
-		requestBody, headers = interceptCodexAlphaSearchAfterAuth(
-			router,
-			ctx,
-			pluginapi.RequestInterceptRequest{
-				SourceFormat:   codexAlphaSearchSourceFormat,
-				ToFormat:       codexAlphaSearchSourceFormat,
-				Model:          upstreamModel,
-				RequestedModel: requestedModel,
-				Headers:        headers,
-				Body:           requestBody,
-				Metadata:       selectionOpts.Metadata,
-			},
-		)
-		req, errRequest := s.handlers.AuthManager.NewHttpRequest(
-			ctx,
-			current,
-			http.MethodPost,
-			upstreamURL,
-			requestBody,
-			headers,
-		)
-		if errRequest != nil {
-			return nil, errRequest
-		}
-		executor.RecordAPIRequest(
-			ctx,
-			s.configSnapshot(),
-			upstreamURL,
-			http.MethodPost,
-			req.Header.Clone(),
-			requestBody,
-			"codex",
-			current,
-		)
-		return s.handlers.AuthManager.HttpRequest(ctx, current, req)
-	}
-
-	if errContext := ctx.Err(); errContext != nil {
-		if selection != nil {
-			selection.End("attempt_canceled")
-		}
-		c.JSON(codexAlphaSearchStatus(errContext, http.StatusRequestTimeout), gin.H{"error": errContext.Error()})
-		return
-	}
-	response, errRequest := performRequest(selected)
-	if errRequest != nil {
-		if selection != nil {
-			if errors.Is(errRequest, errMissingBaseURL) {
-				selection.End("missing_base_url")
+			selectionModel = model
+			selectionOpts.Metadata[coreexecutor.RequestedModelMetadataKey] = model
+			var selection *auth.HomeDispatchSelection
+			var selected *auth.Auth
+			var errSelection error
+			if s.handlers.AuthManager.HomeEnabled() {
+				selection, errSelection = s.handlers.AuthManager.SelectHomeAuthWithCredentialPolicy(
+					ctx,
+					"codex",
+					selectionModel,
+					auth.CredentialPolicyCodexAlphaSearchV1,
+					selectionOpts,
+				)
+				if selection != nil {
+					selected = selection.CloneAuth()
+				}
 			} else {
-				selection.End("request_failed")
+				selected, errSelection = s.handlers.AuthManager.SelectAuthWithCredentialPolicy(
+					ctx,
+					"codex",
+					selectionModel,
+					auth.CredentialPolicyCodexAlphaSearchV1,
+					selectionOpts,
+				)
 			}
-		}
-		executor.RecordAPIResponseError(ctx, s.configSnapshot(), errRequest)
-		c.JSON(codexAlphaSearchStatus(errRequest, http.StatusBadGateway), gin.H{"error": errRequest.Error()})
-		return
-	}
+			if errSelection != nil {
+				return &handlers.ErrorMessage{
+					StatusCode: codexAlphaSearchStatus(errSelection, http.StatusServiceUnavailable),
+					Error:      errSelection, Headers: auth.SafeResponseHeaders(errSelection),
+				}
+			}
+			if selected == nil {
+				if selection != nil {
+					selection.End("missing_auth")
+				}
+				return &handlers.ErrorMessage{
+					StatusCode: http.StatusServiceUnavailable, Error: errors.New("codex auth unavailable"),
+				}
+			}
+			logging.SetGinCPATraceID(c, selected.EnsureIndex())
 
-	closeResponseBody := func() error {
-		errClose := response.Body.Close()
-		if errClose != nil {
-			log.WithError(errClose).Error("codex alpha search: close response body")
-		}
-		return errClose
-	}
-	if selection != nil {
-		if errBind := selection.Bind(closeResponseBody); errBind != nil {
-			selection.End("response_bind_failed")
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
-			return
-		}
-		defer selection.End("response_closed")
-	} else {
-		defer func() { _ = closeResponseBody() }()
-	}
+			if selection != nil {
+				attemptCtx, releaseAttempt, errAttempt := homeSelectionAttemptContext(ctx, selection)
+				if errAttempt != nil {
+					selection.End("attempt_bind_failed")
+					return &handlers.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: errAttempt}
+				}
+				ctx = attemptCtx
+				defer releaseAttempt()
+			}
 
-	executor.RecordAPIResponseMetadata(ctx, s.configSnapshot(), response.StatusCode, response.Header.Clone())
-	upstreamBody, errResponse := io.ReadAll(io.LimitReader(response.Body, codexAlphaSearchResponseLimit+1))
-	if errResponse != nil {
-		executor.RecordAPIResponseError(ctx, s.configSnapshot(), errResponse)
-		c.JSON(
-			codexAlphaSearchStatus(errResponse, http.StatusBadGateway),
-			gin.H{"error": "Failed to read Codex search response"},
-		)
-		return
+			upstreamRequestBody := sanitizeCodexAlphaSearchBody(body)
+			baseHeaders := codexAlphaSearchUpstreamHeaders(c.Request.Header, selectionHeaders)
+
+			errMissingBaseURL := errors.New("codex Alpha Search API key base URL unavailable")
+			performRequest := func(current *auth.Auth) (*http.Response, error) {
+				headers := baseHeaders.Clone()
+				if accountID, ok := current.Metadata["account_id"].(string); ok &&
+					strings.TrimSpace(accountID) != "" {
+					headers.Set("Chatgpt-Account-Id", accountID)
+				}
+				upstreamURL := codexAlphaSearchOAuthURL
+				upstreamModel := requestedModel
+				requestBody := restoreCodexAlphaSearchModel(upstreamRequestBody, clientBody)
+				if current.AuthKind() == auth.AuthKindAPIKey {
+					baseURL := ""
+					if current.Attributes != nil {
+						baseURL = strings.TrimSpace(current.Attributes["base_url"])
+					}
+					if baseURL == "" {
+						return nil, errMissingBaseURL
+					}
+					upstreamURL = strings.TrimRight(baseURL, "/") + "/alpha/search"
+					upstreamModel = s.handlers.AuthManager.ResolveExecutionModel(current, selectionModel)
+					requestBody = rewriteCodexAlphaSearchModel(upstreamRequestBody, upstreamModel)
+				}
+				requestBody, headers, errIntercept := interceptCodexAlphaSearchAfterAuth(
+					router,
+					ctx,
+					pluginapi.RequestInterceptRequest{
+						SourceFormat:   codexAlphaSearchSourceFormat,
+						ToFormat:       codexAlphaSearchSourceFormat,
+						Model:          upstreamModel,
+						RequestedModel: requestedModel,
+						Headers:        headers,
+						Body:           requestBody,
+						Metadata:       selectionOpts.Metadata,
+					},
+				)
+				if errIntercept != nil {
+					return nil, errIntercept
+				}
+				req, errRequest := s.handlers.AuthManager.NewHttpRequest(
+					ctx,
+					current,
+					http.MethodPost,
+					upstreamURL,
+					requestBody,
+					headers,
+				)
+				if errRequest != nil {
+					return nil, errRequest
+				}
+				executor.RecordAPIRequest(
+					ctx,
+					s.configSnapshot(),
+					upstreamURL,
+					http.MethodPost,
+					req.Header.Clone(),
+					requestBody,
+					"codex",
+					current,
+				)
+				dispatch()
+				return s.handlers.AuthManager.HttpRequest(ctx, current, req)
+			}
+
+			if errContext := ctx.Err(); errContext != nil {
+				if selection != nil {
+					selection.End("attempt_canceled")
+				}
+				return &handlers.ErrorMessage{
+					StatusCode: codexAlphaSearchStatus(
+						errContext,
+						http.StatusRequestTimeout,
+					), Error: errContext,
+				}
+			}
+			response, errRequest := performRequest(selected)
+			if errRequest != nil {
+				if _, ok := errors.AsType[*coreexecutor.RequestTerminatedError](errRequest); ok {
+					if selection != nil {
+						selection.End("request_rejected")
+					}
+					return codexAlphaSearchErrorResponse(errRequest)
+				}
+				if selection != nil {
+					if errors.Is(errRequest, errMissingBaseURL) {
+						selection.End("missing_base_url")
+					} else {
+						selection.End("request_failed")
+					}
+				}
+				executor.RecordAPIResponseError(ctx, s.configSnapshot(), errRequest)
+				return codexAlphaSearchErrorResponse(errRequest)
+			}
+
+			closeResponseBody := func() error {
+				errClose := response.Body.Close()
+				if errClose != nil {
+					log.WithError(errClose).Error("codex alpha search: close response body")
+				}
+				return errClose
+			}
+			if selection != nil {
+				if errBind := selection.Bind(closeResponseBody); errBind != nil {
+					if response.StatusCode == http.StatusUnauthorized {
+						s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
+					}
+					selection.End("response_bind_failed")
+					return &handlers.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: errBind}
+				}
+				defer selection.End("response_closed")
+			} else {
+				defer func() { _ = closeResponseBody() }()
+			}
+
+			executor.RecordAPIResponseMetadata(
+				ctx,
+				s.configSnapshot(),
+				response.StatusCode,
+				response.Header.Clone(),
+				response,
+			)
+			upstreamBody, errResponse := io.ReadAll(
+				io.LimitReader(response.Body, codexAlphaSearchResponseLimit+1),
+			)
+			executor.AppendAPIResponseChunk(ctx, s.configSnapshot(), upstreamBody)
+			if selection != nil && response.StatusCode == http.StatusUnauthorized {
+				s.handlers.AuthManager.ReportHomeUnauthorized(
+					ctx,
+					selected,
+					"codex",
+					selectionModel,
+					upstreamBody,
+				)
+			}
+			if errResponse != nil {
+				executor.RecordAPIResponseError(ctx, s.configSnapshot(), errResponse)
+				return &handlers.ErrorMessage{
+					StatusCode: codexAlphaSearchStatus(errResponse, http.StatusBadGateway),
+					Error:      errors.New("failed to read Codex search response"),
+				}
+			}
+			if len(upstreamBody) > codexAlphaSearchResponseLimit {
+				errTooLarge := errors.New("codex search response body too large")
+				executor.RecordAPIResponseError(ctx, s.configSnapshot(), errTooLarge)
+				return &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errTooLarge}
+			}
+			if selection != nil && response.StatusCode == http.StatusUnauthorized {
+				log.WithField("status", response.StatusCode).Warnf(
+					"codex alpha search upstream request failed: "+
+						"%s", logging.SafeDiagnosticForLog(string(upstreamBody)),
+				)
+			}
+			if contentType := response.Header.Get("Content-Type"); contentType != "" {
+				c.Header("Content-Type", contentType)
+			}
+			c.Status(response.StatusCode)
+			if _, errWrite := c.Writer.Write(upstreamBody); errWrite != nil {
+				return &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errWrite}
+			}
+			return nil
+		},
+	)
+	if policyError != nil {
+		if !c.Writer.Written() {
+			s.handlers.WriteErrorResponse(c, policyError)
+		} else {
+			log.WithError(policyError.Error).Error("codex alpha search response delivery failed")
+		}
 	}
-	if len(upstreamBody) > codexAlphaSearchResponseLimit {
-		errTooLarge := errors.New("codex search response body too large")
-		executor.RecordAPIResponseError(ctx, s.configSnapshot(), errTooLarge)
-		c.JSON(http.StatusBadGateway, gin.H{"error": errTooLarge.Error()})
-		return
-	}
-	executor.AppendAPIResponseChunk(ctx, s.configSnapshot(), upstreamBody)
-	if selection != nil && response.StatusCode == http.StatusUnauthorized {
-		s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, upstreamBody)
-		log.WithField("status", response.StatusCode).Warnf("codex alpha search upstream request failed: %s", logging.SafeDiagnosticForLog(string(upstreamBody)))
-	}
-	if contentType := response.Header.Get("Content-Type"); contentType != "" {
-		c.Header("Content-Type", contentType)
-	}
-	c.Status(response.StatusCode)
-	_, _ = c.Writer.Write(upstreamBody)
 }

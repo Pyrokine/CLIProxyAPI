@@ -23,6 +23,8 @@ func GenerateRandomState() (string, error) {
 }
 
 // OAuthCallback captures the parsed OAuth callback parameters.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type OAuthCallback struct {
 	Code             string
 	State            string

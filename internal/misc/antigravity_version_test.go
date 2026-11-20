@@ -55,18 +55,44 @@ func TestAntigravityLatestVersionUsesCurrentCLIFallback(t *testing.T) {
 }
 
 func TestAntigravityUserAgentUsesAgyCLIFamily(t *testing.T) {
-	restore := overrideAntigravityVersionCacheForTest(t, "1.2.3", time.Now().Add(time.Hour))
+	for _, version := range []string{"1.2.3", "1.0.8"} {
+		t.Run(
+			version, func(t *testing.T) {
+				restore := overrideAntigravityVersionCacheForTest(t, version, time.Now().Add(time.Hour))
+				defer restore()
+
+				want := "antigravity/cli/" + version + " (aidev_client; os_type=darwin; arch=arm64)"
+				if got := AntigravityUserAgent(); got != want {
+					t.Fatalf("AntigravityUserAgent() = %q, want %q", got, want)
+				}
+				if got := AntigravityLoadCodeAssistUserAgent(""); got != want {
+					t.Fatalf("AntigravityLoadCodeAssistUserAgent() = %q, want %q", got, want)
+				}
+				if got := AntigravityOnboardUserUserAgent(""); got != want+" google-api-nodejs-client/10.3.0" {
+					t.Fatalf("AntigravityOnboardUserUserAgent() = %q", got)
+				}
+			},
+		)
+	}
+}
+
+func TestAntigravityVersionFromUserAgentParsesAidevClientSuffix(t *testing.T) {
+	ua := "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
+	if got := AntigravityVersionFromUserAgent(ua); got != "1.0.13" {
+		t.Fatalf("AntigravityVersionFromUserAgent() = %q, want %q", got, "1.0.13")
+	}
+}
+
+func TestAntigravityLoadCodeAssistUserAgentUsesShortUA(t *testing.T) {
+	restore := overrideAntigravityVersionCacheForTest(t, "1.0.13", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/cli/1.2.3 (aidev_client; os_type=darwin; arch=arm64)"
-	if got := AntigravityUserAgent(); got != want {
-		t.Fatalf("AntigravityUserAgent() = %q, want %q", got, want)
-	}
+	want := "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
 	if got := AntigravityLoadCodeAssistUserAgent(""); got != want {
 		t.Fatalf("AntigravityLoadCodeAssistUserAgent() = %q, want %q", got, want)
 	}
-	if got := AntigravityOnboardUserUserAgent(""); got != want+" google-api-nodejs-client/10.3.0" {
-		t.Fatalf("AntigravityOnboardUserUserAgent() = %q", got)
+	if got := AntigravityLoadCodeAssistUserAgent(want); got != want {
+		t.Fatalf("AntigravityLoadCodeAssistUserAgent(configured) = %q, want %q", got, want)
 	}
 }
 
@@ -165,6 +191,7 @@ func TestFetchAntigravityLatestVersionFallsBackToCLIGCSList(t *testing.T) {
 					http.Error(w, "temporary outage", http.StatusInternalServerError)
 				case "/gcs":
 					w.Header().Set("Content-Type", "application/xml")
+					//goland:noinspection HttpUrlsUsage
 					_, _ = w.Write(
 						[]byte(`<?xml version='1.0' encoding='UTF-8'?>
 <ListBucketResult xmlns='http://doc.s3.amazonaws.com/2006-03-01'>

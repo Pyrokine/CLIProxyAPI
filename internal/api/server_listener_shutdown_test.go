@@ -37,9 +37,11 @@ func (l *shutdownTestListener) Addr() net.Addr {
 
 func TestServerGinClientIPIgnoresUntrustedForwarding(t *testing.T) {
 	server := newTestServer(t)
-	server.engine.GET("/test-client-ip", func(c *gin.Context) {
-		c.String(http.StatusOK, c.ClientIP())
-	})
+	server.engine.GET(
+		"/test-client-ip", func(c *gin.Context) {
+			c.String(http.StatusOK, c.ClientIP())
+		},
+	)
 	request := httptest.NewRequest(http.MethodGet, "/test-client-ip", nil)
 	request.RemoteAddr = "198.51.100.20:43123"
 	request.Header.Set("X-Forwarded-For", "203.0.113.5")

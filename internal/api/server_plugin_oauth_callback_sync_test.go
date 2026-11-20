@@ -16,7 +16,10 @@ func TestPluginOAuthGETCallbackRouteUsesPendingStateWithoutManagementKey(t *test
 	recorder := httptest.NewRecorder()
 	server.engine.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNotFound || recorder.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("uncredentialed callback status = %d headers = %v, body = %s", recorder.Code, recorder.Header(), recorder.Body.String())
+		t.Fatalf(
+			"uncredentialed callback status = %d headers = %v, body = %s", recorder.Code, recorder.Header(),
+			recorder.Body.String(),
+		)
 	}
 
 	next, err := proxyconfig.Clone(server.cfg)
@@ -25,14 +28,18 @@ func TestPluginOAuthGETCallbackRouteUsesPendingStateWithoutManagementKey(t *test
 	}
 	next.TLS.RequireForAuth = true
 	server.mgmt.SetConfig(next)
-	secureRequest := httptest.NewRequest(http.MethodGet, "/v0/management/oauth-callback?state=missing&code=ignored", nil)
+	secureRequest := httptest.NewRequest(
+		http.MethodGet, "/v0/management/oauth-callback?state=missing&code=ignored", nil,
+	)
 	secureRequest.RemoteAddr = "203.0.113.21:12345"
 	secureRecorder := httptest.NewRecorder()
 	server.engine.ServeHTTP(secureRecorder, secureRequest)
 	if secureRecorder.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("HTTP callback status = %d, want TLS requirement", secureRecorder.Code)
 	}
-	loopbackRequest := httptest.NewRequest(http.MethodGet, "/v0/management/oauth-callback?state=missing&code=ignored", nil)
+	loopbackRequest := httptest.NewRequest(
+		http.MethodGet, "/v0/management/oauth-callback?state=missing&code=ignored", nil,
+	)
 	loopbackRequest.RemoteAddr = "127.0.0.1:12345"
 	loopbackRecorder := httptest.NewRecorder()
 	server.engine.ServeHTTP(loopbackRecorder, loopbackRequest)

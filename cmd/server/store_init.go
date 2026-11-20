@@ -37,7 +37,7 @@ type storeResult struct {
 // a local file store.
 func initStoreAndConfig(
 	wd, configPath string,
-	isCloudDeploy bool,
+	isCloudDeploy, commandMode bool,
 	lookupEnv func(...string) (string, bool),
 	homeJWT string,
 	homeDisableClusterDiscovery bool,
@@ -181,6 +181,20 @@ func initStoreAndConfig(
 		}
 		tokenStore = sdkAuth.NewFileTokenStore()
 	}
+	missingConfigForLogin := false
+	if err != nil && commandMode && !isCloudDeploy && !configLoadedFromHome && !usePostgresStore && !useObjectStore &&
+		!useGitStore {
+		_, primaryErr := os.Stat(configFilePath)
+		_, backupErr := os.Stat(config.LastGoodPath(configFilePath))
+		if errors.Is(primaryErr, fs.ErrNotExist) && errors.Is(backupErr, fs.ErrNotExist) {
+			cfg = &config.Config{CredentialInFlight: config.DefaultCredentialInFlightConfig()}
+			err = nil
+			missingConfigForLogin = true
+			log.WithField(
+				"config", configFilePath,
+			).Info("configuration is absent; starting login with default settings")
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
@@ -188,8 +202,8 @@ func initStoreAndConfig(
 		cfg = &config.Config{}
 	}
 
-	// 启动时补齐源文件中的默认值
-	if !cfg.Home.Enabled && !isCloudDeploy && configFilePath != "" {
+	// 启动时为源文件填充默认值
+	if !missingConfigForLogin && !cfg.Home.Enabled && !isCloudDeploy && configFilePath != "" {
 		config.EnsureDefaultsInFile(configFilePath, cfg)
 	}
 

@@ -10,6 +10,8 @@ import (
 )
 
 // Context encapsulates execution state shared across middleware, translators, and executors.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Context struct {
 	// Request encapsulates the provider facing request payload.
 	Request cliproxyexecutor.Request
@@ -24,6 +26,8 @@ type Context struct {
 }
 
 // Hook captures middleware callbacks around execution.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Hook interface {
 	BeforeExecute(ctx context.Context, execCtx *Context)
 	AfterExecute(ctx context.Context, execCtx *Context, resp cliproxyexecutor.Response, err error)
@@ -31,6 +35,8 @@ type Hook interface {
 }
 
 // HookFunc aggregates optional hook implementations.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type HookFunc struct {
 	Before func(context.Context, *Context)
 	After  func(context.Context, *Context, cliproxyexecutor.Response, error)
@@ -59,6 +65,8 @@ func (h HookFunc) OnStreamChunk(ctx context.Context, execCtx *Context, chunk cli
 }
 
 // RoundTripperProvider allows injection of custom HTTP transports per auth entry.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type RoundTripperProvider interface {
 	RoundTripperFor(auth *cliproxyauth.Auth) http.RoundTripper
 }

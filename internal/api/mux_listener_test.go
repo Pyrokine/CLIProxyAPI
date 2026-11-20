@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -44,6 +45,75 @@ func TestMuxListenerPutAfterClose(t *testing.T) {
 	defer func() { _ = peer.Close() }()
 	if errPut := listener.put(conn); !errors.Is(errPut, net.ErrClosed) {
 		t.Fatalf("put after close error = %v, want net.ErrClosed", errPut)
+	}
+}
+
+func TestMuxListener_PutAfterClose(t *testing.T) {
+	listener := newMuxListener(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8080}, 16)
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	for i := range 500 {
+		conn, peer := net.Pipe()
+		err := listener.put(conn)
+		_ = conn.Close()
+		_ = peer.Close()
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("put after Close at iteration %d error = %v, want %v", i, err, net.ErrClosed)
+		}
+	}
+}
+
+func TestMuxListener_ConcurrentBlockedPutDuringClose(t *testing.T) {
+	const bufferSize = 2
+	const numGoroutines = 16
+	listener := newMuxListener(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8080}, bufferSize)
+	defer func() { _ = listener.Close() }()
+	for range bufferSize {
+		conn, peer := net.Pipe()
+		// 缓冲连接需保留至并发阻塞检查结束
+		// noinspection GoDeferInLoop
+		defer func() {
+			_ = conn.Close()
+			_ = peer.Close()
+		}()
+		if err := listener.put(conn); err != nil {
+			t.Fatalf("initial put failed: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	putErrors := make([]error, numGoroutines)
+	started := make(chan struct{})
+	var readyCount sync.WaitGroup
+	readyCount.Add(numGoroutines)
+	for i := range numGoroutines {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			conn, peer := net.Pipe()
+			defer func() {
+				_ = conn.Close()
+				_ = peer.Close()
+			}()
+			readyCount.Done()
+			<-started
+			putErrors[idx] = listener.put(conn)
+		}(i)
+	}
+	readyCount.Wait()
+	close(started)
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	wg.Wait()
+	for idx, err := range putErrors {
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("goroutine %d put error = %v, want %v", idx, err, net.ErrClosed)
+		}
+	}
+	if _, err := listener.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Accept after Close returned %v, want %v", err, net.ErrClosed)
 	}
 }
 

@@ -135,6 +135,19 @@ func (s *Service) runHomeSubscriber(
 	registry.SetReleaseSink(releaseFlusher.MarkDirty)
 	cancelBound := atomic.Int64{}
 	cancelBound.Store(int64(internalconfig.CredentialConcurrencyConfig{}.WithDefaults().CPACancelBound))
+	defer func() {
+		if registry == nil {
+			return
+		}
+		registry.SetReleaseSink(nil)
+		drainCtx, cancelDrain := context.WithTimeout(
+			context.WithoutCancel(parentCtx), durationOrDefault(time.Duration(cancelBound.Load())),
+		)
+		defer cancelDrain()
+		if err := registry.Drain(drainCtx); err != nil && !errors.Is(err, executionregistry.ErrRegistryClosed) {
+			supervisor.fail(fmt.Errorf("drain detached Home execution registry: %w", err))
+		}
+	}()
 
 	for homeCtx.Err() == nil {
 		client := previousClient
@@ -157,6 +170,56 @@ func (s *Service) runHomeSubscriber(
 
 		var published atomic.Bool
 		var background sync.WaitGroup
+		updates := make(chan *config.Config, 1)
+		ready := make(chan struct{})
+		var configErr error
+		background.Go(
+			func() {
+				select {
+				case <-ready:
+				case <-lifetimeCtx.Done():
+					return
+				}
+				for {
+					var parsed *config.Config
+					select {
+					case parsed = <-updates:
+					case <-lifetimeCtx.Done():
+						return
+					}
+					if lifetimeCtx.Err() != nil {
+						return
+					}
+					if err := s.applyHomeOverlayWithClient(lifetimeCtx, parsed, client); err != nil {
+						if !published.Load() {
+							configErr = err
+							lifetimeCancel()
+							return
+						}
+						log.WithError(err).Warn("failed to apply Home config update")
+						continue
+					}
+					if published.Load() {
+						continue
+					}
+					if !s.publishHomeLifetime(
+						homeCtx, lifetimeCtx, generation, client, registry, time.Duration(cancelBound.Load()),
+					) {
+						return
+					}
+					published.Store(true)
+					if s.coreManager != nil {
+						background.Go(
+							func() {
+								s.coreManager.StartHomeInFlightPublisher(lifetimeCtx, client, registry)
+							},
+						)
+					}
+					background.Go(func() { s.runHomeUsageForwarder(lifetimeCtx, client) })
+					background.Go(func() { s.runHomePluginTaskReports(lifetimeCtx, client) })
+				}
+			},
+		)
 		errRun := client.RunConfigSubscriberLifetime(
 			lifetimeCtx, func(raw []byte) error {
 				parsed, errParse := config.ParseConfigBytes(raw)
@@ -166,7 +229,9 @@ func (s *Service) runHomeSubscriber(
 				if errLifecycle := client.SetLifecycleConfig(parsed.CredentialConcurrency); errLifecycle != nil {
 					return errLifecycle
 				}
-				publisherConfig, errPublisher := coreauth.HomeInFlightPublisherConfigFromConfig(parsed.CredentialInFlight)
+				publisherConfig, errPublisher := coreauth.HomeInFlightPublisherConfigFromConfig(
+					parsed.CredentialInFlight,
+				)
 				if errPublisher != nil {
 					return errPublisher
 				}
@@ -175,27 +240,28 @@ func (s *Service) runHomeSubscriber(
 				}
 				registry.ObserveBarrier(parsed.CredentialConcurrency.ObservationBarrierRevision)
 				cancelBound.Store(int64(parsed.CredentialConcurrency.WithDefaults().CPACancelBound))
-				return s.applyHomeOverlayWithClient(lifetimeCtx, parsed, client)
-			}, func() {
-				if !s.publishHomeLifetime(
-					homeCtx, lifetimeCtx, generation, client, registry, time.Duration(cancelBound.Load()),
-				) {
-					return
+				// 新的完整配置只替换等待中的配置，当前更新继续串行执行
+				for {
+					select {
+					case updates <- parsed:
+						return nil
+					case <-lifetimeCtx.Done():
+						return lifetimeCtx.Err()
+					default:
+						select {
+						case <-updates:
+						default:
+						}
+					}
 				}
-				published.Store(true)
-				if s.coreManager != nil {
-					background.Go(func() {
-						s.coreManager.StartHomeInFlightPublisher(lifetimeCtx, client, registry)
-					})
-				}
-				background.Go(func() {
-					s.runHomeUsageForwarder(lifetimeCtx, client)
-				})
-			},
+			}, func() { close(ready) },
 		)
 
 		lifetimeCancel()
 		background.Wait()
+		if configErr != nil {
+			errRun = configErr
+		}
 		s.detachHomeLifetime(client, registry)
 
 		retry := errRun != nil && homeCtx.Err() == nil
@@ -214,7 +280,8 @@ func (s *Service) runHomeSubscriber(
 						"settle pending Home dispatches before subscriber replacement: %w", errPending,
 					),
 				)
-				log.WithError(errPending).Error("failed to settle pending Home dispatches before subscriber replacement")
+				log.WithError(errPending).
+					Error("failed to settle pending Home dispatches before subscriber replacement")
 				return
 			}
 
@@ -226,6 +293,7 @@ func (s *Service) runHomeSubscriber(
 				registry.SetReleaseSink(nil)
 				drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(parentCtx), settleBound)
 				errDrain := registry.Drain(drainCtx)
+				registry = nil
 				cancelDrain()
 				if errDrain != nil && !errors.Is(errDrain, executionregistry.ErrRegistryClosed) {
 					supervisor.fail(
@@ -233,7 +301,8 @@ func (s *Service) runHomeSubscriber(
 							"drain Home executions after unsafe subscriber replacement: %w", errDrain,
 						),
 					)
-					log.WithError(errDrain).Error("failed to drain Home executions after unsafe subscriber replacement")
+					log.WithError(errDrain).
+						Error("failed to drain Home executions after unsafe subscriber replacement")
 					return
 				}
 				client.SuppressTakeover()
@@ -252,6 +321,7 @@ func (s *Service) runHomeSubscriber(
 		drainBound := durationOrDefault(time.Duration(cancelBound.Load()))
 		drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(parentCtx), drainBound)
 		errDrain := registry.Drain(drainCtx)
+		registry = nil
 		var errFlush error
 		if errDrain == nil || errors.Is(errDrain, executionregistry.ErrRegistryClosed) {
 			errFlush = releaseFlusher.Flush(drainCtx)
@@ -279,7 +349,11 @@ func (s *Service) runHomeSubscriber(
 }
 
 func unsafeHomeLifetimeReplacement(client *home.Client, err error) bool {
-	return client != nil && (client.AmbiguousDispatch() || client.LegacyMembership() || home.IsMembershipTakeoverUnavailableError(err) || home.IsLegacyMembershipProtocolError(err))
+	return client != nil &&
+		(client.AmbiguousDispatch() ||
+			client.LegacyMembership() ||
+			home.IsMembershipTakeoverUnavailableError(err) ||
+			home.IsLegacyMembershipProtocolError(err))
 }
 
 func durationOrDefault(value time.Duration) time.Duration {

@@ -74,6 +74,28 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 	return server
 }
 
+func TestConfigCommitUpdatesQuotaScheduler(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	server := newTestServer(t)
+	t.Cleanup(server.quotaScheduler.Stop)
+	updated := *server.configSnapshot()
+	for _, settings := range []proxyconfig.QuotaRefresh{
+		{Enabled: true, Interval: 123, MaxInterval: 456},
+		{Enabled: true, Interval: 234, MaxInterval: 567},
+		{Enabled: false, Interval: 345, MaxInterval: 678},
+	} {
+		updated.QuotaRefresh = settings
+		server.UpdateClientsForConfigCommit(context.Background(), &updated, 1)
+		got := server.quotaScheduler.GetConfig()
+		want := quota.Config{
+			Enabled: settings.Enabled, Interval: settings.Interval, MaxInterval: settings.MaxInterval,
+		}
+		if got != want {
+			t.Fatalf("quota scheduler configuration = %#v, want %#v", got, want)
+		}
+	}
+}
+
 func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-claude-model-list-cloaking-hot-reload"
@@ -113,7 +135,9 @@ func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 	assertModelID(modelID)
 }
 
-const artifactTestPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+//goland:noinspection SpellCheckingInspection
+const artifactTestPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/" +
+	"p9sAAAAASUVORK5CYII="
 
 type imageArtifactIntegrationExecutor struct{}
 
@@ -190,6 +214,7 @@ func TestServerStopContinuesResourceCleanupAfterHTTPShutdownError(t *testing.T) 
 	clientDone := make(chan struct{})
 	go func() {
 		defer close(clientDone)
+		//goland:noinspection HttpUrlsUsage
 		response, errGet := http.Get("http://" + listener.Addr().String())
 		if errGet == nil {
 			_ = response.Body.Close()
@@ -321,10 +346,14 @@ func TestConfigYAMLTrustedProxiesApplyAndClearWithoutRestart(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-password")
 	var observed access.ClientAddress
 	var resolved bool
-	server := newTestServerWithOptions(t, WithMiddleware(func(c *gin.Context) {
-		c.Next()
-		observed, resolved = access.ClientAddressFromContext(c.Request.Context())
-	}))
+	server := newTestServerWithOptions(
+		t, WithMiddleware(
+			func(c *gin.Context) {
+				c.Next()
+				observed, resolved = access.ClientAddressFromContext(c.Request.Context())
+			},
+		),
+	)
 	initial := *server.configSnapshot()
 	initial.Port = 8317
 	initial.APIKeys = nil
@@ -361,44 +390,60 @@ func TestConfigYAMLTrustedProxiesApplyAndClearWithoutRestart(t *testing.T) {
 		{"enable-trusted-loopback", []string{"127.0.0.1/32"}, "203.0.113.17", true},
 		{"clear-trusted-loopback", []string{}, "127.0.0.1", false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.name != "cold-untrusted" {
-				baseline := managementRequest(http.MethodGet, "/v0/management/config.yaml", nil, "")
-				if baseline.Code != http.StatusOK || baseline.Header().Get("ETag") == "" {
-					t.Fatalf("read baseline: status=%d body=%s", baseline.Code, baseline.Body.String())
+		t.Run(
+			tc.name, func(t *testing.T) {
+				if tc.name != "cold-untrusted" {
+					baseline := managementRequest(http.MethodGet, "/v0/management/config.yaml", nil, "")
+					if baseline.Code != http.StatusOK || baseline.Header().Get("ETag") == "" {
+						t.Fatalf("read baseline: status=%d body=%s", baseline.Code, baseline.Body.String())
+					}
+					next := *server.configSnapshot()
+					next.RemoteManagement.TrustedProxies = tc.proxies
+					content, err := yaml.Marshal(&next)
+					if err != nil {
+						t.Fatalf("marshal next config: %v", err)
+					}
+					result := managementRequest(
+						http.MethodPut, "/v0/management/config.yaml", bytes.NewReader(content),
+						baseline.Header().Get("ETag"),
+					)
+					if result.Code != http.StatusOK {
+						t.Fatalf("commit config: status=%d body=%s", result.Code, result.Body.String())
+					}
 				}
-				next := *server.configSnapshot()
-				next.RemoteManagement.TrustedProxies = tc.proxies
-				content, err := yaml.Marshal(&next)
-				if err != nil {
-					t.Fatalf("marshal next config: %v", err)
+				if !slices.Equal(server.configSnapshot().RemoteManagement.TrustedProxies, tc.proxies) {
+					t.Fatalf(
+						"runtime trusted proxies = %v, want %v",
+						server.configSnapshot().RemoteManagement.TrustedProxies, tc.proxies,
+					)
 				}
-				result := managementRequest(http.MethodPut, "/v0/management/config.yaml", bytes.NewReader(content), baseline.Header().Get("ETag"))
-				if result.Code != http.StatusOK {
-					t.Fatalf("commit config: status=%d body=%s", result.Code, result.Body.String())
+				for _, path := range []string{"/v0/management/version", "/v1/models"} {
+					req := httptest.NewRequest(http.MethodGet, path, nil)
+					req.RemoteAddr = "127.0.0.1:12345"
+					req.TLS = &tls.ConnectionState{}
+					req.Header.Set("X-Forwarded-For", "203.0.113.17")
+					if path == "/v0/management/version" {
+						req.Header.Set("Authorization", "Bearer test-management-password")
+					}
+					recorder := httptest.NewRecorder()
+					server.engine.ServeHTTP(recorder, req)
+					if recorder.Code != http.StatusUnauthorized {
+						t.Fatalf("%s status = %d, want 401: %s", path, recorder.Code, recorder.Body.String())
+					}
+					if !resolved || observed.Key != tc.wantKey || observed.TrustedPeer != tc.trusted ||
+						observed.DirectLoopback {
+						t.Fatalf(
+							"%s client = %#v, resolved=%v, want key=%q trusted=%v without direct loopback",
+							path,
+							observed,
+							resolved,
+							tc.wantKey,
+							tc.trusted,
+						)
+					}
 				}
-			}
-			if !slices.Equal(server.configSnapshot().RemoteManagement.TrustedProxies, tc.proxies) {
-				t.Fatalf("runtime trusted proxies = %v, want %v", server.configSnapshot().RemoteManagement.TrustedProxies, tc.proxies)
-			}
-			for _, path := range []string{"/v0/management/version", "/v1/models"} {
-				req := httptest.NewRequest(http.MethodGet, path, nil)
-				req.RemoteAddr = "127.0.0.1:12345"
-				req.TLS = &tls.ConnectionState{}
-				req.Header.Set("X-Forwarded-For", "203.0.113.17")
-				if path == "/v0/management/version" {
-					req.Header.Set("Authorization", "Bearer test-management-password")
-				}
-				recorder := httptest.NewRecorder()
-				server.engine.ServeHTTP(recorder, req)
-				if recorder.Code != http.StatusUnauthorized {
-					t.Fatalf("%s status = %d, want 401: %s", path, recorder.Code, recorder.Body.String())
-				}
-				if !resolved || observed.Key != tc.wantKey || observed.TrustedPeer != tc.trusted || observed.DirectLoopback {
-					t.Fatalf("%s client = %#v, resolved=%v, want key=%q trusted=%v without direct loopback", path, observed, resolved, tc.wantKey, tc.trusted)
-				}
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -774,7 +819,8 @@ func TestImageGenerationResponseURLDownloadsCreatorArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse content URL: %v", err)
 	}
-	if parsedContentURL.Scheme != "https" || parsedContentURL.Host != "cpa.test" || parsedContentURL.Query().Get("access") == "" {
+	if parsedContentURL.Scheme != "https" || parsedContentURL.Host != "cpa.test" ||
+		parsedContentURL.Query().Get("access") == "" {
 		t.Fatalf("generation content_url = %q, want authenticated CPA HTTPS URL", contentURL)
 	}
 
@@ -784,7 +830,11 @@ func TestImageGenerationResponseURLDownloadsCreatorArtifact(t *testing.T) {
 	otherRec := httptest.NewRecorder()
 	server.engine.ServeHTTP(otherRec, otherReq)
 	if otherRec.Code != http.StatusForbidden {
-		t.Fatalf("other principal download status = %d, want 403; body=%s", otherRec.Code, otherRec.Body.String())
+		t.Fatalf(
+			"other principal download status = %d, want 403; body=%s",
+			otherRec.Code,
+			otherRec.Body.String(),
+		)
 	}
 
 	downloadReq := httptest.NewRequest(http.MethodGet, parsedContentURL.RequestURI(), nil)
@@ -845,7 +895,9 @@ func TestImageArtifactContentRequiresCreatorPrincipalAndServesStoredImage(t *tes
 	server.engine.ServeHTTP(unauthenticatedRec, unauthenticated)
 	if unauthenticatedRec.Code != http.StatusUnauthorized {
 		t.Fatalf(
-			"unauthenticated status = %d, want 401; body=%s", unauthenticatedRec.Code, unauthenticatedRec.Body.String(),
+			"unauthenticated status = %d, want 401; body=%s",
+			unauthenticatedRec.Code,
+			unauthenticatedRec.Body.String(),
 		)
 	}
 
@@ -1224,7 +1276,13 @@ func TestDevinCallbackAliasUsesOAuthCallbackHandler(t *testing.T) {
 		request.RemoteAddr = "127.0.0.1:12345"
 		server.engine.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusConflict {
-			t.Fatalf("%s status = %d, want %d body=%s", path, recorder.Code, http.StatusConflict, recorder.Body.String())
+			t.Fatalf(
+				"%s status = %d, want %d body=%s",
+				path,
+				recorder.Code,
+				http.StatusConflict,
+				recorder.Body.String(),
+			)
 		}
 		if cacheControl := recorder.Header().Get("Cache-Control"); cacheControl != "no-store" {
 			t.Fatalf("%s Cache-Control = %q, want no-store", path, cacheControl)
@@ -1443,7 +1501,11 @@ func TestPluginResourceSessionRenewalIsCappedByAbsoluteExpiry(t *testing.T) {
 	session := server.pluginResourceSessionTokens["near-absolute"]
 	server.pluginResourceSessionMu.Unlock()
 	if session.IdleExpiresAt.After(absoluteExpiresAt) {
-		t.Fatalf("idle expiry = %s, want not after absolute expiry %s", session.IdleExpiresAt, absoluteExpiresAt)
+		t.Fatalf(
+			"idle expiry = %s, want not after absolute expiry %s",
+			session.IdleExpiresAt,
+			absoluteExpiresAt,
+		)
 	}
 	cookies := rec.Result().Cookies()
 	if len(cookies) != 1 || cookies[0].Name != pluginResourceSessionCookie {
@@ -1614,7 +1676,11 @@ func TestPluginResourceCORSRequiresAllowlistForCredentials(t *testing.T) {
 		t.Fatalf("Access-Control-Expose-Headers = %q, want ETag", exposedHeaders)
 	}
 	if !strings.Contains(exposedHeaders, internallogging.CPATraceIDHeader) {
-		t.Fatalf("Access-Control-Expose-Headers = %q, want %s", exposedHeaders, internallogging.CPATraceIDHeader)
+		t.Fatalf(
+			"Access-Control-Expose-Headers = %q, want %s",
+			exposedHeaders,
+			internallogging.CPATraceIDHeader,
+		)
 	}
 }
 
@@ -1785,7 +1851,11 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		}
 	}
 	if !foundErrorLogInAuthDir {
-		t.Fatalf("expected forced error log in auth fallback dir %s, got entries: %+v", authLogsDir, authEntries)
+		t.Fatalf(
+			"expected forced error log in auth fallback dir %s, got entries: %+v",
+			authLogsDir,
+			authEntries,
+		)
 	}
 
 	configLogsDir := filepath.Join(configDir, "logs")
@@ -2285,7 +2355,10 @@ type stubProvider struct {
 
 func (s *stubProvider) Identifier() string { return "stub" }
 
-func (s *stubProvider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
+func (s *stubProvider) Authenticate(
+	_ context.Context,
+	r *http.Request,
+) (*sdkaccess.Result, *sdkaccess.AuthError) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		return nil, sdkaccess.NewNoCredentialsError()
@@ -2304,7 +2377,10 @@ type internalErrorProvider struct{}
 
 func (*internalErrorProvider) Identifier() string { return "internal-error" }
 
-func (*internalErrorProvider) Authenticate(context.Context, *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
+func (*internalErrorProvider) Authenticate(
+	context.Context,
+	*http.Request,
+) (*sdkaccess.Result, *sdkaccess.AuthError) {
 	return nil, sdkaccess.NewInternalAuthError("provider unavailable", errors.New("test failure"))
 }
 
@@ -2568,7 +2644,9 @@ func TestAuthMiddlewareEmptyProviderDoesNotClearRateLimitState(t *testing.T) {
 
 	engine := gin.New()
 	gin.SetMode(gin.TestMode)
-	engine.Use(authMiddleware(manager, rateLimiter, func() *proxyconfig.Config { return &proxyconfig.Config{} }))
+	engine.Use(
+		authMiddleware(manager, rateLimiter, func() *proxyconfig.Config { return &proxyconfig.Config{} }),
+	)
 	engine.GET("/test", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
@@ -2587,50 +2665,59 @@ func TestAuthMiddlewareEmptyProviderDoesNotClearRateLimitState(t *testing.T) {
 
 func TestWebsocketAliasesWriteRequestLog(t *testing.T) {
 	for _, path := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
-		t.Run(path, func(t *testing.T) {
-			logsDir := t.TempDir()
-			server := newTestServerWithOptions(t, WithRequestLoggerFactory(func(cfg *proxyconfig.Config, _ string) internallogging.RequestLogger {
-				cfg.RequestLog = true
-				return internallogging.NewFileRequestLogger(true, logsDir, "", 10)
-			}))
-			found := false
-			for _, route := range server.engine.Routes() {
-				if route.Method == http.MethodGet && route.Path == path {
-					found = true
+		t.Run(
+			path, func(t *testing.T) {
+				logsDir := t.TempDir()
+				server := newTestServerWithOptions(
+					t, WithRequestLoggerFactory(
+						func(cfg *proxyconfig.Config, _ string) internallogging.RequestLogger {
+							cfg.RequestLog = true
+							return internallogging.NewFileRequestLogger(true, logsDir, "", 10)
+						},
+					),
+				)
+				found := false
+				for _, route := range server.engine.Routes() {
+					if route.Method == http.MethodGet && route.Path == path {
+						found = true
+					}
 				}
-			}
-			if !found {
-				t.Fatalf("registered GET route missing: %s", path)
-			}
-			request := httptest.NewRequest(http.MethodGet, path, nil)
-			request.Header.Set("Authorization", "Bearer test-key")
-			request.Header.Set("Upgrade", "websocket")
-			request.Header.Set("Connection", "Upgrade")
-			request.Header.Set("Sec-WebSocket-Version", "13")
-			request.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-			recorder := httptest.NewRecorder()
-			server.engine.ServeHTTP(recorder, request)
-			t.Logf("recorder handshake status = %d; no socket is available to dispatch a provider request", recorder.Code)
-			entries, err := os.ReadDir(logsDir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			count := 0
-			for _, entry := range entries {
-				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
-					continue
+				if !found {
+					t.Fatalf("registered GET route missing: %s", path)
 				}
-				body, err := os.ReadFile(filepath.Join(logsDir, entry.Name()))
+				request := httptest.NewRequest(http.MethodGet, path, nil)
+				request.Header.Set("Authorization", "Bearer test-key")
+				request.Header.Set("Upgrade", "websocket")
+				request.Header.Set("Connection", "Upgrade")
+				request.Header.Set("Sec-WebSocket-Version", "13")
+				request.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+				recorder := httptest.NewRecorder()
+				server.engine.ServeHTTP(recorder, request)
+				t.Logf(
+					"recorder handshake status = %d; no socket is available to dispatch a provider request",
+					recorder.Code,
+				)
+				entries, err := os.ReadDir(logsDir)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if strings.Contains(string(body), path) {
-					count++
+				count := 0
+				for _, entry := range entries {
+					if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+						continue
+					}
+					body, err := os.ReadFile(filepath.Join(logsDir, entry.Name()))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if strings.Contains(string(body), path) {
+						count++
+					}
 				}
-			}
-			if count != 1 {
-				t.Fatalf("registered websocket route %s produced %d request log files, want 1", path, count)
-			}
-		})
+				if count != 1 {
+					t.Fatalf("registered websocket route %s produced %d request log files, want 1", path, count)
+				}
+			},
+		)
 	}
 }

@@ -8,20 +8,22 @@ import (
 )
 
 // NewFileTokenClientProvider returns the default token-backed client loader.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func NewFileTokenClientProvider() TokenClientProvider {
 	return &fileTokenClientProvider{}
 }
 
 type fileTokenClientProvider struct{}
 
-func (p *fileTokenClientProvider) Load(ctx context.Context, cfg *config.Config) (*TokenClientResult, error) {
+func (p *fileTokenClientProvider) Load(_ context.Context, _ *config.Config) (*TokenClientResult, error) {
 	// Stateless executors handle tokens
-	_ = ctx
-	_ = cfg
 	return &TokenClientResult{SuccessfulAuthed: 0}, nil
 }
 
 // NewAPIKeyClientProvider returns the default API key client loader that reuses existing logic.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func NewAPIKeyClientProvider() APIKeyClientProvider {
 	return &apiKeyClientProvider{}
 }
@@ -29,7 +31,10 @@ func NewAPIKeyClientProvider() APIKeyClientProvider {
 type apiKeyClientProvider struct{}
 
 func (p *apiKeyClientProvider) Load(ctx context.Context, cfg *config.Config) (*APIKeyClientResult, error) {
-	geminiCount, vertexCompatCount, claudeCount, codexCount, xaiCount, metaCount, openAICompat := watcher.BuildAPIKeyClients(cfg)
+	geminiCount, vertexCompatCount, claudeCount, codexCount, xaiCount, metaCount,
+		openAICompat := watcher.BuildAPIKeyClients(
+		cfg,
+	)
 	if ctx != nil {
 		select {
 		case <-ctx.Done():

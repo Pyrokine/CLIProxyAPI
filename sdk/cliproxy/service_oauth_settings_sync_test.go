@@ -10,9 +10,11 @@ import (
 )
 
 func TestOAuthSettingsRegistrationKeepsAPIKeyMetadata(t *testing.T) {
-	cfg := &config.Config{OAuthSettings: map[string][]config.OAuthModelSetting{
-		"codex": {{Name: "gpt-5.6-luna", MaxContextLength: 524288}},
-	}}
+	cfg := &config.Config{
+		OAuthSettings: map[string][]config.OAuthModelSetting{
+			"codex": {{Name: "gpt-5.6-luna", MaxContextLength: 524288}},
+		},
+	}
 	service := &Service{cfg: cfg}
 	for _, tc := range []struct {
 		id       string
@@ -45,12 +47,14 @@ func TestOAuthSettingsRegistrationKeepsAPIKeyMetadata(t *testing.T) {
 }
 
 func TestOAuthSettingsAliasesDoNotMutateCatalog(t *testing.T) {
-	cfg := &config.Config{OAuthSettings: map[string][]config.OAuthModelSetting{
-		"codex": {
-			{Name: "original", MaxContextLength: 262144},
-			{Name: "original", Alias: "public", MaxContextLength: 524288},
+	cfg := &config.Config{
+		OAuthSettings: map[string][]config.OAuthModelSetting{
+			"codex": {
+				{Name: "original", MaxContextLength: 262144},
+				{Name: "original", Alias: "public", MaxContextLength: 524288},
+			},
 		},
-	}}
+	}
 	original := &ModelInfo{ID: "original", ContextLength: 100000}
 	alias := &ModelInfo{ID: "public", CatalogName: "original", ContextLength: 100000}
 	out := applyOAuthSettings(cfg, "codex", "oauth", []*ModelInfo{original, alias})
@@ -100,41 +104,47 @@ func TestCodexRefreshReprojectsPlanEligibleModels(t *testing.T) {
 		{name: "downgrade", from: "pro", to: "free", wasAstra: true},
 		{name: "upgrade", from: "free", to: "team", wantAstra: true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manager := coreauth.NewManager(nil, nil, nil)
-			cfg := &config.Config{AuthDir: t.TempDir()}
-			service, err := NewBuilder().WithConfig(cfg).
-				WithConfigPath(filepath.Join(t.TempDir(), "config.yaml")).
-				WithCoreAuthManager(manager).Build()
-			if err != nil {
-				t.Fatal(err)
-			}
-			manager.RegisterExecutor(&codexPlanRefreshFixtureExecutor{
-				customOwnedExecutor: &customOwnedExecutor{id: "codex"}, plan: tc.to,
-			})
-			auth, err := manager.Register(context.Background(), &coreauth.Auth{
-				ID: "codex-plan-refresh-" + tc.name, Provider: "codex", Status: coreauth.StatusActive,
-				Attributes: map[string]string{"auth_kind": "oauth", "plan_type": tc.from},
-				Metadata:   map[string]any{"access_token": "fixture-old-access", "plan_type": tc.from},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
-			service.registerModelsForAuthWithConfig(auth, cfg)
-			if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra"); got != tc.wasAstra {
-				t.Fatalf("before refresh, Astra support = %t, want %t", got, tc.wasAstra)
-			}
-			if _, err := manager.ForceRefreshAuth(context.Background(), auth.ID); err != nil {
-				t.Fatalf("fixture credential refresh: %v", err)
-			}
-			if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra"); got != tc.wantAstra {
-				t.Fatalf("after refresh, Astra support = %t, want %t", got, tc.wantAstra)
-			}
-			current, exists := manager.GetByID(auth.ID)
-			if !exists || current.Attributes["plan_type"] != tc.to {
-				t.Fatalf("refreshed credential plan: %+v", current)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				manager := coreauth.NewManager(nil, nil, nil)
+				cfg := &config.Config{AuthDir: t.TempDir()}
+				service, err := NewBuilder().WithConfig(cfg).
+					WithConfigPath(filepath.Join(t.TempDir(), "config.yaml")).
+					WithCoreAuthManager(manager).Build()
+				if err != nil {
+					t.Fatal(err)
+				}
+				manager.RegisterExecutor(
+					&codexPlanRefreshFixtureExecutor{
+						customOwnedExecutor: &customOwnedExecutor{id: "codex"}, plan: tc.to,
+					},
+				)
+				auth, err := manager.Register(
+					context.Background(), &coreauth.Auth{
+						ID: "codex-plan-refresh-" + tc.name, Provider: "codex", Status: coreauth.StatusActive,
+						Attributes: map[string]string{"auth_kind": "oauth", "plan_type": tc.from},
+						Metadata:   map[string]any{"access_token": "fixture-old-access", "plan_type": tc.from},
+					},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
+				service.registerModelsForAuthWithConfig(auth, cfg)
+				if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra"); got != tc.wasAstra {
+					t.Fatalf("before refresh, Astra support = %t, want %t", got, tc.wasAstra)
+				}
+				if _, err := manager.ForceRefreshAuth(context.Background(), auth.ID); err != nil {
+					t.Fatalf("fixture credential refresh: %v", err)
+				}
+				if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra"); got != tc.wantAstra {
+					t.Fatalf("after refresh, Astra support = %t, want %t", got, tc.wantAstra)
+				}
+				current, exists := manager.GetByID(auth.ID)
+				if !exists || current.Attributes["plan_type"] != tc.to {
+					t.Fatalf("refreshed credential plan: %+v", current)
+				}
+			},
+		)
 	}
 }

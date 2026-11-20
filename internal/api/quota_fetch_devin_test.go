@@ -22,26 +22,32 @@ func TestFetchDevinQuotaUsesSelectedAuthIdentityOnly(t *testing.T) {
 	var callsA atomic.Int32
 	var callsB atomic.Int32
 	newServer := func(label string, daily, weekly uint64, calls *atomic.Int32) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			calls.Add(1)
-			if request.Method != http.MethodPost || request.URL.Path != devinauth.DevinGetUserStatusPath {
-				t.Fatalf("%s request = %s %s", label, request.Method, request.URL.Path)
-			}
-			if request.Header.Get("Sentry-Trace") != "" {
-				t.Fatalf("%s status request included Sentry-Trace", label)
-			}
-			if request.Header.Get("Authorization") != "Basic devin-session-token$"+label+"-devin-session-token$"+label {
-				t.Fatalf("%s Authorization = %q", label, request.Header.Get("Authorization"))
-			}
-			body, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Fatalf("%s read request: %v", label, err)
-			}
-			if !bytes.Contains(body, []byte("devin-session-token$"+label)) {
-				t.Fatalf("%s request metadata omitted selected token", label)
-			}
-			_, _ = writer.Write(testAPIQuotaDevinStatus(daily, weekly))
-		}))
+		return httptest.NewServer(
+			http.HandlerFunc(
+				func(writer http.ResponseWriter, request *http.Request) {
+					calls.Add(1)
+					if request.Method != http.MethodPost || request.URL.Path != devinauth.GetUserStatusPath {
+						t.Fatalf("%s request = %s %s", label, request.Method, request.URL.Path)
+					}
+					if request.Header.Get("Sentry-Trace") != "" {
+						t.Fatalf("%s status request included Sentry-Trace", label)
+					}
+					if request.Header.Get(
+						"Authorization",
+					) != "Basic devin-session-token$"+label+"-devin-session-token$"+label {
+						t.Fatalf("%s Authorization = %q", label, request.Header.Get("Authorization"))
+					}
+					body, err := io.ReadAll(request.Body)
+					if err != nil {
+						t.Fatalf("%s read request: %v", label, err)
+					}
+					if !bytes.Contains(body, []byte("devin-session-token$"+label)) {
+						t.Fatalf("%s request metadata omitted selected token", label)
+					}
+					_, _ = writer.Write(testAPIQuotaDevinStatus(daily, weekly))
+				},
+			),
+		)
 	}
 	serverA := newServer("A", 0, 40, &callsA)
 	defer serverA.Close()
@@ -84,7 +90,8 @@ func TestFetchDevinQuotaUsesSelectedAuthIdentityOnly(t *testing.T) {
 	if callsA.Load() != 1 || callsB.Load() != 0 {
 		t.Fatalf("status calls A/B = %d/%d, want 1/0", callsA.Load(), callsB.Load())
 	}
-	if result.Source != "devin_user_status" || result.Completeness != quota.FetchComplete || result.ObservedAt.IsZero() {
+	if result.Source != "devin_user_status" || result.Completeness != quota.FetchComplete ||
+		result.ObservedAt.IsZero() {
 		t.Fatalf("fetch result = %#v", result)
 	}
 	if !gjson.GetBytes(result.Data, "daily_quota_present").Bool() ||

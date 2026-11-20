@@ -11,9 +11,11 @@ import (
 
 func TestBuilderAndServiceResultPolicy(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
-	policy := coreauth.ResultPolicyFunc(func(_ context.Context, result coreauth.Result) coreauth.Result {
-		return result
-	})
+	policy := coreauth.ResultPolicyFunc(
+		func(_ context.Context, result coreauth.Result) coreauth.Result {
+			return result
+		},
+	)
 	service, errBuild := NewBuilder().
 		WithConfig(&config.Config{AuthDir: t.TempDir()}).
 		WithConfigPath(filepath.Join(t.TempDir(), "config.yaml")).
@@ -24,13 +26,18 @@ func TestBuilderAndServiceResultPolicy(t *testing.T) {
 		t.Fatalf("Build() error = %v", errBuild)
 	}
 	if service == nil || service.ResultPolicy() == nil || manager.ResultPolicy() == nil {
-		t.Fatalf("builder result policy propagation = service:%#v service-policy:%#v manager-policy:%#v", service, service.ResultPolicy(), manager.ResultPolicy())
+		t.Fatalf(
+			"builder result policy propagation = service:%#v service-policy:%#v manager-policy:%#v", service,
+			service.ResultPolicy(), manager.ResultPolicy(),
+		)
 	}
 
-	updated := coreauth.ResultPolicyFunc(func(_ context.Context, result coreauth.Result) coreauth.Result {
-		result.Success = false
-		return result
-	})
+	updated := coreauth.ResultPolicyFunc(
+		func(_ context.Context, result coreauth.Result) coreauth.Result {
+			result.Success = false
+			return result
+		},
+	)
 	service.SetResultPolicy(updated)
 	if service.ResultPolicy() == nil || manager.ResultPolicy() == nil {
 		t.Fatal("Service.SetResultPolicy() did not update the core manager")

@@ -59,7 +59,8 @@ func shouldEnableExampleAPIKeySafeMode(
 }
 
 func shouldCreateExampleAPIKeyLocalManagementPassword(cfg *config.Config, currentPassword string) bool {
-	if cfg == nil || strings.TrimSpace(currentPassword) != "" || strings.TrimSpace(os.Getenv("MANAGEMENT_PASSWORD")) != "" {
+	if cfg == nil || strings.TrimSpace(currentPassword) != "" ||
+		strings.TrimSpace(os.Getenv("MANAGEMENT_PASSWORD")) != "" {
 		return false
 	}
 	return strings.TrimSpace(cfg.RemoteManagement.SecretKey) == ""
@@ -258,9 +259,10 @@ func main() {
 	}
 
 	isCloudDeploy := os.Getenv("DEPLOY") == "cloud"
+	commandMode := lf.isLoginMode()
 
 	result, err := initStoreAndConfig(
-		wd, configPath, isCloudDeploy, lookupEnv, homeJWT, homeDisableClusterDiscovery, pluginHost,
+		wd, configPath, isCloudDeploy, commandMode, lookupEnv, homeJWT, homeDisableClusterDiscovery, pluginHost,
 	)
 	if err != nil {
 		log.Errorf("%v", err)
@@ -280,7 +282,7 @@ func main() {
 		configFileExists = cloudConfigAvailable(configFilePath, cfg)
 	}
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
-	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	redisqueue.SetUsageStatisticsEnabled(cfg.Home.Enabled || cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
@@ -356,7 +358,6 @@ func main() {
 		log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
 	}
 
-	commandMode := lf.isLoginMode()
 	homeMode := cfg.Home.Enabled
 	serverOptions := []sdkapi.ServerOption(nil)
 	if shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, false, homeMode) {
@@ -372,7 +373,8 @@ func main() {
 			case !writeExampleAPIKeyLocalManagementPassword(os.Stderr, password):
 				password = ""
 				log.Error(
-					"example API key safe mode requires MANAGEMENT_PASSWORD or remote-management secret-key when no interactive terminal is available",
+					"example API key safe mode requires MANAGEMENT_PASSWORD or remote-management secret-key " +
+						"when no interactive terminal is available",
 				)
 			default:
 				log.Warn("temporary local management password written to the interactive terminal")

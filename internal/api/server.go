@@ -29,7 +29,6 @@ import (
 	managementHandlers "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/artifact"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	claudemodels "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/claude/models"
 	codexlive "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/codex/live"
 	codexmodels "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/codex/models"
@@ -63,8 +62,14 @@ import (
 )
 
 const (
-	oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
-	oauthCallbackFailureHTML = `<html><head><meta charset="utf-8"><title>Authentication failed</title></head><body><h1>Authentication failed</h1><p>The authentication session is no longer available. Return to the client and start again.</p></body></html>`
+	oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</ti` +
+		`tle><script>setTimeout(function(){window.close();},5000);</script></he` +
+		`ad><body><h1>Authentication successful!</h1><p>You can close this wind` +
+		`ow.</p><p>This window will close automatically in 5 seconds.</p></body` +
+		`></html>`
+	oauthCallbackFailureHTML = `<html><head><meta charset="utf-8"><title>Authentication failed</title></head>` +
+		`<body><h1>Authentication failed</h1><p>The authentication session is no longer available. Return to ` +
+		`the client and start again.</p></body></html>`
 )
 
 const (
@@ -74,6 +79,7 @@ const (
 
 const (
 	pluginResourceSessionCookie      = "cpa_plugin_resource_session"
+	pluginResourceSessionPath        = "/v0/resource/plugins/session"
 	pluginResourceSessionTTL         = 5 * time.Minute
 	pluginResourceSessionAbsoluteTTL = 30 * time.Minute
 	oauthCallbackRateLimitWindow     = time.Minute
@@ -103,7 +109,10 @@ func (a imageArtifactStoreAdapter) PutBytes(
 	return toImageArtifactRecord(record), err
 }
 
-func (a imageArtifactStoreAdapter) PutDataURL(ctx context.Context, raw string) (handlers.ImageArtifactRecord, error) {
+func (a imageArtifactStoreAdapter) PutDataURL(
+	ctx context.Context,
+	raw string,
+) (handlers.ImageArtifactRecord, error) {
 	if a.store == nil {
 		return handlers.ImageArtifactRecord{}, fmt.Errorf("artifact store is unavailable")
 	}
@@ -188,6 +197,7 @@ func (l *callbackRateLimiter) cleanupExpired(cutoff time.Time) {
 type pluginResourceSession struct {
 	IdleExpiresAt     time.Time
 	AbsoluteExpiresAt time.Time
+	AuthGeneration    uint64
 }
 
 type ManagementConfigCommit = managementHandlers.ConfigCommit
@@ -454,7 +464,7 @@ type Server struct {
 	// currentPath is the absolute path to the current working directory.
 	currentPath string
 
-	// wsRoutes tracks registered websocket upgrade paths.
+	// wsRoutes tracks registered WebSocket upgrade paths.
 	wsRouteMu     sync.Mutex
 	wsRoutes      map[string]struct{}
 	wsAuthChanged func(bool, bool)
@@ -524,8 +534,11 @@ func NewServer(
 	if optionState.usageQueue == nil {
 		optionState.usageQueue = redisqueue.DefaultQueue()
 	}
-	optionState.usageQueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	optionState.usageQueue.SetUsageStatisticsEnabled(cfg.Home.Enabled || cfg.UsageStatisticsEnabled)
 	optionState.usageQueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
+	if authManager != nil {
+		authManager.SetErrorQueue(optionState.usageQueue)
+	}
 	if optionState.usageStatisticsToggle != nil {
 		optionState.usageStatisticsToggle(cfg.UsageStatisticsEnabled)
 	}
@@ -732,6 +745,8 @@ func NewServer(
 		),
 	)
 
+	s.handlers.SetVideoTaskStore(s.mgmt)
+
 	// Create quota scheduler
 	quotaCfg := quota.Config{
 		Enabled:     cfg.QuotaRefresh.Enabled,
@@ -756,17 +771,21 @@ func NewServer(
 			case quota.TypeClaude:
 				return fetchClaudeQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeCodex:
-				return fetchCodexQuotaResultContext(ctx, localAPICall, entry.AuthIndex, codexQuotaAccountID(authManager, entry.AuthIndex))
+				return fetchCodexQuotaResultContext(
+					ctx, localAPICall, entry.AuthIndex, codexQuotaAccountID(authManager, entry.AuthIndex),
+				)
 			case quota.TypeGeminiCli:
 				return fetchGeminiQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeAntigravity:
-				return fetchAntigravityQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
+				return fetchAntigravityQuotaResultContext(
+					ctx, localAPICall, entry.AuthIndex, antigravityQuotaProjectID(authManager, entry.AuthIndex),
+				)
 			case quota.TypeKimi:
 				return fetchKimiQuotaResultContext(ctx, localAPICall, authManager, entry.AuthIndex)
 			case quota.TypeXAI:
 				return fetchXAIQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeDevin:
-				return fetchDevinQuotaResultContext(ctx, cfg, authManager, entry.AuthIndex)
+				return fetchDevinQuotaResultContext(ctx, s.configSnapshot(), authManager, entry.AuthIndex)
 			default:
 				return quota.FetchResult{}, fmt.Errorf("quota fetch not implemented for type %s", entry.Type)
 			}
@@ -923,7 +942,12 @@ func (s *Server) imageArtifactContent(c *gin.Context) {
 	c.Header("Content-Length", fmt.Sprintf("%d", record.Size))
 	c.Header("ETag", `"`+record.SHA256+`"`)
 	c.Header("X-Content-Type-Options", "nosniff")
-	c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": record.ID}))
+	disposition := "inline"
+	if record.MIMEType == "image/svg+xml" {
+		disposition = "attachment"
+		c.Header("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'")
+	}
+	c.Header("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": record.ID}))
 	http.ServeContent(c.Writer, c.Request, record.ID, record.ModTime, file)
 }
 
@@ -968,7 +992,8 @@ func (s *Server) exampleAPIKeySafeModeRequired(cfg *config.Config) bool {
 
 func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s == nil || !s.exampleAPIKeySafeModeActive.Load() || c == nil || c.Request == nil || c.Request.URL == nil {
+		if s == nil || !s.exampleAPIKeySafeModeActive.Load() || c == nil || c.Request == nil ||
+			c.Request.URL == nil {
 			c.Next()
 			return
 		}
@@ -978,7 +1003,8 @@ func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if (path == "/" || path == exampleAPIKeyManagementPath) && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) {
+		if (path == "/" || path == exampleAPIKeyManagementPath) &&
+			(c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) {
 			s.serveExampleAPIKeyWarningPage(c)
 			return
 		}
@@ -990,8 +1016,9 @@ func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
 		c.Header("X-CPA-SAFE-MODE", "example-api-key")
 		c.AbortWithStatusJSON(
 			http.StatusForbidden, gin.H{
-				"error":   "unsafe_example_api_key",
-				"message": "Proxy API endpoints are disabled because api-keys contains template values. Open /management.html?safe-mode=configure, update api-keys in Management, then retry.",
+				"error": "unsafe_example_api_key",
+				"message": "Proxy API endpoints are disabled because api-keys contains template values. Open " +
+					"/management.html?safe-mode=configure, update api-keys in Management, then retry.",
 			},
 		)
 	}
@@ -1033,9 +1060,13 @@ func (s *Server) inferenceAdmissionMiddleware() gin.HandlerFunc {
 		ctx, release, err := s.handlers.InferenceAdmission.Acquire(c.Request.Context(), nil)
 		if err != nil {
 			c.Header("Retry-After", "5")
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
-				"type": "server_error", "code": "update_draining", "message": err.Error(),
-			}})
+			c.AbortWithStatusJSON(
+				http.StatusServiceUnavailable, gin.H{
+					"error": gin.H{
+						"type": "server_error", "code": "update_draining", "message": err.Error(),
+					},
+				},
+			)
 			return
 		}
 		// Responses 连接只在实际 turn 中持有租约
@@ -1084,7 +1115,10 @@ func (s *Server) oauthCallbackRateLimitMiddleware() gin.HandlerFunc {
 		c.Request = c.Request.WithContext(access.WithClientAddress(c.Request.Context(), client))
 		if !s.oauthCallbackLimiter.allow(client.Key, time.Now()) {
 			c.Header("Retry-After", "60")
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "too many oauth callback requests"})
+			c.AbortWithStatusJSON(
+				http.StatusTooManyRequests,
+				gin.H{"error": "too many oauth callback requests"},
+			)
 			return
 		}
 		c.Next()
@@ -1106,10 +1140,12 @@ func (s *Server) setupRoutes() {
 	v1.Use(s.publicAuthMiddlewares()...)
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
-		v1.GET("/models/*model", func(c *gin.Context) {
-			c.Set(handlers.ModelDetailIDContextKey, strings.TrimPrefix(c.Param("model"), "/"))
-			s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers)(c)
-		})
+		v1.GET(
+			"/models/*model", func(c *gin.Context) {
+				c.Set(handlers.ModelDetailIDContextKey, strings.TrimPrefix(c.Param("model"), "/"))
+				s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers)(c)
+			},
+		)
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
@@ -1122,6 +1158,7 @@ func (s *Server) setupRoutes() {
 		v1.POST("/alpha/search", s.codexAlphaSearch)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
 		v1.POST("/images/edits", openaiHandlers.ImagesEdits)
+		v1.POST("/asr/transcribe", openaiHandlers.MetaAudioTranscribe)
 		v1.GET("/artifacts/:artifact_id/content", s.imageArtifactContent)
 		v1.HEAD("/artifacts/:artifact_id/content", s.imageArtifactContent)
 		v1.POST("/videos", openaiHandlers.VideosCreate)
@@ -1135,12 +1172,17 @@ func (s *Server) setupRoutes() {
 	realtimeAuth := s.realtimeAuthMiddlewares(true)
 	standardRealtimeAuth := s.realtimeAuthMiddlewares(false)
 	registerRealtimeRoute := func(method, path string, middlewares []gin.HandlerFunc, handler gin.HandlerFunc) {
-		handlers := make([]gin.HandlerFunc, 0, len(middlewares)+1)
-		handlers = append(handlers, middlewares...)
-		handlers = append(handlers, handler)
-		s.engine.Handle(method, path, handlers...)
+		routeHandlers := make([]gin.HandlerFunc, 0, len(middlewares)+1)
+		routeHandlers = append(routeHandlers, middlewares...)
+		routeHandlers = append(routeHandlers, handler)
+		s.engine.Handle(method, path, routeHandlers...)
 	}
-	registerRealtimeRoute(http.MethodGet, "/v1/realtime", realtimeAuth, s.codexLiveHandler.HandleRealtimeWebsocket)
+	registerRealtimeRoute(
+		http.MethodGet,
+		"/v1/realtime",
+		realtimeAuth,
+		s.codexLiveHandler.HandleRealtimeWebsocket,
+	)
 	registerRealtimeRoute(http.MethodPost, "/v1/realtime", realtimeAuth, s.codexLiveHandler.Handle)
 	registerRealtimeRoute(http.MethodPost, "/v1/realtime/calls", realtimeAuth, s.codexLiveHandler.Handle)
 	registerRealtimeRoute(
@@ -1263,6 +1305,7 @@ func (s *Server) setupRoutes() {
 		"/v1internal:method",
 		s.authPolicyReadLockMiddleware(),
 		requireTLSForAuth(s.configSnapshot),
+		noStoreMiddleware(),
 		authMiddleware(s.accessManager, s.authRateLimiter, s.configSnapshot),
 		authPolicyUnlockMiddleware(),
 		geminiCLIHandlers.CLIHandler,
@@ -1325,7 +1368,7 @@ func (s *Server) setupRoutes() {
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
 
-// AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
+// AttachWebsocketRoute registers a WebSocket upgrade handler on the primary Gin engine.
 // When WebSocket authentication is disabled, only loopback peers may access the route.
 func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	if s == nil || s.engine == nil || handler == nil {
@@ -1382,12 +1425,17 @@ func (s *Server) registerManagementRoutes() {
 
 	mgmt := s.engine.Group("/v0/management")
 	mgmt.Use(
-		s.authPolicyReadLockMiddleware(), requireTLSForAuthRequest(s.managementConfigSnapshot), noStoreMiddleware(),
-		s.managementAvailabilityMiddleware(), managementBodyLimitMiddleware(),
-		s.mgmt.MiddlewareWithConfig(s.managementConfigSnapshot), authPolicyUnlockMiddleware(),
+		s.authPolicyReadLockMiddleware(),
+		requireTLSForAuthRequest(s.managementConfigSnapshot),
+		noStoreMiddleware(),
+		s.managementAvailabilityMiddleware(),
+		managementBodyLimitMiddleware(),
+		s.mgmt.MiddlewareWithConfig(s.managementConfigSnapshot),
+		authPolicyUnlockMiddleware(),
 		s.mgmt.MutationAuditMiddleware(),
 	)
 	{
+		mgmt.GET("/mutations/:mutation_id", s.mgmt.GetMutationResult)
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
 		mgmt.GET("/usage/summary", s.mgmt.GetUsageSummary)
@@ -1396,6 +1444,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.POST("/usage/recalculate-costs", s.mgmt.RecalculateCosts)
 		mgmt.GET("/usage/recalculate-costs", s.mgmt.GetRecalculateCostsStatus)
+		mgmt.GET("/usage/storage-upgrade", s.mgmt.GetUsageStorageUpgrade)
 		mgmt.GET("/model-prices", s.mgmt.GetModelPrices)
 		mgmt.PUT("/model-prices", s.mgmt.PutModelPrices)
 		mgmt.GET("/usage-retention", s.mgmt.GetUsageRetention)
@@ -1414,6 +1463,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/update-compatibility", s.mgmt.GetUpdateCompatibility)
 		mgmt.POST("/update", s.mgmt.PostUpdate)
 		mgmt.GET("/update-status", s.mgmt.GetUpdateStatus)
+		mgmt.GET("/panel-update", s.mgmt.GetPanelUpdateState)
 		mgmt.POST("/panel-update", s.mgmt.PostPanelUpdate)
 
 		mgmt.GET("/debug", s.mgmt.GetDebug)
@@ -1518,6 +1568,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/request-retry", s.mgmt.GetRequestRetry)
 		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)
 		mgmt.PATCH("/request-retry", s.mgmt.PutRequestRetry)
+		mgmt.GET("/max-retry-credentials", s.mgmt.GetMaxRetryCredentials)
+		mgmt.PUT("/max-retry-credentials", s.mgmt.PutMaxRetryCredentials)
+		mgmt.PATCH("/max-retry-credentials", s.mgmt.PutMaxRetryCredentials)
 		mgmt.GET("/max-retry-interval", s.mgmt.GetMaxRetryInterval)
 		mgmt.PUT("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
 		mgmt.PATCH("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
@@ -1591,6 +1644,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/plugins", s.mgmt.ListPlugins)
 		mgmt.DELETE("/plugins/:id", s.mgmt.DeletePlugin)
 		mgmt.PATCH("/plugins/:id/enabled", s.mgmt.PatchPluginEnabled)
+		mgmt.GET("/plugins/:id/config", s.mgmt.GetPluginConfig)
 		mgmt.PUT("/plugins/:id/config", s.mgmt.PutPluginConfig)
 		mgmt.PATCH("/plugins/:id/config", s.mgmt.PatchPluginConfig)
 		mgmt.GET("/plugins/:id/quota", s.mgmt.GetPluginQuota)
@@ -1723,8 +1777,16 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		c.Abort()
 		return
 	}
-	if pluginManagementRoute && s.pluginHost.ServeManagementHTTP(c.Writer, c.Request) {
-		c.Abort()
+	if pluginManagementRoute {
+		s.mgmt.AuditMutation(
+			c, "/v0/management/plugins/:route", func() {
+				if s.pluginHost.ServeManagementHTTP(c.Writer, c.Request) {
+					c.Abort()
+					return
+				}
+				c.AbortWithStatus(http.StatusNotFound)
+			},
+		)
 		return
 	}
 	c.AbortWithStatus(http.StatusNotFound)
@@ -1742,7 +1804,10 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 	policyLock := &authPolicyReadLock{mu: &s.authPolicyMu}
 	defer policyLock.release()
 	cfg := s.configSnapshot()
-	if cfg == nil || cfg.Home.Enabled || s.pluginHost == nil || s.mgmt == nil {
+	isSessionLogout := c.Request.Method == http.MethodDelete && path == pluginResourceSessionPath
+	isSessionRotation := c.Request.Method == http.MethodPost && path == pluginResourceSessionPath
+	if cfg == nil || s.mgmt == nil ||
+		(!isSessionLogout && !isSessionRotation && (cfg.Home.Enabled || s.pluginHost == nil)) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -1762,14 +1827,29 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 	if c.IsAborted() {
 		return
 	}
-	sessionAuthenticated := s.pluginResourceSessionAuthenticated(c)
+	sessionAuthenticated := !isSessionRotation && s.pluginResourceSessionAuthenticated(c)
 	if !sessionAuthenticated {
 		s.mgmt.MiddlewareWithConfig(s.managementConfigSnapshot)(c)
 		if c.IsAborted() {
 			return
 		}
 	}
-	policyLock.release()
+	if isSessionLogout {
+		if cookie, err := c.Request.Cookie(pluginResourceSessionCookie); err == nil {
+			s.pluginResourceSessionMu.Lock()
+			delete(s.pluginResourceSessionTokens, cookie.Value)
+			s.pluginResourceSessionMu.Unlock()
+		}
+		s.setPluginResourceSessionCookie(c, "", -1)
+		c.AbortWithStatus(http.StatusNoContent)
+		return
+	}
+	if isSessionRotation {
+		if s.issuePluginResourceSession(c) {
+			c.AbortWithStatus(http.StatusNoContent)
+		}
+		return
+	}
 	if !s.pluginHost.HasResourceRoute(c.Request.Method, path) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
@@ -1777,6 +1857,7 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 	if !sessionAuthenticated && !s.issuePluginResourceSession(c) {
 		return
 	}
+	policyLock.release()
 	if s.pluginHost.ServeResourceHTTP(c.Writer, c.Request) {
 		c.Abort()
 		return
@@ -1794,16 +1875,22 @@ func (s *Server) pluginResourceSessionAuthenticated(c *gin.Context) bool {
 	}
 	now := time.Now()
 	token := cookie.Value
+	authGeneration := s.mgmt.ManagementAuthenticationGeneration()
 	s.pluginResourceSessionMu.Lock()
 	session, ok := s.pluginResourceSessionTokens[token]
 	if !ok {
 		s.pluginResourceSessionMu.Unlock()
 		return false
 	}
-	if !session.IdleExpiresAt.After(now) || !session.AbsoluteExpiresAt.After(now) {
+	if session.AuthGeneration != authGeneration || !session.IdleExpiresAt.After(now) ||
+		!session.AbsoluteExpiresAt.After(now) {
 		delete(s.pluginResourceSessionTokens, token)
 		s.pluginResourceSessionMu.Unlock()
 		return false
+	}
+	if c.Request.Method == http.MethodDelete && c.Request.URL.Path == pluginResourceSessionPath {
+		s.pluginResourceSessionMu.Unlock()
+		return true
 	}
 	idleExpiresAt := now.Add(pluginResourceSessionTTL)
 	if idleExpiresAt.After(session.AbsoluteExpiresAt) {
@@ -1845,19 +1932,25 @@ func (s *Server) issuePluginResourceSession(c *gin.Context) bool {
 		return false
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	authGeneration := s.mgmt.ManagementAuthenticationGeneration()
 	now := time.Now()
 	s.pluginResourceSessionMu.Lock()
 	if s.pluginResourceSessionTokens == nil {
 		s.pluginResourceSessionTokens = make(map[string]pluginResourceSession)
 	}
 	for existing, session := range s.pluginResourceSessionTokens {
-		if !session.IdleExpiresAt.After(now) || !session.AbsoluteExpiresAt.After(now) {
+		if session.AuthGeneration != authGeneration || !session.IdleExpiresAt.After(now) ||
+			!session.AbsoluteExpiresAt.After(now) {
 			delete(s.pluginResourceSessionTokens, existing)
 		}
+	}
+	if cookie, err := c.Request.Cookie(pluginResourceSessionCookie); err == nil {
+		delete(s.pluginResourceSessionTokens, cookie.Value)
 	}
 	s.pluginResourceSessionTokens[token] = pluginResourceSession{
 		IdleExpiresAt:     now.Add(pluginResourceSessionTTL),
 		AbsoluteExpiresAt: now.Add(pluginResourceSessionAbsoluteTTL),
+		AuthGeneration:    authGeneration,
 	}
 	s.pluginResourceSessionMu.Unlock()
 	s.setPluginResourceSessionCookie(c, token, int(pluginResourceSessionTTL.Seconds()))
@@ -1982,20 +2075,21 @@ func (s *Server) realtimeAuthMiddlewares(allowClientSecret bool) []gin.HandlerFu
 
 func (s *Server) realtimeModelPolicyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.FullPath() == "/v1/realtime" && c.Query("call_id") == "" {
-			model := strings.TrimSpace(c.Query("model"))
-			if model == "" {
-				model = "gpt-realtime"
-			}
+		if c.Request.Method == http.MethodGet && c.FullPath() == "/v1/realtime" && c.Query("call_id") == "" {
+			model := codexlive.RealtimeRequestModel(c)
 			principal, _ := c.Get("apiKey")
 			apiKey, _ := principal.(string)
 			if !codexlive.RealtimeModelAllowed(s.configSnapshot(), apiKey, model) {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{
-					"message": "Realtime request is not permitted by this API key policy",
-					"type":    "permission_error",
-					"param":   nil,
-					"code":    "realtime_api_key_restricted",
-				}})
+				c.AbortWithStatusJSON(
+					http.StatusForbidden, gin.H{
+						"error": gin.H{
+							"message": "Realtime request is not permitted by this API key policy",
+							"type":    "permission_error",
+							"param":   nil,
+							"code":    "realtime_api_key_restricted",
+						},
+					},
+				)
 				return
 			}
 		}
@@ -2009,12 +2103,16 @@ const (
 )
 
 func abortInvalidRealtimeClientSecret(c *gin.Context, message string) {
-	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{
-		"message": message,
-		"type":    "invalid_request_error",
-		"param":   nil,
-		"code":    "invalid_realtime_client_secret",
-	}})
+	c.AbortWithStatusJSON(
+		http.StatusUnauthorized, gin.H{
+			"error": gin.H{
+				"message": message,
+				"type":    "invalid_request_error",
+				"param":   nil,
+				"code":    "invalid_realtime_client_secret",
+			},
+		},
+	)
 }
 
 func realtimeAuthMiddleware(
@@ -2133,10 +2231,13 @@ func requireTLSForAuthRequest(configSnapshot func(*gin.Context) *config.Config) 
 			c.Next()
 			return
 		}
+		c.Header("Cache-Control", "no-store")
 		c.AbortWithStatusJSON(
 			http.StatusMisdirectedRequest, gin.H{
-				"error":   "TLS required",
-				"message": "this endpoint requires HTTPS (tls.require-for-auth=true). Retry using https:// or connect via loopback.",
+				"error": "TLS required",
+				"message": "this endpoint requires HTTPS (tls.require-for-auth=true). Retry using " +
+					"https:// or connect via " +
+					"loopback.",
 			},
 		)
 	}
@@ -2180,7 +2281,9 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	// CSP for the management panel SPA
 	c.Header(
 		"Content-Security-Policy",
-		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'",
+		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self"+
+			"' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; "+
+			"connect-src 'self'; frame-ancestors 'self'",
 	)
 	c.File(filePath)
 }
@@ -2263,10 +2366,7 @@ func (s *Server) watchKeepAlive() {
 	}
 }
 
-// unifiedModelsHandler creates a unified handler for the /v1/models endpoint
-// that routes to different handlers based on the User-Agent header.
-// If User-Agent starts with "claude-cli", it routes to Claude handler,
-// otherwise it routes to OpenAI handler.
+// unifiedModelsHandler 按客户端版本、User-Agent 和 Anthropic-Version 选择模型列表格式
 func (s *Server) unifiedModelsHandler(
 	openaiHandler *openai.APIHandler,
 	claudeHandler *claude.CodeAPIHandler,
@@ -2293,8 +2393,8 @@ func (s *Server) unifiedModelsHandler(
 
 		userAgent := c.GetHeader("User-Agent")
 
-		// Route to Claude handler if User-Agent starts with "claude-cli"
-		if strings.HasPrefix(userAgent, "claude-cli") {
+		if strings.HasPrefix(userAgent, "claude-cli") ||
+			strings.TrimSpace(c.GetHeader("Anthropic-Version")) != "" {
 			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
 			claudeHandler.ClaudeModels(c)
 		} else {
@@ -2362,11 +2462,26 @@ func modelMapInt(model map[string]any, keys ...string) int {
 }
 
 func modelMapReasoningLevels(model map[string]any) []string {
-	if thinking, ok := model["thinking"].(*registry.ThinkingSupport); ok && thinking != nil {
+	switch thinking := model["thinking"].(type) {
+	case *registry.ThinkingSupport:
+		if thinking != nil {
+			return append([]string(nil), thinking.Levels...)
+		}
+	case registry.ThinkingSupport:
 		return append([]string(nil), thinking.Levels...)
-	}
-	if thinking, ok := model["thinking"].(registry.ThinkingSupport); ok {
-		return append([]string(nil), thinking.Levels...)
+	case map[string]any:
+		switch levels := thinking["levels"].(type) {
+		case []string:
+			return append([]string(nil), levels...)
+		case []any:
+			out := make([]string, 0, len(levels))
+			for _, level := range levels {
+				if text, ok := level.(string); ok {
+					out = append(out, text)
+				}
+			}
+			return out
+		}
 	}
 	return nil
 }
@@ -2386,7 +2501,10 @@ func (s *Server) handleGrokModels(c *gin.Context) {
 	s.handlers.WriteModelListResponse(c, constant.OpenAI, grokbuild.BuildResponse(models))
 }
 
-func (s *Server) filterGrokModelsForCurrentAPIKey(c *gin.Context, models []grokbuild.ModelInfo) []grokbuild.ModelInfo {
+func (s *Server) filterGrokModelsForCurrentAPIKey(
+	c *gin.Context,
+	models []grokbuild.ModelInfo,
+) []grokbuild.ModelInfo {
 	if len(models) == 0 {
 		return models
 	}
@@ -2477,10 +2595,14 @@ func (s *Server) writeHomeCodexClientModels(c *gin.Context, catalog *modelcatalo
 	}
 	body, err := codexmodels.MarshalCompact(payload)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{Error: handlers.ErrorDetail{
-			Message: "Failed to encode model catalog",
-			Type:    "server_error",
-		}})
+		c.JSON(
+			http.StatusInternalServerError, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "Failed to encode model catalog",
+					Type:    "server_error",
+				},
+			},
+		)
 		return
 	}
 	s.handlers.WriteModelListResponseBody(c, constant.OpenAI, body)
@@ -2526,7 +2648,8 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	entries := homeModelEntries(catalog)
 
 	userAgent := c.GetHeader("User-Agent")
-	isClaude := strings.HasPrefix(userAgent, "claude-cli")
+	isClaude := strings.HasPrefix(userAgent, "claude-cli") ||
+		strings.TrimSpace(c.GetHeader("Anthropic-Version")) != ""
 
 	if isClaude {
 		out := make([]map[string]any, 0, len(entries))
@@ -2560,7 +2683,11 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		out = s.handlers.FilterModelsForCurrentAPIKey(c, out)
 		cfg := s.configSnapshot()
 		disableCloaking := cfg != nil && cfg.ClaudeCode.DisableCloakingModelList
-		s.handlers.WriteModelListResponse(c, constant.Claude, claudemodels.NewCatalog(out, disableCloaking).Response())
+		s.handlers.WriteModelListResponse(
+			c,
+			constant.Claude,
+			claudemodels.NewCatalog(out, disableCloaking).Response(),
+		)
 		return
 	}
 
@@ -2579,10 +2706,12 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		filtered = append(filtered, model)
 	}
 	filtered = s.handlers.FilterModelsForCurrentAPIKey(c, filtered)
-	s.handlers.WriteModelListResponse(c, constant.OpenAI, gin.H{
-		"object": "list",
-		"data":   filtered,
-	})
+	s.handlers.WriteModelListResponse(
+		c, constant.OpenAI, gin.H{
+			"object": "list",
+			"data":   filtered,
+		},
+	)
 }
 
 func (s *Server) handleHomeGeminiModels(c *gin.Context) {
@@ -2593,9 +2722,11 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 	entries := homeModelEntries(catalog)
 
 	models := s.handlers.FilterModelsForCurrentAPIKey(c, formatHomeGeminiModels(entries))
-	s.handlers.WriteModelListResponse(c, constant.Gemini, gin.H{
-		"models": models,
-	})
+	s.handlers.WriteModelListResponse(
+		c, constant.Gemini, gin.H{
+			"models": models,
+		},
+	)
 }
 
 func (s *Server) handleHomeGeminiModel(c *gin.Context) {
@@ -2749,15 +2880,17 @@ func homeModelEntries(catalog *modelcatalog.HomeCatalog) []homeModelEntry {
 		if strings.TrimSpace(displayName) == "" {
 			displayName, _ = model["displayName"].(string)
 		}
-		entries = append(entries, homeModelEntry{
-			id:                  id,
-			created:             modelMapInt64(model, "created"),
-			ownedBy:             strings.TrimSpace(ownedBy),
-			displayName:         strings.TrimSpace(displayName),
-			contextLength:       modelMapInt(model, "max_context_length", "context_length"),
-			maxCompletionTokens: modelMapInt(model, "max_completion_tokens"),
-			reasoningLevels:     modelMapReasoningLevels(model),
-		})
+		entries = append(
+			entries, homeModelEntry{
+				id:                  id,
+				created:             modelMapInt64(model, "created"),
+				ownedBy:             strings.TrimSpace(ownedBy),
+				displayName:         strings.TrimSpace(displayName),
+				contextLength:       modelMapInt(model, "max_context_length", "context_length"),
+				maxCompletionTokens: modelMapInt(model, "max_completion_tokens"),
+				reasoningLevels:     modelMapReasoningLevels(model),
+			},
+		)
 	}
 	return entries
 }
@@ -2807,6 +2940,31 @@ func (s *Server) listeners() (net.Listener, *muxListener, *http.Server) {
 	return s.muxBaseListener, s.muxHTTPListener, s.redirectSrv
 }
 
+func httpsRedirectHandler(httpsAddr string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host, port, err := net.SplitHostPort(httpsAddr)
+		if err != nil {
+			http.Error(w, "HTTPS redirect address is invalid", http.StatusInternalServerError)
+			return
+		}
+		if r.Host != "" {
+			authority, err := url.Parse("//" + r.Host)
+			if err != nil || authority.User != nil || authority.Path != "" || authority.RawQuery != "" ||
+				authority.Fragment != "" {
+				http.Error(w, "HTTPS redirect host is invalid", http.StatusBadRequest)
+				return
+			}
+			host = authority.Hostname()
+		}
+		if host == "" || r.Host == "" && net.ParseIP(host).IsUnspecified() {
+			http.Error(w, "HTTPS redirect requires a request host", http.StatusBadRequest)
+			return
+		}
+		target := "https://" + net.JoinHostPort(host, port) + r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	}
+}
+
 func (s *Server) start(ready chan<- struct{}) error {
 	if s == nil || s.server == nil {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
@@ -2830,8 +2988,11 @@ func (s *Server) start(ready chan<- struct{}) error {
 	}
 	if cfg != nil && cfg.AllowQueryAuth {
 		log.Warnf(
-			"security: allow-query-auth is enabled — API keys may leak to access logs, Referer headers, and browser history. " +
-				"Prefer Authorization header or x-api-key. This option remains for backward compatibility with scripted clients.",
+			"security: allow-query-auth is enabled — API keys may leak to access " +
+				"logs, Referer headers, and browser history. " +
+				("Prefer Authorization header or x-api-key. This option remains for " +
+					"backward compatibility with scripted " +
+					"clients."),
 		)
 	}
 	var redirectSrv *http.Server
@@ -2855,19 +3016,14 @@ func (s *Server) start(ready chan<- struct{}) error {
 		// Start HTTP→HTTPS redirect listener if configured
 		redirectPort := cfg.TLS.HTTPRedirectPort
 		if redirectPort > 0 {
-			httpsAddr := s.server.Addr
+			httpsAddr := listener.Addr().String()
 			redirectAddr := fmt.Sprintf(":%d", redirectPort)
 			redirectSrv = &http.Server{
 				Addr:         redirectAddr,
 				ReadTimeout:  5 * time.Second,
 				WriteTimeout: 10 * time.Second,
 				IdleTimeout:  30 * time.Second,
-				Handler: http.HandlerFunc(
-					func(w http.ResponseWriter, r *http.Request) {
-						target := "https://" + httpsAddr + r.URL.RequestURI()
-						http.Redirect(w, r, target, http.StatusMovedPermanently)
-					},
-				),
+				Handler:      httpsRedirectHandler(httpsAddr),
 			}
 		}
 
@@ -3169,14 +3325,12 @@ func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Headers", "*")
 		}
 		exposedHeaders := logging.CPATraceIDHeader +
-			", X-Cpa-Version, X-Cpa-Build-Date, X-Cpa-Commit, X-CPA-SUPPORT-PLUGIN, ETag"
+			", X-Cpa-Version, X-Cpa-Build-Date, X-Cpa-Commit, X-CPA-SUPPORT-PLUGIN, ETag, Retry-After, " +
+			managementHandlers.MutationIDHeader + ", " + managementHandlers.MutationResultHeader
 		if c.Request != nil && c.Request.URL != nil && strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
-			exposedHeaders += ", Location, Retry-After, X-Request-Id, OpenAI-Request-Id"
+			exposedHeaders += ", Location, X-Request-Id, OpenAI-Request-Id"
 		}
 		c.Header("Access-Control-Expose-Headers", exposedHeaders)
-		c.Header("X-Cpa-Version", buildinfo.Version)
-		c.Header("X-Cpa-Build-Date", buildinfo.BuildDate)
-		c.Header("X-Cpa-Commit", buildinfo.Commit)
 
 		// Security headers
 		c.Header("X-Content-Type-Options", "nosniff")
@@ -3333,8 +3487,8 @@ func (s *Server) updateClients(ctx context.Context, cfg *config.Config, _ uint64
 		} else {
 			usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 		}
-		s.usageQueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	}
+	s.usageQueue.SetUsageStatisticsEnabled(cfg.Home.Enabled || cfg.UsageStatisticsEnabled)
 
 	if oldCfg == nil || oldCfg.RedisUsageQueueRetentionSeconds != cfg.RedisUsageQueueRetentionSeconds {
 		s.usageQueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
@@ -3406,6 +3560,15 @@ func (s *Server) updateClients(ctx context.Context, cfg *config.Config, _ uint64
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}
+	if s.quotaScheduler != nil && (oldCfg == nil || oldCfg.QuotaRefresh != cfg.QuotaRefresh) {
+		s.quotaScheduler.UpdateConfig(
+			quota.Config{
+				Enabled:     cfg.QuotaRefresh.Enabled,
+				Interval:    cfg.QuotaRefresh.Interval,
+				MaxInterval: cfg.QuotaRefresh.MaxInterval,
+			},
+		)
+	}
 	managementasset.SetCurrentConfig(cfg)
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
@@ -3438,9 +3601,18 @@ func (s *Server) updateClients(ctx context.Context, cfg *config.Config, _ uint64
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + vertexAICompatCount + openAICompatCount
+	total := authEntries +
+		geminiAPIKeyCount +
+		claudeAPIKeyCount +
+		codexAPIKeyCount +
+		xaiAPIKeyCount +
+		metaAPIKeyCount +
+		vertexAICompatCount +
+		openAICompatCount
 	fmt.Printf(
-		"server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d Meta API keys + %d Vertex-compat + %d OpenAI-compat)\n",
+		"server clients and configuration updated: %d clients (%d auth entries "+
+			"+ %d Gemini API keys + %d Claude API keys + %d Codex keys + %d xAI key"+
+			"s + %d Meta API keys + %d Vertex-compat + %d OpenAI-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
@@ -3596,6 +3768,11 @@ func authMiddlewareWithErrorStyle(
 				return
 			}
 			if client.DirectLoopback {
+				c.Request = c.Request.WithContext(
+					coreusage.WithAPIKeyIdentity(
+						c.Request.Context(), handlers.DirectLoopbackIdentity,
+					),
+				)
 				c.Next()
 				return
 			}
@@ -3656,7 +3833,6 @@ func authMiddlewareWithErrorStyle(
 				c.Set("accessMetadata", result.Metadata)
 			}
 			if rateLimiter != nil {
-				rateLimiter.RecordSuccess(clientKey)
 				rateLimiter.RecordAccountSuccess(accountHash)
 			}
 			c.Next()
@@ -3698,12 +3874,16 @@ func abortAuthentication(c *gin.Context, status int, message string, realtimeErr
 		errorType = "server_error"
 		code = "authentication_service_error"
 	}
-	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{
-		"message": message,
-		"type":    errorType,
-		"param":   nil,
-		"code":    code,
-	}})
+	c.AbortWithStatusJSON(
+		status, gin.H{
+			"error": gin.H{
+				"message": message,
+				"type":    errorType,
+				"param":   nil,
+				"code":    code,
+			},
+		},
+	)
 }
 
 func authManagerHasProviders(manager *sdkaccess.Manager) bool {

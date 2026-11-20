@@ -1220,6 +1220,7 @@ func TestResponseWriterPartialWriteCapturesOnlyWrittenBytes(t *testing.T) {
 	)
 	c.Writer = wrapper
 
+	//goland:noinspection SpellCheckingInspection
 	n, errWrite := c.Writer.Write([]byte("abcdef"))
 	if n != 2 || !errors.Is(errWrite, writeErr) {
 		t.Fatalf("Write = (%d, %v), want (2, partial write)", n, errWrite)
@@ -1392,6 +1393,23 @@ func TestResponseWriterFinalizeStreamingMergesAPIWebsocketTimelineSourceFallback
 		t.Fatalf("close calls = %d, want 1", closeCalls)
 	}
 	assertFilesRemoved(t, []string{partPath})
+}
+
+func TestResponseWriterFinalizeStreamingPreservesAPIWebsocketTruncationMarker(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	streamWriter := &streamingLogCapture{}
+	logger := &requestLogCapture{enabled: true, streamWriter: streamWriter}
+	c, wrapper := newStreamingResponseWriterTestContext(t, logger)
+	buffer := logging.NewBoundedLogBuffer()
+	buffer.Append(bytes.Repeat([]byte("x"), 9<<20))
+	c.Set("API_WEBSOCKET_TIMELINE", buffer)
+	if err := wrapper.finalize(c); err != nil {
+		t.Fatal(err)
+	}
+	timeline, closeCalls := streamWriter.snapshot()
+	if string(timeline) != `{"log_capture":"truncated: exceeds safe capture limit"}` || closeCalls != 1 {
+		t.Fatalf("timeline=%q, close calls=%d", timeline, closeCalls)
+	}
 }
 
 func TestResponseWriterNonStreamingPreservesMemoryWhenSourceReadFails(t *testing.T) {

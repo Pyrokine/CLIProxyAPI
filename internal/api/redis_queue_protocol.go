@@ -18,6 +18,7 @@ import (
 
 const (
 	redisUsageChannel              = "usage"
+	redisErrorsChannel             = "errors"
 	redisMaxArrayLength            = 16
 	redisMaxBulkStringSize         = 1 << 20
 	redisMaxLineSize               = 4096
@@ -54,7 +55,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 	authed := false
 	writer := bufio.NewWriter(conn)
 	defer func() {
-		if errClose := conn.Close(); errClose != nil {
+		if errClose := conn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
 			log.Errorf("redis connection close error: %v", errClose)
 		}
 	}()
@@ -175,22 +176,31 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				}
 				continue
 			}
-			if !strings.EqualFold(channel, redisUsageChannel) {
+			var messages <-chan []byte
+			var unsubscribe func()
+			var subscribed bool
+			switch {
+			case strings.EqualFold(channel, redisUsageChannel):
+				channel = redisUsageChannel
+				messages, unsubscribe, subscribed = s.usageQueue.TrySubscribeUsage()
+			case strings.EqualFold(channel, redisErrorsChannel):
+				channel = redisErrorsChannel
+				messages, unsubscribe, subscribed = s.usageQueue.TrySubscribeErrors()
+			default:
 				_ = writeRedisError(writer, fmt.Sprintf("ERR unsupported channel '%s'", channel))
 				if !flush() {
 					return
 				}
 				continue
 			}
-			messages, unsubscribe, subscribed := s.usageQueue.TrySubscribeUsage()
 			if !subscribed {
-				_ = writeRedisError(writer, "ERR maximum usage subscriptions reached")
+				_ = writeRedisError(writer, fmt.Sprintf("ERR maximum %s subscriptions reached", channel))
 				if !flush() {
 					return
 				}
 				continue
 			}
-			if errWrite := writeRedisPubSubSubscribe(writer, redisUsageChannel, 1); errWrite != nil {
+			if errWrite := writeRedisPubSubSubscribe(writer, channel, 1); errWrite != nil {
 				unsubscribe()
 				log.Errorf("redis protocol subscribe response error: %v", errWrite)
 				return
@@ -199,7 +209,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				unsubscribe()
 				return
 			}
-			s.streamRedisUsageSubscription(conn, reader, writer, messages, unsubscribe)
+			s.streamRedisSubscription(conn, reader, writer, channel, messages, unsubscribe)
 			return
 		case "LPOP", "RPOP":
 			count, hasCount, ok := parsePopCount(args)
@@ -212,6 +222,13 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 			}
 			if count <= 0 || count > redisqueue.MaxPopCount {
 				_ = writeRedisError(writer, "ERR value is not an integer or out of range")
+				if !flush() {
+					return
+				}
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(args[1]), redisUsageChannel) {
+				_ = writeRedisError(writer, "ERR unsupported queue")
 				if !flush() {
 					return
 				}
@@ -245,10 +262,11 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 	}
 }
 
-func (s *Server) streamRedisUsageSubscription(
+func (s *Server) streamRedisSubscription(
 	conn net.Conn,
 	reader *bufio.Reader,
 	writer *bufio.Writer,
+	channel string,
 	messages <-chan []byte,
 	unsubscribe func(),
 ) {
@@ -283,7 +301,7 @@ func (s *Server) streamRedisUsageSubscription(
 				log.Errorf("redis protocol set write deadline error: %v", errDeadline)
 				return
 			}
-			if errWrite := writeRedisPubSubMessage(writer, redisUsageChannel, msg); errWrite != nil {
+			if errWrite := writeRedisPubSubMessage(writer, channel, msg); errWrite != nil {
 				log.Errorf("redis protocol publish message error: %v", errWrite)
 				return
 			}
@@ -300,7 +318,7 @@ func (s *Server) streamRedisUsageSubscription(
 				log.Errorf("redis protocol set write deadline error: %v", errDeadline)
 				return
 			}
-			keepOpen := handleRedisSubscriptionCommand(writer, command)
+			keepOpen := handleRedisSubscriptionCommand(writer, channel, command)
 			if errFlush := writer.Flush(); errFlush != nil {
 				log.Errorf("redis protocol flush error: %v", errFlush)
 				return
@@ -346,7 +364,7 @@ func readRedisSubscriptionCommands(
 	}
 }
 
-func handleRedisSubscriptionCommand(writer *bufio.Writer, command redisSubscriptionCommand) bool {
+func handleRedisSubscriptionCommand(writer *bufio.Writer, channel string, command redisSubscriptionCommand) bool {
 	if command.err != nil {
 		_ = writeRedisError(writer, "ERR "+command.err.Error())
 		return false
@@ -366,7 +384,7 @@ func handleRedisSubscriptionCommand(writer *bufio.Writer, command redisSubscript
 		_ = writeRedisPubSubPong(writer, payload)
 		return true
 	case "UNSUBSCRIBE":
-		_ = writeRedisPubSubUnsubscribe(writer, redisUsageChannel, 0)
+		_ = writeRedisPubSubUnsubscribe(writer, channel, 0)
 		return false
 	case "QUIT":
 		_ = writeRedisSimpleString(writer, "OK")

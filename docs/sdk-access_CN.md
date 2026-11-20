@@ -81,10 +81,13 @@ import (
     sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 )
 
+//goland:noinspection GoUnusedType
 type provider struct{}
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (*provider) Identifier() string { return "partner-token" }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (p *provider) Authenticate(
     _ context.Context,
     request *http.Request,

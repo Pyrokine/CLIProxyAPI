@@ -469,7 +469,8 @@ func isAPIWebsocketUpgrade(req *http.Request) bool {
 		return false
 	}
 	path := req.URL.Path
-	if path == "/v1/responses" || path == "/responses" || path == "/backend-api/codex/responses" || path == "/v1/realtime" {
+	if path == "/v1/responses" || path == "/responses" || path == "/backend-api/codex/responses" ||
+		path == "/v1/realtime" {
 		return true
 	}
 	return hasSinglePathSegment(path, "/v1/live/") ||
@@ -661,7 +662,9 @@ func decodeCapturedZstdRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bo
 }
 
 func shouldLogRequest(path string) bool {
-	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/v8/management") || strings.HasPrefix(path, "/management") {
+	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/v8/management") || strings.HasPrefix(
+		path, "/management",
+	) {
 		return false
 	}
 

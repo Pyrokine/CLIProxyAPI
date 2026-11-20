@@ -36,9 +36,9 @@ func TestRegisterModelsForAuth_CodexPlanControlsFrontierModels(t *testing.T) {
 		t.Run(
 			test.name, func(t *testing.T) {
 				auth := &coreauth.Auth{
-					ID:       "codex-" + test.name + "-plan",
-					Provider: "codex",
-					Status:   coreauth.StatusActive,
+					ID:         "codex-" + test.name + "-plan",
+					Provider:   "codex",
+					Status:     coreauth.StatusActive,
 					Attributes: map[string]string{"plan_type": test.plan, "auth_kind": test.authKind},
 				}
 				service.registerModelsForAuth(auth)
@@ -345,44 +345,52 @@ func TestHandleAuthUpdateAllowsFileWatcherRecreateRemovedAuth(t *testing.T) {
 	}
 	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient("auth-1") })
 
-	service.handleAuthUpdate(
+	if err := service.handleAuthUpdate(
 		context.Background(), AuthUpdate{
 			Action:            AuthUpdateActionAdd,
 			ID:                "auth-1",
 			Auth:              &coreauth.Auth{ID: "auth-1", Provider: "test", Metadata: map[string]any{"token": "old"}},
 			AllowAuthRecreate: true,
 		},
-	)
+	); err != nil {
+		t.Error(err)
+	}
 	if _, ok := service.coreManager.GetByID("auth-1"); !ok {
 		t.Fatal("expected initial file auth to be registered")
 	}
 
-	service.handleAuthUpdate(
+	if err := service.handleAuthUpdate(
 		context.Background(), AuthUpdate{Action: AuthUpdateActionDelete, ID: "auth-1"},
-	)
+	); err != nil {
+		t.Error(err)
+	}
 	if _, ok := service.coreManager.GetByID("auth-1"); ok {
 		t.Fatal("expected auth to be removed")
 	}
 
-	service.handleAuthUpdate(
+	if err := service.handleAuthUpdate(
 		context.Background(), AuthUpdate{
 			Action: AuthUpdateActionAdd,
 			ID:     "auth-1",
 			Auth:   &coreauth.Auth{ID: "auth-1", Provider: "test", Metadata: map[string]any{"token": "stale"}},
 		},
-	)
+	); err != nil {
+		t.Error(err)
+	}
 	if _, ok := service.coreManager.GetByID("auth-1"); ok {
 		t.Fatal("expected unmarked update not to recreate tombstoned auth")
 	}
 
-	service.handleAuthUpdate(
+	if err := service.handleAuthUpdate(
 		context.Background(), AuthUpdate{
 			Action:            AuthUpdateActionAdd,
 			ID:                "auth-1",
 			Auth:              &coreauth.Auth{ID: "auth-1", Provider: "test", Metadata: map[string]any{"token": "new"}},
 			AllowAuthRecreate: true,
 		},
-	)
+	); err != nil {
+		t.Error(err)
+	}
 	updated, ok := service.coreManager.GetByID("auth-1")
 	if !ok || updated == nil {
 		t.Fatal("expected file watcher recreate to register auth")

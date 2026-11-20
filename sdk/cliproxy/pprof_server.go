@@ -41,6 +41,7 @@ func (s *Service) shutdownPprof(ctx context.Context) error {
 	return s.pprofServer.Shutdown(ctx)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (p *pprofServer) Apply(cfg *config.Config) {
 	if p == nil || cfg == nil {
 		return
@@ -78,6 +79,7 @@ func (p *pprofServer) Apply(cfg *config.Config) {
 	p.startServer(addr)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (p *pprofServer) Shutdown(ctx context.Context) error {
 	if p == nil {
 		return nil

@@ -30,13 +30,15 @@ func WithMiddleware(mw ...gin.HandlerFunc) ServerOption {
 }
 
 // WithEngineConfigurator allows callers to mutate the Gin engine prior to middleware setup.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func WithEngineConfigurator(fn func(*gin.Engine)) ServerOption {
 	return internalapi.WithEngineConfigurator(fn)
 }
 
 // WithRouterConfigurator appends a callback after default routes are registered.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func WithRouterConfigurator(fn func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)) ServerOption {
 	return internalapi.WithRouterConfigurator(fn)
 }
@@ -48,7 +50,8 @@ func WithLocalManagementPassword(password string) ServerOption {
 }
 
 // WithKeepAliveEndpoint enables a keep-alive endpoint with the provided timeout and callback.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption {
 	return internalapi.WithKeepAliveEndpoint(timeout, onTimeout)
 }
@@ -128,6 +131,7 @@ func (a requestLoggerAdapter) LogRequest(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a requestLoggerAdapter) LogRequestWithOptionsAndTimeline(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -201,6 +205,7 @@ func (a requestLoggerAdapter) LogRequestWithOptionsAndTimeline(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a requestLoggerAdapter) LogRequestWithOptionsAndAllSources(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -358,6 +363,7 @@ func (a requestLoggerAdapter) Snapshot() internallogging.RequestLogger {
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a requestLoggerAdapter) SetEnabled(enabled bool) {
 	if a.enabledSnapshot != nil {
 		return
@@ -371,12 +377,14 @@ func (a requestLoggerAdapter) SetEnabled(enabled bool) {
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a requestLoggerAdapter) SetHomeEnabled(enabled bool) {
 	if setter, ok := a.logger.(interface{ SetHomeEnabled(bool) }); ok {
 		setter.SetHomeEnabled(enabled)
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a requestLoggerAdapter) SetErrorLogsMaxFiles(maxFiles int) {
 	if setter, ok := a.logger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
 		setter.SetErrorLogsMaxFiles(maxFiles)

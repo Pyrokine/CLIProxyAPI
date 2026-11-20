@@ -22,7 +22,9 @@ import (
 	"time"
 
 	internalapi "github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
+	managementHandlers "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/handlers/management"
 	internalauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
+	kimiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/kimi"
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/homeplugins"
@@ -134,7 +136,11 @@ type modelRefreshFailureState struct {
 	nextRetry   time.Time
 }
 
-func nextModelRefreshFailure(previous modelRefreshFailureState, now time.Time, randomInt64N func(int64) int64) modelRefreshFailureState {
+func nextModelRefreshFailure(
+	previous modelRefreshFailureState,
+	now time.Time,
+	randomInt64N func(int64) int64,
+) modelRefreshFailureState {
 	if now.Sub(previous.lastFailure) > 2*modelRefreshCacheTTL {
 		previous.failures = 0
 	}
@@ -197,7 +203,7 @@ type Service struct {
 	apiKeyProvider APIKeyClientProvider
 
 	// watcherFactory creates file watcher instances.
-	watcherFactory WatcherFactory
+	watcherFactory func(configPath, authDir string, reload func(*config.Config) bool) (*WatcherWrapper, error)
 
 	// hooks provides lifecycle callbacks.
 	hooks Hooks
@@ -250,7 +256,7 @@ type Service struct {
 	shutdownErr  error
 	shuttingDown atomic.Bool
 
-	// wsGateway manages websocket Gemini providers.
+	// wsGateway manages WebSocket Gemini providers.
 	wsGateway *wsrelay.Manager
 
 	// usageManager and usagePersister are owned by this service instance.
@@ -276,6 +282,8 @@ type Service struct {
 	homeLogScopeRelease func()
 	homePluginSyncMu    sync.Mutex
 	homePluginSyncKey   string
+	homePluginTasksMu   sync.Mutex
+	homePluginTasks     *homePluginTaskWork
 
 	modelRefreshMu           sync.Mutex
 	modelRefreshCancel       map[string]context.CancelFunc
@@ -293,6 +301,8 @@ type Service struct {
 	modelRefreshDiscoveries  sync.WaitGroup
 	modelRefreshSlots        chan struct{}
 	modelRefreshClosed       bool
+	antigravityProbeCount    int
+	antigravityProbeDone     chan struct{}
 
 	pluginRuntimeRetryMu     sync.Mutex
 	pluginRuntimeRetryCancel context.CancelFunc
@@ -319,6 +329,8 @@ func (s *Service) setWatcher(watcher *WatcherWrapper) {
 }
 
 // SetResultPolicy sets an execution result policy on the core auth manager.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *Service) SetResultPolicy(policy coreauth.ResultPolicy) {
 	if s == nil || s.coreManager == nil {
 		return
@@ -327,6 +339,8 @@ func (s *Service) SetResultPolicy(policy coreauth.ResultPolicy) {
 }
 
 // ResultPolicy returns the execution result policy configured on the core auth manager.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *Service) ResultPolicy() coreauth.ResultPolicy {
 	if s == nil || s.coreManager == nil {
 		return nil
@@ -339,6 +353,8 @@ func (s *Service) ResultPolicy() coreauth.ResultPolicy {
 //
 // Parameters:
 //   - plugin: The usage plugin to register
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 	if s == nil || plugin == nil {
 		return
@@ -588,18 +604,24 @@ func (s *Service) consumeAuthUpdates(ctx context.Context) {
 			if !ok {
 				return
 			}
-			s.handleAuthUpdate(ctx, update)
+			updates := make([]AuthUpdate, 1, 1+len(s.authUpdates))
+			updates[0] = update
 		labelDrain:
-			for {
+			for len(updates) < cap(updates) {
 				select {
 				case <-ctx.Done():
 					return
-				case nextUpdate := <-s.authUpdates:
-					s.handleAuthUpdate(ctx, nextUpdate)
+				case nextUpdate, open := <-s.authUpdates:
+					if !open {
+						s.handleAuthUpdates(ctx, updates)
+						return
+					}
+					updates = append(updates, nextUpdate)
 				default:
 					break labelDrain
 				}
 			}
+			s.handleAuthUpdates(ctx, updates)
 		}
 	}
 }
@@ -646,34 +668,86 @@ func (s *Service) emitAuthUpdate(ctx context.Context, update AuthUpdate) {
 			log.Debugf("auth update queue saturated, applying inline action=%v id=%s", update.Action, update.ID)
 		}
 	}
-	s.handleAuthUpdate(ctx, update)
+	_ = s.handleAuthUpdate(ctx, update)
 }
 
-func (s *Service) handleAuthUpdate(ctx context.Context, update AuthUpdate) {
-	if s == nil {
+func (s *Service) handleAuthUpdates(ctx context.Context, updates []AuthUpdate) {
+	if s == nil || s.coreManager == nil || len(updates) == 0 {
 		return
 	}
-	s.authUpdateMu.Lock()
-	errApply := s.handleAuthUpdateLocked(ctx, update)
-	s.authUpdateMu.Unlock()
-	if errApply != nil {
-		id := strings.TrimSpace(update.ID)
-		if id == "" && update.Auth != nil {
-			id = strings.TrimSpace(update.Auth.ID)
-		}
-		log.WithError(errApply).Warnf("failed to apply auth update %s", id)
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	ctx = coreauth.WithDeferredAPIKeyModelAliasRebuild(ctx)
+	defer s.coreManager.RefreshAPIKeyModelAlias()
+	byID := make(map[string][]AuthUpdate)
+	for _, update := range updates {
+		id := authUpdateID(update)
+		byID[id] = append(byID[id], update)
+	}
+	jobs := make(chan []AuthUpdate)
+	var workers sync.WaitGroup
+	for range min(5, len(byID)) {
+		workers.Go(
+			func() {
+				for group := range jobs {
+					for _, update := range group {
+						if ctx.Err() != nil {
+							return
+						}
+						_ = s.handleAuthUpdate(ctx, update)
+					}
+				}
+			},
+		)
+	}
+enqueue:
+	for _, group := range byID {
+		select {
+		case <-ctx.Done():
+			break enqueue
+		case jobs <- group:
+		}
+	}
+	close(jobs)
+	workers.Wait()
 }
 
-// handleAuthUpdateLocked applies one update while the caller holds authUpdateMu.
-func (s *Service) handleAuthUpdateLocked(ctx context.Context, update AuthUpdate) error {
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
-	if cfg == nil || s.coreManager == nil {
+func (s *Service) handleAuthUpdate(ctx context.Context, update AuthUpdate) (errApply error) {
+	if s == nil || s.coreManager == nil {
 		return nil
 	}
-	if !s.acceptAuthUpdateRevisionLocked(update) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.cfgMu.RLock()
+	configured := s.cfg != nil
+	s.cfgMu.RUnlock()
+	if !configured {
+		return nil
+	}
+	if update.Auth != nil {
+		update.Auth = update.Auth.Clone()
+	}
+	id := authUpdateID(update)
+	if id == "" {
+		return nil
+	}
+	defer func() {
+		if errApply != nil {
+			log.WithError(errApply).Warnf("failed to apply auth update %s", id)
+		}
+	}()
+	// 同一认证的登记、重复等待和取消复用可取消的 apply lock
+	unlockApply, err := s.lockAuthApply(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlockApply()
+	s.authUpdateMu.Lock()
+	accepted := s.acceptAuthUpdateRevisionLocked(update)
+	s.authUpdateMu.Unlock()
+	if !accepted {
 		return nil
 	}
 	switch update.Action {
@@ -681,24 +755,32 @@ func (s *Service) handleAuthUpdateLocked(ctx context.Context, update AuthUpdate)
 		if update.Auth == nil || update.Auth.ID == "" {
 			return nil
 		}
-		updateCtx := ctx
 		if update.AllowAuthRecreate {
-			updateCtx = coreauth.WithAllowAuthRecreate(updateCtx)
+			ctx = coreauth.WithAllowAuthRecreate(ctx)
 		}
-		return s.applyCoreAuthAddOrUpdate(updateCtx, update.Auth)
+		return s.applyCoreAuthAddOrUpdateLocked(ctx, update.Auth)
 	case AuthUpdateActionDelete:
-		id := update.ID
-		if id == "" && update.Auth != nil {
-			id = update.Auth.ID
+		if s.coreManager.SupersedeAuthRecreation(ctx, id) {
+			ctx = coreauth.WithForcePersist(ctx)
 		}
-		if id == "" {
-			return nil
-		}
-		s.applyCoreAuthRemoval(ctx, id)
+		return s.applyCoreAuthRemovalLocked(ctx, id)
 	default:
 		log.Debugf("received unknown auth update action: %v", update.Action)
 	}
 	return nil
+}
+
+func authUpdateID(update AuthUpdate) string {
+	if update.Auth != nil && (update.Action == AuthUpdateActionAdd || update.Action == AuthUpdateActionModify) {
+		return strings.TrimSpace(update.Auth.ID)
+	}
+	if id := strings.TrimSpace(update.ID); id != "" {
+		return id
+	}
+	if update.Auth != nil {
+		return strings.TrimSpace(update.Auth.ID)
+	}
+	return ""
 }
 
 func (s *Service) acceptAuthUpdateRevisionLocked(update AuthUpdate) bool {
@@ -706,10 +788,7 @@ func (s *Service) acceptAuthUpdateRevisionLocked(update AuthUpdate) bool {
 	if revision == 0 {
 		return true
 	}
-	id := strings.TrimSpace(update.ID)
-	if id == "" && update.Auth != nil {
-		id = strings.TrimSpace(update.Auth.ID)
-	}
+	id := authUpdateID(update)
 	if id == "" {
 		return true
 	}
@@ -881,6 +960,33 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		return errApplyLock
 	}
 	defer unlockApply()
+	return s.applyCoreAuthAddOrUpdateLocked(ctx, auth)
+}
+
+// 调用方持有该认证的 apply lock，并传入自有快照
+func (s *Service) applyCoreAuthAddOrUpdateLocked(ctx context.Context, auth *coreauth.Auth) error {
+	if providerKey, compatName, compat := openAICompatInfoFromAuth(auth); compat {
+		previousKey := strings.TrimSpace(auth.Attributes["provider_key"])
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes["provider_key"] = providerKey
+		if auth.AuthSourceKind() == coreauth.AuthSourceConfig || strings.EqualFold(
+			auth.Provider, "openai-compatibility",
+		) ||
+			strings.EqualFold(auth.Provider, previousKey) || strings.EqualFold(auth.Provider, compatName) {
+			auth.Provider = providerKey
+		}
+	} else if provider := strings.ToLower(strings.TrimSpace(auth.Provider)); provider ==
+		"kimi.ai" ||
+		provider ==
+			"kimi.com" {
+		if kimiauth.IsKimiAIAuth(auth) {
+			auth.Provider = "kimi-ai"
+		} else {
+			auth.Provider = "kimi"
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -889,7 +995,12 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	}
 	existing, hadExisting := s.coreManager.GetByID(auth.ID)
 	if hadExisting && auth.Generation > 0 && auth.Generation < existing.Generation {
-		log.Debugf("skipping stale auth snapshot %s: generation %d < %d", auth.ID, auth.Generation, existing.Generation)
+		log.Debugf(
+			"skipping stale auth snapshot %s: generation %d < %d",
+			auth.ID,
+			auth.Generation,
+			existing.Generation,
+		)
 		return s.publishCoreAuthRuntime(ctx, existing)
 	}
 	s.cancelModelRefresh(auth.ID)
@@ -899,8 +1010,11 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	var err error
 	if hadExisting {
 		auth.CreatedAt = existing.CreatedAt
-		auth.LastRefreshedAt = existing.LastRefreshedAt
-		auth.NextRefreshAfter = existing.NextRefreshAfter
+		if !existing.Disabled && existing.Status != coreauth.StatusDisabled &&
+			!auth.Disabled && auth.Status != coreauth.StatusDisabled {
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			auth.NextRefreshAfter = existing.NextRefreshAfter
+		}
 		op = "update"
 		if auth.Generation > 0 {
 			updated, err = s.coreManager.MergePersistentUpdate(ctx, existing, auth)
@@ -1025,15 +1139,20 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		return
 	}
 	defer unlockApply()
+	if err := s.applyCoreAuthRemovalLocked(ctx, id); err != nil {
+		log.WithError(err).Warnf("failed to remove auth %s durably", id)
+	}
+}
+
+// 调用方持有该认证的 apply lock
+func (s *Service) applyCoreAuthRemovalLocked(ctx context.Context, id string) error {
 	runtimeOnly := false
 	current, hasCurrent := s.coreManager.GetByID(id)
 	if hasCurrent && current != nil && current.Attributes != nil {
 		runtimeOnly = strings.EqualFold(strings.TrimSpace(current.Attributes["runtime_only"]), "true")
 	}
 	s.cancelModelRefresh(id)
-	if errRemove := s.coreManager.Remove(ctx, id); errRemove != nil {
-		log.WithError(errRemove).Warnf("failed to remove auth %s durably", id)
-	}
+	errRemove := s.coreManager.Remove(ctx, id)
 	if _, stillRegistered := s.coreManager.GetByID(id); !stillRegistered && isAntigravityAuth(current) {
 		executor.CloseAntigravityAuthIdleTransports(current)
 	}
@@ -1045,6 +1164,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		}
 		s.authApplyMu.Unlock()
 	}
+	return errRemove
 }
 
 func (s *Service) applyRetryConfig(cfg *config.Config) {
@@ -1080,6 +1200,8 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 	if errSynthesize != nil {
 		return fmt.Errorf("synthesize config API key auths: %w", errSynthesize)
 	}
+	ctx = coreauth.WithDeferredAPIKeyModelAliasRebuild(ctx)
+	defer s.coreManager.RefreshAPIKeyModelAlias()
 	for _, auth := range auths {
 		if auth == nil || strings.TrimSpace(auth.ID) == "" {
 			continue
@@ -1089,7 +1211,8 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 		if exists {
 			var updated *coreauth.Auth
 			updated, errApply = s.coreManager.Update(ctx, auth)
-			if errApply == nil && updated != nil && (isAntigravityAuth(existing) || isAntigravityAuth(updated)) {
+			if errApply == nil && updated != nil &&
+				(isAntigravityAuth(existing) || isAntigravityAuth(updated)) {
 				executor.CloseAntigravityAuthIdleTransports(existing)
 			}
 		} else {
@@ -1135,11 +1258,12 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 			if providerKey == "" {
 				providerKey = compatName
 			}
-			return strings.ToLower(providerKey), compatName, true
+			return util.OpenAICompatibleProviderKey(providerKey), compatName, true
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "openai-compatibility") {
-		return "openai-compatibility", strings.TrimSpace(a.Label), true
+		compatName = strings.TrimSpace(a.Label)
+		return util.OpenAICompatibleProviderKey(compatName), compatName, true
 	}
 	return "", "", false
 }
@@ -1181,12 +1305,21 @@ func (s *Service) ensureExecutorsForAuthWithConfigContext(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if ctx.Err() != nil {
+		return false
+	}
 	publish := func(candidate coreauth.ProviderExecutor) bool {
 		if forceReplace || a.Generation == 0 {
 			s.coreManager.RegisterExecutor(candidate)
 			return true
 		}
 		return s.coreManager.RegisterExecutorIfAuthPublicationCurrent(ctx, a.ID, a.Generation, candidate)
+	}
+	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
+		if a.Disabled {
+			return true
+		}
+		return s.publishOpenAICompatExecutor(a, compatProviderKey, cfg, forceReplace, true, publish)
 	}
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
 		if !forceReplace {
@@ -1217,15 +1350,6 @@ func (s *Service) ensureExecutorsForAuthWithConfigContext(
 	// and must not override active provider executors (such as iFlow OAuth accounts).
 	if a.Disabled {
 		return true
-	}
-	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
-		if compatProviderKey == "" {
-			compatProviderKey = strings.ToLower(strings.TrimSpace(a.Provider))
-		}
-		if compatProviderKey == "" {
-			compatProviderKey = "openai-compatibility"
-		}
-		return s.publishOpenAICompatExecutor(a, compatProviderKey, cfg, forceReplace, true, publish)
 	}
 	switch strings.ToLower(a.Provider) {
 	case "gemini":
@@ -1299,9 +1423,6 @@ func (s *Service) publishOpenAICompatExecutor(
 	existing, hasExisting := s.coreManager.Executor(providerKey)
 	if hasExisting && existing != nil {
 		if !forceReplace && shouldKeepExistingOpenAICompatExecutor(existing, nextExecutor, preserveExternal) {
-			return true
-		}
-		if preserveExternal && !serviceOwnsOpenAICompatExecutor(existing) {
 			return true
 		}
 	}
@@ -1428,7 +1549,9 @@ func (s *Service) reprojectModelsForCurrentAuths() {
 
 func (s *Service) onRefreshBindingChange(before, after *coreauth.Auth) {
 	if before == nil || after == nil || !strings.EqualFold(after.Provider, "codex") ||
-		strings.EqualFold(strings.TrimSpace(before.Attributes["plan_type"]), strings.TrimSpace(after.Attributes["plan_type"])) {
+		strings.EqualFold(
+			strings.TrimSpace(before.Attributes["plan_type"]), strings.TrimSpace(after.Attributes["plan_type"]),
+		) {
 		return
 	}
 	s.reprojectModelsForAuthID(after.ID, false)
@@ -1500,7 +1623,15 @@ func (s *Service) rebindExecutors() {
 			}
 			reboundXAI = true
 		}
-		s.ensureExecutorsForAuthWithMode(auth, true)
+		providerKey := ""
+		if auth != nil {
+			providerKey = strings.ToLower(strings.TrimSpace(auth.Provider))
+			if compatKey, _, compat := openAICompatInfoFromAuth(auth); compat {
+				providerKey = compatKey
+			}
+		}
+		existing, _ := s.coreManager.Executor(providerKey)
+		s.ensureExecutorsForAuthWithMode(auth, serviceOwnsOpenAICompatExecutor(existing))
 	}
 }
 
@@ -1542,7 +1673,11 @@ func (s *Service) applyHomeOverlayContext(ctx context.Context, remoteCfg *config
 	return s.applyHomeOverlayWithClient(ctx, remoteCfg, s.currentHomeClient())
 }
 
-func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *config.Config, client *home.Client) error {
+func (s *Service) applyHomeOverlayWithClient(
+	ctx context.Context,
+	remoteCfg *config.Config,
+	client *home.Client,
+) error {
 	if s == nil || remoteCfg == nil {
 		return nil
 	}
@@ -1580,7 +1715,7 @@ func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 		config.ApplyHomeRuntimeConfig(&merged)
 		logHomeConfigChanges(baseCfg, &merged)
 		prepared, syncKey, didSync, errPrepare := s.prepareHomePlugins(ctx, &merged)
-		if didSync && errPrepare != nil {
+		if errPrepare != nil {
 			return errors.Join(
 				fmt.Errorf("cliproxy: failed to prepare home plugins: %w", errPrepare),
 				prepared.Close(),
@@ -1601,14 +1736,30 @@ func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 				}
 				if hasManagementBase {
 					currentManagementCfg, currentGeneration, okState := managementState()
-					if !okState || currentManagementCfg != managementCfg || currentGeneration != baseGeneration {
+					if !okState || currentManagementCfg != managementCfg ||
+						currentGeneration != baseGeneration {
 						return errHomeConfigChangedDuringPreparation
 					}
 				}
 				if didSync {
-					report, errSync = prepared.Apply(s.pluginHost)
+					report, errSync = prepared.Apply(s.pluginHost, ctx)
 					if errSync != nil {
-						return fmt.Errorf("cliproxy: failed to sync home plugins: %w", errSync)
+						errSync = fmt.Errorf("cliproxy: failed to sync home plugins: %w", errSync)
+						if s.pluginHost != nil && !s.shuttingDown.Load() {
+							restoreCtx, cancelRestore := context.WithTimeout(
+								context.WithoutCancel(ctx),
+								durationOrDefault(baseCfg.CredentialConcurrency.WithDefaults().CPACancelBound),
+							)
+							errRestore := s.syncPluginRuntime(restoreCtx)
+							cancelRestore()
+							if errRestore != nil {
+								errSync = errors.Join(
+									errSync,
+									fmt.Errorf("cliproxy: restore published plugin runtime: %w", errRestore),
+								)
+							}
+						}
+						return errSync
 					}
 				}
 				if errApplyRuntime := s.applyConfigUpdateRuntime(ctx, &merged); errApplyRuntime != nil {
@@ -1631,7 +1782,10 @@ func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 		}
 		if errApply != nil {
 			if errClose := prepared.Close(); errClose != nil {
-				return errors.Join(errApply, fmt.Errorf("cliproxy: clean Home plugin preparation: %w", errClose))
+				return errors.Join(
+					errApply,
+					fmt.Errorf("cliproxy: clean Home plugin preparation: %w", errClose),
+				)
 			}
 			return errApply
 		}
@@ -1876,8 +2030,16 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) bool {
 }
 
 func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config, expectedHash string) bool {
-	if s == nil || s.server == nil {
+	if s == nil {
 		return false
+	}
+	if s.server == nil {
+		runtimeCfg, errClone := internalconfig.Clone(newCfg)
+		if errClone != nil {
+			log.WithError(errClone).Error("failed to clone embedded watcher configuration")
+			return false
+		}
+		return s.applyConfigUpdate(runtimeCfg)
 	}
 	handler := s.server.ManagementHandler()
 	if handler == nil {
@@ -1966,7 +2128,9 @@ func (s *Service) applyConfigUpdateRuntimeGenerationOptions(
 		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
 		previousSessionAffinity = s.cfg.Routing.SessionAffinity
 		previousSessionAffinityTTL = strings.TrimSpace(s.cfg.Routing.SessionAffinityTTL)
-		previousSessionAffinitySubagents = sessionAffinitySubagentsEnabled(s.cfg.Routing.SessionAffinitySubagents)
+		previousSessionAffinitySubagents = sessionAffinitySubagentsEnabled(
+			s.cfg.Routing.SessionAffinitySubagents,
+		)
 		homeEnabled = s.cfg.Home.Enabled
 	}
 	s.cfgMu.RUnlock()
@@ -1986,6 +2150,7 @@ func (s *Service) applyConfigUpdateRuntimeGenerationOptions(
 	}
 	if homeEnabled {
 		config.ApplyHomeRuntimeConfig(newCfg)
+		newCfg.Plugins.StoreAuth = nil
 	}
 	var modelAliases map[string][]config.OAuthModelAlias
 	if modelCatalogPrepared {
@@ -2065,7 +2230,8 @@ func (s *Service) applyConfigUpdateRuntimeGenerationOptions(
 	s.rebindExecutors()
 	s.reprojectModelsForCurrentAuths()
 	if s.coreManager != nil && !newCfg.Home.Enabled && newCfg.SaveCooldownStatus {
-		if errRestoreCooldown := s.coreManager.RestoreCooldownStates(ctx); errRestoreCooldown != nil && ctx.Err() == nil {
+		if errRestoreCooldown := s.coreManager.RestoreCooldownStates(ctx); errRestoreCooldown != nil &&
+			ctx.Err() == nil {
 			log.Warnf("failed to restore cooldown state after config update: %v", errRestoreCooldown)
 		}
 	}
@@ -2125,26 +2291,38 @@ func (s *Service) endHomeAppLogScope() {
 	}
 }
 
-func (s *Service) usagePersistenceDataDir() string {
+func (s *Service) usagePersistenceDataDir(
+	ctx context.Context,
+) (string, *managementHandlers.UsageDataDirMigration) {
 	if s == nil || s.cfg == nil {
-		return ""
+		return "", nil
 	}
 	baseDir := internalUsage.ResolveDataDir(s.cfg.UsageDataDir, s.configPath)
 	if baseDir == "" {
-		return ""
+		return "", nil
+	}
+	pending, err := managementHandlers.PendingUsageDataDirMigration(ctx, s.configPath, baseDir)
+	if err != nil {
+		log.Warnf("usage: failed to load pending data directory migration: %v", err)
+		return "", nil
 	}
 	migrate := s.usageDataDirMigrator
 	if migrate == nil {
-		migrate = internalUsage.MigrateDataDirIfNeeded
+		migrate = func(configPath, target string) error {
+			if pending != nil {
+				return internalUsage.MigrateDataDirIfNeeded(configPath, target, pending.From)
+			}
+			return internalUsage.MigrateDataDirIfNeeded(configPath, target)
+		}
 	}
 	if errMigrate := migrate(s.configPath, baseDir); errMigrate != nil {
 		log.Warnf(
 			"usage: data dir migration failed; leaving the target unopened for a later retry: %v",
 			errMigrate,
 		)
-		return ""
+		return "", nil
 	}
-	return baseDir
+	return baseDir, pending
 }
 
 // Run starts the service and blocks until the context is canceled or the server stops.
@@ -2156,7 +2334,7 @@ func (s *Service) usagePersistenceDataDir() string {
 //
 // Returns:
 //   - error: An error if the service fails to start or run
-func (s *Service) Run(ctx context.Context) error {
+func (s *Service) Run(ctx context.Context) (runErr error) {
 	if s == nil {
 		return fmt.Errorf("cliproxy: service is nil")
 	}
@@ -2179,6 +2357,11 @@ func (s *Service) Run(ctx context.Context) error {
 		defer shutdownCancel()
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			log.Errorf("service shutdown returned error: %v", err)
+			if runErr == context.Canceled {
+				runErr = err
+			} else {
+				runErr = errors.Join(runErr, err)
+			}
 		}
 	}()
 
@@ -2192,10 +2375,11 @@ func (s *Service) Run(ctx context.Context) error {
 		s.usageQueue = redisqueue.NewQueue()
 	}
 	s.usageStatisticsEnabled.Store(s.cfg.UsageStatisticsEnabled)
-	s.usageQueue.SetUsageStatisticsEnabled(s.cfg.UsageStatisticsEnabled)
+	s.usageQueue.SetUsageStatisticsEnabled(s.cfg.Home.Enabled || s.cfg.UsageStatisticsEnabled)
 	s.usageQueue.SetRetentionSeconds(s.cfg.RedisUsageQueueRetentionSeconds)
 	if homeEnabled {
 		config.ApplyHomeRuntimeConfig(s.cfg)
+		s.cfg.Plugins.StoreAuth = nil
 		s.usageQueue.SetEnabled(true)
 		if s.coreManager != nil {
 			s.coreManager.SetConfig(s.cfg)
@@ -2205,7 +2389,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// Start usage statistics persistence if enabled
 	if s.cfg.UsageStatisticsEnabled && !strings.EqualFold(s.cfg.UsageStatisticsFile, "disabled") {
-		baseDir := s.usagePersistenceDataDir()
+		baseDir, pendingMigration := s.usagePersistenceDataDir(ctx)
 		if baseDir != "" {
 			s.usagePersister = internalUsage.NewPersister(baseDir, s.cfg.UsageRetention)
 			s.usagePersister.SetPriceProvider(internalUsage.BuildModelPriceProvider(s.configPath))
@@ -2216,8 +2400,17 @@ func (s *Service) Run(ctx context.Context) error {
 			// database errors. Keep the service persister nil in that case so its
 			// logger plugin writes to the service-owned in-memory statistics.
 			if !s.usagePersister.IsReady() {
-				log.Warnf("usage: SQLite persister not ready, falling back to in-memory request statistics; legacy summary.json / detail JSON files remain untouched for manual recovery")
+				log.Warnf(
+					"usage: SQLite persister not ready, falling back to in-memory request statistics; " +
+						"legacy summary.json / detail JSON files remain untouched for manual recovery",
+				)
 				s.usagePersister = nil
+			} else if pendingMigration != nil {
+				if err := managementHandlers.CompleteUsageDataDirMigration(
+					ctx, s.configPath, *pendingMigration,
+				); err != nil {
+					log.Warnf("usage: data directory is ready but migration state cleanup failed: %v", err)
+				}
 			}
 		}
 	}
@@ -2327,21 +2520,33 @@ func (s *Service) Run(ctx context.Context) error {
 					defer cancel()
 					if errStop := s.wsGateway.Stop(ctx); errStop != nil {
 						log.Warnf(
-							"failed to reset websocket connections after ws-auth change %t -> %t: %v", oldEnabled,
-							newEnabled, errStop,
+							"failed to reset websocket connections after ws-auth change %t -> %t: %v",
+							oldEnabled,
+							newEnabled,
+							errStop,
 						)
 						return
 					}
-					log.Debugf("ws-auth enabled; existing websocket sessions terminated to enforce authentication")
+					log.Debugf(
+						"ws-auth enabled; existing websocket sessions terminated to enforce authentication",
+					)
 					return
 				}
 				log.Debugf("ws-auth disabled; existing websocket sessions remain connected")
 			},
 		)
 	}
+	var homeSupervisor *homeSubscriberSupervisor
+	var homeSubscriberDone <-chan struct{}
 	if homeEnabled {
 		s.registerHomeExecutors()
 		s.startHomeSubscriber(ctx)
+		s.homeLifecycleMu.Lock()
+		homeSupervisor = s.homeSupervisor
+		if homeSupervisor != nil {
+			homeSubscriberDone = homeSupervisor.done
+		}
+		s.homeLifecycleMu.Unlock()
 	}
 	if errPluginRuntime := s.syncPluginRuntime(ctx); errPluginRuntime != nil {
 		return errPluginRuntime
@@ -2354,7 +2559,16 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	if s.hooks.OnBeforeStart != nil {
-		s.hooks.OnBeforeStart(s.cfg)
+		s.cfgMu.RLock()
+		startCfg := s.cfg
+		s.cfgMu.RUnlock()
+		s.hooks.OnBeforeStart(startCfg)
+	}
+
+	select {
+	case <-homeSubscriberDone:
+		return errors.Join(homeSupervisor.result(), ctx.Err())
+	default:
 	}
 
 	s.serverErr = make(chan error, 1)
@@ -2370,20 +2584,26 @@ func (s *Service) Run(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-homeSubscriberDone:
+		return errors.Join(homeSupervisor.result(), ctx.Err())
 	case err = <-s.serverErr:
 		return err
 	case <-serverReady:
 	}
-	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
+	s.cfgMu.RLock()
+	startedCfg := s.cfg
+	s.cfgMu.RUnlock()
+	fmt.Printf("API server started successfully on: %s:%d\n", startedCfg.Host, startedCfg.Port)
 
-	s.applyPprofConfig(s.cfg)
+	s.applyPprofConfig(startedCfg)
 
 	if s.hooks.OnAfterStart != nil {
 		s.hooks.OnAfterStart(s)
 	}
 
 	// Register model refresh callback to re-register client models when the
-	// remote catalog is updated (e.g., new models like gpt-5.4 added upstream).
+	//goland:noinspection GrazieInspection
+	// remote catalog is updated (e.g., new models like `gpt-5.4` added upstream).
 	registry.SetModelRefreshCallback(
 		func(_ []string) {
 			s.refreshModelClients()
@@ -2396,7 +2616,7 @@ func (s *Service) Run(ctx context.Context) error {
 			return s.applyConfigUpdate(newCfg)
 		}
 
-		watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
+		watcherWrapper, err = s.watcherFactory(s.configPath, startedCfg.AuthDir, reloadCallback)
 		if err != nil {
 			return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
 		}
@@ -2408,7 +2628,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if s.authUpdates != nil {
 			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 		}
-		watcherWrapper.SetConfig(s.cfg)
+		watcherWrapper.SetConfig(startedCfg)
 
 		watcherCtx, watcherCancel := context.WithCancel(context.Background())
 		s.watcherCancel = watcherCancel
@@ -2430,6 +2650,8 @@ func (s *Service) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		log.Debug("service context cancelled, shutting down...")
 		return ctx.Err()
+	case <-homeSubscriberDone:
+		return errors.Join(homeSupervisor.result(), ctx.Err())
 	case err = <-s.serverErr:
 		return err
 	}
@@ -2448,6 +2670,8 @@ func (s *Service) newShutdownContext() (context.Context, context.CancelFunc) {
 //
 // Returns:
 //   - error: An error if shutdown fails
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *Service) Shutdown(ctx context.Context) error {
 	if s == nil {
 		return nil
@@ -2493,6 +2717,9 @@ func (s *Service) shutdown(ctx context.Context) error {
 	s.configPublicationMu.Unlock()
 	if s.server != nil {
 		s.server.BeginShutdown()
+	}
+	if s.usagePersister != nil {
+		s.usagePersister.StopMaintenance()
 	}
 	if s.usageQueue != nil {
 		s.usageQueue.Close()
@@ -2618,6 +2845,11 @@ func (s *Service) ensureAuthDir() error {
 	if authDir == "" {
 		return fmt.Errorf("cliproxy: auth directory is empty")
 	}
+	authDir, errResolve := util.ResolveAuthDir(authDir)
+	if errResolve != nil {
+		return fmt.Errorf("cliproxy: %w", errResolve)
+	}
+	s.cfg.AuthDir = authDir
 	_, errBefore := os.Stat(authDir)
 	created := os.IsNotExist(errBefore)
 	root, errRoot := util.OpenOrCreateDirectoryRoot(authDir, 0o700)
@@ -2932,6 +3164,45 @@ func (s *Service) registerPluginDiscoveredModels(
 	return applied
 }
 
+// WaitAntigravityProbes 等待当前异步 Antigravity 探测及其发布或取消完成
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (s *Service) WaitAntigravityProbes() {
+	if s == nil {
+		return
+	}
+	for {
+		s.modelRefreshMu.Lock()
+		if s.antigravityProbeCount == 0 {
+			s.modelRefreshMu.Unlock()
+			return
+		}
+		done := s.antigravityProbeDone
+		s.modelRefreshMu.Unlock()
+		<-done
+	}
+}
+
+func (s *Service) beginAntigravityProbeLocked(auth *coreauth.Auth) {
+	if !isAntigravityAuth(auth) {
+		return
+	}
+	if s.antigravityProbeCount == 0 {
+		s.antigravityProbeDone = make(chan struct{})
+	}
+	s.antigravityProbeCount++
+}
+
+func (s *Service) finishAntigravityProbeLocked(auth *coreauth.Auth) {
+	if !isAntigravityAuth(auth) {
+		return
+	}
+	s.antigravityProbeCount--
+	if s.antigravityProbeCount == 0 {
+		close(s.antigravityProbeDone)
+	}
+}
+
 func (s *Service) cancelModelRefresh(id string) {
 	if s == nil {
 		return
@@ -2947,6 +3218,7 @@ func (s *Service) cancelModelRefresh(id string) {
 	}
 	if pending, ok := s.modelRefreshPending[id]; ok {
 		s.modelRefreshGroup.Forget(pending.identity.key)
+		s.finishAntigravityProbeLocked(pending.auth)
 	}
 	if active, ok := s.modelRefreshActive[id]; ok {
 		s.modelRefreshGroup.Forget(active.identity.key)
@@ -2968,6 +3240,7 @@ func (s *Service) cancelAllModelRefreshesLocked(clearCache bool) {
 	}
 	for id, pending := range s.modelRefreshPending {
 		s.modelRefreshGroup.Forget(pending.identity.key)
+		s.finishAntigravityProbeLocked(pending.auth)
 		delete(s.modelRefreshPending, id)
 	}
 	for id, active := range s.modelRefreshActive {
@@ -3150,9 +3423,11 @@ func (s *Service) recordModelRefreshFailureLocked(identity modelRefreshIdentity,
 	failure := nextModelRefreshFailure(previous, time.Now(), rand.Int64N)
 	failure.jobVersion = version
 	s.modelRefreshFailures[identity.authID] = failure
-	log.WithFields(log.Fields{
-		"auth_id": identity.authID, "failures": failure.failures, "next_retry": failure.nextRetry,
-	}).Warn("model discovery scheduled a retry")
+	log.WithFields(
+		log.Fields{
+			"auth_id": identity.authID, "failures": failure.failures, "next_retry": failure.nextRetry,
+		},
+	).Warn("model discovery scheduled a retry")
 	s.wakeModelRefreshWorkerLocked()
 }
 
@@ -3167,6 +3442,7 @@ func (s *Service) nextModelRefreshJob(
 			s.wakeModelRefreshWorkerLocked()
 		}
 		if s.modelRefreshVersion[id] != job.version {
+			s.finishAntigravityProbeLocked(job.auth)
 			continue
 		}
 		jobCtx, cancel := context.WithTimeout(workerCtx, modelRefreshTimeout)
@@ -3194,6 +3470,7 @@ func (s *Service) finishModelRefreshJob(job modelRefreshJob) {
 		s.modelRefreshGroup.Forget(active.identity.key)
 		delete(s.modelRefreshActive, id)
 	}
+	s.finishAntigravityProbeLocked(job.auth)
 }
 
 func (s *Service) modelRefreshWorker(ctx context.Context) {
@@ -3287,13 +3564,23 @@ func (s *Service) runModelDiscovery(ctx context.Context, job modelRefreshJob) mo
 			err:     fmt.Errorf("model discovery service is stopped"),
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		s.modelRefreshMu.Unlock()
+		return modelDiscoveryResult{outcome: modelDiscoveryInconclusive, err: err}
+	}
 	if s.modelRefreshSlots == nil {
 		s.modelRefreshSlots = make(chan struct{}, modelRefreshWorkerCount)
 	}
 	slots := s.modelRefreshSlots
 	s.modelRefreshDiscoveries.Add(1)
+	s.beginAntigravityProbeLocked(job.auth)
 	s.modelRefreshMu.Unlock()
 	defer s.modelRefreshDiscoveries.Done()
+	defer func() {
+		s.modelRefreshMu.Lock()
+		s.finishAntigravityProbeLocked(job.auth)
+		s.modelRefreshMu.Unlock()
+	}()
 
 	select {
 	case slots <- struct{}{}:
@@ -3618,7 +3905,9 @@ func (s *Service) projectModelDiscoveryLocked(
 		case modelDiscoverySourceAntigravity:
 			return s.registerAntigravityModels(auth, cfg, cloneModelInfos(entry.models), expectedEpoch)
 		case modelDiscoverySourcePlugin:
-			return s.registerPluginDiscoveredModels(auth, cfg, entry.provider, cloneModelInfos(entry.models), expectedEpoch)
+			return s.registerPluginDiscoveredModels(
+				auth, cfg, entry.provider, cloneModelInfos(entry.models), expectedEpoch,
+			)
 		}
 		return false
 	}
@@ -3714,6 +4003,7 @@ func (s *Service) scheduleExternalModelRefresh(a *coreauth.Auth, tryPlugin bool)
 	}
 	if pending, ok := s.modelRefreshPending[id]; ok {
 		s.modelRefreshGroup.Forget(pending.identity.key)
+		s.finishAntigravityProbeLocked(pending.auth)
 		delete(s.modelRefreshPending, id)
 	}
 	if active, ok := s.modelRefreshActive[id]; ok {
@@ -3749,6 +4039,7 @@ func (s *Service) scheduleExternalModelRefresh(a *coreauth.Auth, tryPlugin bool)
 		return
 	}
 	s.projectCachedModelRefreshLocked(auth, cfg, identity)
+	s.beginAntigravityProbeLocked(auth)
 	s.modelRefreshPending[id] = modelRefreshJob{
 		auth:          auth,
 		cfg:           cfg,
@@ -4024,6 +4315,7 @@ func (s *Service) registerModelsForAuthWithConfig(a *coreauth.Auth, cfg *config.
 			}
 		}
 		if authKind == "apikey" {
+			models = append(models, fromRegistryModelInfos(registry.GetOpenAIAPIImageModels())...)
 			for _, model := range models {
 				if model != nil {
 					model.SupportConfigurationUpdate = false
@@ -4371,7 +4663,11 @@ func resolveConfigMetaKey(cfg *config.Config, auth *coreauth.Auth) *config.MetaK
 	if entry := configEntryForAuthIndex(auth, cfg.MetaKey); entry != nil {
 		return entry
 	}
-	return resolveConfigKey(cfg.MetaKey, strings.TrimSpace(auth.Attributes["api_key"]), strings.TrimSpace(auth.Attributes["base_url"]))
+	return resolveConfigKey(
+		cfg.MetaKey,
+		strings.TrimSpace(auth.Attributes["api_key"]),
+		strings.TrimSpace(auth.Attributes["base_url"]),
+	)
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
@@ -4627,7 +4923,6 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 				info.SupportedParameters = append([]string(nil), upstream.SupportedParameters...)
 				info.NativeCapabilities = fromRegistryNativeCapabilities(upstream.NativeCapabilities)
 				info.Thinking = fromRegistryThinkingSupport(upstream.Thinking)
-				info.IsCompat = info.IsCompat || upstream.IsCompat
 			}
 		}
 		if thinkingSupport := model.Thinking; thinkingSupport != nil {
@@ -4671,6 +4966,10 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 	if len(models) == 0 {
 		return nil
 	}
+	channel := modelType
+	if channel == "openai" {
+		channel = "codex"
+	}
 	now := time.Now().Unix()
 	out := make([]*ModelInfo, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
@@ -4712,13 +5011,17 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 			info.IsCompat = compatModel.GetIsCompat()
 		}
 		if name != "" {
-			if upstream := registry.LookupStaticModelInfo(name); upstream != nil {
+			upstream := registry.LookupStaticModelInfoByChannel(name, channel)
+			// 显式配置允许跨 Provider 型号，渠道内的历史能力优先
+			if upstream == nil {
+				upstream = registry.LookupStaticModelInfo(name)
+			}
+			if upstream != nil {
 				info.ContextLength = upstream.ContextLength
 				info.MaxCompletionTokens = upstream.MaxCompletionTokens
 				info.SupportedParameters = append([]string(nil), upstream.SupportedParameters...)
 				info.NativeCapabilities = fromRegistryNativeCapabilities(upstream.NativeCapabilities)
 				info.Thinking = fromRegistryThinkingSupport(upstream.Thinking)
-				info.IsCompat = info.IsCompat || upstream.IsCompat
 			}
 		}
 		if support := normalizeConfiguredThinkingSupport(model.GetThinking()); support != nil {
@@ -4818,7 +5121,12 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 	return name
 }
 
-func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, attributes map[string]string, models []*ModelInfo) []*ModelInfo {
+func applyOAuthModelAlias(
+	cfg *config.Config,
+	provider, authKind string,
+	attributes map[string]string,
+	models []*ModelInfo,
+) []*ModelInfo {
 	if len(models) == 0 {
 		return models
 	}
@@ -4972,10 +5280,10 @@ func applyOAuthSettings(cfg *config.Config, provider, authKind string, models []
 		}
 		setting := config.ResolveOAuthModelSetting(settings, model.ID, model.CatalogName, model.Name)
 		if setting != nil && setting.MaxContextLength > 0 {
-			copy := *model
-			copy.ContextLength = setting.MaxContextLength
-			copy.MaxContextLength = setting.MaxContextLength
-			out = append(out, &copy)
+			clonedModel := *model
+			clonedModel.ContextLength = setting.MaxContextLength
+			clonedModel.MaxContextLength = setting.MaxContextLength
+			out = append(out, &clonedModel)
 		} else {
 			out = append(out, model)
 		}

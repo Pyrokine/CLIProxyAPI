@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"reflect"
 	"testing"
 
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -9,29 +10,44 @@ import (
 )
 
 func TestBuildCodexConfigModelsConfigurationUpdateCapability(t *testing.T) {
-	models := buildCodexConfigModels(&internalconfig.CodexKey{Models: []internalconfig.CodexModel{
-		{Name: "gpt-5.5", Alias: "supported", SupportConfigurationUpdate: true},
-		{Name: "gpt-5.5", Alias: "disabled", SupportConfigurationUpdate: false},
-		{Name: "gpt-5.5", Alias: "DEFAULT"},
-		{Name: "gpt-5.5", Alias: "default", SupportConfigurationUpdate: true},
-		{Name: "other-model", SupportConfigurationUpdate: true},
-	}})
+	models := buildCodexConfigModels(
+		&internalconfig.CodexKey{
+			Models: []internalconfig.CodexModel{
+				{Name: "gpt-5.5", Alias: "supported", SupportConfigurationUpdate: true},
+				{Name: "gpt-5.5", Alias: "disabled", SupportConfigurationUpdate: false},
+				{Name: "gpt-5.5", Alias: "DEFAULT"},
+				{Name: "gpt-5.5", Alias: "default", SupportConfigurationUpdate: true},
+				{Name: "other-model", SupportConfigurationUpdate: true},
+			},
+		},
+	)
 	want := map[string]bool{"supported": true, "disabled": false, "DEFAULT": false, "other-model": true}
 	if len(models) != len(want) {
 		t.Fatalf("models = %#v, want %d", models, len(want))
 	}
 	for _, model := range models {
 		if enabled, ok := want[model.ID]; !ok || model.SupportConfigurationUpdate != enabled {
-			t.Errorf("model %q support_configuration_update = %t, want %t", model.ID, model.SupportConfigurationUpdate, enabled)
+			t.Errorf(
+				"model %q support_configuration_update = %t, want %t", model.ID, model.SupportConfigurationUpdate,
+				enabled,
+			)
 		}
 	}
 }
 
 func TestRegisterCodexConfigurationUpdateCapabilityIsCredentialScoped(t *testing.T) {
-	cfg := &internalconfig.Config{CodexKey: []internalconfig.CodexKey{{
-		APIKey: "config-key", BaseURL: "https://codex.example/v1",
-		Models: []internalconfig.CodexModel{{Name: "gpt-5.5", Alias: "configured", SupportConfigurationUpdate: true}},
-	}}}
+	cfg := &internalconfig.Config{
+		CodexKey: []internalconfig.CodexKey{
+			{
+				APIKey: "config-key", BaseURL: "https://codex.example/v1",
+				Models: []internalconfig.CodexModel{
+					{
+						Name: "gpt-5.5", Alias: "configured", SupportConfigurationUpdate: true,
+					},
+				},
+			},
+		},
+	}
 	catalog := registry.GetGlobalRegistry()
 	for _, id := range []string{"codex-config-update-api-key", "codex-config-update-oauth"} {
 		catalog.UnregisterClient(id)
@@ -39,14 +55,24 @@ func TestRegisterCodexConfigurationUpdateCapabilityIsCredentialScoped(t *testing
 		t.Cleanup(func() { catalog.UnregisterClient(id) })
 	}
 	service := &Service{cfg: cfg}
-	service.registerModelsForAuthWithConfig(&coreauth.Auth{
-		ID: "codex-config-update-api-key", Provider: "codex", Status: coreauth.StatusActive,
-		Attributes: map[string]string{"source": "config:codex[0]", "auth_kind": "apikey", "api_key": "config-key", "base_url": "https://codex.example/v1", coreauth.AttributeConfigIndex: "0"},
-	}, cfg)
-	service.registerModelsForAuthWithConfig(&coreauth.Auth{
-		ID: "codex-config-update-oauth", Provider: "codex", Status: coreauth.StatusActive,
-		Attributes: map[string]string{"source": "oauth.json", "auth_kind": "oauth", "api_key": "config-key", "base_url": "https://codex.example/v1", "plan_type": "pro"},
-	}, cfg)
+	service.registerModelsForAuthWithConfig(
+		&coreauth.Auth{
+			ID: "codex-config-update-api-key", Provider: "codex", Status: coreauth.StatusActive,
+			Attributes: map[string]string{
+				"source": "config:codex[0]", "auth_kind": "apikey", "api_key": "config-key",
+				"base_url": "https://codex.example/v1", coreauth.AttributeConfigIndex: "0",
+			},
+		}, cfg,
+	)
+	service.registerModelsForAuthWithConfig(
+		&coreauth.Auth{
+			ID: "codex-config-update-oauth", Provider: "codex", Status: coreauth.StatusActive,
+			Attributes: map[string]string{
+				"source": "oauth.json", "auth_kind": "oauth", "api_key": "config-key",
+				"base_url": "https://codex.example/v1", "plan_type": "pro",
+			},
+		}, cfg,
+	)
 	configured := catalog.GetModelInfoForClient("codex-config-update-api-key", "configured")
 	if configured == nil || !configured.SupportConfigurationUpdate {
 		t.Fatalf("API key model capability = %+v, want true", configured)
@@ -61,7 +87,9 @@ func TestRegisterCodexConfigurationUpdateCapabilityIsCredentialScoped(t *testing
 	for _, static := range staticModels {
 		registered := catalog.GetModelInfoForClient("codex-config-update-oauth", static.ID)
 		if registered == nil || registered.SupportConfigurationUpdate != static.SupportConfigurationUpdate {
-			t.Fatalf("OAuth model %q capability = %+v, want %t", static.ID, registered, static.SupportConfigurationUpdate)
+			t.Fatalf(
+				"OAuth model %q capability = %+v, want %t", static.ID, registered, static.SupportConfigurationUpdate,
+			)
 		}
 	}
 }
@@ -82,7 +110,8 @@ func TestBuildCodexConfigModels_PreservesStaticMetadata(t *testing.T) {
 	if models[0].ID != "g55" {
 		t.Fatalf("expected alias g55, got %q", models[0].ID)
 	}
-	if upstream := registry.LookupStaticModelInfo("gpt-5.5"); upstream == nil || models[0].ContextLength != upstream.ContextLength {
+	if upstream := registry.LookupStaticModelInfo("gpt-5.5"); upstream == nil ||
+		models[0].ContextLength != upstream.ContextLength {
 		t.Fatalf("expected static context_length, got %d", models[0].ContextLength)
 	}
 	if models[0].MaxCompletionTokens == 0 {
@@ -209,7 +238,8 @@ func TestBuildConfiguredModelsAppliesDisplayNameAndMaxContextLength(t *testing.T
 				if model.DisplayName != "Configured Model" {
 					t.Fatalf("DisplayName = %q, want Configured Model", model.DisplayName)
 				}
-				if model.ContextLength != testCase.wantContextLength || model.MaxContextLength != testCase.wantContextLength {
+				if model.ContextLength != testCase.wantContextLength ||
+					model.MaxContextLength != testCase.wantContextLength {
 					t.Fatalf(
 						"context lengths = %d/%d, want %d",
 						model.ContextLength,
@@ -342,6 +372,41 @@ func TestBuildConfiguredModelsApplyThinkingOverrides(t *testing.T) {
 	}
 }
 
+func TestBuildGeminiConfigModelsPreservesExplicitMetadataSources(t *testing.T) {
+	for _, id := range []string{"custom-gemini-model", "gpt-5.5"} {
+		t.Run(
+			id, func(t *testing.T) {
+				models := buildGeminiConfigModels(
+					&internalconfig.GeminiKey{
+						Models: []internalconfig.GeminiModel{{Name: id, Alias: "configured-model"}},
+					},
+				)
+				if len(models) != 1 || models[0].ID != "configured-model" || models[0].CatalogName != id || !models[0].UserDefined {
+					t.Fatalf("explicit unknown model was not preserved: %+v", models)
+				}
+				if id == "gpt-5.5" {
+					reference := registry.LookupStaticModelInfo(id)
+					if reference == nil {
+						t.Fatal("explicit cross-provider model reference is missing")
+					}
+					if models[0].ContextLength != reference.ContextLength ||
+						models[0].MaxCompletionTokens != reference.MaxCompletionTokens ||
+						!reflect.DeepEqual(models[0].Thinking, fromRegistryThinkingSupport(reference.Thinking)) ||
+						!reflect.DeepEqual(
+							models[0].NativeCapabilities, fromRegistryNativeCapabilities(reference.NativeCapabilities),
+						) {
+						t.Fatalf("explicit cross-provider model lost its capability reference: %+v", models[0])
+					}
+					return
+				}
+				if models[0].Thinking != nil || models[0].NativeCapabilities != nil || models[0].ContextLength != 0 {
+					t.Fatalf("unknown configured model invented capability metadata: %+v", models[0])
+				}
+			},
+		)
+	}
+}
+
 func TestBuildOpenAICompatibilityUnknownModelDoesNotInventThinkingMetadata(t *testing.T) {
 	models := buildOpenAICompatibilityConfigModels(
 		&internalconfig.OpenAICompatibility{
@@ -407,8 +472,14 @@ func TestRegisterModelsForAuthPublishesCurrentNativeModels(t *testing.T) {
 				"gemini-3.8-flash",
 				"gemini-3.1-flash-image",
 				"gemini-3.1-flash-lite-image",
+				"gemini-3.1-flash-lite",
 			},
-			absent: []string{"gemini-3-pro-preview", "gemini-3.1-flash-image-preview"},
+			absent: []string{"gemini-3-pro-preview", "gemini-3.1-flash-image-preview", "gemini-3.1-flash-lite-preview"},
+		},
+		{
+			provider: "gemini-cli",
+			present:  []string{"gemini-3.1-flash-lite-preview"},
+			absent:   []string{"gemini-3-pro-preview", "gemini-3.1-flash-image-preview"},
 		},
 		{
 			provider: "vertex",
@@ -416,6 +487,7 @@ func TestRegisterModelsForAuthPublishesCurrentNativeModels(t *testing.T) {
 				"gemini-3.8-flash",
 				"gemini-3.1-flash-image",
 				"gemini-3.1-flash-lite-image",
+				"gemini-3.1-flash-lite",
 			},
 			absent: []string{"gemini-3-pro-preview", "gemini-3.1-flash-lite-preview"},
 		},
@@ -425,8 +497,14 @@ func TestRegisterModelsForAuthPublishesCurrentNativeModels(t *testing.T) {
 				"gemini-3.8-flash",
 				"gemini-3.1-flash-image",
 				"gemini-3.1-flash-lite-image",
+				"gemini-3.1-flash-lite",
 			},
-			absent: []string{"gemini-3-pro-preview", "gemini-3.1-flash-lite-preview"},
+			absent: []string{"gemini-3-pro-preview", "gemini-3.1-flash-image-preview", "gemini-3.1-flash-lite-preview"},
+		},
+		{
+			provider: "gemini-interactions",
+			present:  []string{"gemini-3.1-flash-lite"},
+			absent:   []string{"gemini-3.1-flash-lite-preview"},
 		},
 		{
 			provider: "xai",
@@ -435,34 +513,36 @@ func TestRegisterModelsForAuthPublishesCurrentNativeModels(t *testing.T) {
 		},
 	}
 	for _, testCase := range tests {
-		t.Run(testCase.provider, func(t *testing.T) {
-			authID := "current-native-models-" + testCase.provider
-			GlobalModelRegistry().UnregisterClient(authID)
-			t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(authID) })
+		t.Run(
+			testCase.provider, func(t *testing.T) {
+				authID := "current-native-models-" + testCase.provider
+				GlobalModelRegistry().UnregisterClient(authID)
+				t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(authID) })
 
-			cfg := &internalconfig.Config{}
-			svc := &Service{cfg: cfg}
-			svc.registerModelsForAuthWithConfig(
-				&coreauth.Auth{
-					ID:       authID,
-					Provider: testCase.provider,
-					Attributes: map[string]string{
-						"auth_kind": "oauth",
+				cfg := &internalconfig.Config{}
+				svc := &Service{cfg: cfg}
+				svc.registerModelsForAuthWithConfig(
+					&coreauth.Auth{
+						ID:       authID,
+						Provider: testCase.provider,
+						Attributes: map[string]string{
+							"auth_kind": "oauth",
+						},
 					},
-				},
-				cfg,
-			)
-			for _, modelID := range testCase.present {
-				if !GlobalModelRegistry().ClientSupportsModel(authID, modelID) {
-					t.Errorf("%s credential did not publish current model %q", testCase.provider, modelID)
+					cfg,
+				)
+				for _, modelID := range testCase.present {
+					if !GlobalModelRegistry().ClientSupportsModel(authID, modelID) {
+						t.Errorf("%s credential did not publish current model %q", testCase.provider, modelID)
+					}
 				}
-			}
-			for _, modelID := range testCase.absent {
-				if GlobalModelRegistry().ClientSupportsModel(authID, modelID) {
-					t.Errorf("%s credential published retired model %q", testCase.provider, modelID)
+				for _, modelID := range testCase.absent {
+					if GlobalModelRegistry().ClientSupportsModel(authID, modelID) {
+						t.Errorf("%s credential published retired model %q", testCase.provider, modelID)
+					}
 				}
-			}
-		})
+			},
+		)
 	}
 }
 

@@ -30,7 +30,8 @@ func TestApplyModelCatalogConfigMigratesConfigAliasIntoNewCatalog(t *testing.T) 
 		t.Fatalf("applyModelCatalogConfig: %v", err)
 	}
 	codexAliases := aliases["codex"]
-	if len(codexAliases) != 1 || codexAliases[0].Name != "gpt-5" || codexAliases[0].Alias != "g5" || codexAliases[0].Fork {
+	if len(codexAliases) != 1 || codexAliases[0].Name != "gpt-5" || codexAliases[0].Alias != "g5" ||
+		codexAliases[0].Fork {
 		t.Fatalf("codex aliases = %#v", codexAliases)
 	}
 	found := false
@@ -384,17 +385,21 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 
 func TestApplyOAuthModelAliasUsesCredentialBeforeGlobalInModelPublication(t *testing.T) {
 	auth := &coreauth.Auth{Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
-	if err := coreauth.SetOAuthModelAliasesAttribute(auth, []config.OAuthModelAlias{
-		{Name: "credential-model", Alias: "shared", Fork: true},
-	}); err != nil {
+	if err := coreauth.SetOAuthModelAliasesAttribute(
+		auth, []config.OAuthModelAlias{
+			{Name: "credential-model", Alias: "shared", Fork: true},
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
-		"codex": {
-			{Name: "global-model", Alias: "shared"},
-			{Name: "global-model", Alias: "global-alias", Fork: true},
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {
+				{Name: "global-model", Alias: "shared"},
+				{Name: "global-model", Alias: "global-alias", Fork: true},
+			},
 		},
-	}}
+	}
 	models := []*ModelInfo{{ID: "credential-model"}, {ID: "global-model"}}
 	published := applyOAuthModelAlias(cfg, "codex", "oauth", auth.Attributes, models)
 	if len(published) != 4 || published[0].ID != "credential-model" || published[1].ID != "shared" ||
@@ -406,10 +411,14 @@ func TestApplyOAuthModelAliasUsesCredentialBeforeGlobalInModelPublication(t *tes
 			t.Fatalf("per-credential alias points to %q", model.CatalogName)
 		}
 	}
-	if got := applyOAuthModelAlias(nil, "codex", "oauth", auth.Attributes, models); len(got) != 3 || got[1].ID != "shared" {
+	if got := applyOAuthModelAlias(
+		nil, "codex", "oauth", auth.Attributes, models,
+	); len(got) != 3 || got[1].ID != "shared" {
 		t.Fatalf("per-credential aliases without config = %#v", got)
 	}
-	if got := applyOAuthModelAlias(cfg, "codex", "api_key", auth.Attributes, models); len(got) != 2 || got[0].ID != "credential-model" {
+	if got := applyOAuthModelAlias(
+		cfg, "codex", "api_key", auth.Attributes, models,
+	); len(got) != 2 || got[0].ID != "credential-model" {
 		t.Fatalf("API key published OAuth aliases: %#v", got)
 	}
 }

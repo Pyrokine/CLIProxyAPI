@@ -12,6 +12,7 @@ import (
 	configaccess "github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	internalUsage "github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 	sdkapi "github.com/Pyrokine/CLIProxyAPI/v6/sdk/api"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
@@ -111,18 +112,24 @@ func (b *Builder) WithConfigPath(path string) *Builder {
 }
 
 // WithTokenClientProvider overrides the provider responsible for token-backed clients.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (b *Builder) WithTokenClientProvider(provider TokenClientProvider) *Builder {
 	b.tokenProvider = provider
 	return b
 }
 
 // WithAPIKeyClientProvider overrides the provider responsible for API key-backed clients.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (b *Builder) WithAPIKeyClientProvider(provider APIKeyClientProvider) *Builder {
 	b.apiKeyProvider = provider
 	return b
 }
 
 // WithWatcherFactory allows customizing the watcher factory that handles reloads.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (b *Builder) WithWatcherFactory(factory WatcherFactory) *Builder {
 	b.watcherFactory = factory
 	return b
@@ -135,12 +142,16 @@ func (b *Builder) WithHooks(h Hooks) *Builder {
 }
 
 // WithAuthManager overrides the authentication manager used for token lifecycle operations.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (b *Builder) WithAuthManager(mgr *sdkAuth.Manager) *Builder {
 	b.authManager = mgr
 	return b
 }
 
 // WithRequestAccessManager overrides the request authentication manager.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (b *Builder) WithRequestAccessManager(mgr *sdkaccess.Manager) *Builder {
 	b.accessManager = mgr
 	return b
@@ -153,12 +164,16 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 }
 
 // WithCooldownStateStore overrides the store used for runtime cooldown persistence.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (b *Builder) WithCooldownStateStore(store coreauth.CooldownStateStore) *Builder {
 	b.cooldownStateStore = store
 	return b
 }
 
 // WithResultPolicy sets an execution result policy invoked before state mutation and persistence.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (b *Builder) WithResultPolicy(policy coreauth.ResultPolicy) *Builder {
 	b.resultPolicy = policy
 	return b
@@ -187,6 +202,8 @@ func (b *Builder) WithLocalManagementPassword(password string) *Builder {
 
 // WithPostAuthHook registers a hook to be called after an Auth record is created
 // but before it is persisted to storage.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (b *Builder) WithPostAuthHook(hook coreauth.PostAuthHook) *Builder {
 	if hook == nil {
 		return b
@@ -216,6 +233,13 @@ func (b *Builder) Build() (*Service, error) {
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
 	}
+	if authDir := strings.TrimSpace(b.cfg.AuthDir); authDir != "" {
+		resolved, err := util.ResolveAuthDir(authDir)
+		if err != nil {
+			return nil, fmt.Errorf("cliproxy: %w", err)
+		}
+		b.cfg.AuthDir = resolved
+	}
 	b.cfg.NormalizePluginsConfig()
 	if errResolvePluginsDir := b.cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && b.cfg.Plugins.Enabled {
 		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
@@ -231,9 +255,11 @@ func (b *Builder) Build() (*Service, error) {
 		apiKeyProvider = NewAPIKeyClientProvider()
 	}
 
-	watcherFactory := b.watcherFactory
-	if watcherFactory == nil {
-		watcherFactory = defaultWatcherFactory
+	watcherFactory := defaultWatcherFactory
+	if factory := b.watcherFactory; factory != nil {
+		watcherFactory = func(configPath, authDir string, reload func(*config.Config) bool) (*WatcherWrapper, error) {
+			return factory(configPath, authDir, func(cfg *config.Config) { reload(cfg) })
+		}
 	}
 
 	authManager := b.authManager
@@ -306,7 +332,7 @@ func (b *Builder) Build() (*Service, error) {
 	}
 	usageManager := coreusage.NewManager(512)
 	usageQueue := redisqueue.NewQueue()
-	usageQueue.SetUsageStatisticsEnabled(b.cfg.UsageStatisticsEnabled)
+	usageQueue.SetUsageStatisticsEnabled(b.cfg.Home.Enabled || b.cfg.UsageStatisticsEnabled)
 	usageQueue.SetRetentionSeconds(b.cfg.RedisUsageQueueRetentionSeconds)
 	internalPluginHost := pluginHost.internal()
 	if internalPluginHost != nil {
@@ -363,11 +389,10 @@ func (s *Service) runtimeAuthSyncHook() coreauth.PostAuthHook {
 		}
 
 		s.authUpdateMu.Lock()
-		defer s.authUpdateMu.Unlock()
-
 		if s.coreManager != nil && auth.Generation != 0 {
 			current, ok := s.coreManager.GetByID(auth.ID)
 			if !ok || current.Generation > auth.Generation {
+				s.authUpdateMu.Unlock()
 				return nil
 			}
 		}
@@ -383,8 +408,9 @@ func (s *Service) runtimeAuthSyncHook() coreauth.PostAuthHook {
 			_, revision := watcher.DispatchPersistedAuthUpdateWithRevision(&update)
 			update.SetRevision(revision)
 		}
+		s.authUpdateMu.Unlock()
 
 		syncCtx := coreauth.WithSkipPersist(context.Background())
-		return s.handleAuthUpdateLocked(syncCtx, update)
+		return s.handleAuthUpdate(syncCtx, update)
 	}
 }

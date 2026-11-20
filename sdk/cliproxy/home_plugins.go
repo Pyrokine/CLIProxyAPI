@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -13,11 +15,19 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/homeplugins"
+	sdkpluginstore "github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
 const homePluginStatusReportTimeout = 10 * time.Second
+
+type homePluginTaskWork struct {
+	cfg      *config.Config
+	tasks    []home.PluginTask
+	nextTask int
+	report   *homeplugins.SyncReport
+}
 
 func (s *Service) prepareHomePlugins(ctx context.Context, cfg *config.Config) (
 	homeplugins.PreparedSync,
@@ -27,6 +37,55 @@ func (s *Service) prepareHomePlugins(ctx context.Context, cfg *config.Config) (
 ) {
 	if s == nil || cfg == nil || !cfg.Home.Enabled {
 		return homeplugins.PreparedSync{}, "", false, nil
+	}
+	errRecover := s.applyExternalConfigUpdate(
+		func() error {
+			if !cfg.Plugins.Enabled {
+				return nil
+			}
+			targetRoot, errTarget := config.ResolvePluginsDir(cfg.Plugins.Dir)
+			if errTarget != nil {
+				return errTarget
+			}
+			info, errStat := os.Stat(targetRoot)
+			if errors.Is(errStat, os.ErrNotExist) || (errStat == nil && !info.IsDir()) {
+				return nil
+			}
+			if errStat != nil {
+				return errStat
+			}
+			pending, errPending := sdkpluginstore.PendingInstallPluginIDs(targetRoot)
+			if errPending != nil {
+				return errPending
+			}
+			if len(pending) == 0 {
+				return nil
+			}
+			recoveryCfg := *cfg
+			recoveryCfg.Plugins.Configs = nil
+			s.cfgMu.RLock()
+			published := s.cfg
+			s.cfgMu.RUnlock()
+			if published != nil {
+				publishedRoot, errPublished := config.ResolvePluginsDir(published.Plugins.Dir)
+				if errPublished != nil {
+					return errPublished
+				}
+				publishedInfo, errPublishedStat := os.Stat(publishedRoot)
+				if errPublishedStat != nil && !errors.Is(errPublishedStat, os.ErrNotExist) {
+					return errPublishedStat
+				}
+				if errPublishedStat == nil && os.SameFile(info, publishedInfo) {
+					recoveryCfg.Plugins.Configs = published.Plugins.Configs
+				}
+			}
+			return homeplugins.RecoverPluginTransactions(&recoveryCfg)
+		},
+	)
+	if errRecover != nil {
+		return homeplugins.PreparedSync{}, "", false, fmt.Errorf(
+			"home plugins: recover published state before preparation: %w", errRecover,
+		)
 	}
 	syncKey := homePluginSyncKey(cfg)
 	if syncKey != "" {
@@ -69,7 +128,9 @@ func (s *Service) reportHomePluginStatusWithClient(
 		return fmt.Errorf("home node id is empty")
 	}
 	report.NodeID = nodeID
-	report.UpdatedAt = time.Now().UTC()
+	if report.UpdatedAt.IsZero() {
+		report.UpdatedAt = time.Now().UTC()
+	}
 	raw, errMarshal := json.Marshal(report)
 	if errMarshal != nil {
 		log.Warnf("failed to marshal home plugin status: %v", errMarshal)
@@ -94,30 +155,78 @@ func (s *Service) processHomePluginTasksWithClient(ctx context.Context, cfg *con
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	tasks, errTasks := client.GetPluginTasks(ctx)
-	if errTasks != nil {
-		log.Warnf("failed to fetch home plugin tasks: %v", errTasks)
+	s.homePluginTasksMu.Lock()
+	defer s.homePluginTasksMu.Unlock()
+	if s.homePluginTasks == nil {
+		tasks, errTasks := client.GetPluginTasks(ctx)
+		if errTasks != nil {
+			log.Warnf("failed to fetch home plugin tasks: %v", errTasks)
+			return
+		}
+		s.homePluginTasks = &homePluginTaskWork{cfg: cfg, tasks: tasks}
+	}
+	s.finalizeHomePluginTasksWithClient(ctx, client)
+}
+
+// finalizeHomePluginTasksWithClient requires homePluginTasksMu.
+func (s *Service) finalizeHomePluginTasksWithClient(ctx context.Context, client *home.Client) {
+	work := s.homePluginTasks
+	if work == nil {
 		return
 	}
-	for _, task := range tasks {
-		if !strings.EqualFold(strings.TrimSpace(task.Operation), "delete") {
+	for work.nextTask < len(work.tasks) {
+		if ctx.Err() != nil {
+			return
+		}
+		task := work.tasks[work.nextTask]
+		nodeID := strings.TrimSpace(work.cfg.Home.NodeID)
+		targetType := strings.TrimSpace(task.TargetNodeType)
+		targetID := strings.TrimSpace(task.TargetNodeID)
+		if nodeID == "" ||
+			(!strings.EqualFold(targetType, "cpa") && targetType != "*") ||
+			(targetID != nodeID && targetID != "*") ||
+			!strings.EqualFold(strings.TrimSpace(task.Operation), "delete") {
+			work.nextTask++
 			continue
 		}
-		var report homeplugins.SyncReport
-		errApply := s.applyExternalConfigUpdate(
-			func() error {
-				report = s.processHomePluginDeleteTask(ctx, cfg, task)
-				return nil
-			},
-		)
-		if errApply != nil {
-			log.Warnf("failed to sequence home plugin delete task %d for %s: %v", task.ID, task.PluginID, errApply)
-			continue
+		if work.report == nil {
+			errApply := s.applyExternalConfigUpdate(
+				func() error {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					report := s.processHomePluginDeleteTask(ctx, work.cfg, task)
+					work.report = &report
+					return nil
+				},
+			)
+			if errApply != nil {
+				log.Warnf("failed to sequence home plugin delete task %d for %s: %v", task.ID, task.PluginID, errApply)
+				return
+			}
+			if !work.report.OK && strings.TrimSpace(work.report.Error) != "" {
+				log.Warnf(
+					"failed to process home plugin delete task %d for %s: %v",
+					task.ID,
+					task.PluginID,
+					work.report.Error,
+				)
+			}
 		}
-		if !report.OK && strings.TrimSpace(report.Error) != "" {
-			log.Warnf("failed to process home plugin delete task %d for %s: %v", task.ID, task.PluginID, report.Error)
+		if errReport := s.reportHomePluginStatusWithClient(ctx, work.cfg, *work.report, client); errReport != nil {
+			return
 		}
-		s.reportHomePluginStatusWithClient(ctx, cfg, report, client)
+		work.nextTask++
+		work.report = nil
+	}
+	s.homePluginTasks = nil
+}
+
+func (s *Service) runHomePluginTaskReports(ctx context.Context, client *home.Client) {
+	for waitForHomeSubscriberRetry(ctx, homeSubscriberRetryBackoff) {
+		s.homePluginTasksMu.Lock()
+		s.finalizeHomePluginTasksWithClient(ctx, client)
+		s.homePluginTasksMu.Unlock()
 	}
 }
 

@@ -10,15 +10,21 @@ import (
 
 func TestConfigAPIKeyExcludedAllRemovesModelsAcrossReload(t *testing.T) {
 	const model = "only-model"
-	cfg := &config.Config{VertexCompatAPIKey: []config.VertexCompatKey{{
-		APIKey: "test-key", BaseURL: "https://vertex.example.com",
-		Models: []config.VertexCompatModel{{Name: "upstream-only", Alias: model}},
-	}}}
+	cfg := &config.Config{
+		VertexCompatAPIKey: []config.VertexCompatKey{
+			{
+				APIKey: "test-key", BaseURL: "https://vertex.example.com",
+				Models: []config.VertexCompatModel{{Name: "upstream-only", Alias: model}},
+			},
+		},
+	}
 	synthesize := func() string {
 		t.Helper()
-		auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{
-			Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
-		})
+		auths, err := synthesizer.NewConfigSynthesizer().Synthesize(
+			&synthesizer.SynthesisContext{
+				Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
+			},
+		)
 		if err != nil || len(auths) != 1 {
 			t.Fatalf("synthesize auth: %v, count=%d", err, len(auths))
 		}

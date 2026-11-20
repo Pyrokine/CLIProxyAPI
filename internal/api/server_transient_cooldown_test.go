@@ -20,16 +20,20 @@ func TestServerTransientCooldownInitializationAndHotReloadReachAuthState(t *test
 			server.UpdateClients(&cfg)
 		}
 		id := fmt.Sprintf("synthetic-transient-cooldown-%d", index)
-		registered, err := manager.Register(t.Context(), &coreauth.Auth{
-			ID: id, Provider: "codex", Status: coreauth.StatusActive,
-		})
+		registered, err := manager.Register(
+			t.Context(), &coreauth.Auth{
+				ID: id, Provider: "codex", Status: coreauth.StatusActive,
+			},
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		manager.MarkResult(t.Context(), coreauth.Result{
-			AuthID: id, AuthGeneration: registered.Generation, Provider: "codex", Model: "synthetic-model",
-			Error: &coreauth.Error{HTTPStatus: 520, Message: "synthetic upstream failure"},
-		})
+		manager.MarkResult(
+			t.Context(), coreauth.Result{
+				AuthID: id, AuthGeneration: registered.Generation, Provider: "codex", Model: "synthetic-model",
+				Error: &coreauth.Error{HTTPStatus: 520, Message: "synthetic upstream failure"},
+			},
+		)
 		updated, ok := manager.GetByID(id)
 		if !ok || updated.ModelStates["synthetic-model"] == nil {
 			t.Fatal("transient failure did not publish model state")

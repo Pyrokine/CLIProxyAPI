@@ -80,6 +80,8 @@ func (h *PluginHost) PluginBusy(id string) bool {
 }
 
 // PluginRuntimeIdentity returns the lifecycle identity for conditional plugin unload.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *PluginHost) PluginRuntimeIdentity(id string) pluginhost.PluginRuntimeIdentity {
 	if host := h.internal(); host != nil {
 		return host.PluginRuntimeIdentity(id)
@@ -94,6 +96,8 @@ func (h *PluginHost) UnloadPlugin(id string) bool {
 }
 
 // UnloadPluginWithError unloads a plugin and reports deferred shutdown errors.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *PluginHost) UnloadPluginWithError(id string) (bool, error) {
 	if host := h.internal(); host != nil {
 		return host.UnloadPluginWithError(id)
@@ -101,7 +105,17 @@ func (h *PluginHost) UnloadPluginWithError(id string) (bool, error) {
 	return false, nil
 }
 
+// UnloadPluginContext 按调用方的取消信号和期限卸载动态插件
+func (h *PluginHost) UnloadPluginContext(ctx context.Context, id string) bool {
+	if host := h.internal(); host != nil {
+		return host.UnloadPluginContext(ctx, id)
+	}
+	return false
+}
+
 // UnloadPluginIfCurrentWithError unloads a plugin only while identity still owns the runtime.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *PluginHost) UnloadPluginIfCurrentWithError(
 	identity pluginhost.PluginRuntimeIdentity,
 ) (bool, error) {

@@ -22,23 +22,31 @@ func TestHomePrepareFailureKeepsCurrentConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := service.Shutdown(context.Background()); err != nil {
-			t.Error(err)
-		}
-	})
+	t.Cleanup(
+		func() {
+			if err := service.Shutdown(context.Background()); err != nil {
+				t.Error(err)
+			}
+		},
+	)
 	enabled := true
 	remote := &config.Config{}
 	remote.Plugins.Enabled = true
 	remote.Plugins.Dir = root
 	remote.Plugins.Configs = map[string]internalconfig.PluginInstanceConfig{
-		"broken": {Enabled: &enabled, Raw: yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
-			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "store"},
-			{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "id"},
-				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "broken"},
-			}},
-		}}},
+		"broken": {
+			Enabled: &enabled, Raw: yaml.Node{
+				Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Tag: "!!str", Value: "store"},
+					{
+						Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+							{Kind: yaml.ScalarNode, Tag: "!!str", Value: "id"},
+							{Kind: yaml.ScalarNode, Tag: "!!str", Value: "broken"},
+						},
+					},
+				},
+			},
+		},
 	}
 	err = service.applyHomeOverlayContext(context.Background(), remote)
 	if err == nil {
@@ -73,7 +81,10 @@ func TestHomePluginApplyFailureKeepsCurrentConfiguration(t *testing.T) {
 		t.Fatalf("installation failure was not returned: %v", err)
 	}
 	if service.cfg != base || service.homePluginSyncKey != "" {
-		t.Fatalf("failed Home installation published configuration: config=%p want=%p key=%q", service.cfg, base, service.homePluginSyncKey)
+		t.Fatalf(
+			"failed Home installation published configuration: config=%p want=%p key=%q", service.cfg, base,
+			service.homePluginSyncKey,
+		)
 	}
 	data, errRead := os.ReadFile(root)
 	if errRead != nil || string(data) != "synthetic root file" {

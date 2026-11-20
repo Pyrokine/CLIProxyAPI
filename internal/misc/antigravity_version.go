@@ -29,7 +29,8 @@ const (
 var (
 	antigravityCLIUpdaterBaseURL = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests"
 	antigravityCLILatestURL      = "https://storage.googleapis.com/antigravity-public/antigravity-cli/latest"
-	antigravityCLIGCSListURL     = "https://storage.googleapis.com/antigravity-public/?prefix=antigravity-cli/&delimiter=/"
+	antigravityCLIGCSListURL     = "https://storage.googleapis.com/antigravity-public/" +
+		"?prefix=antigravity-cli/&delimiter=/"
 )
 
 type antigravityCLIUpdaterManifest struct {
@@ -233,7 +234,8 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 		return version, nil
 	}
 
-	log.WithError(errManifest).Debug("failed to fetch antigravity CLI updater manifest, trying CLI latest pointer")
+	log.WithError(errManifest).
+		Debug("failed to fetch antigravity CLI updater manifest, trying CLI latest pointer")
 	version, errLatest := fetchAntigravityCLILatestVersion(ctx, client)
 	if errLatest == nil {
 		return version, nil
@@ -246,14 +248,20 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 	}
 
 	return "", fmt.Errorf(
-		"fetch antigravity CLI updater manifest: %v; fetch antigravity CLI latest: %v; fetch antigravity CLI GCS version: %w",
-		errManifest, errLatest, errList,
+		"fetch antigravity CLI updater manifest: %v; fetch antigravity CLI "+
+			"latest: %v; fetch antigravity CLI GCS version: "+
+			"%w",
+		errManifest,
+		errLatest,
+		errList,
 	)
 }
 
 func fetchAntigravityCLIUpdaterManifestVersion(ctx context.Context, client *http.Client) (string, error) {
 	manifestURL := fmt.Sprintf(
-		"%s/%s.json", strings.TrimSuffix(antigravityCLIUpdaterBaseURL, "/"), antigravityCLIUpdaterManifestName(),
+		"%s/%s.json",
+		strings.TrimSuffix(antigravityCLIUpdaterBaseURL, "/"),
+		antigravityCLIUpdaterManifestName(),
 	)
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
 	if errReq != nil {

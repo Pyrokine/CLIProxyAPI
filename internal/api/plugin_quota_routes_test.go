@@ -16,7 +16,10 @@ func TestPluginQuotaRoutesUseManagementPolicyAndNoStore(t *testing.T) {
 	unauthorizedRequest.RemoteAddr = "127.0.0.1:12345"
 	server.engine.ServeHTTP(unauthorized, unauthorizedRequest)
 	if unauthorized.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthorized status = %d, want %d body=%s", unauthorized.Code, http.StatusUnauthorized, unauthorized.Body.String())
+		t.Fatalf(
+			"unauthorized status = %d, want %d body=%s", unauthorized.Code, http.StatusUnauthorized,
+			unauthorized.Body.String(),
+		)
 	}
 	if cacheControl := unauthorized.Header().Get("Cache-Control"); cacheControl != "no-store" {
 		t.Fatalf("unauthorized Cache-Control = %q, want no-store", cacheControl)

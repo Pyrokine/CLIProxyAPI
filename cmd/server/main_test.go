@@ -23,7 +23,9 @@ func TestConfigurationCheckCommand(t *testing.T) {
 		os.Exit(0)
 	}
 
-	const valid = "host: 127.0.0.1\nport: 48317\napi-keys: [acceptance-placeholder-key]\nplugins: {enabled: false, dir: plugins}\n"
+	const valid = "host: 127.0.0.1\nport: 48317\napi-keys: " +
+		"[acceptance-placeholder-key]\nplugins: {enabled: false, dir: " +
+		"plugins}\n"
 	tests := []struct {
 		name        string
 		data        string
@@ -36,11 +38,16 @@ func TestConfigurationCheckCommand(t *testing.T) {
 	}{
 		{name: "valid", data: valid, wantMessage: "configuration is valid"},
 		{
-			name: "plain management key", data: valid + "remote-management: {secret-key: acceptance-placeholder-secret}\n",
+			name:        "plain management key",
+			data:        valid + "remote-management: {secret-key: acceptance-placeholder-secret}\n",
 			wantMessage: "configuration is valid",
 		},
 		{
 			name: "invalid port", data: strings.ReplaceAll(valid, "48317", "70000"),
+			wantCode: 1, wantMessage: "port 70000 is out of range",
+		},
+		{
+			name: "invalid port with last-good", data: strings.ReplaceAll(valid, "48317", "70000"), lastGood: true,
 			wantCode: 1, wantMessage: "port 70000 is out of range",
 		},
 		{name: "invalid YAML", data: "port: [\n", wantCode: 1, wantMessage: "failed to load config"},
@@ -61,71 +68,82 @@ func TestConfigurationCheckCommand(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			path := filepath.Join(dir, "config.yaml")
-			if !tt.missing {
-				if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "config.yaml")
+				if !tt.missing {
+					if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				backup := config.LastGoodPath(path)
+				if tt.lastGood {
+					if err := os.WriteFile(backup, []byte(valid), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if tt.pluginFile {
+					if err := os.WriteFile(
+						filepath.Join(dir, "plugins"), []byte("not a directory"), 0o600,
+					); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(
+					filepath.Join(dir, ".env"), []byte("HOME_JWT=invalid-placeholder\n"), 0o600,
+				); err != nil {
 					t.Fatal(err)
 				}
-			}
-			backup := config.LastGoodPath(path)
-			if tt.lastGood {
-				if err := os.WriteFile(backup, []byte(valid), 0o600); err != nil {
-					t.Fatal(err)
+				ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+				defer cancel()
+				command := exec.CommandContext(
+					ctx, os.Args[0], "-test.run=^TestConfigurationCheckCommand$", "--",
+					"-config", path, "-local-model", "-t",
+				)
+				command.Dir = dir
+				command.Env = []string{
+					"CPA_CONFIG_CHECK_HELPER=1",
+					"HOME=" + dir,
+					"PATH=/usr/bin:/bin",
+					"GOMAXPROCS=2",
 				}
-			}
-			if tt.pluginFile {
-				if err := os.WriteFile(filepath.Join(dir, "plugins"), []byte("not a directory"), 0o600); err != nil {
-					t.Fatal(err)
+				if tt.cloud {
+					command.Env = append(command.Env, "DEPLOY=cloud")
 				}
-			}
-			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("HOME_JWT=invalid-placeholder\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-			defer cancel()
-			command := exec.CommandContext(
-				ctx, os.Args[0], "-test.run=^TestConfigurationCheckCommand$", "--",
-				"-config", path, "-local-model", "-t",
-			)
-			command.Dir = dir
-			command.Env = []string{"CPA_CONFIG_CHECK_HELPER=1", "HOME=" + dir, "PATH=/usr/bin:/bin", "GOMAXPROCS=2"}
-			if tt.cloud {
-				command.Env = append(command.Env, "DEPLOY=cloud")
-			}
-			output, err := command.CombinedOutput()
-			if ctx.Err() != nil {
-				t.Fatalf("configuration check timed out: %s", output)
-			}
-			code := 0
-			if err != nil {
-				var exitError *exec.ExitError
-				if !errors.As(err, &exitError) {
-					t.Fatalf("execute configuration check: %v", err)
+				output, err := command.CombinedOutput()
+				if ctx.Err() != nil {
+					t.Fatalf("configuration check timed out: %s", output)
 				}
-				code = exitError.ExitCode()
-			}
-			if code != tt.wantCode || !strings.Contains(string(output), tt.wantMessage) {
-				t.Fatalf("configuration check exit=%d, want=%d, output=%s", code, tt.wantCode, output)
-			}
-			data, err := os.ReadFile(path)
-			if tt.missing {
-				if !os.IsNotExist(err) {
-					t.Fatalf("missing configuration was created: %v", err)
+				code := 0
+				if err != nil {
+					var exitError *exec.ExitError
+					if !errors.As(err, &exitError) {
+						t.Fatalf("execute configuration check: %v", err)
+					}
+					code = exitError.ExitCode()
 				}
-			} else if err != nil || string(data) != tt.data {
-				t.Fatalf("configuration check changed source file: %v", err)
-			}
-			data, err = os.ReadFile(backup)
-			if tt.lastGood {
-				if err != nil || string(data) != valid {
-					t.Fatalf("configuration check changed last-good backup: %v", err)
+				if code != tt.wantCode || !strings.Contains(string(output), tt.wantMessage) {
+					t.Fatalf("configuration check exit=%d, want=%d, output=%s", code, tt.wantCode, output)
 				}
-			} else if !os.IsNotExist(err) {
-				t.Fatalf("configuration check created last-good backup: %v", err)
-			}
-		})
+				data, err := os.ReadFile(path)
+				if tt.missing {
+					if !os.IsNotExist(err) {
+						t.Fatalf("missing configuration was created: %v", err)
+					}
+				} else if err != nil || string(data) != tt.data {
+					t.Fatalf("configuration check changed source file: %v", err)
+				}
+				data, err = os.ReadFile(backup)
+				if tt.lastGood {
+					if err != nil || string(data) != valid {
+						t.Fatalf("configuration check changed last-good backup: %v", err)
+					}
+				} else if !os.IsNotExist(err) {
+					t.Fatalf("configuration check created last-good backup: %v", err)
+				}
+			},
+		)
 	}
 }
 
@@ -165,11 +183,13 @@ func TestNormalizeHomePort(t *testing.T) {
 		{name: "custom preserved", port: 9090, want: 9090},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := normalizeHomePort(test.port); got != test.want {
-				t.Fatalf("normalizeHomePort(%d) = %d, want %d", test.port, got, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				if got := normalizeHomePort(test.port); got != test.want {
+					t.Fatalf("normalizeHomePort(%d) = %d, want %d", test.port, got, test.want)
+				}
+			},
+		)
 	}
 }
 

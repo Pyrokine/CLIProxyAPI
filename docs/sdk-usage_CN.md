@@ -3,7 +3,7 @@
 `sdk/cliproxy` 包用于在其它 Go 进程中内嵌 CLIProxyAPI。宿主程序无需调用 CLI 入口，即可使用服务生命周期、配置、认证、
 路由、协议转换、插件和热更新能力。
 
-公共 SDK 要求 Go 1.27.2，并采用 `/v6` 模块路径
+公共 SDK 要求 Go 1.27.4，并采用 `/v6` 模块路径
 
 ## 安装
 
@@ -74,6 +74,19 @@ api.WithPostAuthHook(coreauth.PostAuthHook)
 回调签名应使用 `sdk/api/handlers`、`sdk/config` 和 `sdk/logging`。外部模块不能导入对应的 `internal`
 包。`examples/custom-provider/main.go` 提供了可以构建的服务器选项示例。
 
+## 指定请求与响应协议
+
+宿主路由可向 `BaseAPIHandler.ExecuteProtocolWithAuthManager` 或
+`ExecuteProtocolStreamWithAuthManager` 传入 `handlers.ProtocolExecutionRequest`，用 `EntryProtocol`
+指定请求格式，用 `ExitProtocol` 指定响应格式，取消调用的 `context` 会结束相应执行
+
+`Model` 指定实际执行的模型，`AuthSelectionModel` 可单独指定凭据选择所用的模型，执行请求与
+`requested_model` 继续使用实际模型；`ForcedProvider` 和选择模型仍受当前 API Key 的模型及 Provider
+规则约束，`Headers`、`Query`、`Alt` 和 `Path` 随本次请求传递
+
+`ExecuteModel` 和 `ExecuteModelStream` 用于内部模型回调，并保留
+`source=plugin_host_model_callback`；两个 `ExecuteProtocol...` 入口按宿主路由请求处理
+
 ## 提供核心认证管理器
 
 默认 `Service` 会创建认证管理器，并注册内建 Provider 执行器。需要自定义选择策略、传输或执行器时，可通过
@@ -117,17 +130,22 @@ if err == nil {
 
 ### 请求与响应格式
 
-`executor.Options.SourceFormat` 指定请求格式，`ResponseFormat` 指定响应格式，未设置 `ResponseFormat` 时使用 `SourceFormat`，非流式、流式和计数响应遵循相同规则
+`executor.Options.SourceFormat` 指定请求格式，`ResponseFormat` 指定响应格式，未设置 `ResponseFormat` 时使用 `SourceFormat`
+，非流式、流式和计数响应遵循相同规则
 
-Vertex 原生 Interactions 要求 `SourceFormat` 为 `translator.FormatInteractions`，并在选中凭证中启用以下任一标志：`Metadata["native_interactions"]` 或 `Metadata["interactions"]` 为布尔值 `true`；`Attributes["interactions"]` 为 `"true"` 或 `"1"`，字符串属性忽略大小写和首尾空白，metadata 字符串 `"true"` 不启用该功能
+Vertex 原生 Interactions 要求 `SourceFormat` 为 `translator.FormatInteractions`，并在选中凭证中启用以下任一标志：
+`Metadata["native_interactions"]` 或 `Metadata["interactions"]` 为布尔值 `true`；`Attributes["interactions"]` 为 `"true"`
+或 `"1"`，字符串属性忽略大小写和首尾空白，metadata 字符串 `"true"` 不启用该功能
 
-启用后，API key 使用 `X-Goog-Api-Key`，服务账号使用 Bearer token，有 project 的请求使用 global Interactions endpoint，`base_url` 属性可指定接口地址；未启用的凭证、Chat 请求和 `CountTokens` 保留原路径
+启用后，API key 使用 `X-Goog-Api-Key`，服务账号使用 Bearer token，有 project 的请求使用 global Interactions endpoint，
+`base_url` 属性可指定接口地址；未启用的凭证、Chat 请求和 `CountTokens` 保留原路径
 
 此选项用于认证管理器的编程式执行，不新增公共 HTTP endpoint
 
 ### Codex 客户端工具能力
 
-模型目录默认不声明 freeform `apply_patch`，显式启用以下配置后，仅支持文本且全部路由执行器支持该工具的模型声明能力，图像、视频和 audio-only 模型不声明
+模型目录默认不声明 freeform `apply_patch`，显式启用以下配置后，仅支持文本且全部路由执行器支持该工具的模型声明能力，图像、视频和
+audio-only 模型不声明
 
 ```yaml
 client:
@@ -135,19 +153,32 @@ client:
     enable-apply-patch: true
 ```
 
-执行器通过可选的 `auth.ApplyPatchSupport` 接口提供 `SupportsApplyPatch() bool`；实现了 `APIKeyConfigExecutor` 时，`ForAPIKey()` 返回的视图也必须支持，未提供合同、缺失执行器或任一候选不支持时均不声明，不按 Provider 名称推断
+执行器通过可选的 `auth.ApplyPatchSupport` 接口提供 `SupportsApplyPatch() bool`；实现了 `APIKeyConfigExecutor` 时，
+`ForAPIKey()` 返回的视图也必须支持，未提供合同、缺失执行器或任一候选不支持时均不声明，不按 Provider 名称推断
 
-原生 Codex 保留 freeform 工具协议，xAI 将 custom `apply_patch` 声明和历史转换为只有 string `input` 字段的函数参数，向 Responses／Codex 客户端还原 freeform 调用；Chat／Messages 响应使用函数参数形式，普通同名 function 不参与转换，服务端不执行 patch
+原生 Codex 保留 freeform 工具协议，xAI 将 custom `apply_patch` 声明和历史转换为只有 string `input` 字段的函数参数，向
+Responses／Codex 客户端还原 freeform 调用；Chat／Messages 响应使用函数参数形式，普通同名 function 不参与转换，服务端不执行
+patch
 
-Claude、Gemini、Gemini Interactions、GeminiCLI、Vertex、Antigravity、AI Studio、OpenAI-compatible、Qwen、iFlow 和 Devin 使用内建转换器，将 Responses 请求的声明、tool choice 和 custom 调用历史转换为函数形式；返回 Responses 时恢复 freeform `input`、namespace 和客户端声明，保留普通同名 function
+Claude、Gemini、Gemini Interactions、GeminiCLI、Vertex、Antigravity、AI Studio、OpenAI-compatible、Qwen、iFlow 和 Devin 使用内建转换器，将
+Responses 请求的声明、tool choice 和 custom 调用历史转换为函数形式；返回 Responses 时恢复 freeform `input`、namespace
+和客户端声明，保留普通同名 function
 
-SDK 响应调用须复用请求的 `param`，调用后读取 `translator.ResponseTranslationError(&param)`；无效参数通过错误返回或 `StreamChunk.Err` 交付，必需的转换回调和执行器接口不变；JSON 终态后释放请求正文与转换缓冲区，插件 hooks 仍收到客户端原始请求；插件自行接管 `TranslateResponse` 时承担其转换合同
+SDK 响应调用须复用请求的 `param`，调用后读取 `translator.ResponseTranslationError(&param)`；无效参数通过错误返回或
+`StreamChunk.Err` 交付，必需的转换回调和执行器接口不变；JSON 终态后释放请求正文与转换缓冲区，插件 hooks 仍收到客户端原始请求；插件自行接管
+`TranslateResponse` 时承担其转换合同
 
-OpenAI-compatible、Qwen 和 iFlow 的 freeform 流须观察到源协议的 `finish_reason`，干净 EOF 可结束已完成的响应；提前 DONE 和未完成的 EOF 返回失败，读取失败保留已观察用量，取消不生成完成事件
+OpenAI-compatible、Qwen 和 iFlow 的 freeform 流须观察到源协议的 `finish_reason`，干净 EOF 可结束已完成的响应；提前 DONE
+和未完成的 EOF 返回失败，读取失败保留已观察用量，取消不生成完成事件
 
-xAI 的 `apply_patch` 转换支持晚到 name／item ID／call ID、增量参数、稀疏终态和 namespace dispatcher，转换事件保留响应标识及附加元数据，完整终态保留源顺序，稀疏终态按真实身份与已观察到的 output_index 恢复工具、消息和 reasoning，终态快照优先于较早快照
+xAI 的 `apply_patch` 转换支持晚到 name／item ID／call ID、增量参数、稀疏终态和 namespace
+dispatcher，转换事件保留响应标识及附加元数据，完整终态保留源顺序，稀疏终态按真实身份与已观察到的 output_index 恢复工具、消息和
+reasoning，终态快照优先于较早快照
 
-xAI 的 freeform `apply_patch` 请求将 `response.done` 统一为 `response.completed`，响应完成后释放工具身份和解码状态，接受一个可选的 `[DONE]`，不重复交付后续进度，提前 `[DONE]`、缺失响应终态、读取失败、取消或下游交付失败不会提交新的 replay，完成后的上游错误仍返回失败，启用交付确认的 HTTP 流在 EOF 后等待下游确认再提交 replay，WebSocket 在 JSON 终态结束当前请求并复用连接
+xAI 的 freeform `apply_patch` 请求将 `response.done` 统一为 `response.completed`，响应完成后释放工具身份和解码状态，接受一个可选的
+`[DONE]`，不重复交付后续进度，提前 `[DONE]`、缺失响应终态、读取失败、取消或下游交付失败不会提交新的
+replay，完成后的上游错误仍返回失败，启用交付确认的 HTTP 流在 EOF 后等待下游确认再提交 replay，WebSocket 在 JSON
+终态结束当前请求并复用连接
 
 内建转换与模型目录开关由离线合同测试覆盖，真实账号请求未验证；Kimi 的原生 Responses 路径不继承 Claude 的能力声明，配置默认保持关闭
 
@@ -200,21 +231,26 @@ Provider，并更新管理器的 Provider 快照。
 
 ### 插件 OAuth
 
-`GET /v0/management/plugins` 的 `oauth_provider` 来自 `AuthProvider.Identifier()`，与登录路由使用同一身份，空值仍返回该字段，不用插件二进制 ID 推断其他 Provider
+`GET /v0/management/plugins` 的 `oauth_provider` 来自 `AuthProvider.Identifier()`，与登录路由使用同一身份，空值仍返回该字段，不用插件二进制
+ID 推断其他 Provider
 
-管理页面仅为已生效且声明有效 Provider 的插件提供登录入口，登录、轮询、手动回调和取消使用该 Provider，状态按当前认证连接隔离；内建 Provider 的 Gemini alias、xAI code 处理和 Devin 校验不用于插件登录
+管理页面仅为已生效且声明有效 Provider 的插件提供登录入口，登录、轮询、手动回调和取消使用该 Provider，状态按当前认证连接隔离；内建
+Provider 的 Gemini alias、xAI code 处理和 Devin 校验不用于插件登录
 
 ### 嵌套模型流
 
-`host.model.execute_stream` 创建的流仅供发起插件及其加载实例读取或关闭，回调结束、父上下文取消、加载实例关闭、EOF 或错误都会释放资源，结束后移除回调清理记录，已关闭实例不能登记晚到的流
+`host.model.execute_stream` 创建的流仅供发起插件及其加载实例读取或关闭，回调结束、父上下文取消、加载实例关闭、EOF
+或错误都会释放资源，结束后移除回调清理记录，已关闭实例不能登记晚到的流
 
 卸载、热替换后的旧实例退出和宿主关闭也会取消该实例的模型上下文，释放阻塞的流读取；同名新实例的流不受影响
 
 ### 插件本地冷却恢复
 
-插件可调用 `host.routing.reset_cooldown`，请求为 `{"auth_index":"凭证索引"}`，成功响应返回 `auth_index` 和已恢复路由的 `models`，请求、响应类型分别为 `sdk/pluginapi.HostRoutingResetCooldownRequest` 和 `HostRoutingResetCooldownResponse`
+插件可调用 `host.routing.reset_cooldown`，请求为 `{"auth_index":"凭证索引"}`，成功响应返回 `auth_index` 和已恢复路由的
+`models`，请求、响应类型分别为 `sdk/pluginapi.HostRoutingResetCooldownRequest` 和 `HostRoutingResetCooldownResponse`
 
-该操作清除本地配额冷却和临时重试限制，保留禁用状态与永久认证错误，不写入 token 文件，不恢复上游配额，也不消耗主动重置次数；无效索引、认证管理器不可用或已关闭实例返回错误
+该操作清除本地配额冷却和临时重试限制，保留禁用状态与永久认证错误，不写入 token
+文件，不恢复上游配额，也不消耗主动重置次数；无效索引、认证管理器不可用或已关闭实例返回错误
 
 ## 运行时行为
 

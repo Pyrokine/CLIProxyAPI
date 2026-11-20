@@ -46,11 +46,13 @@ func TestFetchAntigravityQuotaIncludesLoadCodeAssist(t *testing.T) {
 		func(req quota.APICallRequest) (*quota.APICallResponse, error) {
 			requests = append(requests, req)
 			switch req.URL {
-			case geminiQuotaURL:
+			case antigravityQuotaURLs[0]:
 				return &quota.APICallResponse{
 					StatusCode: 200,
 					Header:     map[string][]string{"Date": {time.Now().UTC().Format(http.TimeFormat)}},
-					Body:       json.RawMessage(`{"quota":"ok"}`),
+					Body: json.RawMessage(
+						`{"groups":[{"displayName":"Models","buckets":[{"window":"5h","remainingFraction":0.5}]}]}`,
+					),
 				}, nil
 			case antigravityLoadCodeAssistURL:
 				return &quota.APICallResponse{
@@ -61,7 +63,7 @@ func TestFetchAntigravityQuotaIncludesLoadCodeAssist(t *testing.T) {
 				return nil, nil
 			}
 		},
-		"antigravity-index",
+		"antigravity-index", "fixture-project",
 	)
 	if err != nil {
 		t.Fatalf("fetchAntigravityQuota() error = %v", err)
@@ -96,10 +98,12 @@ func TestFetchAntigravityQuotaReportsPartialAuxiliaryFailure(t *testing.T) {
 		context.Background(),
 		func(_ context.Context, req quota.APICallRequest) (*quota.APICallResponse, error) {
 			switch req.URL {
-			case geminiQuotaURL:
+			case antigravityQuotaURLs[0]:
 				return &quota.APICallResponse{
 					StatusCode: http.StatusOK,
-					Body:       json.RawMessage(`{"quota":"ok"}`),
+					Body: json.RawMessage(
+						`{"groups":[{"displayName":"Models","buckets":[{"window":"5h","remainingFraction":0.5}]}]}`,
+					),
 				}, nil
 			case antigravityLoadCodeAssistURL:
 				return nil, errors.New("subscription unavailable")
@@ -108,7 +112,7 @@ func TestFetchAntigravityQuotaReportsPartialAuxiliaryFailure(t *testing.T) {
 				return nil, nil
 			}
 		},
-		"antigravity-index",
+		"antigravity-index", "fixture-project",
 	)
 	if err != nil {
 		t.Fatalf("fetchAntigravityQuotaResultContext() error = %v", err)
@@ -129,36 +133,48 @@ func TestFetchClaudeQuotaUsesCLIUserAgent(t *testing.T) {
 				t.Errorf("quota user agent = %q", req.Header["User-Agent"])
 			}
 			if req.AuthIndex != "claude-fixture" || req.Method != http.MethodGet ||
-				(req.URL != "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1" && req.URL != claudeProfileURL) {
+				(req.URL !=
+					"https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1" &&
+					req.URL !=
+						claudeProfileURL) {
 				t.Fatalf("unexpected Claude quota request: url=%q method=%q", req.URL, req.Method)
 			}
 			return &quota.APICallResponse{StatusCode: http.StatusOK, Body: json.RawMessage(`{}`)}, nil
 		},
 		"claude-fixture",
 	)
-	if err != nil || calls != 2 || result.Source != "claude_usage" {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || result.Source != "claude_usage" {
 		t.Fatalf("fetchClaudeQuotaResultContext() calls=%d source=%q error=%v", calls, result.Source, err)
 	}
 }
 
 func TestFetchClaudeQuotaPreservesReadOnlyResetGrants(t *testing.T) {
-	const usage = `{"five_hour":{"utilization":72},"cedar_ember":{"eligible":true,"grants":[{"id":"fixture","resets_total":4,"resets_left":2,"ends_at":"2026-11-01T00:00:00Z"}]}}`
+	const usage = `{"five_hour":{"utilization":72},"cedar_ember":{"eligible":true,"grants` +
+		`":[{"id":"fixture","resets_total":4,"resets_left":2,"ends_at":"2026-11` +
+		`-01T00:00:00Z"}]}}`
 	var requests []quota.APICallRequest
-	result, err := fetchClaudeQuotaResultContext(context.Background(), func(_ context.Context, req quota.APICallRequest) (*quota.APICallResponse, error) {
-		requests = append(requests, req)
-		if req.Method != http.MethodGet || req.AuthIndex != "fixture-claude" || req.Data != "" {
-			t.Fatalf("quota read changed credential or issued a mutation: %#v", req)
-		}
-		switch req.URL {
-		case "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1":
-			return &quota.APICallResponse{StatusCode: http.StatusOK, Body: json.RawMessage(usage)}, nil
-		case claudeProfileURL:
-			return nil, errors.New("fixture profile unavailable")
-		default:
-			t.Fatalf("unexpected Claude request: %s", req.URL)
-			return nil, nil
-		}
-	}, "fixture-claude")
+	result, err := fetchClaudeQuotaResultContext(
+		context.Background(),
+		func(_ context.Context, req quota.APICallRequest) (*quota.APICallResponse, error) {
+			requests = append(requests, req)
+			if req.Method != http.MethodGet || req.AuthIndex != "fixture-claude" || req.Data != "" {
+				t.Fatalf("quota read changed credential or issued a mutation: %#v", req)
+			}
+			switch req.URL {
+			case "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1":
+				return &quota.APICallResponse{StatusCode: http.StatusOK, Body: json.RawMessage(usage)}, nil
+			case claudeProfileURL:
+				return nil, errors.New("fixture profile unavailable")
+			default:
+				t.Fatalf("unexpected Claude request: %s", req.URL)
+				return nil, nil
+			}
+		},
+		"fixture-claude",
+	)
 	if err != nil || len(requests) != 2 || result.Completeness != quota.FetchPartial {
 		t.Fatalf("quota result = %#v, error = %v, requests = %d", result, err, len(requests))
 	}
@@ -203,7 +219,11 @@ func TestFetchCodexQuotaIncludesResetCredits(t *testing.T) {
 			case codexRateLimitResetCreditsURL:
 				return &quota.APICallResponse{
 					StatusCode: 200,
-					Body:       json.RawMessage(`{"available_count":1,"credits":[{"id":"credit-1","reset_type":"codex_rate_limits","status":"available","expires_at":"2026-07-06T08:00:00Z"}]}`),
+					Body: json.RawMessage(
+						`{"available_count":1,"credits":[{"id":"credit-1","reset_type":"codex_r` +
+							`ate_limits","status":"available","expires_at":"2026-07-06T08:00:00Z"}]` +
+							`}`,
+					),
 				}, nil
 			default:
 				t.Fatalf("unexpected url: %s", req.URL)
@@ -266,15 +286,28 @@ func TestFetchCodexQuotaThroughLocalAPICallWire(t *testing.T) {
 							if call.Method != http.MethodGet ||
 								(call.URL != codexUsageURL && call.URL != codexRateLimitResetCreditsURL &&
 									!strings.HasPrefix(call.URL, codexSubscriptionsURL+"?account_id=")) {
-								t.Errorf("quota refresh attempted a non-read-only request: %s %s", call.Method, call.URL)
+								t.Errorf(
+									"quota refresh attempted a non-read-only request: %s %s",
+									call.Method,
+									call.URL,
+								)
 								http.Error(w, "unexpected quota request", http.StatusBadRequest)
 								return
 							}
-							if call.Header["User-Agent"] != "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)" {
+							if call.Header["User-Agent"] !=
+								("codex-tui/0.149.1 (Mac OS 26.5.2; arm64) " +
+									"iTerm.app/3.6.11 (codex-tui; " +
+									"0.149.1)") {
 								t.Errorf("quota User-Agent = %q", call.Header["User-Agent"])
 							}
-							if call.AuthIndex != "codex-index" || call.Header["Chatgpt-Account-Id"] != accountID || call.Data != "" {
-								t.Errorf("quota request changed account scope or body: auth=%q account=%q", call.AuthIndex, call.Header["Chatgpt-Account-Id"])
+							if call.AuthIndex != "codex-index" ||
+								call.Header["Chatgpt-Account-Id"] != accountID ||
+								call.Data != "" {
+								t.Errorf(
+									"quota request changed account scope or body: auth=%q account=%q",
+									call.AuthIndex,
+									call.Header["Chatgpt-Account-Id"],
+								)
 							}
 							requests = append(requests, call.URL)
 							status := http.StatusOK
@@ -290,7 +323,9 @@ func TestFetchCodexQuotaThroughLocalAPICallWire(t *testing.T) {
 							}
 							if call.URL == codexRateLimitResetCreditsURL {
 								status = tt.detailsStatus
-								body = `{"available_count":2,"applicable_available_count":1,"credits":[{"id":"credit-1","reset_type":"codex_rate_limits","status":"available","expires_at":"2026-10-01T00:00:00Z"}]}`
+								body = `{"available_count":2,"applicable_available_count":1,"credits":[{"id":` +
+									`"credit-1","reset_type":"codex_rate_limits","status":"available","` +
+									`expires_at":"2026-10-01T00:00:00Z"}]}`
 							}
 							w.Header().Set("Content-Type", "application/json")
 							_ = json.NewEncoder(w).Encode(
@@ -328,7 +363,8 @@ func TestFetchCodexQuotaThroughLocalAPICallWire(t *testing.T) {
 				if (result.PartialError != "") != (tt.wantCompleteness == quota.FetchPartial) {
 					t.Fatalf("partial error = %q", result.PartialError)
 				}
-				if len(requests) != 3 || requests[0] != codexUsageURL || requests[1] != codexRateLimitResetCreditsURL ||
+				if len(requests) != 3 || requests[0] != codexUsageURL ||
+					requests[1] != codexRateLimitResetCreditsURL ||
 					!strings.HasPrefix(requests[2], codexSubscriptionsURL+"?account_id=") {
 					t.Fatalf("requests = %#v", requests)
 				}
@@ -342,20 +378,34 @@ func TestFetchCodexQuotaThroughLocalAPICallWire(t *testing.T) {
 				if tt.subscriptionStatus == http.StatusOK {
 					if string(payload["subscription_active_until"]) != `"2026-10-03T13:27:01Z"` ||
 						string(payload["subscription_active_until_source"]) != `"codex_subscriptions"` {
-						t.Fatalf("live subscription fields = %s, %s", payload["subscription_active_until"], payload["subscription_active_until_source"])
+						t.Fatalf(
+							"live subscription fields = %s, %s", payload["subscription_active_until"],
+							payload["subscription_active_until_source"],
+						)
 					}
-				} else if !strings.Contains(string(payload["subscription_error"]), "codex subscription returned status 403") ||
+				} else if !strings.Contains(
+					string(payload["subscription_error"]), "codex subscription returned status 403",
+				) ||
 					!strings.Contains(result.PartialError, "codex subscription returned status 403") ||
 					len(payload["subscription_active_until"]) != 0 {
-					t.Fatalf("subscription error lost stage or status: data=%s error=%q", result.Data, result.PartialError)
+					t.Fatalf(
+						"subscription error lost stage or status: data=%s error=%q", result.Data, result.PartialError,
+					)
 				}
 				if tt.detailsStatus != http.StatusOK {
 					want := "codex reset credits returned status " + strconv.Itoa(tt.detailsStatus)
 					if !strings.Contains(string(payload["rate_limit_reset_credits_error"]), want) ||
-						!strings.Contains(result.PartialError, want) || len(payload["rate_limit_reset_credits_details"]) != 0 {
-						t.Fatalf("reset credit error lost stage or status: data=%s error=%q", result.Data, result.PartialError)
+						!strings.Contains(
+							result.PartialError, want,
+						) || len(payload["rate_limit_reset_credits_details"]) != 0 {
+						t.Fatalf(
+							"reset credit error lost stage or status: data=%s error=%q", result.Data,
+							result.PartialError,
+						)
 					}
-				} else if !strings.Contains(string(payload["rate_limit_reset_credits_details"]), "2026-10-01T00:00:00Z") {
+				} else if !strings.Contains(
+					string(payload["rate_limit_reset_credits_details"]), "2026-10-01T00:00:00Z",
+				) {
 					t.Fatalf("reset credit details = %s", payload["rate_limit_reset_credits_details"])
 				}
 			},
@@ -373,14 +423,25 @@ func TestFetchCodexQuotaAccountHeadersDoNotLeak(t *testing.T) {
 			wantAccount = ""
 		}
 		calls := 0
-		_, err := fetchCodexQuotaResultContext(context.Background(), func(_ context.Context, req quota.APICallRequest) (*quota.APICallResponse, error) {
-			calls++
-			if req.Method != http.MethodGet || req.Data != "" || req.Header["Chatgpt-Account-Id"] != wantAccount {
-				t.Fatalf("invalid account scope or mutation: method=%q account=%q", req.Method, req.Header["Chatgpt-Account-Id"])
-			}
-			captured = append(captured, req)
-			return &quota.APICallResponse{StatusCode: http.StatusOK, Body: json.RawMessage(`{"active_until":"2026-11-01T00:00:00Z"}`)}, nil
-		}, "synthetic-index", accountID)
+		_, err := fetchCodexQuotaResultContext(
+			context.Background(),
+			func(_ context.Context, req quota.APICallRequest) (*quota.APICallResponse, error) {
+				calls++
+				if req.Method != http.MethodGet || req.Data != "" ||
+					req.Header["Chatgpt-Account-Id"] != wantAccount {
+					t.Fatalf(
+						"invalid account scope or mutation: method=%q account=%q", req.Method,
+						req.Header["Chatgpt-Account-Id"],
+					)
+				}
+				captured = append(captured, req)
+				return &quota.APICallResponse{
+					StatusCode: http.StatusOK, Body: json.RawMessage(`{"active_until":"2026-11-01T00:00:00Z"}`),
+				}, nil
+			},
+			"synthetic-index",
+			accountID,
+		)
 		wantCalls := 2
 		if wantAccount != "" {
 			wantCalls = 3
@@ -414,9 +475,11 @@ func TestRegisterAuthManagerForQuotaUsesCredentialMaterialRevision(t *testing.T)
 	if err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
-	scheduler := quota.NewScheduler(quota.DefaultConfig(), func(*quota.Entry) ([]byte, error) {
-		return []byte(`{"remaining":5}`), nil
-	})
+	scheduler := quota.NewScheduler(
+		quota.DefaultConfig(), func(*quota.Entry) ([]byte, error) {
+			return []byte(`{"remaining":5}`), nil
+		},
+	)
 	registerAuthManagerForQuota(scheduler, authManager)
 	scheduler.RefreshNow([]string{"claude.json"})
 	key := quota.EntryKey(quota.TypeClaude, "claude.json")
@@ -436,7 +499,11 @@ func TestRegisterAuthManagerForQuotaUsesCredentialMaterialRevision(t *testing.T)
 		registerAuthManagerForQuota(scheduler, authManager)
 		after := scheduler.GetStatus().Credentials[key]
 		if after == nil || after.Generation != before.Generation || after.Disabled != disabled ||
-			string(after.Data) != string(before.Data) || after.ObservedAt == nil || !after.ObservedAt.Equal(*before.ObservedAt) {
+			string(
+				after.Data,
+			) != string(
+				before.Data,
+			) || after.ObservedAt == nil || !after.ObservedAt.Equal(*before.ObservedAt) {
 			t.Fatalf("status=%v discarded quota: before=%#v after=%#v", disabled, before, after)
 		}
 	}
@@ -447,7 +514,8 @@ func TestRegisterAuthManagerForQuotaUsesCredentialMaterialRevision(t *testing.T)
 	}
 	registerAuthManagerForQuota(scheduler, authManager)
 	after := scheduler.GetStatus().Credentials[key]
-	if after == nil || after.Generation <= before.Generation || after.Freshness != quota.FreshnessOutdated || len(after.Data) != 0 {
+	if after == nil || after.Generation <= before.Generation || after.Freshness != quota.FreshnessOutdated ||
+		len(after.Data) != 0 {
 		t.Fatalf("replaced credential retained quota: %#v", after)
 	}
 }

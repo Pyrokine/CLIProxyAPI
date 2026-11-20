@@ -2,19 +2,19 @@ package cliproxy
 
 import (
 	"bufio"
+	"context"
 	"fmt"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/homeplugins"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
-	"context"
-	"testing"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/homeplugins"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
@@ -58,19 +58,25 @@ func TestPrepareHomePluginsRunsAgainAfterAuthRevisionChanges(t *testing.T) {
 }
 
 func TestHomePluginSyncKeyIncludesAuthRevision(t *testing.T) {
-	cfg := &config.Config{
-		Home: config.HomeConfig{Enabled: true},
-		Plugins: config.PluginsConfig{
-			Enabled: true,
-			Dir:     "plugins",
-			Configs: map[string]config.PluginInstanceConfig{},
-		},
-	}
-	first := homePluginSyncKey(cfg)
-	cfg.Plugins.AuthRevision = 2
-	second := homePluginSyncKey(cfg)
-	if first == second {
-		t.Fatalf("homePluginSyncKey() unchanged after auth revision update: %q", first)
+	for _, dir := range []string{"", "plugins"} {
+		t.Run(
+			"dir="+dir, func(t *testing.T) {
+				cfg := &config.Config{
+					Home: config.HomeConfig{Enabled: true},
+					Plugins: config.PluginsConfig{
+						Enabled: true,
+						Dir:     dir,
+						Configs: map[string]config.PluginInstanceConfig{},
+					},
+				}
+				first := homePluginSyncKey(cfg)
+				cfg.Plugins.AuthRevision = 2
+				second := homePluginSyncKey(cfg)
+				if first == second {
+					t.Fatalf("homePluginSyncKey() unchanged after auth revision update: %q", first)
+				}
+			},
+		)
 	}
 }
 
@@ -116,38 +122,44 @@ func homePluginStatusClient(t *testing.T, statusResponse func(int32) string) (*h
 	}
 	writes := &atomic.Int32{}
 	var workers sync.WaitGroup
-	workers.Go(func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			workers.Go(func() {
-				defer conn.Close()
-				reader := bufio.NewReader(conn)
-				for {
-					args, err := readHomeStatusCommand(reader)
-					if err != nil {
-						return
-					}
-					response := "+OK\r\n"
-					switch strings.ToUpper(args[0]) {
-					case "HELLO":
-						response = "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
-					case "RPUSH":
-						if len(args) > 1 && args[1] == "plugin-status" {
-							response = statusResponse(writes.Add(1))
-						}
-					case "GET":
-						response = "$-1\r\n"
-					}
-					if _, err := io.WriteString(conn, response); err != nil {
-						return
-					}
+	workers.Go(
+		func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
 				}
-			})
-		}
-	})
+				workers.Go(
+					func() {
+						defer func(closeResource func() error) { _ = closeResource() }(conn.Close)
+						reader := bufio.NewReader(conn)
+						for {
+							args, err := readHomeStatusCommand(reader)
+							if err != nil {
+								return
+							}
+							response := "+OK\r\n"
+							switch strings.ToUpper(args[0]) {
+							case "HELLO":
+								response = "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n" +
+									":1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r" +
+									"\n$7\r\nmodules\r\n*0\r\n"
+							case "RPUSH":
+								if len(args) > 1 && args[1] == "plugin-status" {
+									response = statusResponse(writes.Add(1))
+								}
+							case "GET":
+								response = "$-1\r\n"
+							}
+							if _, err := io.WriteString(conn, response); err != nil {
+								return
+							}
+						}
+					},
+				)
+			}
+		},
+	)
 	host, portText, err := net.SplitHostPort(listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -157,17 +169,19 @@ func homePluginStatusClient(t *testing.T, statusResponse func(int32) string) (*h
 		t.Fatal(err)
 	}
 	client := home.New(config.HomeConfig{Enabled: true, Host: host, Port: port})
-	t.Cleanup(func() { client.Close(); listener.Close(); workers.Wait() })
+	t.Cleanup(func() { client.Close(); _ = listener.Close(); workers.Wait() })
 	return client, writes
 }
 
 func TestHomePluginStatusRejectionRemainsRetryable(t *testing.T) {
-	client, writes := homePluginStatusClient(t, func(count int32) string {
-		if count == 1 {
-			return "-ERR blocked\r\n"
-		}
-		return ":1\r\n"
-	})
+	client, writes := homePluginStatusClient(
+		t, func(count int32) string {
+			if count == 1 {
+				return "-ERR blocked\r\n"
+			}
+			return ":1\r\n"
+		},
+	)
 	base := &config.Config{}
 	base.Home.Enabled, base.Home.NodeID = true, "node-1"
 	service := &Service{cfg: base}
@@ -190,13 +204,15 @@ func TestHomePluginLateStatusKeepsCurrentConfigurationSignature(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	defer once.Do(func() { close(release) })
-	client, _ := homePluginStatusClient(t, func(count int32) string {
-		if count == 1 {
-			close(started)
-			<-release
-		}
-		return ":1\r\n"
-	})
+	client, _ := homePluginStatusClient(
+		t, func(count int32) string {
+			if count == 1 {
+				close(started)
+				<-release
+			}
+			return ":1\r\n"
+		},
+	)
 	base := &config.Config{}
 	base.Home.Enabled, base.Home.NodeID = true, "node-1"
 	service := &Service{cfg: base}
@@ -239,11 +255,15 @@ func TestHomePluginLateStatusKeepsCurrentConfigurationSignature(t *testing.T) {
 
 func TestHomePluginStatusRequiresClientAndNode(t *testing.T) {
 	service := &Service{}
-	if err := service.reportHomePluginStatusWithClient(context.Background(), &config.Config{}, homeplugins.SyncReport{}, nil); err == nil {
+	if err := service.reportHomePluginStatusWithClient(
+		context.Background(), &config.Config{}, homeplugins.SyncReport{}, nil,
+	); err == nil {
 		t.Fatal("missing Home client returned success")
 	}
 	client, _ := homePluginStatusClient(t, func(int32) string { return ":1\r\n" })
-	if err := service.reportHomePluginStatusWithClient(context.Background(), &config.Config{}, homeplugins.SyncReport{}, client); err == nil {
+	if err := service.reportHomePluginStatusWithClient(
+		context.Background(), &config.Config{}, homeplugins.SyncReport{}, client,
+	); err == nil {
 		t.Fatal("missing Home node returned success")
 	}
 }

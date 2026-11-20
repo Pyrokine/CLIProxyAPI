@@ -103,18 +103,22 @@ func TestRegisterModelsForDevinAuthUsesNamespacedCatalogAndExclusions(t *testing
 func TestDevinManagerExecutionUsesPinnedSelectedIdentity(t *testing.T) {
 	var callsA, callsB int
 	newServer := func(label string, calls *int) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			*calls++
-			if request.URL.Path != helps.DevinChatPath {
-				t.Fatalf("%s request path = %q", label, request.URL.Path)
-			}
-			token := "devin-session-token$" + label
-			if got := request.Header.Get("Authorization"); got != "Basic "+token+"-"+token {
-				t.Fatalf("%s Authorization = %q", label, got)
-			}
-			writer.Header().Set("Content-Type", "application/connect+proto")
-			_, _ = writer.Write(devinBindingTestResponse())
-		}))
+		return httptest.NewServer(
+			http.HandlerFunc(
+				func(writer http.ResponseWriter, request *http.Request) {
+					*calls++
+					if request.URL.Path != helps.DevinChatPath {
+						t.Fatalf("%s request path = %q", label, request.URL.Path)
+					}
+					token := "devin-session-token$" + label
+					if got := request.Header.Get("Authorization"); got != "Basic "+token+"-"+token {
+						t.Fatalf("%s Authorization = %q", label, got)
+					}
+					writer.Header().Set("Content-Type", "application/connect+proto")
+					_, _ = writer.Write(devinBindingTestResponse())
+				},
+			),
+		)
 	}
 	serverA := newServer("A", &callsA)
 	defer serverA.Close()

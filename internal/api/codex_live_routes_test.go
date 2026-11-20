@@ -142,7 +142,8 @@ func TestCodexLiveSidebandUpgradeReachesSessionLookup(t *testing.T) {
 		server.engine.ServeHTTP(recorder, req)
 		if recorder.Code != http.StatusNotFound {
 			t.Errorf(
-				"GET %s status = %d, want %d; body=%s", path, recorder.Code, http.StatusNotFound, recorder.Body.String(),
+				"GET %s status = %d, want %d; body=%s", path, recorder.Code, http.StatusNotFound,
+				recorder.Body.String(),
 			)
 		}
 		if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
@@ -205,18 +206,20 @@ func TestRealtimeRoutesUseStandardAndEphemeralAuthentication(t *testing.T) {
 			want:   http.StatusNotImplemented,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
-			request.Header.Set("Authorization", "Bearer "+clientSecret)
-			if test.body != "" {
-				request.Header.Set("Content-Type", "application/sdp")
-			}
-			server.engine.ServeHTTP(recorder, request)
-			if recorder.Code != test.want {
-				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.want, recorder.Body.String())
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				recorder := httptest.NewRecorder()
+				request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+				request.Header.Set("Authorization", "Bearer "+clientSecret)
+				if test.body != "" {
+					request.Header.Set("Content-Type", "application/sdp")
+				}
+				server.engine.ServeHTTP(recorder, request)
+				if recorder.Code != test.want {
+					t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.want, recorder.Body.String())
+				}
+			},
+		)
 	}
 
 	for _, path := range []string{
@@ -232,7 +235,10 @@ func TestRealtimeRoutesUseStandardAndEphemeralAuthentication(t *testing.T) {
 		request.Header.Set("Authorization", "Bearer "+clientSecret)
 		server.engine.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusUnauthorized {
-			t.Errorf("ephemeral key reached standard-only route %s: status=%d body=%s", path, recorder.Code, recorder.Body.String())
+			t.Errorf(
+				"ephemeral key reached standard-only route %s: status=%d body=%s", path, recorder.Code,
+				recorder.Body.String(),
+			)
 		}
 	}
 
@@ -255,14 +261,16 @@ func TestRealtimeEphemeralAuthenticationUsesIssuerIdentity(t *testing.T) {
 	var provider string
 	var identity string
 	handlers := append([]gin.HandlerFunc(nil), server.realtimeAuthMiddlewares(true)...)
-	handlers = append(handlers, func(c *gin.Context) {
-		principalValue, _ := c.Get("apiKey")
-		providerValue, _ := c.Get("accessProvider")
-		principal, _ = principalValue.(string)
-		provider, _ = providerValue.(string)
-		identity = coreusage.APIKeyIdentityFromContext(c.Request.Context())
-		c.Status(http.StatusNoContent)
-	})
+	handlers = append(
+		handlers, func(c *gin.Context) {
+			principalValue, _ := c.Get("apiKey")
+			providerValue, _ := c.Get("accessProvider")
+			principal, _ = principalValue.(string)
+			provider, _ = providerValue.(string)
+			identity = coreusage.APIKeyIdentityFromContext(c.Request.Context())
+			c.Status(http.StatusNoContent)
+		},
+	)
 	server.engine.GET("/test/realtime-ephemeral-identity", handlers...)
 
 	recorder := httptest.NewRecorder()
@@ -284,7 +292,10 @@ type emptyRealtimeAccessProvider struct{}
 
 func (*emptyRealtimeAccessProvider) Identifier() string { return "empty-realtime" }
 
-func (*emptyRealtimeAccessProvider) Authenticate(context.Context, *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
+func (*emptyRealtimeAccessProvider) Authenticate(context.Context, *http.Request) (
+	*sdkaccess.Result,
+	*sdkaccess.AuthError,
+) {
 	return nil, nil
 }
 
@@ -294,7 +305,10 @@ type opaqueRealtimeAccessProvider struct {
 
 func (*opaqueRealtimeAccessProvider) Identifier() string { return "opaque-realtime" }
 
-func (p *opaqueRealtimeAccessProvider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
+func (p *opaqueRealtimeAccessProvider) Authenticate(_ context.Context, r *http.Request) (
+	*sdkaccess.Result,
+	*sdkaccess.AuthError,
+) {
 	if r.Header.Get("Authorization") != "Bearer "+p.credential {
 		return nil, sdkaccess.NewInvalidCredentialError()
 	}
@@ -311,7 +325,9 @@ func TestRealtimeInvalidClientSecretCannotUseLoopbackFallback(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	server.engine.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("invalid client secret on loopback status=%d, want 401; body=%s", recorder.Code, recorder.Body.String())
+		t.Fatalf(
+			"invalid client secret on loopback status=%d, want 401; body=%s", recorder.Code, recorder.Body.String(),
+		)
 	}
 }
 
@@ -332,7 +348,9 @@ func TestRealtimeConfiguredKeyWithClientSecretPrefix(t *testing.T) {
 
 func TestRealtimeClientSecretOpaqueIssuerRevocation(t *testing.T) {
 	server := newTestServer(t)
-	server.accessManager.SetProviders([]sdkaccess.Provider{&opaqueRealtimeAccessProvider{credential: "ek_initial-credential"}})
+	server.accessManager.SetProviders(
+		[]sdkaccess.Provider{&opaqueRealtimeAccessProvider{credential: "ek_initial-credential"}},
+	)
 
 	configuredRequest := httptest.NewRequest(http.MethodGet, "/v1/realtime?model=gpt-realtime", nil)
 	configuredRequest.Header.Set("Authorization", "Bearer ek_initial-credential")
@@ -343,7 +361,9 @@ func TestRealtimeClientSecretOpaqueIssuerRevocation(t *testing.T) {
 	}
 
 	issued := httptest.NewRecorder()
-	issueRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"model":"gpt-realtime"}}`))
+	issueRequest := httptest.NewRequest(
+		http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"model":"gpt-realtime"}}`),
+	)
 	issueRequest.Header.Set("Authorization", "Bearer ek_initial-credential")
 	issueRequest.Header.Set("Content-Type", "application/json")
 	server.engine.ServeHTTP(issued, issueRequest)
@@ -368,7 +388,9 @@ func TestRealtimeClientSecretOpaqueIssuerRevocation(t *testing.T) {
 		}
 	}
 	check(http.StatusUpgradeRequired)
-	server.accessManager.SetProviders([]sdkaccess.Provider{&opaqueRealtimeAccessProvider{credential: "replacement-credential"}})
+	server.accessManager.SetProviders(
+		[]sdkaccess.Provider{&opaqueRealtimeAccessProvider{credential: "replacement-credential"}},
+	)
 	check(http.StatusUnauthorized)
 }
 
@@ -440,13 +462,17 @@ func TestRealtimeAPIKeyRuleBlocksNewAndExistingSessions(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/v1/realtime?model=gpt-realtime", nil)
 		request.Header.Set("Authorization", "Bearer "+auth)
 		server.engine.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusForbidden && !(auth == clientSecret && recorder.Code == http.StatusUnauthorized) {
+		if recorder.Code != http.StatusForbidden &&
+			!(auth == clientSecret && recorder.Code == http.StatusUnauthorized) {
 			t.Errorf("restricted Realtime request status=%d body=%s", recorder.Code, recorder.Body.String())
 		}
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	request := httptest.NewRequest(
+		http.MethodPost, "/v1/realtime/client_secrets",
+		strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`),
+	)
 	request.Header.Set("Authorization", "Bearer test-key")
 	request.Header.Set("Content-Type", "application/json")
 	server.engine.ServeHTTP(recorder, request)
@@ -475,45 +501,79 @@ func TestRealtimeAPIKeyPolicyRestrictions(t *testing.T) {
 		rule proxyconfig.APIKeyRule
 		want int
 	}{
-		{name: "canonical model blocked", rule: proxyconfig.APIKeyRule{BlockedModels: []string{"gpt-live-1-codex"}}, want: http.StatusForbidden},
-		{name: "canonical model not allowed", rule: proxyconfig.APIKeyRule{CanonicalModels: []string{"other-model"}}, want: http.StatusForbidden},
-		{name: "provider not allowed", rule: proxyconfig.APIKeyRule{Providers: []string{"gemini"}}, want: http.StatusForbidden},
-		{name: "usage limit cannot be enforced", rule: proxyconfig.APIKeyRule{Limits: []proxyconfig.APIKeyPolicyLimit{{Window: "1m", Requests: 1}}}, want: http.StatusForbidden},
-		{name: "model mapping cannot be applied", rule: proxyconfig.APIKeyRule{ModelMappings: map[string]string{"gpt-realtime": "other-model"}}, want: http.StatusForbidden},
-		{name: "permitted policy", rule: proxyconfig.APIKeyRule{Providers: []string{"codex"}, CanonicalModels: []string{"gpt-live-1-codex"}}, want: http.StatusOK},
+		{
+			name: "canonical model blocked", rule: proxyconfig.APIKeyRule{BlockedModels: []string{"gpt-live-1-codex"}},
+			want: http.StatusForbidden,
+		},
+		{
+			name: "canonical model not allowed", rule: proxyconfig.APIKeyRule{CanonicalModels: []string{"other-model"}},
+			want: http.StatusForbidden,
+		},
+		{
+			name: "provider not allowed", rule: proxyconfig.APIKeyRule{Providers: []string{"gemini"}},
+			want: http.StatusForbidden,
+		},
+		{
+			name: "usage limit cannot be enforced",
+			rule: proxyconfig.APIKeyRule{Limits: []proxyconfig.APIKeyPolicyLimit{{Window: "1m", Requests: 1}}},
+			want: http.StatusForbidden,
+		},
+		{
+			name: "model mapping cannot be applied",
+			rule: proxyconfig.APIKeyRule{ModelMappings: map[string]string{"gpt-realtime": "other-model"}},
+			want: http.StatusForbidden,
+		},
+		{
+			name: "permitted policy",
+			rule: proxyconfig.APIKeyRule{Providers: []string{"codex"}, CanonicalModels: []string{"gpt-live-1-codex"}},
+			want: http.StatusOK,
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			server := newTestServer(t)
-			updated := *server.configSnapshot()
-			updated.APIKeyRules = map[string]proxyconfig.APIKeyRule{"test-key": test.rule}
-			server.UpdateClients(&updated)
+		t.Run(
+			test.name, func(t *testing.T) {
+				server := newTestServer(t)
+				updated := *server.configSnapshot()
+				updated.APIKeyRules = map[string]proxyconfig.APIKeyRule{"test-key": test.rule}
+				server.UpdateClients(&updated)
 
-			issued := httptest.NewRecorder()
-			issueRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"model":"gpt-realtime"}}`))
-			issueRequest.Header.Set("Authorization", "Bearer test-key")
-			server.engine.ServeHTTP(issued, issueRequest)
-			if issued.Code != test.want {
-				t.Errorf("issuance status=%d, want %d; body=%s", issued.Code, test.want, issued.Body.String())
-			}
+				issued := httptest.NewRecorder()
+				issueRequest := httptest.NewRequest(
+					http.MethodPost, "/v1/realtime/client_secrets",
+					strings.NewReader(`{"session":{"model":"gpt-realtime"}}`),
+				)
+				issueRequest.Header.Set("Authorization", "Bearer test-key")
+				server.engine.ServeHTTP(issued, issueRequest)
+				if issued.Code != test.want {
+					t.Errorf("issuance status=%d, want %d; body=%s", issued.Code, test.want, issued.Body.String())
+				}
 
-			for _, request := range []*http.Request{
-				httptest.NewRequest(http.MethodGet, "/v1/realtime?model=gpt-realtime", nil),
-				httptest.NewRequest(http.MethodPost, "/v1/realtime/calls", strings.NewReader(`{"model":"gpt-realtime"}`)),
-			} {
-				request.Header.Set("Authorization", "Bearer test-key")
-				if request.Method == http.MethodPost {
-					request.Header.Set("Content-Type", "application/json")
+				for _, request := range []*http.Request{
+					httptest.NewRequest(http.MethodGet, "/v1/realtime?model=gpt-realtime", nil),
+					httptest.NewRequest(
+						http.MethodPost, "/v1/realtime/calls", strings.NewReader(`{"model":"gpt-realtime"}`),
+					),
+				} {
+					request.Header.Set("Authorization", "Bearer test-key")
+					if request.Method == http.MethodPost {
+						request.Header.Set("Content-Type", "application/json")
+					}
+					recorder := httptest.NewRecorder()
+					server.engine.ServeHTTP(recorder, request)
+					if test.want == http.StatusForbidden && recorder.Code != http.StatusForbidden {
+						t.Errorf(
+							"%s %s status=%d, want 403; body=%s", request.Method, request.URL.Path, recorder.Code,
+							recorder.Body.String(),
+						)
+					}
+					if test.want == http.StatusOK && recorder.Code == http.StatusForbidden {
+						t.Errorf(
+							"%s %s rejected allowed policy: %s", request.Method, request.URL.Path,
+							recorder.Body.String(),
+						)
+					}
 				}
-				recorder := httptest.NewRecorder()
-				server.engine.ServeHTTP(recorder, request)
-				if test.want == http.StatusForbidden && recorder.Code != http.StatusForbidden {
-					t.Errorf("%s %s status=%d, want 403; body=%s", request.Method, request.URL.Path, recorder.Code, recorder.Body.String())
-				}
-				if test.want == http.StatusOK && recorder.Code == http.StatusForbidden {
-					t.Errorf("%s %s rejected allowed policy: %s", request.Method, request.URL.Path, recorder.Body.String())
-				}
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -533,10 +593,13 @@ func TestRealtimeCORSExposesOnlyRealtimeResponseHeaders(t *testing.T) {
 			t.Fatalf("OPTIONS %s status = %d, want %d", test.path, recorder.Code, http.StatusNoContent)
 		}
 		exposed := recorder.Header().Get("Access-Control-Expose-Headers")
-		for _, header := range []string{"Location", "Retry-After", "X-Request-Id", "OpenAI-Request-Id"} {
+		for _, header := range []string{"Location", "X-Request-Id", "OpenAI-Request-Id"} {
 			if got := strings.Contains(exposed, header); got != test.wantHeader {
 				t.Errorf("OPTIONS %s exposed %s=%t, want %t: %s", test.path, header, got, test.wantHeader, exposed)
 			}
+		}
+		if count := strings.Count(exposed, "Retry-After"); count != 1 {
+			t.Errorf("OPTIONS %s exposed Retry-After %d times, want 1: %s", test.path, count, exposed)
 		}
 	}
 }
@@ -553,7 +616,9 @@ func createRealtimeClientSecret(t *testing.T, server *Server) string {
 	request.Header.Set("Content-Type", "application/json")
 	server.engine.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("create client secret status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		t.Fatalf(
+			"create client secret status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+		)
 	}
 	var response struct {
 		Value string `json:"value"`

@@ -46,52 +46,60 @@ func TestServiceInvalidatesAntigravityTransportsOnCredentialLifecycle(t *testing
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			runtimeexecutor.ResetAntigravityTransports()
-			t.Cleanup(runtimeexecutor.ResetAntigravityTransports)
+		t.Run(
+			test.name, func(t *testing.T) {
+				runtimeexecutor.ResetAntigravityTransports()
+				t.Cleanup(runtimeexecutor.ResetAntigravityTransports)
 
-			auth := &coreauth.Auth{
-				ID:       "antigravity-transport-" + test.name,
-				Provider: "antigravity",
-				Status:   coreauth.StatusActive,
-				Metadata: map[string]any{
-					"access_token": "initial-token",
-					"project_id":   "test-project",
-					"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
-				},
-			}
-			manager := coreauth.NewManager(nil, nil, nil)
-			registered, errRegister := manager.Register(coreauth.WithSkipPersist(context.Background()), auth)
-			if errRegister != nil {
-				t.Fatalf("register auth: %v", errRegister)
-			}
-			service := &Service{cfg: &config.Config{}, coreManager: manager}
-			t.Cleanup(func() {
-				if err := service.stopModelRefreshWorkers(context.Background()); err != nil {
-					t.Errorf("stopModelRefreshWorkers() error = %v", err)
+				auth := &coreauth.Auth{
+					ID:       "antigravity-transport-" + test.name,
+					Provider: "antigravity",
+					Status:   coreauth.StatusActive,
+					Metadata: map[string]any{
+						"access_token": "initial-token",
+						"project_id":   "test-project",
+						"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+					},
 				}
-			})
+				manager := coreauth.NewManager(nil, nil, nil)
+				registered, errRegister := manager.Register(coreauth.WithSkipPersist(context.Background()), auth)
+				if errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+				service := &Service{cfg: &config.Config{}, coreManager: manager}
+				t.Cleanup(
+					func() {
+						if err := service.stopModelRefreshWorkers(context.Background()); err != nil {
+							t.Errorf("stopModelRefreshWorkers() error = %v", err)
+						}
+					},
+				)
 
-			primeAntigravityTransport(t, registered)
-			if got := runtimeexecutor.AntigravityTransportsLen(); got != 1 {
-				t.Fatalf("transport cache length = %d, want 1", got)
-			}
-			if errApply := test.apply(service, registered); errApply != nil {
-				t.Fatalf("apply credential lifecycle: %v", errApply)
-			}
-			if got := runtimeexecutor.AntigravityTransportsLen(); got != 0 {
-				t.Fatalf("transport cache length = %d, want 0 after %s", got, test.name)
-			}
-		})
+				primeAntigravityTransport(t, registered)
+				if got := runtimeexecutor.AntigravityTransportsLen(); got != 1 {
+					t.Fatalf("transport cache length = %d, want 1", got)
+				}
+				if errApply := test.apply(service, registered); errApply != nil {
+					t.Fatalf("apply credential lifecycle: %v", errApply)
+				}
+				if got := runtimeexecutor.AntigravityTransportsLen(); got != 0 {
+					t.Fatalf("transport cache length = %d, want 0 after %s", got, test.name)
+				}
+			},
+		)
 	}
 }
 
 func primeAntigravityTransport(t *testing.T, auth *coreauth.Auth) {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"totalTokens":1}`)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"totalTokens":1}`)
+			},
+		),
+	)
 	defer server.Close()
 
 	auth.Attributes = map[string]string{"base_url": server.URL}

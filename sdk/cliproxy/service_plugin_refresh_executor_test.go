@@ -211,12 +211,19 @@ func TestEnsureExecutorsForAuthPreservesCustomExecutorOwnership(t *testing.T) {
 	}
 
 	if !service.ensureExecutorsForAuthWithConfigContext(
-		context.Background(), auth, true, service.cfg,
+		context.Background(), auth, false, service.cfg,
 	) {
 		t.Fatal("ensureExecutorsForAuthWithConfigContext() = false")
 	}
 	resolved, ok := manager.Executor("openai-compatible-custom")
 	if !ok || resolved != custom {
 		t.Fatalf("executor = %T %p, want custom %p", resolved, resolved, custom)
+	}
+	if !service.ensureExecutorsForAuthWithConfigContext(context.Background(), auth, true, service.cfg) {
+		t.Fatal("explicit forceReplace did not publish the plugin-compatible executor")
+	}
+	resolved, ok = manager.Executor("openai-compatible-custom")
+	if !ok || resolved == custom || !pluginhost.IsPluginRefreshCompatExecutor(resolved) {
+		t.Fatalf("forced executor=%T, want plugin-compatible replacement", resolved)
 	}
 }

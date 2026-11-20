@@ -280,7 +280,8 @@ func (p *xaiQuotaPayload) retainWeeklyBilling() {
 	p.Normalized.UsagePercent = p.Normalized.Weekly.UsagePercent
 	for _, field := range []string{
 		"monthly_limit", "used", "included_used", "remaining", "billing_period_start", "billing_period_end",
-		"amount_unit", "currency", "monthly.usage_percent", "monthly.period_type", "monthly.period_start", "monthly.period_end",
+		"amount_unit", "currency", "monthly.usage_percent", "monthly.period_type", "monthly.period_start",
+		"monthly.period_end",
 		"usage_percent",
 	} {
 		delete(p.ValueSource, field)
@@ -320,7 +321,8 @@ func (p *xaiQuotaPayload) applyMonthlyBilling(body []byte, syncedAt time.Time) e
 	p.Normalized.Currency = monthly.Normalized.Currency
 	for _, field := range []string{
 		"monthly_limit", "used", "included_used", "remaining", "billing_period_start", "billing_period_end",
-		"amount_unit", "currency", "monthly.usage_percent", "monthly.period_type", "monthly.period_start", "monthly.period_end",
+		"amount_unit", "currency", "monthly.usage_percent", "monthly.period_type", "monthly.period_start",
+		"monthly.period_end",
 	} {
 		if source := monthly.ValueSource[field]; source != "" {
 			p.ValueSource[field] = source

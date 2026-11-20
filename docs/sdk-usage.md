@@ -3,7 +3,7 @@
 The `sdk/cliproxy` package embeds CLIProxyAPI in another Go process. It exposes the service lifecycle, configuration,
 authentication, routing, translation, plugins, and hot reload without requiring the CLI entry point.
 
-The public SDK requires Go 1.27.2 and uses the `/v6` module path.
+The public SDK requires Go 1.27.4 and uses the `/v6` module path.
 
 ## Install
 
@@ -56,8 +56,10 @@ func main() {
 }
 ```
 
-`Service.Run` manages configuration and auth-file watching, background credential refresh, and shutdown. Cancel the parent
-context to stop it. `Run` already invokes `Shutdown`; call `Service.Shutdown` directly only when the host owns a separate
+`Service.Run` manages configuration and auth-file watching, background credential refresh, and shutdown. Cancel the
+parent
+context to stop it. `Run` already invokes `Shutdown`; call `Service.Shutdown` directly only when the host owns a
+separate
 shutdown sequence.
 
 ## Customize the HTTP server
@@ -74,6 +76,20 @@ api.WithPostAuthHook(coreauth.PostAuthHook)
 
 Use `sdk/api/handlers`, `sdk/config`, and `sdk/logging` in callback signatures. External modules must not import the
 corresponding `internal` packages. `examples/custom-provider/main.go` contains a buildable server-options example.
+
+## Choose request and response protocols
+
+Host routes can pass `handlers.ProtocolExecutionRequest` to `BaseAPIHandler.ExecuteProtocolWithAuthManager` or
+`ExecuteProtocolStreamWithAuthManager`. `EntryProtocol` selects the request format and `ExitProtocol` selects the
+response
+format. Cancel the calling context to end the execution.
+
+`Model` identifies the model to execute. `AuthSelectionModel` can select credentials using a separate model while the
+execution request and `requested_model` retain the execution model. Selection and `ForcedProvider` remain subject to the
+current API Key model and provider rules. `Headers`, `Query`, `Alt`, and `Path` apply to that request.
+
+`ExecuteModel` and `ExecuteModelStream` handle internal model callbacks and preserve
+`source=plugin_host_model_callback`. The two `ExecuteProtocol...` methods handle host-route requests.
 
 ## Supply a core auth manager
 
@@ -119,7 +135,8 @@ for the built-in providers.
 
 ## Replace credential sources
 
-Implement `cliproxy.TokenClientProvider` or `cliproxy.APIKeyClientProvider` when credentials do not come from the default
+Implement `cliproxy.TokenClientProvider` or `cliproxy.APIKeyClientProvider` when credentials do not come from the
+default
 stores:
 
 ```text
@@ -168,5 +185,6 @@ from non-loopback clients also require `remote-management.allow-remote: true`.
 ## Runtime behavior
 
 Changes to `config.yaml` and the configured auth directory are applied by the watcher. Request logging can be changed
-through the management API. `gemini-web.*`, Home, plugin, model-catalog, and usage settings are read from the same public
+through the management API. `gemini-web.*`, Home, plugin, model-catalog, and usage settings are read from the same
+public
 `sdk/config.Config` used by the CLI server.

@@ -35,29 +35,37 @@ func TestUpdateAdmissionPreservesSSEAndHealthUntilNaturalCompletion(t *testing.T
 	finish := make(chan struct{})
 	var finishOnce sync.Once
 	endStream := func() { finishOnce.Do(func() { close(finish) }) }
-	server.engine.POST("/v1/responses", func(c *gin.Context) {
-		c.Header("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(c.Writer, "data: started\n\n")
-		c.Writer.Flush()
-		close(started)
-		<-finish
-		_, _ = io.WriteString(c.Writer, "data: completed\n\n")
-	})
+	server.engine.POST(
+		"/v1/responses", func(c *gin.Context) {
+			c.Header("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(c.Writer, "data: started\n\n")
+			c.Writer.Flush()
+			close(started)
+			<-finish
+			_, _ = io.WriteString(c.Writer, "data: completed\n\n")
+		},
+	)
 	server.engine.POST("/v1/chat/completions", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	server.engine.GET("/healthz", func(c *gin.Context) { c.Status(http.StatusOK) })
 	httpServer := httptest.NewServer(server.engine)
 	defer func() { endStream(); httpServer.Close() }()
-	response, err := httpServer.Client().Post(httpServer.URL+"/v1/responses", "application/json", strings.NewReader("{}"))
+	response, err := httpServer.Client().Post(
+		httpServer.URL+"/v1/responses", "application/json", strings.NewReader("{}"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func(closeResource func() error) {
+		if err := closeResource(); err != nil {
+			t.Errorf("close admission stream response: %v", err)
+		}
+	}(response.Body.Close)
 	<-started
 	reader := bufio.NewReader(response.Body)
 	if line, err := reader.ReadString('\n'); err != nil || line != "data: started\n" {
 		t.Fatalf("initial SSE = %q, %v", line, err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
@@ -66,7 +74,9 @@ func TestUpdateAdmissionPreservesSSEAndHealthUntilNaturalCompletion(t *testing.T
 	}()
 	paused := false
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
-		reply, err := httpServer.Client().Post(httpServer.URL+"/v1/chat/completions", "application/json", strings.NewReader("{}"))
+		reply, err := httpServer.Client().Post(
+			httpServer.URL+"/v1/chat/completions", "application/json", strings.NewReader("{}"),
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -115,24 +125,32 @@ func TestUpdateAdmissionIdleResponsesSocketDoesNotBlockAndNewTurnIsRejected(t *t
 	server.engine.GET("/v1/responses", responses.ResponsesWebsocket)
 	httpServer := httptest.NewServer(server.engine)
 	defer httpServer.Close()
-	connection, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+"/v1/responses", nil)
+	connection, _, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(httpServer.URL, "http")+"/v1/responses", nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
-	confirmation, err := server.handlers.InferenceAdmission.Drain(context.Background(), "attempt", time.Now().Add(time.Minute))
+	defer func(closeResource func() error) { _ = closeResource() }(connection.Close)
+	confirmation, err := server.handlers.InferenceAdmission.Drain(
+		context.Background(), "attempt", time.Now().Add(time.Minute),
+	)
 	if err != nil || !server.handlers.InferenceAdmission.Confirm(confirmation) {
 		t.Fatalf("idle socket blocked drain: %v", err)
 	}
-	if err := connection.WriteJSON(map[string]any{
-		"type": "response.create", "model": "fixture-model", "generate": true,
-		"input": []map[string]string{{"role": "user", "content": "synthetic request"}},
-	}); err != nil {
+	if err := connection.WriteJSON(
+		map[string]any{
+			"type": "response.create", "model": "fixture-model", "generate": true,
+			"input": []map[string]string{{"role": "user", "content": "synthetic request"}},
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
 	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
 	_, data, err := connection.ReadMessage()
-	if err != nil || !strings.Contains(string(data), executionregistry.ErrInferencePaused.Error()) || !strings.Contains(string(data), "503") {
+	if err != nil || !strings.Contains(
+		string(data), executionregistry.ErrInferencePaused.Error(),
+	) || !strings.Contains(string(data), "503") {
 		t.Fatalf("new WS turn was not rejected before dispatch: %s, %v", data, err)
 	}
 	if !server.handlers.InferenceAdmission.Confirm(confirmation) {
@@ -148,26 +166,30 @@ func TestUpdateAdmissionCountsUploadBeforeBodyReadAndAllowsItToContinue(t *testi
 	var uploadOnce sync.Once
 	endUpload := func() { uploadOnce.Do(func() { close(continueUpload) }) }
 	defer endUpload()
-	server.engine.POST("/v1/images/edits", func(c *gin.Context) {
-		entered <- c.Request.Context()
-		<-continueUpload
-		ctx, release, err := server.handlers.InferenceAdmission.Acquire(context.Background(), c.Request.Context())
-		defer release()
-		if err != nil || ctx == nil {
-			c.Status(http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = io.Copy(io.Discard, c.Request.Body)
-		c.Status(http.StatusNoContent)
-	})
+	server.engine.POST(
+		"/v1/images/edits", func(c *gin.Context) {
+			entered <- c.Request.Context()
+			<-continueUpload
+			ctx, release, err := server.handlers.InferenceAdmission.Acquire(context.Background(), c.Request.Context())
+			defer release()
+			if err != nil || ctx == nil {
+				c.Status(http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = io.Copy(io.Discard, c.Request.Body)
+			c.Status(http.StatusNoContent)
+		},
+	)
 	response := httptest.NewRecorder()
 	finished := make(chan struct{})
 	go func() {
-		server.engine.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader("synthetic-upload")))
+		server.engine.ServeHTTP(
+			response, httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader("synthetic-upload")),
+		)
 		close(finished)
 	}()
 	<-entered
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	drained := make(chan error, 1)
 	go func() {
@@ -201,10 +223,14 @@ func TestUpdateAdmissionCountsUploadBeforeBodyReadAndAllowsItToContinue(t *testi
 func TestUpdateAdmissionIncludesDynamicWebsocketHandshakes(t *testing.T) {
 	server := newAdmissionTestServer()
 	calls := 0
-	server.AttachWebsocketRoute("/custom-provider", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls++
-		w.WriteHeader(http.StatusNoContent)
-	}))
+	server.AttachWebsocketRoute(
+		"/custom-provider", http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.WriteHeader(http.StatusNoContent)
+			},
+		),
+	)
 	_, err := server.handlers.InferenceAdmission.Drain(context.Background(), "attempt", time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)

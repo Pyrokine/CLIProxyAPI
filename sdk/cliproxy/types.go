@@ -30,6 +30,8 @@ type TokenClientProvider interface {
 
 // TokenClientResult represents clients generated from persisted tokens.
 // It contains metadata about the loading operation and the number of successful authentications.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type TokenClientResult struct {
 	// SuccessfulAuthed is the number of successfully authenticated clients.
 	SuccessfulAuthed int
@@ -51,6 +53,8 @@ type APIKeyClientProvider interface {
 }
 
 // APIKeyClientResult is returned by APIKeyClientProvider.Load()
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type APIKeyClientResult struct {
 	// GeminiKeyCount is the number of Gemini API keys loaded
 	GeminiKeyCount int
@@ -74,14 +78,17 @@ type APIKeyClientResult struct {
 	OpenAICompatCount int
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type AuthUpdateAction string
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const (
 	AuthUpdateActionAdd    AuthUpdateAction = "add"
 	AuthUpdateActionModify AuthUpdateAction = "modify"
 	AuthUpdateActionDelete AuthUpdateAction = "delete"
 )
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type AuthUpdate struct {
 	Action            AuthUpdateAction
 	ID                string
@@ -91,22 +98,29 @@ type AuthUpdate struct {
 }
 
 // Revision returns the watcher-local ordering assigned to this update.
+//
+//goland:noinspection GoMixedReceiverTypes,GoUnnecessarilyExportedIdentifiers
 func (u AuthUpdate) Revision() uint64 {
 	return u.revision
 }
 
 // SetRevision assigns watcher-local ordering to a custom watcher update.
+//
+//goland:noinspection GoMixedReceiverTypes,GoUnnecessarilyExportedIdentifiers
 func (u *AuthUpdate) SetRevision(revision uint64) {
 	if u != nil {
 		u.revision = revision
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PluginAuthParser interface {
 	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
 }
 
 // PluginMultiAuthParser expands one source into multiple plugin runtime auths.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PluginMultiAuthParser interface {
 	ParseAuths(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error)
 }
@@ -122,9 +136,13 @@ type PluginMultiAuthParser interface {
 // Returns:
 //   - *WatcherWrapper: A watcher wrapper instance
 //   - error: An error if watcher creation fails
-type WatcherFactory func(configPath, authDir string, reload func(*config.Config) bool) (*WatcherWrapper, error)
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+type WatcherFactory func(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error)
 
 // WatcherWrapper exposes the subset of watcher methods required by the SDK.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type WatcherWrapper struct {
 	start func(ctx context.Context) error
 	stop  func() error
@@ -141,6 +159,8 @@ type WatcherWrapper struct {
 }
 
 // Start proxies to the underlying watcher Start implementation.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) Start(ctx context.Context) error {
 	if w == nil || w.start == nil {
 		return nil
@@ -149,6 +169,8 @@ func (w *WatcherWrapper) Start(ctx context.Context) error {
 }
 
 // Stop proxies to the underlying watcher Stop implementation.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) Stop() error {
 	if w == nil || w.stop == nil {
 		return nil
@@ -157,6 +179,8 @@ func (w *WatcherWrapper) Stop() error {
 }
 
 // SetConfig updates the watcher configuration cache.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 	if w == nil || w.setConfig == nil {
 		return
@@ -164,6 +188,7 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 	w.setConfig(cfg)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) AcknowledgeConfigFile(cfg *config.Config, expectedHash string) bool {
 	if w == nil || w.acknowledgeConfigFile == nil {
 		return false
@@ -171,6 +196,7 @@ func (w *WatcherWrapper) AcknowledgeConfigFile(cfg *config.Config, expectedHash 
 	return w.acknowledgeConfigFile(cfg, expectedHash)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) SetConfigReloadCallback(callback func(*config.Config, string) bool) {
 	if w == nil || w.setConfigReloadCallback == nil {
 		return
@@ -178,9 +204,11 @@ func (w *WatcherWrapper) SetConfigReloadCallback(callback func(*config.Config, s
 	w.setConfigReloadCallback(callback)
 }
 
-// DispatchRuntimeAuthUpdate forwards runtime auth updates (e.g., websocket providers)
+// DispatchRuntimeAuthUpdate forwards runtime auth updates (e.g., WebSocket providers)
 // into the watcher-managed auth update queue when available.
 // Returns true if the update was enqueued successfully.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	if w == nil || w.dispatchRuntimeUpdate == nil {
 		return false
@@ -188,7 +216,17 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchRuntimeUpdate(update)
 }
 
+// DispatchPersistedAuthUpdate 将已保存的凭据更新交给现有队列
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (w *WatcherWrapper) DispatchPersistedAuthUpdate(update AuthUpdate) bool {
+	queued, _ := w.DispatchPersistedAuthUpdateWithRevision(&update)
+	return queued
+}
+
 // DispatchPersistedAuthUpdateWithRevision forwards an already-persisted update and returns its revision.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) DispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (bool, uint64) {
 	if w == nil || w.dispatchPersistedAuthWithRev == nil {
 		return false, 0
@@ -197,6 +235,8 @@ func (w *WatcherWrapper) DispatchPersistedAuthUpdateWithRevision(update *AuthUpd
 }
 
 // SetPluginAuthParser updates the parser used for plugin-owned auth files.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) SetPluginAuthParser(parser PluginAuthParser) {
 	if w == nil || w.setPluginAuthParser == nil {
 		return
@@ -205,6 +245,8 @@ func (w *WatcherWrapper) SetPluginAuthParser(parser PluginAuthParser) {
 }
 
 // SetUsageQueue assigns the service-owned usage queue.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) SetUsageQueue(queue *redisqueue.Queue) {
 	if w == nil || w.setUsageQueue == nil {
 		return
@@ -219,6 +261,8 @@ func (w *WatcherWrapper) SetUsageQueue(queue *redisqueue.Queue) {
 // SnapshotClients removed; use SnapshotAuths
 
 // SnapshotAuths returns the current auth entries derived from legacy clients.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 	if w == nil || w.snapshotAuths == nil {
 		return nil
@@ -227,6 +271,8 @@ func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 }
 
 // SetAuthUpdateQueue registers the channel used to propagate auth updates.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *WatcherWrapper) SetAuthUpdateQueue(queue chan<- AuthUpdate) {
 	if w == nil || w.setUpdateQueue == nil {
 		return

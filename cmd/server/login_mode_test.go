@@ -11,10 +11,12 @@ func TestProviderLoginFlagsEnableLoginMode(t *testing.T) {
 		{name: "Devin", flags: loginFlags{devinLogin: true}},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if !test.flags.isLoginMode() {
-				t.Fatalf("%s login flag did not enable login mode", test.name)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				if !test.flags.isLoginMode() {
+					t.Fatalf("%s login flag did not enable login mode", test.name)
+				}
+			},
+		)
 	}
 }

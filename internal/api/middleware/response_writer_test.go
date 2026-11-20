@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -47,6 +48,68 @@ func TestExtractRequestBodySupportsStringOverride(t *testing.T) {
 	body := wrapper.extractRequestBody(c)
 	if string(body) != "override-as-string" {
 		t.Fatalf("request body = %q, want %q", string(body), "override-as-string")
+	}
+}
+
+func TestExtractResponseBodyPrefersOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	wrapper := &responseWriterWrapper{body: &bytes.Buffer{}}
+	wrapper.body.WriteString("original-response")
+	body := wrapper.extractResponseBody(c)
+	if string(body) != "original-response" {
+		t.Fatalf("response body = %q, want %q", body, "original-response")
+	}
+	c.Set(responseBodyOverrideContextKey, []byte("override-response"))
+	body = wrapper.extractResponseBody(c)
+	if string(body) != "override-response" {
+		t.Fatalf("response body = %q, want %q", body, "override-response")
+	}
+	body[0] = 'X'
+	if got := wrapper.extractResponseBody(c); string(got) != "override-response" {
+		t.Fatalf("response override should be cloned, got %q", got)
+	}
+}
+
+func TestExtractResponseBodySupportsStringOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	wrapper := &responseWriterWrapper{}
+	c.Set(responseBodyOverrideContextKey, "override-response-as-string")
+	if body := wrapper.extractResponseBody(c); string(body) != "override-response-as-string" {
+		t.Fatalf("response body = %q, want %q", body, "override-response-as-string")
+	}
+}
+
+func TestExtractBodyOverrideClonesBytes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	override := []byte("body-override")
+	c.Set(requestBodyOverrideContextKey, override)
+	body := extractBodyOverride(c, requestBodyOverrideContextKey)
+	if !bytes.Equal(body, override) {
+		t.Fatalf("body override = %q, want %q", body, override)
+	}
+	body[0] = 'X'
+	if !bytes.Equal(override, []byte("body-override")) {
+		t.Fatalf("override mutated: %q", override)
+	}
+}
+
+func TestExtractWebsocketTimelineUsesOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	wrapper := &responseWriterWrapper{}
+	if got := wrapper.extractWebsocketTimeline(c); got != nil {
+		t.Fatalf("expected nil websocket timeline, got %q", got)
+	}
+	c.Set(websocketTimelineOverrideContextKey, []byte("timeline"))
+	if body := wrapper.extractWebsocketTimeline(c); string(body) != "timeline" {
+		t.Fatalf("websocket timeline = %q, want %q", body, "timeline")
 	}
 }
 

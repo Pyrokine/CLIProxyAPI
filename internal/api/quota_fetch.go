@@ -49,6 +49,12 @@ const (
 	xaiSettingsURL       = "https://cli-chat-proxy.grok.com/v1/settings"
 )
 
+var antigravityQuotaURLs = []string{
+	"https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+	"https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
+	"https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+}
+
 var claudeHeaders = map[string]string{
 	"Authorization":  "Bearer $TOKEN$",
 	"Content-Type":   "application/json",
@@ -146,6 +152,8 @@ func fetchClaudeQuotaResultContext(
 		partialError = "claude profile returned empty response"
 	} else if profileResp.StatusCode < 200 || profileResp.StatusCode >= 300 {
 		partialError = fmt.Sprintf("claude profile returned status %d", profileResp.StatusCode)
+	} else if !json.Valid(profileResp.Body) {
+		partialError = "claude profile returned invalid JSON"
 	} else {
 		payload["profile"] = profileResp.Body
 	}
@@ -270,17 +278,19 @@ func fetchCodexQuotaResultContext(
 		subscriptionError = "codex subscription account is unavailable"
 	} else {
 		subscriptionCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		subscriptionResp, subscriptionErr := apiCall(subscriptionCtx, quota.APICallRequest{
-			URL:       codexSubscriptionsURL + "?account_id=" + url.QueryEscape(accountID),
-			Method:    http.MethodGet,
-			AuthIndex: authIndex,
-			Header: map[string]string{
-				"Authorization":      codexHeaders["Authorization"],
-				"Content-Type":       codexHeaders["Content-Type"],
-				"User-Agent":         codexHeaders["User-Agent"],
-				"Chatgpt-Account-Id": accountID,
+		subscriptionResp, subscriptionErr := apiCall(
+			subscriptionCtx, quota.APICallRequest{
+				URL:       codexSubscriptionsURL + "?account_id=" + url.QueryEscape(accountID),
+				Method:    http.MethodGet,
+				AuthIndex: authIndex,
+				Header: map[string]string{
+					"Authorization":      codexHeaders["Authorization"],
+					"Content-Type":       codexHeaders["Content-Type"],
+					"User-Agent":         codexHeaders["User-Agent"],
+					"Chatgpt-Account-Id": accountID,
+				},
 			},
-		})
+		)
 		cancel()
 		switch {
 		case subscriptionErr != nil:
@@ -426,16 +436,17 @@ func responseServerTimeOffsetMilliseconds(header map[string][]string, observedAt
 }
 
 // fetchAntigravityQuota queries Antigravity quota and subscription tier via api-call proxy.
-func fetchAntigravityQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]byte, error) {
-	return fetchAntigravityQuotaContext(context.Background(), backgroundQuotaAPICall(apiCall), authIndex)
+func fetchAntigravityQuota(apiCall quota.InternalAPICallFunc, authIndex string, projectIDs ...string) ([]byte, error) {
+	return fetchAntigravityQuotaContext(context.Background(), backgroundQuotaAPICall(apiCall), authIndex, projectIDs...)
 }
 
 func fetchAntigravityQuotaContext(
 	ctx context.Context,
 	apiCall quota.InternalAPICallContextFunc,
 	authIndex string,
+	projectIDs ...string,
 ) ([]byte, error) {
-	result, err := fetchAntigravityQuotaResultContext(ctx, apiCall, authIndex)
+	result, err := fetchAntigravityQuotaResultContext(ctx, apiCall, authIndex, projectIDs...)
 	if err != nil {
 		return nil, err
 	}
@@ -446,54 +457,101 @@ func fetchAntigravityQuotaResultContext(
 	ctx context.Context,
 	apiCall quota.InternalAPICallContextFunc,
 	authIndex string,
+	projectIDs ...string,
 ) (quota.FetchResult, error) {
-	quotaResp, err := apiCall(
-		ctx,
-		quota.APICallRequest{
-			URL:       geminiQuotaURL,
-			Method:    "POST",
-			Header:    antigravityHeaders(),
-			AuthIndex: authIndex,
-			Data:      "{}",
-		},
-	)
-	observedAt := time.Now().UTC()
+	projectID := ""
+	if len(projectIDs) > 0 {
+		projectID = strings.TrimSpace(projectIDs[0])
+	}
+	if projectID == "" {
+		return quota.FetchResult{}, errors.New("antigravity quota project id is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	body, err := json.Marshal(map[string]string{"project": projectID})
 	if err != nil {
-		return quota.FetchResult{}, fmt.Errorf("antigravity quota request failed: %w", err)
+		return quota.FetchResult{}, err
+	}
+	var quotaResp *quota.APICallResponse
+	var lastError error
+	var observedAt time.Time
+	priorityStatus := 0
+	for index, endpoint := range antigravityQuotaURLs {
+		if err := ctx.Err(); err != nil {
+			return quota.FetchResult{}, err
+		}
+		response, callError := apiCall(
+			ctx, quota.APICallRequest{
+				URL: endpoint, Method: http.MethodPost, Header: antigravityHeaders(),
+				AuthIndex: authIndex, Data: string(body),
+			},
+		)
+		observedAt = time.Now().UTC()
+		switch {
+		case callError != nil:
+			lastError = fmt.Errorf("antigravity quota request failed: %w", callError)
+		case response == nil:
+			lastError = errors.New("antigravity quota returned empty response")
+		case response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices:
+			if priorityStatus == 0 &&
+				(response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound) {
+				priorityStatus = response.StatusCode
+			}
+			lastError = fmt.Errorf("antigravity quota returned status %d", response.StatusCode)
+		default:
+			var summary struct {
+				Groups  []json.RawMessage `json:"groups"`
+				Buckets []json.RawMessage `json:"buckets"`
+			}
+			if err := json.Unmarshal(
+				response.Body, &summary,
+			); err != nil || (summary.Groups == nil && summary.Buckets == nil) {
+				lastError = errors.New("antigravity quota returned invalid summary payload")
+			} else {
+				quotaResp = response
+			}
+		}
+		if quotaResp != nil {
+			break
+		}
+		if index+1 < len(antigravityQuotaURLs) {
+			log.WithField(
+				"endpoint", endpoint,
+			).Debug("antigravity quota endpoint failed; trying the next summary endpoint")
+		}
 	}
 	if quotaResp == nil {
-		return quota.FetchResult{}, fmt.Errorf("antigravity quota returned empty response")
-	}
-	if quotaResp.StatusCode < 200 || quotaResp.StatusCode >= 300 {
-		return quota.FetchResult{}, fmt.Errorf("antigravity quota returned status %d", quotaResp.StatusCode)
+		if err := ctx.Err(); err != nil {
+			return quota.FetchResult{}, err
+		}
+		if priorityStatus != 0 {
+			return quota.FetchResult{}, fmt.Errorf("antigravity quota returned status %d", priorityStatus)
+		}
+		return quota.FetchResult{}, lastError
 	}
 	serverTimeOffsetMillis, hasServerTimeOffset := responseServerTimeOffsetMilliseconds(quotaResp.Header, observedAt)
-
 	codeAssistResp, codeAssistErr := apiCall(
-		ctx,
-		quota.APICallRequest{
-			URL:       antigravityLoadCodeAssistURL,
-			Method:    "POST",
-			Header:    antigravityHeaders(),
-			AuthIndex: authIndex,
-			Data:      `{"metadata":{"ideType":"ANTIGRAVITY"}}`,
+		ctx, quota.APICallRequest{
+			URL: antigravityLoadCodeAssistURL, Method: http.MethodPost, Header: antigravityHeaders(),
+			AuthIndex: authIndex, Data: `{"metadata":{"ideType":"ANTIGRAVITY"}}`,
 		},
 	)
-
-	payload := map[string]any{
-		"quota": quotaResp.Body,
-	}
+	payload := map[string]any{"quota": quotaResp.Body}
 	if hasServerTimeOffset {
 		payload["server_time_offset_ms"] = serverTimeOffsetMillis
 	}
 	partialError := ""
-	if codeAssistErr != nil {
+	switch {
+	case codeAssistErr != nil:
 		partialError = "antigravity code assist request failed"
-	} else if codeAssistResp == nil {
+	case codeAssistResp == nil:
 		partialError = "antigravity code assist returned empty response"
-	} else if codeAssistResp.StatusCode < 200 || codeAssistResp.StatusCode >= 300 {
+	case codeAssistResp.StatusCode < http.StatusOK || codeAssistResp.StatusCode >= http.StatusMultipleChoices:
 		partialError = fmt.Sprintf("antigravity code assist returned status %d", codeAssistResp.StatusCode)
-	} else {
+	case !json.Valid(codeAssistResp.Body):
+		partialError = "antigravity code assist returned invalid JSON"
+	default:
 		payload["codeAssist"] = codeAssistResp.Body
 	}
 	data, err := json.Marshal(payload)
@@ -587,6 +645,26 @@ func quotaAuthByIndex(authManager *coreauth.Manager, authIndex string) *coreauth
 	return nil
 }
 
+func antigravityQuotaProjectID(authManager *coreauth.Manager, authIndex string) string {
+	auth := quotaAuthByIndex(authManager, authIndex)
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		return ""
+	}
+	for _, key := range []string{"project_id", "projectId"} {
+		if projectID, ok := auth.Metadata[key].(string); ok {
+			if projectID = strings.TrimSpace(projectID); projectID != "" {
+				return projectID
+			}
+		}
+	}
+	for _, key := range []string{"project_id", "projectId", "gemini_virtual_project"} {
+		if projectID := strings.TrimSpace(auth.Attributes[key]); projectID != "" {
+			return projectID
+		}
+	}
+	return ""
+}
+
 func codexQuotaAccountID(authManager *coreauth.Manager, authIndex string) string {
 	auth := quotaAuthByIndex(authManager, authIndex)
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
@@ -651,9 +729,11 @@ func fetchXAIQuotaResultContext(
 			{name: "subscription", url: xaiSubscriptionURL},
 			{name: "settings", url: xaiSettingsURL},
 		} {
-			response, requestErr := apiCall(planCtx, quota.APICallRequest{
-				URL: source.url, Method: http.MethodGet, Header: xaiQuotaHeaders(), AuthIndex: authIndex,
-			})
+			response, requestErr := apiCall(
+				planCtx, quota.APICallRequest{
+					URL: source.url, Method: http.MethodGet, Header: xaiQuotaHeaders(), AuthIndex: authIndex,
+				},
+			)
 			switch {
 			case requestErr != nil:
 				partialErrors = append(partialErrors, "xai "+source.name+" request failed")
@@ -662,8 +742,12 @@ func fetchXAIQuotaResultContext(
 				partialErrors = append(partialErrors, "xai "+source.name+" returned empty response")
 				payload.addAuxiliaryError(source.name, "empty_response", 0)
 			case response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices:
-				partialErrors = append(partialErrors, fmt.Sprintf("xai %s returned status %d", source.name, response.StatusCode))
-				payload.addAuxiliaryError(source.name, fmt.Sprintf("status_%d", response.StatusCode), response.StatusCode)
+				partialErrors = append(
+					partialErrors, fmt.Sprintf("xai %s returned status %d", source.name, response.StatusCode),
+				)
+				payload.addAuxiliaryError(
+					source.name, fmt.Sprintf("status_%d", response.StatusCode), response.StatusCode,
+				)
 			case payload.applySubscription(response.Body, source.name) != nil:
 				partialErrors = append(partialErrors, "xai "+source.name+" payload is invalid")
 				payload.addAuxiliaryError(source.name, "invalid_payload", response.StatusCode)
@@ -684,9 +768,11 @@ func fetchXAIBillingSnapshotsContext(
 	authIndex string,
 	observedAt time.Time,
 ) (*xaiQuotaPayload, []string, error) {
-	creditsResp, creditsErr := apiCall(ctx, quota.APICallRequest{
-		URL: xaiBillingCreditsURL, Method: http.MethodGet, Header: xaiQuotaHeaders(), AuthIndex: authIndex,
-	})
+	creditsResp, creditsErr := apiCall(
+		ctx, quota.APICallRequest{
+			URL: xaiBillingCreditsURL, Method: http.MethodGet, Header: xaiQuotaHeaders(), AuthIndex: authIndex,
+		},
+	)
 	var weekly *xaiQuotaPayload
 	weeklyError, weeklyCode, weeklyStatus := "", "", 0
 	switch {
@@ -702,7 +788,9 @@ func fetchXAIBillingSnapshotsContext(
 		if xaiCreditsFormatUnsupported(creditsResp) {
 			weeklyError, weeklyCode = "xai weekly credits format unsupported", "credits_format_unsupported"
 		} else if creditsResp.StatusCode >= http.StatusInternalServerError {
-			weeklyError, weeklyCode = fmt.Sprintf("xai weekly credits returned status %d", weeklyStatus), fmt.Sprintf("status_%d", weeklyStatus)
+			weeklyError, weeklyCode = fmt.Sprintf(
+				"xai weekly credits returned status %d", weeklyStatus,
+			), fmt.Sprintf("status_%d", weeklyStatus)
 		} else {
 			return nil, nil, fmt.Errorf("xai weekly credits returned status %d", weeklyStatus)
 		}
@@ -719,9 +807,11 @@ func fetchXAIBillingSnapshotsContext(
 		}
 	}
 
-	monthlyResp, monthlyErr := apiCall(ctx, quota.APICallRequest{
-		URL: xaiBillingURL, Method: http.MethodGet, Header: xaiQuotaHeaders(), AuthIndex: authIndex,
-	})
+	monthlyResp, monthlyErr := apiCall(
+		ctx, quota.APICallRequest{
+			URL: xaiBillingURL, Method: http.MethodGet, Header: xaiQuotaHeaders(), AuthIndex: authIndex,
+		},
+	)
 	monthlyError, monthlyCode, monthlyStatus := "", "", 0
 	var payload *xaiQuotaPayload
 	if weekly != nil {

@@ -56,12 +56,14 @@ func TestDetachHomeLifetimePreservesConcurrentReplacementRace(t *testing.T) {
 
 	var workers sync.WaitGroup
 	for range 64 {
-		workers.Go(func() {
-			service.detachHomeLifetime(oldClient, oldRegistry)
-			if current := home.Current(); current != newClient {
-				t.Errorf("Home current client = %p, want replacement %p", current, newClient)
-			}
-		})
+		workers.Go(
+			func() {
+				service.detachHomeLifetime(oldClient, oldRegistry)
+				if current := home.Current(); current != newClient {
+					t.Errorf("Home current client = %p, want replacement %p", current, newClient)
+				}
+			},
+		)
 	}
 	workers.Wait()
 	if current := service.currentHomeClient(); current != newClient {

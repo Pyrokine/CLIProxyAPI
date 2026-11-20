@@ -7,6 +7,8 @@ import (
 )
 
 // NativeCapabilities contains tri-state native capability metadata for one model.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type NativeCapabilities struct {
 	WebSearch *bool `json:"web_search,omitempty"`
 }
@@ -43,6 +45,8 @@ type ModelInfo struct {
 }
 
 // ThinkingSupport describes supported reasoning budget settings for a model.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ThinkingSupport struct {
 	Min            int      `json:"min,omitempty"`
 	Max            int      `json:"max,omitempty"`
@@ -52,6 +56,8 @@ type ThinkingSupport struct {
 }
 
 // ClientModelProjection describes the desired availability state for one client model.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ClientModelProjection struct {
 	ModelID       string
 	Suspended     bool
@@ -66,6 +72,8 @@ type ModelRegistryHook interface {
 }
 
 // ModelRegistry describes registry operations consumed by external callers.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ModelRegistry interface {
 	RegisterClient(clientID, clientProvider string, models []*ModelInfo)
 	UnregisterClient(clientID string)
@@ -103,7 +111,11 @@ func (r *modelRegistryAdapter) RegisterClient(clientID, clientProvider string, m
 	r.inner.RegisterClient(clientID, clientProvider, toRegistryModelInfos(models))
 }
 
-func (r *modelRegistryAdapter) ReplaceClientModels(clientID, clientProvider string, expectedEpoch uint64, models []*ModelInfo) (uint64, bool) {
+func (r *modelRegistryAdapter) ReplaceClientModels(
+	clientID, clientProvider string,
+	expectedEpoch uint64,
+	models []*ModelInfo,
+) (uint64, bool) {
 	if r == nil || r.inner == nil {
 		return 0, false
 	}
@@ -142,12 +154,14 @@ func (r *modelRegistryAdapter) ApplyClientModelProjections(
 	}
 	converted := make([]registry.ClientModelProjection, 0, len(projections))
 	for _, projection := range projections {
-		converted = append(converted, registry.ClientModelProjection{
-			ModelID:       projection.ModelID,
-			Suspended:     projection.Suspended,
-			SuspendReason: projection.SuspendReason,
-			QuotaExceeded: projection.QuotaExceeded,
-		})
+		converted = append(
+			converted, registry.ClientModelProjection{
+				ModelID:       projection.ModelID,
+				Suspended:     projection.Suspended,
+				SuspendReason: projection.SuspendReason,
+				QuotaExceeded: projection.QuotaExceeded,
+			},
+		)
 	}
 	return r.inner.ApplyClientModelProjections(clientID, epoch, generation, converted)
 }
@@ -201,7 +215,8 @@ func GlobalModelRegistry() VersionedModelRegistry {
 }
 
 // SetGlobalModelRegistryHook registers an optional hook on the shared global registry instance.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func SetGlobalModelRegistryHook(hook ModelRegistryHook) {
 	if hook == nil {
 		registry.GetGlobalRegistry().SetHook(nil)

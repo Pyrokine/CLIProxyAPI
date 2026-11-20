@@ -12,10 +12,12 @@ func TestModelRegistryAdapterPreservesConfigurationUpdateCapability(t *testing.T
 	modelRegistry.UnregisterClient(clientID)
 	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
 
-	modelRegistry.RegisterClient(clientID, "codex", []*ModelInfo{
-		{ID: "enabled", SupportConfigurationUpdate: true},
-		{ID: "disabled", SupportConfigurationUpdate: false},
-	})
+	modelRegistry.RegisterClient(
+		clientID, "codex", []*ModelInfo{
+			{ID: "enabled", SupportConfigurationUpdate: true},
+			{ID: "disabled", SupportConfigurationUpdate: false},
+		},
+	)
 	for _, test := range []struct {
 		id      string
 		enabled bool
@@ -33,7 +35,12 @@ func TestModelRegistryAdapterPreservesConfigurationUpdateCapability(t *testing.T
 			if model.ID == test.id {
 				found = true
 				if model.SupportConfigurationUpdate != test.enabled {
-					t.Errorf("SDK model %q capability = %t, want %t", test.id, model.SupportConfigurationUpdate, test.enabled)
+					t.Errorf(
+						"SDK model %q capability = %t, want %t",
+						test.id,
+						model.SupportConfigurationUpdate,
+						test.enabled,
+					)
 				}
 			}
 		}
@@ -58,9 +65,11 @@ func TestModelRegistryAdapterPublishesVersionedProjection(t *testing.T) {
 	if modelRegistry.ClientRegistrationEpoch(clientID) != epoch {
 		t.Fatalf("ClientRegistrationEpoch() != snapshot epoch %d", epoch)
 	}
-	if !modelRegistry.ApplyClientModelProjections(clientID, epoch, 1, []ClientModelProjection{
-		{ModelID: modelID, Suspended: true, SuspendReason: "quota", QuotaExceeded: true},
-	}) {
+	if !modelRegistry.ApplyClientModelProjections(
+		clientID, epoch, 1, []ClientModelProjection{
+			{ModelID: modelID, Suspended: true, SuspendReason: "quota", QuotaExceeded: true},
+		},
+	) {
 		t.Fatal("ApplyClientModelProjections() rejected adapter projection")
 	}
 

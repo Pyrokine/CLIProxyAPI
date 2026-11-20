@@ -58,10 +58,14 @@ func TestServerUpdateClientsInvalidatesChangedAntigravityPool(t *testing.T) {
 
 func primeServerAntigravityTransport(t *testing.T, cfg *config.Config, auth *coreauth.Auth) {
 	t.Helper()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"totalTokens":1}`)
-	}))
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"totalTokens":1}`)
+			},
+		),
+	)
 	defer upstream.Close()
 
 	selected := auth.Clone()

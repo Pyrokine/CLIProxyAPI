@@ -31,8 +31,10 @@ func TestManagementCooldownResetRequiresAuthenticationAndNeverNeedsCodexResetCre
 		t.Fatal(err)
 	}
 	request := func(authenticated bool) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/v0/management/routing/cooldown/reset",
-			strings.NewReader(`{"auth_index":"`+index+`"}`))
+		req := httptest.NewRequest(
+			http.MethodPost, "/v0/management/routing/cooldown/reset",
+			strings.NewReader(`{"auth_index":"`+index+`"}`),
+		)
 		req.RemoteAddr = "127.0.0.1:12345"
 		req.Header.Set("Content-Type", "application/json")
 		if authenticated {

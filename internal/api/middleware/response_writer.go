@@ -41,15 +41,18 @@ type requestInfo struct {
 }
 
 // responseWriterWrapper wraps the standard gin.ResponseWriter to intercept and log response data.
-// It is designed to handle both standard and streaming responses, ensuring that logging operations do not block the client response.
+// It is designed to handle both standard and streaming responses, ensuring that logging operations do not block
+// the client response.
 type responseWriterWrapper struct {
 	gin.ResponseWriter
-	body                *bytes.Buffer // body is a buffer to store the response body for non-streaming responses.
-	bodyTruncated       bool
-	isStreaming         bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
-	streamWriter        logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
-	chunkChannel        chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
-	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
+	body          *bytes.Buffer // body is a buffer to store the response body for non-streaming responses.
+	bodyTruncated bool
+	// isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
+	isStreaming  bool
+	streamWriter logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
+	// chunkChannel is a channel for asynchronously passing response chunks to the logger.
+	chunkChannel        chan []byte
+	streamDone          chan struct{} // streamDone signals when the streaming goroutine completes.
 	streamErrMu         sync.Mutex
 	streamErr           error
 	logger              logging.RequestLogger // logger is the instance of the request logger service.
@@ -230,6 +233,7 @@ func (w *responseWriterWrapper) Flush() {
 	_ = w.FlushError()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *responseWriterWrapper) FlushError() error {
 	w.commitHeaders()
 	return httpwire.FlushResponse(w.ResponseWriter)
@@ -507,10 +511,24 @@ func (w *responseWriterWrapper) finalizeRequest(c *gin.Context) (err error) {
 	return errors.Join(
 		w.streamError(),
 		w.logRequest(
-			w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c),
-			w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource,
-			w.extractAPIResponse(c), apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource,
-			requestTimelineBytes(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog,
+			w.extractRequestBody(c),
+			finalStatusCode,
+			w.cloneHeaders(),
+			w.extractResponseBody(c),
+			w.extractWebsocketTimeline(c),
+			websocketTimelineSource,
+			apiRequest,
+			apiRequestSource,
+			w.extractAPIResponse(
+				c,
+			),
+			apiResponseSource,
+			w.extractAPIWebsocketTimeline(c),
+			apiWebsocketTimelineSource,
+			requestTimelineBytes(c),
+			w.extractAPIResponseTimestamp(c),
+			slicesAPIResponseError,
+			forceLog,
 		),
 	)
 }
