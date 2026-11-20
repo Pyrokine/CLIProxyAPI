@@ -4,7 +4,8 @@
 
 CLIProxyAPI 为 CLI 工具和 SDK 提供 OpenAI、Gemini、Claude 与 Codex 兼容 API
 
-支持 OAuth 与 API Key 提供商、多账户路由、流式响应、工具调用、多模态输入、可配置的上游转发，以及包含当前 DeepSeek V4.1 模型标识的内置模型目录
+支持 OAuth 与 API Key 提供商、多账户路由、流式响应、工具调用、多模态输入、可配置的上游转发，以及包含当前 DeepSeek V4.1
+模型标识的内置模型目录
 
 ## 赞助商
 
@@ -22,12 +23,18 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 <table>
 <tbody>
 <tr>
-<td style="width:180px"><a href="https://www.packyapi.com/register?aff=cliproxyapi"><img src="./assets/packycode.png" alt="PackyCode" style="width:150px"></a></td>
-<td>感谢 PackyCode 对本项目的赞助！PackyCode 是一家可靠高效的 API 中转服务商，提供 Claude Code、Codex、Gemini 等多种服务的中转。PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.packyapi.com/register?aff=cliproxyapi">此链接</a>注册，并在充值时输入 "cliproxyapi" 优惠码即可享受九折优惠。</td>
+<td style="width:180px"><a href="https://www.packyapi.com/register?aff=cliproxyapi">
+<img src="./assets/packycode.png" alt="PackyCode" style="width:150px"></a></td>
+<td>感谢 PackyCode 对本项目的赞助！PackyCode 是一家可靠高效的 API 中转服务商，提供 Claude Code、Codex、Gemini 等多种服务的中转；PackyCode
+为本软件用户提供了特别优惠：使用
+<a href="https://www.packyapi.com/register?aff=cliproxyapi">此链接</a>注册，并在充值时输入 "cliproxyapi" 优惠码即可享受九折优惠</td>
 </tr>
 <tr>
-<td style="width:180px"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" style="width:150px"></a></td>
-<td>感谢 AICodeMirror 赞助了本项目！AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级高并发、极速开票、7×24 专属技术支持。 Claude Code / Codex / Gemini 官方渠道低至 3.8 / 0.2 / 0.9 折，充值更有折上折！AICodeMirror 为 CLIProxyAPI 的用户提供了特别福利，通过<a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">此链接</a>注册的用户，可享受首充8折，企业客户最高可享 7.5 折！</td>
+<td style="width:180px"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">
+<img src="./assets/aicodemirror.png" alt="AICodeMirror" style="width:150px"></a></td>
+<td>感谢 AICodeMirror 赞助了本项目！AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级高并发、极速开票、7×24 专属技术支持；
+Claude Code / Codex / Gemini 官方渠道低至 3.8 / 0.2 / 0.9 折，充值更有折上折！AICodeMirror 为 CLIProxyAPI 的用户提供了特别福利，通过
+<a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">此链接</a>注册的用户，可享受首充 8 折，企业客户最高可享 7.5 折！</td>
 </tr>
 </tbody>
 </table>
@@ -41,6 +48,8 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 - 支持流式与非流式响应、函数调用、工具和多模态输入
 - 返回动态 OpenAI 模型元数据，并提供兼容的 Responses 端点
 - 内置当前 DeepSeek V4.1 模型目录项：`deepseek-flash` 与 `deepseek-v4-pro`
+- 模型目录包含 [Kimi K3](https://platform.kimi.com/docs/guide/kimi-k3-quickstart) 和 Kimi K3 256K，支持 OAuth 或兼容 API
+  接入
 - 通过配置接入 OpenAI 兼容上游
 - 提供管理 API 和内置控制面板
 - 提供可嵌入代理的 Go SDK
@@ -56,8 +65,15 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 ```bash
 mkdir -p config
 cp config.example.yaml config/config.yaml
+```
+
+将 `config/config.yaml` 中的 `host` 设为 `""`，让服务监听容器网卡，再启动容器：
+
+```bash
 docker compose up -d
 ```
+
+Compose 默认把端口发布到宿主机的 `127.0.0.1`，访问范围保持在宿主机本地
 
 Compose 会把 `./config` 挂载到 `/CLIProxyAPI/config`，管理接口可以原子替换 `config.yaml`，并保留 `config.yaml.last-good`
 
@@ -68,25 +84,51 @@ Compose 会把 `./config` 挂载到 `/CLIProxyAPI/config`，管理接口可以�
 
 ### 安全自更新
 
-systemd 自更新在替换程序前暂停新推理，HTTP 上传和 SSE 响应完成后才计为结束，Responses WebSocket 按每次推理计数，空闲连接不阻止更新；已有实时媒体会话保留到会话结束
-等待最长两分钟，超时后恢复接收并报告更新失败，现有流继续执行；暂停期间管理与健康查询保持可用，新推理收到 503 和 `Retry-After`
+systemd 自更新在替换程序前暂停新推理，HTTP 上传和 SSE 响应完成后才计为结束，Responses WebSocket
+按每次推理计数，空闲连接不阻止更新；已有实时媒体会话保留到会话结束
+等待最长两分钟，超时后恢复接收并报告更新失败，现有流继续执行；暂停期间管理与健康查询保持可用，新推理收到 503 和
+`Retry-After`
 
 更新固定目标版本、完整 commit SHA、程序 SHA-256、OS/architecture 与更新协议标识，候选程序必须支持当前暂停恢复协议，旧协议发布物在安装前拒绝，上一版本仍可作为受控回滚备份
 安装前再次确认当前进程已完成等待，确认后持续暂停接收直到安装、验活或恢复结束，新进程在开始监听前恢复安装阶段的暂停
 Guard 最长运行五分钟，服务核实 guard 已退出且重启任务已结束后恢复接收，查询 systemd 状态失败时保留暂停；状态数据库不可用时同样暂停接收，修复持久化后重启服务
 
-验活和回滚继续核对同一身份，备份按更新 attempt 隔离，只清理已成功更新的备份，恢复失败时保留备份与恢复信息，并要求核实后再开始下一次更新
+自动更新在安装前核对目标程序与回滚程序支持的数据库格式，现有数据库保持相同写入格式；缺少格式声明或需要变更格式时，先完成显式迁移评估
+重启后的验活会读取管理配额和用量事件，并核对当前 PostgreSQL 存储的表结构，通过后才接受更新
+
+验活和回滚继续核对同一身份，程序备份按更新 attempt 隔离，只清理已成功更新的备份，恢复失败时保留备份与恢复信息，并要求核实后再开始下一次更新
 旧版 session 可按原路径恢复备份，身份信息不足时明确要求人工核实
 
 更新兼容性查询会声明当前后端是否支持客户端提供的 attempt ID，从旧后端升级时先更新管理面板；首次升级使用旧后端已有的守护程序，新版更新保护在更新后的后端发起下一次升级时生效
 
-### Codex 重置次数核查（v8.0.23-aug.5）
+### Codex 重置次数核查（v8.0.23-aug.6）
 
-`POST /v0/management/quota/fetch` 接受 `{"auth_index":"<credential-index>","provider":"codex","purpose":"codex_reset_credit"}`，实时只读核查指定凭证的原生重置次数，返回凭证标识、目标代次、检查时间、资格和计数数据；该用途不经过插件，不查询订阅，不发布配额缓存，也不清理冷却，原有配额查询行为保持
+`POST /v0/management/quota/fetch` 接受
+`{"auth_index":"<credential-index>","provider":"codex","purpose":"codex_reset_credit"}`
+，实时只读核查指定凭证的原生重置次数，返回凭证标识、目标代次、检查时间、资格和计数数据；该用途不经过插件，不查询订阅，不发布配额缓存，也不清理冷却，原有配额查询行为保持
 
 重置要求当前至少持有一次有效可用的机会，适用次数不代替持有次数，昨天查询成功也不作为今天消费的许可；每次重新核查期限和明确的已消费状态，缺少可选明细不表示永久有效
 
 `POST /v0/management/reset-quota` 在消费前再次核查资格，凭证或代理变化、并发重置、查询失败、非法或冲突数据均阻止消费；只有上游明确确认后才清理同一凭证的本地冷却，结果不明确时保留状态并提示，不自动重发消费
+
+## 视频任务与插件资源会话
+
+视频任务由创建任务的 CPA API key 独立持有，同一 key 可查询状态和下载结果，其他 key 或未知任务统一返回 404，`/openai/v1`
+别名与原生 xAI 查询遵守相同规则，编辑和扩展引用任务 ID 时也会检查归属
+
+归属和上游路由保存在 `management-state.db`，独立于使用量记录与路由缓存；保留该数据库，缓存过期、容量淘汰或服务重启后仍按创建者授权，更换
+API key 不继承原任务，升级前缺少归属记录的任务返回 404；归属存储不可用时返回 503，创建成功前保存失败也返回错误，通过 SDK
+直接构造视频 handler 时需用 `SetVideoTaskStore` 注入持久存储
+
+面板退出通过 `DELETE /v0/resource/plugins/session` 撤销当前浏览器的插件资源会话，该接口接受管理 key 或有效资源
+cookie，并清除对应 cookie，其他会话保持有效；管理 key、本机管理密码或远程管理许可变化会使旧资源 cookie 失效，无关配置变更保持现有会话，静态管理
+key 通过配置轮换撤销
+
+## 相关项目
+
+- [CPA-Manager-Plus](https://github.com/seakee/CPA-Manager-Plus)：请求监控、用量与费用估算、账号池管理
+- [Panopticon](https://github.com/eltmon/panopticon-cli)：使用 CLIProxyAPI 本地代理的编程代理编排工具
+- [AIUsage](https://github.com/sylearn/AIUsage)：原生 macOS SwiftUI AI 订阅看板，可管理官方 CLIProxyAPI 发布版
 
 ## 文档
 
@@ -94,6 +136,8 @@ Guard 最长运行五分钟，服务核实 guard 已退出且重启任务已结�
 - [生产部署：Nginx、Cloudflare、超时与排查](docs/production-deployment_CN.md)
 - [管理 API](https://help.router-for.me/cn/management/api)
 - [使用量 SQLite 容量、保留、备份与迁移](docs/usage-sqlite-capacity_CN.md)
+- [模型目录、媒体调用与 Fast／Ultrafast 设置](internal/modelcatalog/MODEL_SOURCES.md)
+- [模型价格来源与请求时价格记录](internal/modelcatalog/PRICE_SOURCES.md)
 - [Go SDK 使用](docs/sdk-usage_CN.md)
 - [Go SDK 高级执行器与翻译器](docs/sdk-advanced_CN.md)
 - [Go SDK 认证](docs/sdk-access_CN.md)
@@ -102,7 +146,7 @@ Guard 最长运行五分钟，服务核实 guard 已退出且重启任务已结�
 
 ## 开发检查
 
-根 module 要求 Go 1.27.3，包含 GO-2026-6809 的标准库证书校验修正；按 `go.mod` 安装依赖，并在提交 Pull Request 前执行基础检查：
+根 module 要求 Go 1.27.4，包含 GO-2026-6809 的标准库证书校验修正；按 `go.mod` 安装依赖，并在提交 Pull Request 前执行基础检查：
 
 ```bash
 go mod verify
@@ -112,7 +156,7 @@ go vet ./...
 go build ./cmd/server
 ```
 
-发布候选验证还会执行 race detector、Staticcheck v0.8.2、govulncheck v1.7.0，以及 Linux AMD64 和 ARM64 的 `CGO_ENABLED=0` 构建
+发布候选验证还会执行 race detector、Staticcheck v0.8.2、govulncheck v1.9.0，以及 Linux AMD64 和 ARM64 的 `CGO_ENABLED=0` 构建
 
 ## 版本与发布行为
 

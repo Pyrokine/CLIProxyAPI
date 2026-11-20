@@ -17,7 +17,7 @@ if ([string]::IsNullOrWhiteSpace($PanelRepo)) {
 }
 if ([string]::IsNullOrWhiteSpace($PanelTag)) {
     $PanelTag = if ([string]::IsNullOrWhiteSpace($env:PANEL_TAG)) {
-        "v1.26.0-aug.2"
+        "v1.26.0-aug.6"
     }
     else {
         $env:PANEL_TAG
@@ -79,7 +79,8 @@ try {
     if ((Get-Item -LiteralPath $tempAsset).Length -eq 0) {
         throw "Downloaded management.html is empty"
     }
-    if (Select-String -LiteralPath $tempAsset -SimpleMatch -Quiet "Management panel asset is not included in this Docker image") {
+    if (Select-String -LiteralPath $tempAsset -SimpleMatch -Quiet `
+            "Management panel asset is not included in this Docker image") {
         throw "Downloaded management.html is the fallback page"
     }
     Move-Item -LiteralPath $tempAsset -Destination $OutputPath -Force

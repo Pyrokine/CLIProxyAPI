@@ -24,12 +24,23 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 <table>
 <tbody>
 <tr>
-<td style="width:180px"><a href="https://www.packyapi.com/register?aff=cliproxyapi"><img src="./assets/packycode.png" alt="PackyCode" style="width:150px"></a></td>
-<td>Thanks to PackyCode for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more. PackyCode provides special discounts for our software users: register using <a href="https://www.packyapi.com/register?aff=cliproxyapi">this link</a> and enter the "cliproxyapi" promo code during recharge to get 10% off.</td>
+<td style="width:180px"><a href="https://www.packyapi.com/register?aff=cliproxyapi">
+<img src="./assets/packycode.png" alt="PackyCode" style="width:150px"></a></td>
+<td>Thanks to PackyCode for sponsoring this project! PackyCode is a reliable and efficient API relay service provider,
+offering relay services for Claude Code, Codex, Gemini, and more. PackyCode provides special discounts for our software
+users: register using <a href="https://www.packyapi.com/register?aff=cliproxyapi">this link</a> and enter the
+"cliproxyapi" promo code during recharge to get 10% off.</td>
 </tr>
 <tr>
-<td style="width:180px"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" style="width:150px"></a></td>
-<td>Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for CLIProxyAPI users: register via <a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">this link</a> to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off!</td>
+<td style="width:180px"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">
+<img src="./assets/aicodemirror.png" alt="AICodeMirror" style="width:150px"></a></td>
+<td>Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for
+Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical
+support.
+Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups!
+AICodeMirror offers special benefits for CLIProxyAPI users: register via
+<a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">this link</a> to enjoy 20% off your first top-up, and
+enterprise customers can get up to 25% off!</td>
 </tr>
 </tbody>
 </table>
@@ -37,12 +48,14 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 ## Highlights
 
 - OpenAI, Gemini, Claude, and Codex-compatible API endpoints
-- OAuth and API-key access for supported providers, including Meta Muse accounts and Meta Model API keys
+- OAuth and API-key access for supported providers, including Meta Muse accounts and `Meta Model` API keys
 - Kimi.com and Kimi.ai device login, and Devin account login through `--devin-login`
 - Multiple-account routing, round-robin selection, and configurable provider prefixes
 - Streaming and non-streaming responses, function calls, tools, and text and image input
 - Dynamic OpenAI model metadata and compatible Responses endpoints
 - Current DeepSeek V4.1 catalog entries: `deepseek-flash` and `deepseek-v4-pro`
+- [Kimi K3](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart) and Kimi K3 256K catalog entries, with OAuth or
+  compatible API access
 - Configurable OpenAI-compatible upstream providers
 - Management API and bundled control panel support
 - Reusable Go SDK for embedding the proxy
@@ -58,8 +71,15 @@ Create a dedicated configuration directory before the first start:
 ```bash
 mkdir -p config
 cp config.example.yaml config/config.yaml
+```
+
+Set `host: ""` in `config/config.yaml` so the server listens on the container network interface, then start it:
+
+```bash
 docker compose up -d
 ```
+
+Compose publishes its ports on the host's `127.0.0.1`, keeping the default deployment local to the host
 
 Compose mounts `./config` at `/CLIProxyAPI/config`, which allows management updates to replace `config.yaml` atomically
 and retain `config.yaml.last-good`
@@ -72,24 +92,59 @@ Before exposing the service outside localhost, read the [production deployment g
 
 ### Safe self-update
 
-A systemd self-update pauses new inference before replacing the executable. Accepted HTTP uploads and SSE responses finish naturally; Responses WebSockets are counted per turn, so idle sockets do not block an update. Existing realtime media sessions remain active until the session ends.
-The drain waits up to two minutes. On timeout, inference admission resumes and the update reports failure while existing streams continue. Management and health queries remain available; new inference receives 503 with `Retry-After`.
+A systemd self-update pauses new inference before replacing the executable. Accepted HTTP uploads and SSE responses
+finish naturally; Responses WebSockets are counted per turn, so idle sockets do not block an update. Existing realtime
+media sessions remain active until the session ends.
+The drain waits up to two minutes. On timeout, inference admission resumes and the update reports failure while existing
+streams continue. Management and health queries remain available; new inference receives 503 with `Retry-After`.
 
-Each update binds the release tag, full commit SHA, executable SHA-256, OS, architecture, and update protocol marker. Candidates must support the current pause-and-recovery protocol; older-protocol releases are rejected before installation while previous artifacts remain eligible for controlled rollback.
-A fresh drain confirmation commits the admission pause through installation, health checks, or recovery. Restarted processes restore the installation pause before listening.
-The guard has a five-minute runtime limit. Admission resumes after the server verifies that the guard has exited and no restart job remains pending. A failed systemd query keeps admission paused. If the state database is unavailable, restore persistence and restart the service before resuming inference.
+Each update binds the release tag, full commit SHA, executable SHA-256, OS, architecture, and update protocol marker.
+Candidates must support the current pause-and-recovery protocol; older-protocol releases are rejected before
+installation while previous artifacts remain eligible for controlled rollback.
+A fresh drain confirmation commits the admission pause through installation, health checks, or recovery. Restarted
+processes restore the installation pause before listening.
+The guard has a five-minute runtime limit. Admission resumes after the server verifies that the guard has exited and no
+restart job remains pending. A failed systemd query keeps admission paused. If the state database is unavailable,
+restore persistence and restart the service before resuming inference.
 
-Health checks and rollback verify the same artifact identities. Backups are isolated by update attempt and removed only after a successful update. Failed recovery retains its backup and session identity and blocks another update until recovery is verified. Legacy sessions can recover their original backup path, with incomplete identity evidence reported as requiring manual verification.
+Automatic updates check database formats against the release and rollback executables before installation. Existing
+databases keep the same write format; incompatible or missing declarations require migration review. After restart,
+health checks read management quota data and usage events, then verify the active PostgreSQL table layout before
+accepting the update.
 
-Update compatibility declares whether the running backend supports client-supplied attempt IDs. Install the new management panel before updating an older backend. The first upgrade uses that backend's existing guard; the new update protections apply when the updated backend starts a later upgrade.
+Health checks and rollback verify the same artifact identities. Executable backups are isolated by update attempt and
+removed only after a successful update. Failed recovery retains its backup and session identity and blocks another
+update until recovery is verified. Legacy sessions can recover their original backup path, with incomplete identity
+evidence reported as requiring manual verification.
 
-### Codex reset-credit checks (v8.0.23-aug.5)
+Update compatibility declares whether the running backend supports client-supplied attempt IDs. Install the new
+management panel before updating an older backend. The first upgrade uses that backend's existing guard; the new update
+protections apply when the updated backend starts a later upgrade.
 
-`POST /v0/management/quota/fetch` accepts `{"auth_index":"<credential-index>","provider":"codex","purpose":"codex_reset_credit"}` for a current, read-only native reset-credit check. The response identifies the credential, target generation, check time, availability, and count data. This purpose bypasses plugins, subscription queries, cache publication, and cooldown recovery; existing quota-fetch requests keep their behavior
+### Codex reset-credit checks (v8.0.23-aug.6)
 
-Resetting requires at least one currently available owned credit. Applicable credits do not replace the owned count, and yesterday's query does not establish today's eligibility. Expiration and explicit consumed states are checked again using current data; optional missing details do not imply permanent validity
+`POST /v0/management/quota/fetch` accepts
+`{"auth_index":"<credential-index>","provider":"codex","purpose":"codex_reset_credit"}` for a current, read-only native
+reset-credit check. The response identifies the credential, target generation, check time, availability, and count data.
+This purpose bypasses plugins, subscription queries, cache publication, and cooldown recovery; existing quota-fetch
+requests keep their behavior
 
-`POST /v0/management/reset-quota` checks eligibility again before consuming a credit. Credential and proxy changes, concurrent resets, failed queries, and invalid or conflicting data stop consumption. Local cooldown is cleared only after an explicit upstream confirmation for the same credential. An uncertain result does not trigger an automatic retry
+Resetting requires at least one currently available owned credit. Applicable credits do not replace the owned count, and
+yesterday's query does not establish today's eligibility. Expiration and explicit consumed states are checked again
+using current data; optional missing details do not imply permanent validity
+
+`POST /v0/management/reset-quota` checks eligibility again before consuming a credit. Credential and proxy changes,
+concurrent resets, failed queries, and invalid or conflicting data stop consumption. Local cooldown is cleared only
+after an explicit upstream confirmation for the same credential. An uncertain result does not trigger an automatic retry
+
+## Related projects
+
+- [CPA-Manager-Plus](https://github.com/seakee/CPA-Manager-Plus): request monitoring, usage and cost estimates, and
+  account-pool management
+- [Panopticon](https://github.com/eltmon/panopticon-cli): coding-agent orchestration using CLIProxyAPI as a local
+  sidecar
+- [AIUsage](https://github.com/sylearn/AIUsage): native macOS SwiftUI dashboard for AI subscriptions and official
+  CLIProxyAPI release management
 
 ## Documentation
 
@@ -97,6 +152,7 @@ Resetting requires at least one currently available owned credit. Applicable cre
 - [Production deployment: Nginx, Cloudflare, timeouts, and diagnostics](docs/production-deployment.md)
 - [Management API](https://help.router-for.me/management/api)
 - [Usage SQLite capacity, retention, backup, and migration](docs/usage-sqlite-capacity.md)
+- [Model catalogs, media routes, and Fast/Ultrafast settings](internal/modelcatalog/MODEL_SOURCES.md)
 - [Model price sources and request-time pricing receipts](internal/modelcatalog/PRICE_SOURCES.md)
 - [Go SDK usage](docs/sdk-usage.md)
 - [Go SDK advanced executors and translators](docs/sdk-advanced.md)
@@ -104,9 +160,27 @@ Resetting requires at least one currently available owned credit. Applicable cre
 - [Go SDK watcher](docs/sdk-watcher.md)
 - Custom provider example: [`examples/custom-provider`](examples/custom-provider)
 
+## Video tasks and plugin resource sessions
+
+Each video task belongs to the CPA API key that created it. That key can retrieve its status and download the result.
+Other keys and unknown tasks receive 404. The `/openai/v1` aliases and native xAI retrieval use the same checks. Edits
+and extensions also check ownership when they reference a task ID
+
+Ownership and upstream routing are stored in `management-state.db`, independently of usage recording and the routing
+cache. Keep this database to preserve access across cache expiry, eviction, and service restarts. A replacement API key
+does not inherit the previous key's tasks. Tasks created before ownership was recorded receive 404. Unavailable
+ownership storage returns 503, and a failed ownership write returns an error before a successful creation response. SDK
+consumers that construct video handlers directly must provide persistent storage through `SetVideoTaskStore`
+
+Panel logout calls `DELETE /v0/resource/plugins/session` with management authentication or a valid resource cookie. It
+revokes that cookie's server-side session and clears the cookie while leaving other sessions active. Changes to the
+management key, local management password, or remote-management permission invalidate old resource cookies. Unrelated
+configuration changes preserve sessions. Revoke a static management key by rotating it in the configuration
+
 ## Development
 
-The root module requires Go 1.27.3, including the standard-library certificate verification fix for GO-2026-6809. Install dependencies from `go.mod` and run the baseline checks before opening a pull
+The root module requires Go 1.27.4, including the standard-library certificate verification fix for GO-2026-6809.
+Install dependencies from `go.mod` and run the baseline checks before opening a pull
 request:
 
 ```bash
@@ -117,17 +191,21 @@ go vet ./...
 go build ./cmd/server
 ```
 
-Release-candidate validation also runs the race detector, Staticcheck v0.8.2, govulncheck v1.7.0, and `CGO_ENABLED=0`
+Release-candidate validation also runs the race detector, Staticcheck v0.8.2, govulncheck v1.9.0, and `CGO_ENABLED=0`
 builds for Linux AMD64 and ARM64
 
 ## Version and release behavior
 
-Local source and Docker builds resolve the displayed version through `git describe --tags --always --dirty`. Release builds
-embed the release version, full commit SHA, and UTC build date through linker flags. Without release metadata, the server
+Local source and Docker builds resolve the displayed version through `git describe --tags --always --dirty`. Release
+builds
+embed the release version, full commit SHA, and UTC build date through linker flags. Without release metadata, the
+server
 reports `dev`, `none`, and `unknown`
 
-Local augmented releases use tags in the form `v<upstream>-aug.N`; the first local release based on a new upstream version
-uses `aug.1`. Tags trigger the GoReleaser workflow, while `v*` tags also trigger the multi-architecture Docker workflow. A
+Local augmented releases use tags in the form `v<upstream>-aug.N`; the first local release based on a new upstream
+version
+uses `aug.1`. Tags trigger the GoReleaser workflow, while `v*` tags also trigger the multi-architecture Docker workflow.
+A
 matching entry in `CHANGELOG.md` is required before publishing release assets
 
 ## Contributing

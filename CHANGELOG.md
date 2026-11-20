@@ -1,5 +1,147 @@
 # Changelog
 
+## v8.0.23-aug.6 - 2026-11-21
+
+### Release basis
+
+- Upstream release: v8.0.23 (`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`)
+- Fork point: `09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- Previous local release: v8.0.23-aug.5
+- Paired management panel: CPAM v1.26.0-aug.6
+
+This release collects the cumulative changes in the Pyrokine fork since v8.0.23-aug.5 on the v8.0.23 upstream base
+
+### Features
+
+- Refresh exact model IDs, retirement metadata, image capabilities, and discovery for supported providers while
+  preserving channel boundaries, account restrictions, and saved model settings
+- Apply model enablement and channel-specific Standard, Fast, and Ultrafast settings through the existing catalog;
+  retain explicit payload overrides and distinguish requested processing from upstream-confirmed processing
+- Support structured prices for context length, region, effective dates, cache-write TTL, processing speed, modality,
+  and independent media or tool charges; retain custom prices through default-update previews and adoption
+- Preserve immutable request-time pricing receipts alongside current-catalog costs, including selected conditions,
+  rate sources, token buckets, additional charges, and specific missing quantities or rates
+- Record initial and final forwarding addresses, selected and reported models and providers, and explicit cache-usage
+  presence after payload and header overrides; keep omitted cache fields distinct from reported zero usage
+- Upgrade historical usage fields in resumable pages, maintain filtered totals and historical repricing progress, and
+  retain request-time receipts through backup, import, and export
+- Return durable management-write results that distinguish success, rejection, partial changes, and uncertain outcomes;
+  use confirmed effects and resource readback when reporting saved state
+
+### Fixes
+
+- Preserve configuration transactions, exact credential numbers, integer and duration validation, session-affinity key
+  migration, and dynamic changes published after persistence
+- Keep credential snapshots and generations isolated across file, Git, object, and PostgreSQL stores; expose storage
+  failures before publishing a successful credential change
+- Keep Home selected-only routing within the selected credentials and end connection, plugin, and session resources
+  for their owning operation; discard late results from a previous owner
+- Reconcile routing aliases, weights, scheduling, quota observations, and cooldown recovery against the current
+  credential identity and generation
+- Preserve request-scoped unknown and no-retry outcomes, terminal authentication errors, session-cache identity, and
+  delivered response state when deciding whether execution can be retried
+- Keep Claude fingerprints, session identity, cache TTL, thinking replay, signatures, tool names, and failed-request
+  usage consistent across request preparation and response delivery
+- Preserve Codex response IDs, HTTP and WebSocket session routing, tool capabilities, quota frames, image usage, and
+  terminal errors; apply live configuration and transport changes from the same snapshot
+- Preserve Gemini and Vertex native schemas, parallel tool history, signatures, token counting, configured proxies,
+  cancellation, and failed-request usage, including Interactions responses
+- Isolate Antigravity refresh cancellation and credential generations, retain optional credit-query failures, and
+  handle model discovery, final response bodies, multiline SSE, and reasoning replay consistently
+- Preserve xAI tool-call identity, image quality and IDs, response rewrites, WebSocket lifetime, raw usage, and
+  rate-limit errors across text and image requests
+- Preserve Devin Interactions errors, custom tool arguments, final request context, reported model, and the presence
+  of cache-usage fields
+- Retain Kimi identity and thinking replay, Meta media behavior, and the final request context, errors, and usage of
+  Qwen, iFlow, and AI Studio without mixing provider observations
+- Keep OpenAI-compatible native Responses, Chat tools, search citations, and Cline responses bound to the final model
+  and cache identity; return failed or incomplete terminal responses as errors
+- Preserve tool schemas and names, reasoning settings, signatures, reported zero usage, and registered conversion
+  behavior across shared protocol translators
+- Honor plugin disablement, cancellation, callback ownership, model-stream usage, configuration reads, and actual
+  installation results; keep public SDKs and examples consistent with those behaviors
+- Apply API-key policies and model, token-counting, and media rules across public HTTP, SSE, and WebSocket routes;
+  release observers at completion while retaining original errors and already delivered data
+- Bind OAuth attempts, credential mutations, batch refreshes, inspections, and quota queries to the current
+  credential; preserve the explicit-confirmation boundary for Codex reset-credit consumption
+- Drain and cancel service work within independent shutdown deadlines, retaining recorded usage and costs while
+  closing CLI, embedded SDK, Home, and plugin resources
+- Preserve segmented request-log recovery, escape injected log characters, redact credentials and proxy URLs, and
+  release access-control and WebSocket-relay resources on completion
+
+### Distribution and compatibility
+
+- Use Go 1.27.4, stable go-git dependencies, and the updated terminal UI packages; retain the `/v6` Go module,
+  `/v0/management` API, and flat configuration format
+- Build Linux, macOS, and Windows AMD64/ARM64 archives on native runners and publish the complete archive set with
+  consolidated checksums; retain Linux AMD64/ARM64 Docker images
+- Default local management-panel preparation selects CPAM v1.26.0-aug.6
+- Verify update identity, database read/write compatibility, inference draining, independent guard recovery, and the
+  actual panel publication result before reporting update completion
+- Migration required: the management database advances from schema 4 to 5 for durable write results; usage schema
+  remains 9 and PostgreSQL format remains 1, with historical usage fields upgraded separately in pages
+- Back up the management database before upgrading from aug.5 and review database compatibility before rollback;
+  automatic updates that require a database-format change are rejected by the new compatibility checks
+- Extended pricing receipts remain in event metadata; older usage readers retain stored events and amounts but omit
+  these details, so preserve the original database and model catalog before using older export/import tools
+- Install the paired panel before updating an older backend; the first upgrade uses the guard provided by that backend
+
+### 中文
+
+#### 版本依据
+
+- 上游版本：v8.0.23（`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`）
+- 分叉点：`09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- 上一个本地版本：v8.0.23-aug.5
+- 配套管理面板：CPAM v1.26.0-aug.6
+
+本版本汇集 Pyrokine fork 自 v8.0.23-aug.5 以来的累计变更，上游基线保持 v8.0.23
+
+#### 功能
+
+- 更新已支持提供商的精确模型标识、退役信息、图像能力与模型发现，保留渠道边界、账户权限和已保存的模型设置
+- 通过现有模型目录控制启用状态和各渠道的标准速度、Fast、Ultrafast，保留显式 Payload 覆盖，分别记录申请与上游确认的处理模式
+- 支持按上下文长度、地区、生效时间、缓存写入 TTL、处理速度和模态维护价格，以及独立的媒体或工具收费；默认更新沿用预览与确认，保留自定义价格
+- 同时保留不可变的请求时计价凭据与当前目录费用，记录采用的条件、价格来源、Token 分项、额外收费及具体缺失的用量或价格
+- Payload 与 Header 覆盖后记录初始和最终转发地址、选用与上游自报的模型和渠道，以及缓存用量是否明确返回，区分未返回与明确为 0
+- 历史用量字段按页升级并支持继续处理，维护筛选汇总和历史重算进度，备份、导入和导出保留请求时计价凭据
+- 管理写入持久记录成功、拒绝、部分变更与结果待确认，结合已确认的实际效果和资源读回报告保存结果
+
+#### 修复
+
+- 保留配置事务、凭证数字精度、整数与时长验证、会话亲和键迁移，持久化后再发布动态变更
+- 文件、Git、对象和 PostgreSQL 存储按凭证副本与代次隔离，存储失败时先返回错误，再由调用方处理保存结果
+- Home 仅选中凭证的路由范围保持有效，连接、插件和会话资源由所属操作结束，旧操作迟到的结果不再生效
+- 路由别名、权重、调度、配额观察与冷却恢复按当前凭证身份和代次核实
+- 执行重试保留请求级结果未知与禁止重试状态、终态认证错误、会话缓存身份和已交付响应状态
+- Claude 请求准备与响应交付保持指纹、会话身份、缓存 TTL、思考重放、签名、工具名称和失败请求用量一致
+- Codex 保留响应 ID、HTTP 与 WebSocket 会话路由、工具能力、配额帧、图像用量和终态错误，实时配置与传输使用同一快照
+- Gemini、Vertex 与 Interactions 保留原生 schema、并行工具历史、签名、Token 计数、配置代理、取消和失败请求用量
+- Antigravity 刷新按取消和凭证代次隔离，保留可选积分查询错误，正确处理模型发现、最终正文、多行 SSE 和思考重放
+- xAI 文本与图像请求保留工具调用身份、图像质量与 ID、响应重写、WebSocket 生命周期、原始用量和限流错误
+- Devin 保留 Interactions 错误、自定义工具参数、最终请求上下文、返回模型和缓存用量字段是否存在
+- 保留 Kimi 身份与思考重放、Meta 媒体行为，以及 Qwen、iFlow、AI Studio 的最终请求上下文、错误和用量，各提供商观察分别归属
+- OpenAI 兼容的原生 Responses、Chat 工具、搜索引用和 Cline 响应使用最终模型与缓存身份，失败或不完整终态明确返回错误
+- 共享协议转换保留工具 schema 与名称、推理设置、签名、明确为 0 的用量及已注册的转换行为
+- 插件停用、取消、回调归属、模型流用量、配置读取和安装结果按真实状态处理，公开 SDK 与示例保持一致
+- 公共 HTTP、SSE 与 WebSocket 入口统一执行 API Key 策略和模型、Token 计数、媒体规则，完成后释放观察资源，保留原错误和已交付数据
+- OAuth 尝试、凭证修改、批量刷新、巡检和配额查询使用当前凭证，Codex 重置次数消费继续要求明确确认
+- 服务关闭按独立期限等待和取消任务，保留已记录用量与费用，结束 CLI、嵌入式 SDK、Home 和插件资源
+- 请求日志支持分段恢复，转义注入字符并脱敏凭证与代理 URL，操作结束后释放访问控制和 WebSocket 转发资源
+
+#### 交付与兼容性
+
+- 使用 Go 1.27.4、稳定版 go-git 依赖和新版终端界面包，保留 `/v6` Go module、`/v0/management` API 与扁平配置格式
+- Linux、macOS、Windows 的 AMD64／ARM64 安装包由原生 runner 构建，完整制品与合并校验文件一起发布，保留 Linux AMD64／ARM64 Docker 镜像
+- 本地管理面板准备脚本默认选择 CPAM v1.26.0-aug.6
+- 更新完成前核实制品身份、数据库读写兼容、等待推理结束、独立守护程序恢复和面板实际发布结果
+- 需要迁移：管理数据库为持久写入结果从 schema 4 升级至 5，usage schema 保持 9，PostgreSQL 格式保持 1，历史用量字段另行按页升级
+- 从 aug.5 升级前备份管理数据库，回滚前检查数据库兼容性；新版兼容检查会拒绝需要变更数据库格式的自动更新
+- 扩展计价凭据保存在事件 metadata，旧用量读取器可读取原事件和已保存金额，扩展明细暂不可读；使用旧版导入导出工具前保留原数据库和模型目录
+- 升级旧后端前先安装配套面板，首次升级使用旧后端提供的守护程序
+
+Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.5...v8.0.23-aug.6
+
 ## v8.0.23-aug.5 - 2026-10-22
 
 ### Release basis
@@ -14,15 +156,19 @@
 - Check current Codex reset credits independently of subscription queries and ordinary quota refreshes
 - Require at least one currently valid owned credit, preserving eligibility when the applicable count is zero
 - Recheck current credits before consumption and check expiration and credential identity again before submission
-- Exclude explicitly expired and consumed credits from eligibility evidence while retaining optional details and missing, invalid and conflicting count states
-- Keep one reset operation in flight per credential and reject changes to the credential, account or proxy during the operation
-- Clear local quota cooldown only after an explicit upstream confirmation for the same credential, and retain local state on failed or uncertain consumption
+- Exclude explicitly expired and consumed credits from eligibility evidence while retaining optional details and
+  missing, invalid and conflicting count states
+- Keep one reset operation in flight per credential and reject changes to the credential, account or proxy during the
+  operation
+- Clear local quota cooldown only after an explicit upstream confirmation for the same credential, and retain local
+  state on failed or uncertain consumption
 - Bundle CPAM v1.26.0-aug.5 in both Docker architectures
 
 ### Compatibility
 
 - Database schemas remain management 4 and usage 9
-- The management API remains `/v0/management` and the existing Go SDK `ResetQuota(context.Context, string)` signature is retained
+- The management API remains `/v0/management` and the existing Go SDK `ResetQuota(context.Context, string)` signature is
+  retained
 - The native read-only check uses the existing quota-fetch endpoint with `purpose: codex_reset_credit`
 - Core and Linux AMD64 native-plugin editions remain separate
 
@@ -38,10 +184,10 @@
 ### 修复
 
 - Codex 当前重置次数独立核查，订阅查询与普通额度刷新分别处理
-- 当前至少持有一次有效机会才允许重置，适用次数为 0 时保留有效的持有次数资格
+- 当前至少持有一次有效机会才允许重置，适用次数为 0 时仍按有效持有次数保留资格
 - 消费前重新查询当前次数，发送前再次检查期限与凭证身份
 - 明确过期及已消费的机会不作为资格证据，保留可选明细及次数缺失、非法和冲突状态
-- 同一凭证只处理一个重置操作，期间凭证、账户或代理变化时停止提交
+- 同一凭证只处理一个重置操作，凭证、账户或代理在操作期间变化时停止提交
 - 上游明确确认后才清理同一凭证的本地额度冷却，消费失败或结果未知时保留本地状态
 - 两种 Docker 架构均内置 CPAM v1.26.0-aug.5
 
@@ -65,9 +211,12 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.4...
 
 ### Fixes
 
-- Wait for accepted inference to finish before a systemd update, including uploads, streaming responses, WebSocket turns and live media sessions; restore admission when a pre-installation wait fails
-- Keep inference paused through installation and process restart, and resume after the update guard exits and pending service jobs finish
-- Verify release tag, full commit, executable SHA-256, platform and update protocol before installation and during health checks and recovery
+- Wait for accepted inference to finish before a systemd update, including uploads, streaming responses, WebSocket turns
+  and live media sessions; restore admission when a pre-installation wait fails
+- Keep inference paused through installation and process restart, and resume after the update guard exits and pending
+  service jobs finish
+- Verify release tag, full commit, executable SHA-256, platform and update protocol before installation and during
+  health checks and recovery
 - Retain recovery backups and reject another update when recovery is incomplete
 - Accept client-supplied update attempt IDs and declare this capability to the management panel
 - Use Go 1.27.3 for the certificate verification security fix
@@ -78,8 +227,10 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.4...
 - Database schemas remain management 4 and usage 9; this patch adds no schema migration
 - The Go SDK module remains `/v6` and the management API remains `/v0/management`
 - Core and Linux AMD64 native-plugin editions remain separate
-- Update the management panel first when upgrading from an older backend; the first upgrade is still performed by that backend's existing guard
-- Releases without the current update protocol remain eligible as previous-version recovery artifacts and are rejected as new installation candidates
+- Update the management panel first when upgrading from an older backend; the first upgrade is still performed by that
+  backend's existing guard
+- Releases without the current update protocol remain eligible as previous-version recovery artifacts and are rejected
+  as new installation candidates
 
 ### 中文
 
@@ -122,8 +273,10 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.3...
 ### Fixes
 
 - Handle Cline non-streaming Chat requests through a single upstream stream without increasing the original token limit
-- Preserve actual text, reasoning, tool calls, stop reasons and reported usage; unwrap successful `success/data` responses and report failed or incomplete responses as errors
-- Match update-health versions with or without the standard `v` prefix, including compatibility with older update guards; preserve full build identity and per-attempt authentication
+- Preserve actual text, reasoning, tool calls, stop reasons and reported usage; unwrap successful `success/data`
+  responses and report failed or incomplete responses as errors
+- Match update-health versions with or without the standard `v` prefix, including compatibility with older update
+  guards; preserve full build identity and per-attempt authentication
 - Bundle the released CPAM v1.26.0-aug.3 panel in both Docker architectures
 
 ### Compatibility
@@ -167,67 +320,100 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.3...
 
 ### Changes
 
-- Record canceled downstream delivery as canceled even before the request context is canceled; preserve upstream and write failures
+- Record canceled downstream delivery as canceled even before the request context is canceled; preserve upstream and
+  write failures
 - Keep bootstrap replay tests from treating a closed channel as response data
 - Give race-test packages a finite 25-minute CI timeout while retaining all tests and the 45-minute job limit
 
-- Preserve exact credential numbers when saving files and comparing quota identities; keep ordinary numeric settings compatible
-- Restore quota after metadata normalization only when the source material can be verified; isolate legacy numeric identities whose precision cannot be proven
+- Preserve exact credential numbers when saving files and comparing quota identities; keep ordinary numeric settings
+  compatible
+- Restore quota after metadata normalization only when the source material can be verified; isolate legacy numeric
+  identities whose precision cannot be proven
 - Keep plugin authentication available when quota metadata cannot be validated, with an explicit quota warning
-- Keep quota windows, credits, reset allowances and observation times across credential enable/disable changes and restart recovery, while isolating credential replacements
-- Stop adding successful image records when a text response only reports unused image statistics; retain completed image calls with zero reported usage
-- Use consistent account scope for quota, reset-credit details and subscription queries; retain available results and identify failed auxiliary queries
+- Keep quota windows, credits, reset allowances and observation times across credential enable/disable changes and
+  restart recovery, while isolating credential replacements
+- Stop adding successful image records when a text response only reports unused image statistics; retain completed image
+  calls with zero reported usage
+- Use consistent account scope for quota, reset-credit details and subscription queries; retain available results and
+  identify failed auxiliary queries
 
-- Update provider authentication, model metadata, and protocol conversion while retaining the `/v6` SDK module, `/v0/management` API, and flat configuration format
+- Update provider authentication, model metadata, and protocol conversion while retaining the `/v6` SDK module,
+  `/v0/management` API, and flat configuration format
 - Preserve tool identity, signatures, namespaces, and delivery state across streaming and non-streaming responses
-- Keep optional Codex `apply_patch` capability negotiation disabled by default; supported translators convert tool declarations, history, and responses without executing patches on the server
-- Preserve plugin OAuth identity and nested model callback ownership, and release streams when their callback, context, or plugin instance ends
+- Keep optional Codex `apply_patch` capability negotiation disabled by default; supported translators convert tool
+  declarations, history, and responses without executing patches on the server
+- Preserve plugin OAuth identity and nested model callback ownership, and release streams when their callback, context,
+  or plugin instance ends
 - Query plugin models by the target provider without triggering unrelated discovery
-- Preserve plugin error messages and HTTP status codes across RPC and native calls; keep request buffers valid during reentrant Windows callbacks
-- Classify delivery errors caused by context cancellation as canceled; retain failed status for independent downstream write errors
+- Preserve plugin error messages and HTTP status codes across RPC and native calls; keep request buffers valid during
+  reentrant Windows callbacks
+- Classify delivery errors caused by context cancellation as canceled; retain failed status for independent downstream
+  write errors
 - Return failure from `-t` for invalid configuration without replacing the source configuration with its last-good copy
 - Skip empty Claude turns when translating to Gemini and Gemini CLI while preserving attachment rejection
-- Preserve Gemini and Gemini CLI tool call IDs, result ordering across user messages, structured results, and per-message attachment errors; schema cleanup no longer changes ordinary tool input JSON
+- Preserve Gemini and Gemini CLI tool call IDs, result ordering across user messages, structured results, and
+  per-message attachment errors; schema cleanup no longer changes ordinary tool input JSON
 - Retain valid signatures in Gemini tool continuations and keep standalone signatures separate
-- Preserve pending Gemini tool pairing when an unmatched result becomes user text; retain media defaults for generic MIME types and reject invalid data URLs in base64 sources
-- Preserve Claude tool pairing for interrupted calls, late results, and colliding IDs; retain image results, cache controls, and reversible tool names
-- Use declared wire names for Claude tool additions, removals and inline replacements; preserve caller-owned MCP and server tools
-- Restore redacted reasoning, recognize prefill restrictions across model versions, and report unsupported content without logging request payloads; byte request conversion returns no body on attachment errors
-- Deduplicate repeated complete Gemini function-call snapshots in streaming and non-streaming responses; preserve call identity and reject conflicting snapshots with an SDK 502 error
-- Preserve late and interleaved Claude tool calls; validate fragmented arguments against complete snapshots and return SDK 502 errors for conflicting input
-- Convert native Claude Messages JSON while preserving model identity, content order, citations, reasoning signatures, and cache usage
+- Preserve pending Gemini tool pairing when an unmatched result becomes user text; retain media defaults for generic
+  MIME types and reject invalid data URLs in base64 sources
+- Preserve Claude tool pairing for interrupted calls, late results, and colliding IDs; retain image results, cache
+  controls, and reversible tool names
+- Use declared wire names for Claude tool additions, removals and inline replacements; preserve caller-owned MCP and
+  server tools
+- Restore redacted reasoning, recognize prefill restrictions across model versions, and report unsupported content
+  without logging request payloads; byte request conversion returns an empty body on attachment errors
+- Deduplicate repeated complete Gemini function-call snapshots in streaming and non-streaming responses; preserve call
+  identity and reject conflicting snapshots with an SDK 502 error
+- Preserve late and interleaved Claude tool calls; validate fragmented arguments against complete snapshots and return
+  SDK 502 errors for conflicting input
+- Convert native Claude Messages JSON while preserving model identity, content order, citations, reasoning signatures,
+  and cache usage
 - Mark Claude Responses incomplete when the token limit is reached or the provider pauses the turn
-- Reject Responses requests when conversion removes all usable content from any user message, returning an error before contacting the provider
-- Preserve tool namespaces and reversible names across Responses and Chat declarations, history, tool choices, and responses
-- Return a failure for inconsistent custom apply_patch calls instead of a completed response; HTTP errors do not expose internal conflict details
+- Reject Responses requests when conversion removes all usable content from any user message, returning an error before
+  contacting the provider
+- Preserve tool namespaces and reversible names across Responses and Chat declarations, history, tool choices, and
+  responses
+- Return a failure for inconsistent custom apply_patch calls instead of a completed response; HTTP errors do not expose
+  internal conflict details
 - Preserve valid Codex audio, file references, stringified image tool results, and reversible tool names
 - Apply final payload rules to Codex local token counts and select the tokenizer from the final model
-- Deliver remaining tool arguments from complete snapshots; reject conflicting snapshots with SDK 502 errors over HTTP and WebSocket
+- Deliver remaining tool arguments from complete snapshots; reject conflicting snapshots with SDK 502 errors over HTTP
+  and WebSocket
 - Return generated Codex images across streaming and non-streaming responses
 - Preserve Gemini inline media and file references when translating to Codex
 - Keep Interactions URI attachments and developer instructions; reject user turns emptied by unsupported media
-- Preserve HTTP(S) Interactions images and documents, ordered tool results, structured payloads, and reversible tool names in Claude conversions
+- Preserve HTTP(S) Interactions images and documents, ordered tool results, structured payloads, and reversible tool
+  names in Claude conversions
 - Report Claude provider errors as failed Interactions and ignore later response frames
 - Preserve Gemini and Antigravity Interactions parallel tool history and thought summaries
-- Preserve late Interactions tool identities and ordinary argument prefixes; reject inconsistent source identities, snapshots and stop boundaries, and report premature source EOF as failure
+- Preserve late Interactions tool identities and ordinary argument prefixes; reject inconsistent source identities,
+  snapshots and stop boundaries, and report premature source EOF as failure
 - Preserve explicit zero cache usage fields and valid continuation signatures
-- Retain valid signatures with visible text, tool calls, and inline media; return no byte request body after attachment rejection
+- Retain valid signatures with visible text, tool calls, and inline media; return no byte request body after attachment
+  rejection
 - Preserve HTTP(S), file ID and inline image inputs when translating Claude requests to Codex
 - Keep tool-result ordering, explicit tool choices and typed web search sources
-- Preserve compatible Grok reasoning and Schema unions; reject conflicting completed tool arguments without a successful stream ending
-- Finalize Gemini Responses when a complete, consistent usage tail arrives; preserve the finish reason and mark the active message incomplete for `MAX_TOKENS`; use `cpaUsageMetadata` only when `usageMetadata` is absent
+- Preserve compatible Grok reasoning and Schema unions; reject conflicting completed tool arguments without a successful
+  stream ending
+- Finalize Gemini Responses when a complete, consistent usage tail arrives; preserve the finish reason and mark the
+  active message incomplete for `MAX_TOKENS`; use `cpaUsageMetadata` only when `usageMetadata` is absent
 - Refresh Devin metadata independently in Home mode; `local-model` still disables remote catalog refresh
 - Use valid GLM-5.2 1M request model identifiers while retaining catalog thinking levels and output token limits
-- Measure first-token latency from effective output across Chat, Responses, Claude Messages and Gemini streams, excluding keepalive and metadata-only frames
-- Honor per-request proxy selection for protected TLS requests; retain integer fields in Codex Desktop tools sent to Google providers
-- Keep the served image model in usage records after completion; ignore late model metadata while preserving image stream bytes, usage and service tier
-- Apply quota-aware routing changes immediately, including supported aliases and session affinity, without restarting the service
+- Measure first-token latency from effective output across Chat, Responses, Claude Messages and Gemini streams,
+  excluding keepalive and metadata-only frames
+- Honor per-request proxy selection for protected TLS requests; retain integer fields in Codex Desktop tools sent to
+  Google providers
+- Keep the served image model in usage records after completion; ignore late model metadata while preserving image
+  stream bytes, usage and service tier
+- Apply quota-aware routing changes immediately, including supported aliases and session affinity, without restarting
+  the service
 - Preserve newer saved credential settings when an older watcher update arrives
 - Keep Home authoritative for account models while preserving plugin model discovery
 - Apply reasoning updates to custom Claude models while retaining manual or adaptive mode
 - Preserve normalized Claude thinking settings and keep summary display changes independent
 - Exclude management endpoints from ordinary request logs and retain full request identifiers
-- Preserve the entry request for SDK callers that omit OriginalRequest, including custom tool declarations and validation
+- Preserve the entry request for SDK callers that omit OriginalRequest, including custom tool declarations and
+  validation
 - Report an empty native tool translation as failure instead of a successful empty response
 - Record failed Gemini Interactions as failures across response formats and retain observed usage
 - Close canceled or failed xAI WebSocket attempts and confirm downstream delivery before recording success
@@ -235,9 +421,12 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.3...
 - Preserve Meta response failures and observed usage through translation, EOF, cancellation and completion
 - Honor explicit positive retry delays for 404 responses while retaining the default for missing or invalid hints
 - Keep sendable Devin text and tool results together and omit prompts emptied by unsupported media
-- Respect original JSON and multipart image fields; apply automatic Codex image tools only for the final model and configured tool policy
-- Apply configured payload rules after provider request preparation and use the same source format and request path for local token counts
-- Return plugin response translation failures as request-scoped errors, retain observed usage and release the source stream when execution ends
+- Respect original JSON and multipart image fields; apply automatic Codex image tools only for the final model and
+  configured tool policy
+- Apply configured payload rules after provider request preparation and use the same source format and request path for
+  local token counts
+- Return plugin response translation failures as request-scoped errors, retain observed usage and release the source
+  stream when execution ends
 - Preserve Home Anthropic model types, display names, token limits and RFC3339 creation timestamps
 - Apply the Opus 5.5 fallback for the final Claude model while preserving explicit caller and payload-rule choices
 - Reserve one positive cache-control budget slot for non-null Claude threads
@@ -263,36 +452,48 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.3...
 - Handle incremental WebSocket prewarm locally for SSE upstreams without discarding prior turns
 - Preserve Responses stream write and short-write failure causes in usage records
 - Preserve observed upstream stream failures when request cleanup cancels execution
-- Preserve operator-owned Claude system content through automatic reporting and cache processing while retaining OAuth CCH signing
+- Preserve operator-owned Claude system content through automatic reporting and cache processing while retaining OAuth
+  CCH signing
 - Distinguish client tools named advisor from server-side advisor calls
 - Exclude native Claude hints from unconfirmed caller passthrough while preserving ordinary transport headers
 - Preserve successful Claude completion after the terminal frame is delivered, including a trailing upstream read error
 - Verify stale credit rejection after Antigravity credentials are removed and recreated
-- Remove internal prompt cache options before signing Claude OAuth bodies so CCH matches the sent body
-- Accept complete named terminal snapshots on native Gemini and Vertex Interactions streams while preserving translated-response validation
+- Remove internal prompt cache options before signing Claude OAuth bodies so CCH matches the body sent upstream
+- Accept complete named terminal snapshots on native Gemini and Vertex Interactions streams while preserving
+  translated-response validation
 - Return HTTP 502 for empty Claude upstream responses instead of returning successful empty output
 - Preserve explicitly configured input IDs in Codex HTTP and WebSocket requests, including streaming requests
 - Evaluate Claude payload conditions after forced-tool thinking cleanup while preserving final model and tool validation
-- Accept complete Gemini and Vertex Interactions requires_action snapshots as terminal responses while rejecting missing steps and unfinished snapshots
-- Write the Devin client name to metadata field 1 and remove obsolete field 28 without changing credential and device metadata
+- Accept complete Gemini and Vertex Interactions requires_action snapshots as terminal responses while rejecting missing
+  steps and unfinished snapshots
+- Write the Devin client name to metadata field 1 and remove obsolete field 28 without changing credential and device
+  metadata
 - Apply xAI compact payload overrides after built-in cleanup across HTTP, streaming triggers, and WebSocket triggers
-- Preserve explicit xAI thinking overrides after model-capability checks and keep existing cleanup when no override is configured
-- Return xAI HTTP response translation failures as failed outcomes, retain observed token usage, and publish successful usage only after conversion and stream completion
-- Propagate Kimi and Kimi.ai Chat and Responses translation failures in streaming and non-streaming requests without losing observed token usage
-- Reject empty non-streaming translations across Codex HTTP, compact, WebSocket, OpenAI-compatible, Qwen, iFlow, Gemini CLI, and Devin without recording successful usage
+- Preserve explicit xAI thinking overrides after model-capability checks and keep existing cleanup when no override is
+  configured
+- Return xAI HTTP response translation failures as failed outcomes, retain observed token usage, and publish successful
+  usage only after conversion and stream completion
+- Propagate Kimi and Kimi.ai Chat and Responses translation failures in streaming and non-streaming requests without
+  losing observed token usage
+- Reject empty non-streaming translations across Codex HTTP, compact, WebSocket, OpenAI-compatible, Qwen, iFlow, Gemini
+  CLI, and Devin without recording successful usage
 - Reject empty xAI compact response translations with HTTP 502 and retain observed token usage as failed usage
 - Honor configured generation, tool, and safety settings in Gemini token-count requests
 - Record the actual response model in Codex image usage, preserving an earlier model when the terminal event omits it
-- Honor configured model, service tier, and cache overrides or field removal for Codex image generation and editing in standard and streamed responses
+- Honor configured model, service tier, and cache overrides or field removal for Codex image generation and editing in
+  standard and streamed responses
 - Require Go 1.27.2 and use `golang.org/x/net` v0.60.0; use Staticcheck v0.8.2 for the updated toolchain
 
 ### Compatibility
 
-Model catalog entries describe supported identifiers and routing capabilities; access still depends on the account and provider
+Model catalog entries describe supported identifiers and routing capabilities; access still depends on the account and
+provider
 
-The Go SDK module remains `/v6`; the binary release tag is not a compatible Go module version, so pin SDK dependencies to the release commit
+The Go SDK module remains `/v6`; the binary release tag is not a compatible Go module version, so pin SDK dependencies
+to the release commit
 
-Linux and macOS core packages built with `CGO_ENABLED=0` cannot load standard dynamic-library plugins; use a compatible native-plugin build when those plugins are required
+Linux and macOS core packages built with `CGO_ENABLED=0` cannot load standard dynamic-library plugins; use a compatible
+native-plugin build when those plugins are required
 
 ### 中文
 
@@ -325,9 +526,11 @@ Linux and macOS core packages built with `CGO_ENABLED=0` cannot load standard dy
 - 上下文取消造成的交付错误记为 canceled，独立下游写入错误仍记为 failed
 - `-t` 遇到无效配置时返回失败，不用 last-good 副本覆盖源配置
 - Claude 转 Gemini 和 GeminiCLI 时跳过空消息，保留附件拒绝
-- Gemini 和 GeminiCLI 保留工具调用 ID、跨 user 消息的结果顺序、结构化结果及逐消息附件错误，Schema 清理不再改写普通工具输入 JSON
+- Gemini 和 GeminiCLI 保留工具调用 ID、跨 user 消息的结果顺序、结构化结果及逐消息附件错误，Schema 清理不再改写普通工具输入
+  JSON
 - Gemini 响应保留合法工具续段 signature，连续独立 signature 分别返回
-- Gemini 未匹配工具结果转为 user 文本时保留待完成调用的配对，通用 MIME 使用媒体默认类型，拒绝 base64 source 中的非法 data URL
+- Gemini 未匹配工具结果转为 user 文本时保留待完成调用的配对，通用 MIME 使用媒体默认类型，拒绝 base64 source 中的非法 data
+  URL
 - Claude 保留中断调用、晚到结果与冲突 ID 的工具配对，以及图片结果、缓存控制和可逆工具名称
 - Claude 的工具添加、删除和内联替换使用声明对应的传输名称，保留调用方 MCP 与服务端工具
 - 恢复 redacted reasoning，按模型版本识别 prefill 限制，报告不支持的内容且不记录请求正文；附件转换失败时 byte 请求入口不返回正文
@@ -353,7 +556,8 @@ Linux and macOS core packages built with `CGO_ENABLED=0` cannot load standard dy
 - Claude 请求转为 Codex 时保留 HTTP(S)、file ID 和内联图片
 - 保留工具结果顺序、指定工具选择及内建搜索来源
 - 保留兼容的 Grok reasoning 和 Schema 联合类型；完整工具参数冲突时返回失败，不发送成功终态
-- Gemini Responses 收到完整且一致的用量尾帧后返回终态，保留原 finish reason，`MAX_TOKENS` 时将活动消息标为 incomplete；`usageMetadata` 缺失时使用 `cpaUsageMetadata`
+- Gemini Responses 收到完整且一致的用量尾帧后返回终态，保留原 finish reason，`MAX_TOKENS` 时将活动消息标为 incomplete；
+  `usageMetadata` 缺失时使用 `cpaUsageMetadata`
 - Home 独立刷新 Devin 元数据，`local-model` 仍禁止远端目录刷新
 - GLM-5.2 1M 请求使用有效模型标识，保留目录中的 thinking 档位与输出 token 上限
 - Chat、Responses、Claude Messages 和 Gemini 的首个 token 耗时按有效输出计算，忽略保活与纯元数据帧
@@ -446,21 +650,32 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v7.3.2-aug.1...v
 
 ### What's Changed
 
-- feat (models): Update sourced model capabilities and prices for Claude, Codex, Gemini, DeepSeek, xAI and image models; keep unconfirmed or non-runtime models out of the default requestable inventory
-- feat (credentials): Preserve credential identity and configuration across watcher updates, storage backends and management changes; restore durable and runtime state after partial plugin OAuth failures
-- feat (routing): Carry quota freshness and cooldown identity through scheduling, refresh and retries without consuming active-reset credits during status checks; keep session affinity within the highest available credential priority and exclude prior-request diagnostics from cooldown responses
+- feat (models): Update sourced model capabilities and prices for Claude, Codex, Gemini, DeepSeek, xAI and image models;
+  keep unconfirmed or non-runtime models out of the default requestable inventory
+- feat (credentials): Preserve credential identity and configuration across watcher updates, storage backends and
+  management changes; restore durable and runtime state after partial plugin OAuth failures
+- feat (routing): Carry quota freshness and cooldown identity through scheduling, refresh and retries without consuming
+  active-reset credits during status checks; keep session affinity within the highest available credential priority and
+  exclude prior-request diagnostics from cooldown responses
 - feat (plugins): Extend ABI and RPC compatibility for auth, quota, request observers, affinity and plugin lifecycle
-- feat (management): Integrate plugin OAuth, credential refresh, network-scoped proxy calls and guarded update state with Home runtime registration
+- feat (management): Integrate plugin OAuth, credential refresh, network-scoped proxy calls and guarded update state
+  with Home runtime registration
 - feat (usage): Preserve request attribution and accounting across asynchronous delivery, diagnostics and logs
-- feat (protocols): Update Claude, OpenAI, Gemini, Codex, Antigravity and Interactions translation, including streaming tools, signatures and terminal errors
-- feat (runtime): Update provider execution, reasoning replay, WebSocket transport, image handling and dynamic request headers
-- fix (realtime): Revoke client secrets after access-provider changes without rejecting unrelated configuration reloads; honor ordinary keys with an `ek_` prefix, enforce API-key restrictions (including rejecting hard-limit policies that Realtime cannot meter), and reject malformed session requests
+- feat (protocols): Update Claude, OpenAI, Gemini, Codex, Antigravity and Interactions translation, including streaming
+  tools, signatures and terminal errors
+- feat (runtime): Update provider execution, reasoning replay, WebSocket transport, image handling and dynamic request
+  headers
+- fix (realtime): Revoke client secrets after access-provider changes without rejecting unrelated configuration reloads;
+  honor ordinary keys with an `ek_` prefix, enforce API-key restrictions (including rejecting hard-limit policies that
+  Realtime cannot meter), and reject malformed session requests
 - feat (devin): Add OAuth, model catalog, execution, quota and session isolation support
-- fix (server): Connect management and model routes to current runtime state, and retain trusted Codex client versions without sending a fabricated version for other clients
+- fix (server): Connect management and model routes to current runtime state, and retain trusted Codex client versions
+  without sending a fabricated version for other clients
 
 ### Compatibility
 
-- Docker release builds use the published CPAM v1.23.1-aug.1 `management.html`; publish that panel before the backend tag
+- Docker release builds use the published CPAM v1.23.1-aug.1 `management.html`; publish that panel before the backend
+  tag
 - Existing credential stores remain supported through the current storage adapters
 - Real paid Provider inference and active quota reset were not part of the local release checks
 
@@ -484,7 +699,8 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v7.3.2-aug.1...v
 - feat (usage)：在异步交付、诊断与日志路径保留请求归属和使用统计
 - feat (protocols)：更新 Claude、OpenAI、Gemini、Codex、Antigravity 与 Interactions 转译，包括流式工具调用、签名和终态错误
 - feat (runtime)：更新 Provider 执行、推理重放、WebSocket 传输、图片处理和动态请求头
-- fix (realtime)：认证 Provider 变更后撤销临时密钥，无关配置刷新不误撤销；支持以 `ek_` 开头的普通 API key，执行当前 API key 限制，无法计量的 Realtime 请求不绕过硬额度策略，并拒绝无效 session JSON
+- fix (realtime)：认证 Provider 变更后撤销临时密钥，无关配置刷新不误撤销；支持以 `ek_` 开头的普通 API key，执行当前 API key
+  限制，无法计量的 Realtime 请求不绕过硬额度策略，并拒绝无效 session JSON
 - feat (devin)：增加 OAuth、模型目录、执行、quota 和 session 隔离支持
 - fix (server)：管理与模型路由使用当前运行时状态；透传受信 Codex 客户端版本，不为其他客户端伪造版本号
 
@@ -509,18 +725,25 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v7.3.2-aug.1...v
   `deepseek-v4-pro`, including retirement aliases that resolve to V4.1 Flash
 - feat (images): Support the official GPT Image 2.5 Flare and Sunburst floating and 2026-09-08 snapshot model IDs across
   image generations, edits, inpainting, and Responses image tools without adding an unsupported generic alias
-- feat (usage): Record immutable request-time pricing receipts, expose model-price source and refresh metadata, apply the
+- feat (usage): Record immutable request-time pricing receipts, expose model-price source and refresh metadata, apply
+  the
   2026-09-10 default catalog decisions, and report asynchronous historical repricing progress
-- feat (policy): Reserve API-key policy capacity before provider dispatch, preserve execution identity across retries and
+- feat (policy): Reserve API-key policy capacity before provider dispatch, preserve execution identity across retries
+  and
   streams, and record explicit committed, released, or uncertain outcomes
-- feat (management): Add guarded update sessions with artifact verification, installation health checks, rollback, backup
+- feat (management): Add guarded update sessions with artifact verification, installation health checks, rollback,
+  backup
   retention, and append-only management mutation auditing
-- fix (credentials): Preserve credential identity and provider state across subscription changes, refreshes, and concurrent
+- fix (credentials): Preserve credential identity and provider state across subscription changes, refreshes, and
+  concurrent
   management requests
-- fix (quota): Return provider quota freshness, active-reset availability, remaining reset credits, and expiration metadata
-  without consuming a reset during status refresh; recover only matching, authoritative, refresh-fresh Codex quota-family
+- fix (quota): Return provider quota freshness, active-reset availability, remaining reset credits, and expiration
+  metadata
+  without consuming a reset during status refresh; recover only matching, authoritative, refresh-fresh Codex
+  quota-family
   cooldowns so credentials become routable again without a service restart while newer errors remain intact
-- fix (streaming): Normalize acknowledged-stream errors, terminal event handling, tool-call state, cancellation, and empty
+- fix (streaming): Normalize acknowledged-stream errors, terminal event handling, tool-call state, cancellation, and
+  empty
   bootstrap failures across OpenAI, Responses, Claude, Gemini, and compatible provider paths; send shared no-buffer SSE
   headers, flush heartbeats during setup and response gaps, and bound both protocol-to-transport and post-terminal waits
 - fix (runtime): Move HTTP/2 handling to the Go standard library while retaining uTLS dialing, proxy support, fixed-IP
@@ -531,7 +754,8 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v7.3.2-aug.1...v
 ### Compatibility
 
 - Docker release builds bundle the published CPAM v1.22.2-aug.1 `management.html` asset
-- The default DeepSeek inventory uses `deepseek-flash` and `deepseek-v4-pro`; retired V4 Flash identifiers remain aliases
+- The default DeepSeek inventory uses `deepseek-flash` and `deepseek-v4-pro`; retired V4 Flash identifiers remain
+  aliases
   rather than separate inventory entries
 - Existing Management API, provider configuration, usage backup, and SQLite data paths remain supported
 
@@ -551,13 +775,16 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v7.3.2-aug.1...v
 - feat (images)：支持 GPT Image 2.5 Flare 与 Sunburst 的 floating 和 2026-09-08 snapshot 官方模型 ID，覆盖图片生成、编辑、
   inpainting 和 Responses 图片工具，不增加未发布的通用 alias
 - feat (usage)：记录请求时不可变价格凭据，返回模型价格来源与刷新元数据，应用 2026-09-10 默认目录决策，并报告异步历史重算进度
-- feat (policy)：Provider 请求前预留 API Key 策略容量，在重试与流式请求中保留执行身份，并记录 committed、released 或 uncertain 结果
+- feat (policy)：Provider 请求前预留 API Key 策略容量，在重试与流式请求中保留执行身份，并记录 committed、released 或
+  uncertain 结果
 - feat (management)：增加更新会话、发布物校验、安装后健康检查、回滚、备份保留和 append-only 管理写操作审计
 - fix (credentials)：套餐变化、数据刷新和并发管理请求期间保留凭证身份与 Provider 状态
 - fix (quota)：状态刷新返回 Provider 配额新鲜度、主动重置可用状态、剩余次数和过期时间，刷新状态不会消耗主动重置次数；
   只恢复 matching、authoritative 且早于本次刷新的 Codex quota-family cooldown，额度恢复后无需重启即可重新路由，同时保留较新错误
-- fix (streaming)：统一 OpenAI、Responses、Claude、Gemini 和兼容 Provider 的已确认流错误、终态事件、工具调用状态、取消与空 bootstrap 失败语义；
-  共用 SSE no-buffer header，在 setup 和响应空档 flush heartbeat，并限制 protocol terminal 到 transport terminal 及 terminal 后等待时间
+- fix (streaming)：统一 OpenAI、Responses、Claude、Gemini 和兼容 Provider 的已确认流错误、终态事件、工具调用状态、取消与空
+  bootstrap 失败语义；
+  共用 SSE no-buffer header，在 setup 和响应空档 flush heartbeat，并限制 protocol terminal 到 transport terminal 及
+  terminal 后等待时间
 - fix (runtime)：HTTP/2 迁移到 Go 标准库，同时保留 uTLS 拨号、代理、固定 IP、公开主机校验和 HTTP/2-only 行为
 - chore (toolchain)：使用 Go 1.27.0，升级根 module 中全部存在兼容更新的 required module，并清除可修复的 Staticcheck 与漏洞告警
 
@@ -881,7 +1108,7 @@ Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v7.3.2-aug.1...v
 ### What's Changed
 
 - feat (home): Add certificate provisioning and auto-refresh for self-hosted setups
-- feat (openai): Add image and video endpoint handlers, plus Codex client model listing
+- feat (`openai`): Add image and video endpoint handlers, plus Codex client model listing
 - feat (claude): Add request signing and uTLS transport support
 - feat (usage): Add SQLite `provider_id` dimension for per-provider usage breakdowns
 - feat (cluster): Add Docker Compose template and environment configuration for multi-node deployments
