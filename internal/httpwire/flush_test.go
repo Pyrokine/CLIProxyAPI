@@ -51,7 +51,10 @@ func TestFlushResponsePreservesMiddlewareAndGinStatus(t *testing.T) {
 	}
 	if !c.Writer.Written() || c.Writer.Status() != http.StatusAccepted || transport.Code != http.StatusAccepted ||
 		transport.Header().Get("X-Middleware-Flush") != "preserved" {
-		t.Fatalf("status or middleware header lost: status=%d transport=%d headers=%v", c.Writer.Status(), transport.Code, transport.Header())
+		t.Fatalf(
+			"status or middleware header lost: status=%d transport=%d headers=%v", c.Writer.Status(), transport.Code,
+			transport.Header(),
+		)
 	}
 }
 

@@ -174,7 +174,7 @@ func TestGetLogsTailLimitReturnsRecentLinesWithCursor(t *testing.T) {
 
 	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=2")
 	wantLines := []string{lines[2], lines[3]}
-	if !reflect.DeepEqual(resp.Lines, wantLines) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines(wantLines)) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
 	if resp.LineCount != len(wantLines) {
@@ -199,7 +199,7 @@ func TestGetLogsTailLimitDoesNotScanOlderFilesForLineCount(t *testing.T) {
 
 	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=1")
 	wantLines := []string{"[2026-06-15 10:00:00] current"}
-	if !reflect.DeepEqual(resp.Lines, wantLines) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines(wantLines)) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
 	if resp.LineCount != len(wantLines) {
@@ -213,7 +213,7 @@ func TestGetLogsNoLimitKeepsFullScanBehavior(t *testing.T) {
 
 	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs")
 	wantLines := []string{"complete", "partial"}
-	if !reflect.DeepEqual(resp.Lines, wantLines) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines(wantLines)) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
 	if resp.LineCount != 2 {
@@ -243,7 +243,7 @@ func TestGetLogsAfterKeepsTimestampScanAndReturnsCursor(t *testing.T) {
 	cutoff := time.Date(2026, 6, 15, 10, 0, 0, 0, time.Local).Unix()
 	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?after="+strconv.FormatInt(cutoff, 10))
 	wantLines := []string{lines[1], lines[2]}
-	if !reflect.DeepEqual(resp.Lines, wantLines) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines(wantLines)) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
 	if resp.LineCount != 3 {
@@ -272,7 +272,7 @@ func TestGetLogsCursorReturnsOnlyNewCompleteLines(t *testing.T) {
 		t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=10",
 	)
 	wantLines := []string{"[2026-06-15 10:00:03] fourth"}
-	if !reflect.DeepEqual(resp.Lines, wantLines) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines(wantLines)) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
 	if resp.LineCount != 1 {
@@ -377,7 +377,7 @@ func TestGetLogsCursorResetAfterTruncateTailsLimit(t *testing.T) {
 	if !resp.CursorReset {
 		t.Fatal("cursor-reset = false, want true")
 	}
-	if !reflect.DeepEqual(resp.Lines, []string{resetLine}) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines([]string{resetLine})) {
 		t.Fatalf("lines = %#v, want reset tail", resp.Lines)
 	}
 	if resp.LineCount != 1 {
@@ -405,7 +405,7 @@ func TestGetLogsCursorReadsAcrossRotation(t *testing.T) {
 		t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=10",
 	)
 	wantLines := []string{line2, line3}
-	if !reflect.DeepEqual(resp.Lines, wantLines) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines(wantLines)) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
 	if resp.CursorReset {
@@ -432,7 +432,7 @@ func TestGetLogsCursorReadsRotatedFileWhenNewMainIsSmaller(t *testing.T) {
 	resp := performGetLogs(
 		t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=1",
 	)
-	if !reflect.DeepEqual(resp.Lines, []string{line2}) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines([]string{line2})) {
 		t.Fatalf("lines = %#v, want rotated unread line", resp.Lines)
 	}
 	if resp.CursorReset {
@@ -477,7 +477,7 @@ func TestGetLogsZeroOffsetCursorWithPartialLineReadsAcrossRotation(t *testing.T)
 		t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=10",
 	)
 	wantLines := []string{"partial complete", "new"}
-	if !reflect.DeepEqual(resp.Lines, wantLines) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines(wantLines)) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
 	if resp.CursorReset {
@@ -641,7 +641,7 @@ func TestGetLogsZeroOffsetCursorWithEmptyFileResetsWhenRotationModTimeAmbiguous(
 		t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=2",
 	)
 	wantLines := []string{first, second}
-	if !reflect.DeepEqual(resp.Lines, wantLines) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines(wantLines)) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
 	if !resp.CursorReset {
@@ -677,7 +677,7 @@ func TestGetLogsInvalidCursorResetsToTail(t *testing.T) {
 		if !resp.CursorReset {
 			t.Fatalf("cursor-reset = false for cursor %q", raw)
 		}
-		if !reflect.DeepEqual(resp.Lines, []string{lines[1]}) {
+		if !reflect.DeepEqual(resp.Lines, utcLogLines([]string{lines[1]})) {
 			t.Fatalf("lines = %#v, want latest line", resp.Lines)
 		}
 		if resp.LineCount != 1 {
@@ -708,7 +708,7 @@ func TestGetLogsMissingRotatedCursorFileResetsToTail(t *testing.T) {
 	if !resp.CursorReset {
 		t.Fatal("cursor-reset = false, want true")
 	}
-	if !reflect.DeepEqual(resp.Lines, []string{current}) {
+	if !reflect.DeepEqual(resp.Lines, utcLogLines([]string{current})) {
 		t.Fatalf("lines = %#v, want current tail", resp.Lines)
 	}
 }

@@ -134,16 +134,11 @@ func (pr *pendingRequest) receive() (message, error) {
 		return msg, nil
 	default:
 	}
-	select {
-	case msg := <-pr.terminal:
-		return msg, nil
-	default:
-	}
+	var terminal message
 	select {
 	case msg := <-pr.ch:
 		return msg, nil
-	case msg := <-pr.terminal:
-		return msg, nil
+	case terminal = <-pr.terminal:
 	case err := <-pr.failed:
 		return message{}, err
 	case <-pr.ctx.Done():
@@ -152,11 +147,17 @@ func (pr *pendingRequest) receive() (message, error) {
 		select {
 		case msg := <-pr.ch:
 			return msg, nil
-		case msg := <-pr.terminal:
-			return msg, nil
+		case terminal = <-pr.terminal:
 		default:
 			return message{}, errClosed
 		}
+	}
+	select {
+	case msg := <-pr.ch:
+		pr.terminal <- terminal
+		return msg, nil
+	default:
+		return terminal, nil
 	}
 }
 
@@ -289,11 +290,13 @@ func (s *session) request(ctx context.Context, msg message) (*pendingRequest, er
 	if _, loaded := s.pending.LoadOrStore(msg.ID, req); loaded {
 		return nil, fmt.Errorf("wsrelay: duplicate message id %s", msg.ID)
 	}
-	stopCancel := context.AfterFunc(ctx, func() {
-		if s.pending.CompareAndDelete(msg.ID, req) {
-			req.stopCancellation()
-		}
-	})
+	stopCancel := context.AfterFunc(
+		ctx, func() {
+			if s.pending.CompareAndDelete(msg.ID, req) {
+				req.stopCancellation()
+			}
+		},
+	)
 	req.setStopCancel(stopCancel)
 	if err := s.send(ctx, msg); err != nil {
 		s.pending.CompareAndDelete(msg.ID, req)

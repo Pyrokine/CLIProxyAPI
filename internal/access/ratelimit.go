@@ -280,13 +280,6 @@ func (rl *AuthRateLimiter) RecordFailure(ip string) {
 	}
 }
 
-// RecordSuccess clears all failure state for the given IP.
-func (rl *AuthRateLimiter) RecordSuccess(ip string) {
-	if rl != nil {
-		rl.ipEntries.delete(ip)
-	}
-}
-
 // IsAccountLimited returns true if the given account identifier is currently locked out.
 // Use HashAccountKey to derive accountHash from a raw credential — never pass raw secrets.
 func (rl *AuthRateLimiter) IsAccountLimited(accountHash string) bool {

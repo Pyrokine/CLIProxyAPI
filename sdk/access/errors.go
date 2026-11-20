@@ -38,6 +38,7 @@ func (e *AuthError) Error() string {
 	return message
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *AuthError) Unwrap() error {
 	if e == nil {
 		return nil

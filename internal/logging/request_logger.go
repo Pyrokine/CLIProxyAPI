@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -404,13 +405,39 @@ func sanitizeTempPrefix(prefix string) string {
 	return out
 }
 
+func (s *FileBodySource) ensureDirectoryLocked() error {
+	if _, errStat := os.Stat(s.dir); !os.IsNotExist(errStat) {
+		return errStat
+	}
+	baseDir := filepath.Dir(s.dir)
+	if errMkdir := os.MkdirAll(baseDir, 0o755); errMkdir != nil {
+		return errMkdir
+	}
+	dir, errCreate := os.MkdirTemp(baseDir, "request-log-parts-recovered-*")
+	if errCreate != nil {
+		return errCreate
+	}
+	ownerLease, errLease := createRequestLogFileLease(filepath.Join(dir, fileBodySourceOwnerLeaseName))
+	if errLease != nil {
+		return errors.Join(errLease, os.Remove(dir))
+	}
+	previousLease := s.ownerLease
+	s.dir = dir
+	s.ownerLease = ownerLease
+	s.paths = nil
+	s.validSizes = nil
+	s.capturedBytes = 0
+	log.Warn("request log source directory was removed; previous capture was lost, continuing with new data")
+	return previousLease.release(false)
+}
+
 func (s *FileBodySource) createPartLocked(prefix string) (*os.File, error) {
 	if s.cleaned {
 		return nil, fmt.Errorf("file body source has been cleaned")
 	}
 	prefix = sanitizeTempPrefix(prefix)
-	if errMkdir := os.MkdirAll(s.dir, 0o755); errMkdir != nil {
-		return nil, errMkdir
+	if errDirectory := s.ensureDirectoryLocked(); errDirectory != nil {
+		return nil, errDirectory
 	}
 	file, errCreate := os.CreateTemp(s.dir, prefix+"-*.tmp")
 	if errCreate != nil {
@@ -496,8 +523,8 @@ func (s *FileBodySource) appendBytes(
 	if s.truncated {
 		return nil
 	}
-	if errMkdir := os.MkdirAll(s.dir, 0o755); errMkdir != nil {
-		return errMkdir
+	if errDirectory := s.ensureDirectoryLocked(); errDirectory != nil {
+		return errDirectory
 	}
 
 	var file *os.File
@@ -1049,11 +1076,11 @@ type StreamingLogWriter interface {
 	//   - error: An error if writing fails, nil otherwise
 	WriteAPIResponse(apiResponse []byte) error
 
-	// WriteAPIWebsocketTimeline writes the upstream websocket timeline to the log.
-	// This should be called when upstream communication happened over websocket.
+	// WriteAPIWebsocketTimeline writes the upstream WebSocket timeline to the log.
+	// This should be called when upstream communication happened over WebSocket.
 	//
 	// Parameters:
-	//   - apiWebsocketTimeline: The upstream websocket event timeline
+	//   - apiWebsocketTimeline: The upstream WebSocket event timeline
 	//
 	// Returns:
 	//   - error: An error if writing fails, nil otherwise
@@ -1319,6 +1346,7 @@ func (s *fileRequestLoggerSnapshot) LogRequest(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *fileRequestLoggerSnapshot) LogRequestWithOptions(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -1341,6 +1369,7 @@ func (s *fileRequestLoggerSnapshot) LogRequestWithOptions(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *fileRequestLoggerSnapshot) LogRequestWithOptionsAndTimeline(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -1363,6 +1392,7 @@ func (s *fileRequestLoggerSnapshot) LogRequestWithOptionsAndTimeline(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *fileRequestLoggerSnapshot) LogRequestWithOptionsAndAllSources(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -1423,6 +1453,7 @@ func (l *FileRequestLogger) SetHomeEnabled(enabled bool) {
 	l.configMu.Unlock()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *FileRequestLogger) SetHomeClientProvider(provider func() *home.Client) {
 	if l == nil {
 		return
@@ -2529,6 +2560,11 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	return writeTrailingRouteTrace(w, routeTrace)
 }
 
+func escapeLogField(value string) string {
+	quoted := strconv.Quote(value)
+	return quoted[1 : len(quoted)-1]
+}
+
 func writeRequestInfoWithBody(
 	w io.Writer,
 	url, method string,
@@ -2542,10 +2578,10 @@ func writeRequestInfoWithBody(
 	if _, errWrite := io.WriteString(w, fmt.Sprintf("Version: %s\n", buildinfo.Version)); errWrite != nil {
 		return errWrite
 	}
-	if _, errWrite := io.WriteString(w, fmt.Sprintf("URL: %s\n", url)); errWrite != nil {
+	if _, errWrite := io.WriteString(w, fmt.Sprintf("URL: %s\n", escapeLogField(url))); errWrite != nil {
 		return errWrite
 	}
-	if _, errWrite := io.WriteString(w, fmt.Sprintf("Method: %s\n", method)); errWrite != nil {
+	if _, errWrite := io.WriteString(w, fmt.Sprintf("Method: %s\n", escapeLogField(method))); errWrite != nil {
 		return errWrite
 	}
 	if _, errWrite := io.WriteString(
@@ -2563,7 +2599,9 @@ func writeRequestInfoWithBody(
 	for key, values := range headers {
 		for _, value := range values {
 			masked := util.MaskSensitiveHeaderValue(key, value)
-			if _, errWrite := io.WriteString(w, fmt.Sprintf("%s: %s\n", key, masked)); errWrite != nil {
+			if _, errWrite := io.WriteString(
+				w, fmt.Sprintf("%s: %s\n", escapeLogField(key), escapeLogField(masked)),
+			); errWrite != nil {
 				return errWrite
 			}
 		}
@@ -2948,7 +2986,9 @@ func writeResponseSection(
 	for key, values := range responseHeaders {
 		for _, value := range values {
 			masked := util.MaskSensitiveHeaderValue(key, value)
-			if _, errWrite := io.WriteString(w, fmt.Sprintf("%s: %s\n", key, masked)); errWrite != nil {
+			if _, errWrite := io.WriteString(
+				w, fmt.Sprintf("%s: %s\n", escapeLogField(key), escapeLogField(masked)),
+			); errWrite != nil {
 				return errWrite
 			}
 		}
@@ -3285,6 +3325,7 @@ func (w *fileStreamingLogWriter) WriteAPIResponse(apiResponse []byte) error {
 	return nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *fileStreamingLogWriter) WriteAPIRequestSource(source *FileBodySource) error {
 	if w == nil || source == nil || !source.HasPayload() {
 		return nil
@@ -3298,6 +3339,7 @@ func (w *fileStreamingLogWriter) WriteAPIRequestSource(source *FileBodySource) e
 	return nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *fileStreamingLogWriter) WriteAPIResponseSource(source *FileBodySource) error {
 	if w == nil || source == nil || !source.HasPayload() {
 		return nil
@@ -3324,6 +3366,7 @@ func (w *fileStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline 
 	return nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *fileStreamingLogWriter) WriteAPIWebsocketTimelineSource(source *FileBodySource) error {
 	if w == nil || source == nil || !source.HasPayload() {
 		return nil
@@ -3403,7 +3446,9 @@ func (w *fileStreamingLogWriter) Close() error {
 				return
 			}
 
-			published, publishedPath, errWrite := writeRequestLogAtomicallyWithResult(w.logger, w.logFilePath, w.writeFinalLog)
+			published, publishedPath, errWrite := writeRequestLogAtomicallyWithResult(
+				w.logger, w.logFilePath, w.writeFinalLog,
+			)
 			w.closeErr = errWrite
 			if w.logger == nil {
 				return
@@ -3702,6 +3747,7 @@ func (w *homeStreamingLogWriter) WriteAPIResponse(apiResponse []byte) error {
 	return nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *homeStreamingLogWriter) WriteAPIRequestSource(source *FileBodySource) error {
 	if w == nil || source == nil || !source.HasPayload() {
 		return nil
@@ -3715,6 +3761,7 @@ func (w *homeStreamingLogWriter) WriteAPIRequestSource(source *FileBodySource) e
 	return nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *homeStreamingLogWriter) WriteAPIResponseSource(source *FileBodySource) error {
 	if w == nil || source == nil || !source.HasPayload() {
 		return nil
@@ -3741,6 +3788,7 @@ func (w *homeStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline 
 	return nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *homeStreamingLogWriter) WriteAPIWebsocketTimelineSource(source *FileBodySource) error {
 	if w == nil || source == nil || !source.HasPayload() {
 		return nil

@@ -134,8 +134,8 @@ func TestHomeAppLogForwarderClientsAreIsolated(t *testing.T) {
 	forwarderB.enabled.Store(true)
 	forwarderNil.enabled.Store(false)
 
-	forwarderA.forward(homeAppLogPayload{Line: "service-a"})
-	forwarderB.forward(homeAppLogPayload{Line: "service-b"})
+	forwarderA.forward(homeAppLogPayload{owner: clientA, Line: "service-a"})
+	forwarderB.forward(homeAppLogPayload{owner: clientB, Line: "service-b"})
 	if clientA.pushedCount() != 1 || clientB.pushedCount() != 1 || globalClient.pushedCount() != 0 {
 		t.Fatalf(
 			"pushed counts = service A %d, service B %d, global %d",
@@ -267,7 +267,7 @@ func TestHomeAppLogForwarderDisablesForwardingWhenHomeDoesNotSupportAppLog(t *te
 	}
 	forwarder.enabled.Store(true)
 
-	forwarder.forward(homeAppLogPayload{Line: "legacy home cannot receive app logs"})
+	forwarder.forward(homeAppLogPayload{owner: stub, Line: "legacy home cannot receive app logs"})
 	if forwarder.enabled.Load() {
 		t.Fatal("forwarder still enabled, want disabled after unsupported app-log response")
 	}

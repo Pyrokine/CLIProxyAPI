@@ -1,6 +1,6 @@
 package wsrelay
 
-// message represents the JSON payload exchanged with websocket clients.
+// message represents the JSON payload exchanged with WebSocket clients.
 type message struct {
 	ID      string         `json:"id"`
 	Type    string         `json:"type"`

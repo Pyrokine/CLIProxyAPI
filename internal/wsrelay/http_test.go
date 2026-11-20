@@ -39,3 +39,46 @@ func TestWriteChunkWithLimit(t *testing.T) {
 		t.Fatalf("body changed after rejected chunk: %q", got)
 	}
 }
+
+func TestResponseFinalURLProtocol(t *testing.T) {
+	for _, value := range []any{
+		nil, "https://user:synthetic-secret@final.example.test/result?api_key=synthetic-secret&region=test",
+		"relative/path", 42,
+	} {
+		payload := map[string]any{"status": float64(503), "final_url": value}
+		resp := decodeResponse(payload)
+		if resp.Status != 503 {
+			t.Fatalf("status=%d", resp.Status)
+		}
+		if _, valid := value.(string); valid && value != "relative/path" {
+			if resp.FinalURL != "https://final.example.test/result?api_key=%2A%2A%2A&region=test" {
+				t.Fatalf("final URL=%q", resp.FinalURL)
+			}
+		} else if resp.FinalURL != "" {
+			t.Fatalf("invented final URL=%q", resp.FinalURL)
+		}
+	}
+	for _, kind := range []string{MessageTypeStreamStart, MessageTypeHTTPResp} {
+		ctx := t.Context()
+		pending := newPendingRequest(ctx, make(chan struct{}))
+		if err := pending.deliver(
+			message{
+				Type: kind, Payload: map[string]any{"final_url": "https://final.example.test/result"},
+			},
+		); err != nil {
+			t.Fatal(err)
+		}
+		if kind == MessageTypeStreamStart {
+			if err := pending.deliver(message{Type: MessageTypeStreamEnd}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		events := streamPendingEvents(ctx, pending)
+		event, ok := <-events
+		if !ok || event.FinalURL != "https://final.example.test/result" {
+			t.Fatalf("event=%+v", event)
+		}
+		for range events {
+		}
+	}
+}

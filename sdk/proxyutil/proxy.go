@@ -19,8 +19,11 @@ import (
 )
 
 // Mode describes how a proxy setting should be interpreted.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Mode int
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const (
 	// ModeInherit means no explicit proxy behavior was configured.
 	ModeInherit Mode = iota
@@ -41,6 +44,19 @@ type Setting struct {
 	URL  *url.URL
 }
 
+type urlParseError struct {
+	cause error
+}
+
+func (err urlParseError) Error() string {
+	return "invalid URL syntax"
+}
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (err urlParseError) Unwrap() error {
+	return err.cause
+}
+
 // Parse normalizes a proxy configuration value into inherit, direct, or proxy modes.
 func Parse(raw string) (Setting, error) {
 	trimmed := strings.TrimSpace(raw)
@@ -59,7 +75,7 @@ func Parse(raw string) (Setting, error) {
 	parsedURL, errParse := url.Parse(trimmed)
 	if errParse != nil {
 		setting.Mode = ModeInvalid
-		return setting, fmt.Errorf("parse proxy URL failed: %w", errParse)
+		return setting, fmt.Errorf("parse proxy URL failed: %w", urlParseError{cause: errParse})
 	}
 	if parsedURL.Scheme == "" || parsedURL.Host == "" {
 		setting.Mode = ModeInvalid
@@ -101,7 +117,8 @@ func ValidateProxyURL(raw string) error {
 
 // ValidatePublicProxyURL is kept for SDK compatibility. Proxy endpoints may be local or private;
 // only target URLs fetched directly by CPA should use public-host validation.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func ValidatePublicProxyURL(raw string) error {
 	return ValidateProxyURL(raw)
 }
@@ -110,7 +127,7 @@ func ValidateHTTPURL(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	parsedURL, errParse := url.Parse(trimmed)
 	if errParse != nil {
-		return fmt.Errorf("parse URL failed: %w", errParse)
+		return fmt.Errorf("parse URL failed: %w", urlParseError{cause: errParse})
 	}
 	if parsedURL.Scheme == "" || parsedURL.Host == "" {
 		return fmt.Errorf("URL missing scheme/host")
@@ -142,7 +159,14 @@ func IsPrivateHost(hostname string) bool {
 
 func IsRestrictedCustomHeader(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "authorization", "api-key", "cookie", "host", "proxy-authorization", "x-api-key", "x-goog-api-key", "x-management-key":
+	case "authorization",
+		"api-key",
+		"cookie",
+		"host",
+		"proxy-authorization",
+		"x-api-key",
+		"x-goog-api-key",
+		"x-management-key":
 		return true
 	default:
 		return false
@@ -244,7 +268,7 @@ func PublicHostTransport(base http.RoundTripper) http.RoundTripper {
 	return publicHostRoundTripper{base: base}
 }
 
-// noinspection GoUnusedExportedFunction
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func PublicDNSRebindTransport(base http.RoundTripper) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport
@@ -580,6 +604,22 @@ func proxyAuthorization(user *url.Userinfo) string {
 	password, _ := user.Password()
 	encoded := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 	return "Basic " + encoded
+}
+
+// Redact 返回移除凭据、路径、查询参数和片段的代理 URL
+func Redact(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<invalid proxy URL>"
+	}
+	redacted := &url.URL{Scheme: parsed.Scheme, Host: parsed.Host}
+	if parsed.User != nil {
+		redacted.User = url.User("redacted")
+	}
+	return redacted.String()
 }
 
 type bufferedConnection struct {

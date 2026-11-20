@@ -1,10 +1,12 @@
 package logging
 
 import (
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -28,11 +30,16 @@ func TestShouldSuppressAccessLogOnlyForSuccessfulHealthReads(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := shouldSuppressAccessLog(test.method, test.path, test.statusCode); got != test.want {
-				t.Fatalf("shouldSuppressAccessLog(%q, %q, %d) = %t, want %t", test.method, test.path, test.statusCode, got, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				if got := shouldSuppressAccessLog(test.method, test.path, test.statusCode); got != test.want {
+					t.Fatalf(
+						"shouldSuppressAccessLog(%q, %q, %d) = %t, want %t", test.method, test.path, test.statusCode,
+						got, test.want,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -218,5 +225,59 @@ func TestGenerateRequestIDFallbackRemainsUnique(t *testing.T) {
 	}
 	if strings.Trim(first, "0") == "" || strings.Trim(second, "0") == "" {
 		t.Fatalf("fallback request ID must not be all zero: %q, %q", first, second)
+	}
+}
+
+func TestGenerateRequestID_Concurrency(t *testing.T) {
+	original := readRequestIDRandom
+	for _, source := range []struct {
+		name string
+		read func([]byte) (int, error)
+	}{
+		{name: "random", read: original},
+		{
+			name: "entropy error", read: func([]byte) (int, error) {
+				return 0, errors.New("entropy unavailable")
+			},
+		},
+		{
+			name: "short entropy read", read: func(buffer []byte) (int, error) {
+				return len(buffer) - 1, nil
+			},
+		},
+	} {
+		t.Run(
+			source.name, func(t *testing.T) {
+				readRequestIDRandom = source.read
+				t.Cleanup(func() { readRequestIDRandom = original })
+				const total = 1000
+				ids := make(chan string, total)
+				var workers sync.WaitGroup
+				workers.Add(total)
+				for range total {
+					go func() {
+						defer workers.Done()
+						ids <- generateRequestID()
+					}()
+				}
+				workers.Wait()
+				close(ids)
+				seen := make(map[string]bool, total)
+				for id := range ids {
+					if decoded, err := hex.DecodeString(id); err != nil || len(decoded) != 16 || strings.Trim(
+						id, "0",
+					) == "" {
+						t.Fatalf("invalid 128-bit request ID %q: %v", id, err)
+					}
+					if seen[id] {
+						t.Fatalf("duplicate ID generated in concurrent run: %q", id)
+					}
+					seen[id] = true
+				}
+				if len(seen) != total {
+					t.Fatalf("expected %d unique IDs, got %d", total, len(seen))
+				}
+			},
+		)
 	}
 }

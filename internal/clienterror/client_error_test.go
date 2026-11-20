@@ -44,15 +44,20 @@ func TestResponseBodyFromError(t *testing.T) {
 		{"plain", errors.New("failure"), "", false},
 		{"unmarked", directBodyError{body: []byte("private diagnostic")}, "", false},
 		{"marked", directBodyError{body: []byte(" denied\n"), direct: true}, " denied\n", true},
-		{"wrapped", fmt.Errorf("wrapper: %w", directBodyError{body: []byte(" denied\n"), direct: true}), " denied\n", true},
+		{
+			"wrapped", fmt.Errorf("wrapper: %w", directBodyError{body: []byte(" denied\n"), direct: true}), " denied\n",
+			true,
+		},
 		{"empty", directBodyError{direct: true}, "", true},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			body, direct := ResponseBodyFromError(test.err)
-			if direct != test.direct || string(body) != test.body {
-				t.Fatalf("body=%q direct=%t", body, direct)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				body, direct := ResponseBodyFromError(test.err)
+				if direct != test.direct || string(body) != test.body {
+					t.Fatalf("body=%q direct=%t", body, direct)
+				}
+			},
+		)
 	}
 }
 
@@ -111,7 +116,10 @@ func TestHTTPStatusFromError(t *testing.T) {
 		},
 		{
 			name: "wrapped status code via errors.As",
-			err:  fmt.Errorf("execute failed: %w", statusError{status: http.StatusUnauthorized, body: "unauthorized"}),
+			err: fmt.Errorf(
+				"execute failed: %w",
+				statusError{status: http.StatusUnauthorized, body: "unauthorized"},
+			),
 			want: http.StatusUnauthorized,
 		},
 	}
@@ -185,6 +193,7 @@ func TestIsRequestFaultStructuredIdentifiers(t *testing.T) {
 	}
 }
 
+// noinspection GoErrorStringFormat
 func TestIsRequestFault(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -205,14 +214,18 @@ func TestIsRequestFault(t *testing.T) {
 		{
 			name:   "cyber policy behind bad gateway",
 			status: http.StatusBadGateway,
-			err:    errors.New(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`),
-			want:   true,
+			err: errors.New(
+				`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`,
+			),
+			want: true,
 		},
 		{
 			name:   "context length behind internal error",
 			status: http.StatusInternalServerError,
-			err:    errors.New(`{"response":{"error":{"type":"server_error","code":"context_length_exceeded"}}}`),
-			want:   true,
+			err: errors.New(
+				`{"response":{"error":{"type":"server_error","code":"context_length_exceeded"}}}`,
+			),
+			want: true,
 		},
 		{
 			name:   "invalid request type behind bad gateway",
@@ -257,19 +270,26 @@ func TestIsRequestFault(t *testing.T) {
 		},
 		{
 			name: "item not persisted", status: http.StatusNotFound,
-			err: errors.New("Item with id 'rs_1' not found. Items are not persisted when `store` is set to false."),
+			err: errors.New(
+				"Item with id 'rs_1' not found. Items are not persisted when `store` is set to false.",
+			),
 			want: true,
 		},
 		{
 			name: "Claude stale thread", status: http.StatusNotFound,
-			err: errors.New(`{"error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}`),
+			err: errors.New(
+				`{"error":{"type":"not_found_error","message":"No thread state was ` +
+					`found for the requested ` +
+					`previous_message_id."}}`,
+			),
 			want: true,
 		},
 		{
 			name: "Claude stale thread in response body",
 			err: upstreamBodyError{
 				statusError: statusError{status: http.StatusNotFound, body: "upstream failure"},
-				responseBody: `{"error":{"type":"not_found_error","message":"No thread state was found for previous_message_id."}}`,
+				responseBody: `{"error":{"type":"not_found_error","message":"No thread state was ` +
+					`found for previous_message_id."}}`,
 			},
 			want: true,
 		},
@@ -283,7 +303,9 @@ func TestIsRequestFault(t *testing.T) {
 		},
 		{
 			name: "Claude thread server failure", status: http.StatusInternalServerError,
-			err: errors.New(`{"error":{"type":"not_found_error","message":"No thread state was found for previous_message_id."}}`),
+			err: errors.New(
+				`{"error":{"type":"not_found_error","message":"No thread state was found for previous_message_id."}}`,
+			),
 		},
 		{name: "quota", status: http.StatusTooManyRequests, err: errors.New("quota")},
 		{name: "transport", status: http.StatusBadGateway, err: errors.New("unexpected EOF")},

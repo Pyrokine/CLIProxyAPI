@@ -95,6 +95,27 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.headers = cloneResponseHeaders(headers)
 }
 
+// MergeResponseHeaders 保存 HTTP 响应后收到的 header 观察，并保留当前 attempt 的已有值
+func MergeResponseHeaders(ctx context.Context, headers http.Header) {
+	if ctx == nil || len(headers) == 0 {
+		return
+	}
+	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
+	if !ok || holder == nil {
+		return
+	}
+	holder.mu.Lock()
+	defer holder.mu.Unlock()
+	if holder.headers == nil {
+		holder.headers = make(http.Header, len(headers))
+	}
+	for key, values := range headers {
+		if canonicalKey := http.CanonicalHeaderKey(key); canonicalKey != "" {
+			holder.headers[canonicalKey] = append([]string(nil), values...)
+		}
+	}
+}
+
 func MarkFirstResponseByte(ctx context.Context) {
 	if ctx == nil {
 		return

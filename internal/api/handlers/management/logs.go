@@ -139,7 +139,8 @@ func (h *Handler) GetLogs(c *gin.Context) {
 			cutoff := parseCutoff(c.Query("after"))
 			latest := cutoff
 			if rawCursor != "" {
-				if cursor, errCursor := decodeLogCursor(rawCursor); errCursor == nil && cursor.LatestTimestamp > latest {
+				if cursor, errCursor := decodeLogCursor(rawCursor); errCursor == nil &&
+					cursor.LatestTimestamp > latest {
 					latest = cursor.LatestTimestamp
 				}
 			}
@@ -247,27 +248,36 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 		name := entry.Name()
 		fullPath := filepath.Join(dir, name)
 		if name == defaultLogFileName {
-			if errTrunc := os.Truncate(fullPath, 0); errTrunc != nil && !os.IsNotExist(errTrunc) {
+			errTrunc := os.Truncate(fullPath, 0)
+			if errTrunc != nil && !os.IsNotExist(errTrunc) {
 				c.JSON(
 					http.StatusInternalServerError,
 					gin.H{"error": fmt.Sprintf("failed to truncate log file: %v", errTrunc)},
 				)
 				return
 			}
+			if errTrunc == nil {
+				RecordMutationEffect(c.Request.Context(), "logging.deleted", "logging")
+			}
 			continue
 		}
 		if isRotatedLogFile(name) {
-			if errRemove := os.Remove(fullPath); errRemove != nil && !os.IsNotExist(errRemove) {
+			errRemove := os.Remove(fullPath)
+			if errRemove != nil && !os.IsNotExist(errRemove) {
 				c.JSON(
 					http.StatusInternalServerError,
 					gin.H{"error": fmt.Sprintf("failed to remove %s: %v", name, errRemove)},
 				)
 				return
 			}
+			if errRemove == nil {
+				RecordMutationEffect(c.Request.Context(), "logging.deleted", "logging")
+			}
 			removed++
 		}
 	}
 
+	CompleteMutation(c.Request.Context())
 	c.JSON(
 		http.StatusOK, gin.H{
 			"success": true,
@@ -667,6 +677,13 @@ func writeLogsResponse(
 	if lines == nil {
 		lines = []string{}
 	}
+	for i, line := range lines {
+		if len(line) >= 21 && line[0] == '[' && line[11] == ' ' && line[20] == ']' {
+			if parsed, err := time.ParseInLocation("2006-01-02 15:04:05", line[1:20], time.Local); err == nil {
+				lines[i] = "[" + parsed.UTC().Format(time.RFC3339Nano) + line[20:]
+			}
+		}
+	}
 	payload := gin.H{
 		"lines":            lines,
 		"line-count":       lineCount,
@@ -684,6 +701,8 @@ func tailLogFiles(files []string, limit int, fallbackLatest int64) (logReadResul
 		lines:  []string{},
 		latest: fallbackLatest,
 	}
+	var cursorFile string
+	var cursorOffset int64
 	for _, file := range slices.Backward(files) {
 		remaining := 0
 		if limit > 0 {
@@ -699,6 +718,9 @@ func tailLogFiles(files []string, limit int, fallbackLatest int64) (logReadResul
 			}
 			return logReadResult{}, errRead
 		}
+		if cursorFile == "" {
+			cursorFile, cursorOffset = file, read.endOffset
+		}
 		if len(read.lines) == 0 {
 			continue
 		}
@@ -707,11 +729,13 @@ func tailLogFiles(files []string, limit int, fallbackLatest int64) (logReadResul
 			result.latest = read.latest
 		}
 	}
-	nextCursor, errCursor := cursorForLatestLogFile(files, result.latest)
-	if errCursor != nil {
-		return logReadResult{}, errCursor
+	if cursorFile != "" {
+		nextCursor, errCursor := newLogCursor(cursorFile, cursorOffset, result.latest)
+		if errCursor != nil {
+			return logReadResult{}, errCursor
+		}
+		result.nextCursor = nextCursor
 	}
-	result.nextCursor = nextCursor
 	return result, nil
 }
 
@@ -1354,6 +1378,11 @@ func parseLimit(raw string) (int, error) {
 
 func parseTimestamp(line string) int64 {
 	line = strings.TrimPrefix(line, "[")
+	if end := strings.IndexByte(line, ']'); end >= 0 {
+		if parsed, err := time.Parse(time.RFC3339Nano, line[:end]); err == nil {
+			return parsed.Unix()
+		}
+	}
 	if len(line) < 19 {
 		return 0
 	}

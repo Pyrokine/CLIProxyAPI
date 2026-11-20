@@ -155,6 +155,7 @@ func (w *cpaTraceResponseWriter) Flush() {
 	_ = w.FlushError()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (w *cpaTraceResponseWriter) FlushError() error {
 	w.applyTraceHeader()
 	return httpwire.FlushResponse(w.ResponseWriter)

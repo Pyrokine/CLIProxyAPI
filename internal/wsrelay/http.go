@@ -8,12 +8,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/google/uuid"
 )
 
 const maxNonStreamResponseBodyBytes = 64 << 20 // 64 MiB
 
-// HTTPRequest represents a proxied HTTP request delivered to websocket clients.
+// HTTPRequest represents a proxied HTTP request delivered to WebSocket clients.
 type HTTPRequest struct {
 	Method  string
 	URL     string
@@ -21,23 +22,29 @@ type HTTPRequest struct {
 	Body    []byte
 }
 
-// HTTPResponse captures the response relayed back from websocket clients.
+// HTTPResponse captures the response relayed back from WebSocket clients.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type HTTPResponse struct {
-	Status  int
-	Headers http.Header
-	Body    []byte
+	// FinalURL is supplied by the bridge from the HTTP response URL, never the request URL.
+	FinalURL string
+	Status   int
+	Headers  http.Header
+	Body     []byte
 }
 
 // StreamEvent represents a streaming response event from clients.
 type StreamEvent struct {
-	Type    string
-	Payload []byte
-	Status  int
-	Headers http.Header
-	Err     error
+	// FinalURL is supplied by the bridge from the HTTP response URL, never the request URL.
+	FinalURL string
+	Type     string
+	Payload  []byte
+	Status   int
+	Headers  http.Header
+	Err      error
 }
 
-// NonStream executes a non-streaming HTTP request using the websocket provider.
+// NonStream executes a non-streaming HTTP request using the WebSocket provider.
 func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPRequest) (*HTTPResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("wsrelay: request is nil")
@@ -65,6 +72,9 @@ func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPReque
 			resp := decodeResponse(msg.Payload)
 			if len(resp.Body) > maxNonStreamResponseBodyBytes {
 				return nil, nonStreamResponseTooLargeError()
+			}
+			if streamResp != nil && resp.FinalURL == "" {
+				resp.FinalURL = streamResp.FinalURL
 			}
 			if streamMode && streamBody.Len() > 0 && len(resp.Body) == 0 {
 				resp.Body = streamBody.Bytes()
@@ -169,6 +179,7 @@ func streamPendingEvents(ctx context.Context, pending *pendingRequest) <-chan St
 				if okSend := send(
 					StreamEvent{
 						Type: MessageTypeStreamStart, Status: resp.Status, Headers: resp.Headers,
+						FinalURL: resp.FinalURL,
 					},
 				); !okSend {
 					return
@@ -189,6 +200,7 @@ func streamPendingEvents(ctx context.Context, pending *pendingRequest) <-chan St
 				_ = send(
 					StreamEvent{
 						Type: MessageTypeHTTPResp, Status: resp.Status, Headers: resp.Headers, Payload: resp.Body,
+						FinalURL: resp.FinalURL,
 					},
 				)
 				return
@@ -220,6 +232,9 @@ func decodeResponse(payload map[string]any) *HTTPResponse {
 		return &HTTPResponse{Status: http.StatusBadGateway, Headers: make(http.Header)}
 	}
 	resp := &HTTPResponse{Status: http.StatusOK, Headers: make(http.Header)}
+	if endpoint, ok := payload["final_url"].(string); ok {
+		resp.FinalURL = util.SanitizeUpstreamURL(endpoint)
+	}
 	if status, ok := payload["status"].(float64); ok {
 		resp.Status = int(status)
 	}

@@ -559,20 +559,22 @@ func TestWriteRequestLogAtomicallyKeepsConcurrentCollisions(t *testing.T) {
 	errs := make(chan error, workers)
 	var pending sync.WaitGroup
 	for index := range workers {
-		pending.Add(1)
-		go func() {
-			defer pending.Done()
-			content := fmt.Sprintf("worker-%d", index)
-			published, actual, err := writeRequestLogAtomicallyWithResult(nil, path, func(writer io.Writer) error {
-				_, errWrite := io.WriteString(writer, content)
-				return errWrite
-			})
-			if err != nil || !published {
-				errs <- fmt.Errorf("publish %q: published=%t error=%v", content, published, err)
-				return
-			}
-			results <- actual
-		}()
+		pending.Go(
+			func() {
+				content := fmt.Sprintf("worker-%d", index)
+				published, actual, err := writeRequestLogAtomicallyWithResult(
+					nil, path, func(writer io.Writer) error {
+						_, errWrite := io.WriteString(writer, content)
+						return errWrite
+					},
+				)
+				if err != nil || !published {
+					errs <- fmt.Errorf("publish %q: published=%t error=%v", content, published, err)
+					return
+				}
+				results <- actual
+			},
+		)
 	}
 	pending.Wait()
 	close(results)
@@ -1439,7 +1441,10 @@ func TestStreamingLogWritersRejectMetadataAfterClose(t *testing.T) {
 					call func() error
 				}{
 					{name: "status", call: func() error { return test.writer.WriteStatus(200, nil) }},
-					{name: "API request", call: func() error { return test.writer.WriteAPIRequest([]byte("request")) }},
+					{
+						name: "API request",
+						call: func() error { return test.writer.WriteAPIRequest([]byte("request")) },
+					},
 					{
 						name: "API response",
 						call: func() error { return test.writer.WriteAPIResponse([]byte("response")) },
@@ -1565,10 +1570,20 @@ func TestFileBodySourceRedactsPreformattedBodiesAcrossParts(t *testing.T) {
 	}
 	defer func() { _ = source.Cleanup() }()
 
-	if errAppend := source.AppendPart([]byte("=== API REQUEST 1 ===\nBody:\n{\"api_key\":{\"nested\":\"sk-cross-part-request-secret\"},\"model\":\"gpt-5\"}")); errAppend != nil {
+	if errAppend := source.AppendPart(
+		[]byte(("=== API REQUEST 1 ===\nBody:\n{\"api_key\":{\"nested\":" +
+			"\"sk-cross-part-request-secret\"},\"model\":" +
+			"\"gpt-5\"}")),
+	); errAppend !=
+		nil {
 		t.Fatalf("AppendPart request: %v", errAppend)
 	}
-	if errAppend := source.AppendPart([]byte("=== API RESPONSE 1 ===\nBody:\n{\"refresh_token\":{\"nested\":\"sk-cross-part-response-secret\"},\"status\":\"ok\"}")); errAppend != nil {
+	if errAppend := source.AppendPart(
+		[]byte(("=== API RESPONSE 1 ===\nBody:\n{\"refresh_token\":{\"nested\":" +
+			"\"sk-cross-part-response-secret\"},\"status\":" +
+			"\"ok\"}")),
+	); errAppend !=
+		nil {
 		t.Fatalf("AppendPart response: %v", errAppend)
 	}
 

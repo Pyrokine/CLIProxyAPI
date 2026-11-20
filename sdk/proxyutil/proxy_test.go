@@ -18,6 +18,7 @@ import (
 func TestParse(t *testing.T) {
 	t.Parallel()
 
+	//goland:noinspection HttpUrlsUsage
 	tests := []struct {
 		name    string
 		input   string
@@ -127,7 +128,7 @@ func TestValidatePublicHTTPURL(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "public http", input: "http://8.8.8.8/v1"},
-		{name: "public https", input: "https://example.com/v1"},
+		{name: "public https", input: "https://8.8.8.8/v1"},
 		{name: "missing host", input: "https://", wantErr: true},
 		{name: "unsupported scheme", input: "file:///tmp/socket", wantErr: true},
 		{name: "loopback", input: "http://127.0.0.1:8080", wantErr: true},
@@ -171,6 +172,7 @@ func TestBuildHTTPTransportDirectBypassesProxy(t *testing.T) {
 func TestBuildHTTPTransportHTTPProxy(t *testing.T) {
 	t.Parallel()
 
+	//goland:noinspection HttpUrlsUsage
 	transport, mode, errBuild := BuildHTTPTransport("http://proxy.example.com:8080")
 	if errBuild != nil {
 		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
@@ -191,7 +193,9 @@ func TestBuildHTTPTransportHTTPProxy(t *testing.T) {
 	if errProxy != nil {
 		t.Fatalf("transport.Proxy returned error: %v", errProxy)
 	}
+	//goland:noinspection HttpUrlsUsage
 	if proxyURL == nil || proxyURL.String() != "http://proxy.example.com:8080" {
+		//goland:noinspection HttpUrlsUsage
 		t.Fatalf("proxy URL = %v, want http://proxy.example.com:8080", proxyURL)
 	}
 }
@@ -380,6 +384,7 @@ func TestBuildDialerHTTPConnectProxy(t *testing.T) {
 		serverDone <- nil
 	}()
 
+	//goland:noinspection HttpUrlsUsage
 	dialer, mode, errBuild := BuildDialer("http://user:pass@" + listener.Addr().String())
 	if errBuild != nil {
 		t.Fatalf("BuildDialer returned error: %v", errBuild)
@@ -555,6 +560,7 @@ func TestBuildDialerHTTPProxyCONNECTCancellation(t *testing.T) {
 		serverDone <- errRead
 	}()
 
+	//goland:noinspection HttpUrlsUsage
 	dialer, mode, errBuild := BuildDialer("http://" + listener.Addr().String())
 	if errBuild != nil || mode != ModeProxy {
 		t.Fatalf("BuildDialer mode=%d error=%v", mode, errBuild)

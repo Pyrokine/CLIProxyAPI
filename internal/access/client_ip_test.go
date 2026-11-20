@@ -46,7 +46,8 @@ func TestResolveClientAddressUsesRightmostUntrustedForwardedHop(t *testing.T) {
 	req.Header.Set("X-Real-IP", "198.51.100.11")
 
 	got := ResolveClientAddress(req, []string{"127.0.0.1/32", "10.0.0.0/8"})
-	if got.IP != "198.51.100.10" || got.Key != "198.51.100.10" || got.DirectLoopback || got.Source != ClientAddressSourceForwardedFor {
+	if got.IP != "198.51.100.10" || got.Key != "198.51.100.10" || got.DirectLoopback ||
+		got.Source != ClientAddressSourceForwardedFor {
 		t.Fatalf("ResolveClientAddress = %+v, want forwarded client", got)
 	}
 }
@@ -138,8 +139,10 @@ func TestResolveClientAddressNormalizesIPv4MappedPeer(t *testing.T) {
 func TestResolveClientAddressUsesIPv6ForwardedChain(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "[::1]:12345"
+	//goland:noinspection SpellCheckingInspection
 	req.Header.Set("X-Forwarded-For", "2001:db8::10, 2001:db8:ffff::1")
 
+	//goland:noinspection SpellCheckingInspection
 	got := ResolveClientAddress(req, []string{"::1/128", "2001:db8:ffff::/48"})
 	if got.IP != "2001:db8::10" || got.Key != "2001:db8::10" || got.DirectLoopback {
 		t.Fatalf("ResolveClientAddress = %+v, want forwarded IPv6 client", got)

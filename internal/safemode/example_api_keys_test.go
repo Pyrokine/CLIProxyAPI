@@ -28,6 +28,7 @@ func TestExampleAPIKeysDetectsOnlyTemplateValues(t *testing.T) {
 }
 
 func TestExampleAPIKeysIgnoresSimilarValues(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	keys := []string{"your-api-key", "change-me", "changeme", "your-api-key-4", "my-your-api-key-1"}
 	if got := ExampleAPIKeys(keys); len(got) != 0 {
 		t.Fatalf("ExampleAPIKeys() = %#v, want empty", got)

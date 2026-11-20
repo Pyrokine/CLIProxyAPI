@@ -21,6 +21,7 @@ type homeAppLogClient interface {
 }
 
 type homeAppLogPayload struct {
+	owner     homeAppLogClient
 	Line      string `json:"line"`
 	Level     string `json:"level,omitempty"`
 	Timestamp string `json:"timestamp,omitempty"`
@@ -31,11 +32,32 @@ var currentHomeAppLogClient = func() homeAppLogClient {
 	return home.Current()
 }
 
-var activeHomeAppLogForwarders = struct {
+type homeAppLogForwarderRegistry struct {
 	sync.RWMutex
 	items map[*HomeAppLogForwarder]struct{}
-}{items: make(map[*HomeAppLogForwarder]struct{})}
+}
 
+func (*homeAppLogForwarderRegistry) Levels() []log.Level {
+	return log.AllLevels
+}
+
+func (r *homeAppLogForwarderRegistry) Fire(entry *log.Entry) error {
+	r.RLock()
+	var forwarder *HomeAppLogForwarder
+	if len(r.items) == 1 {
+		for current := range r.items {
+			forwarder = current
+		}
+	}
+	r.RUnlock()
+	if forwarder == nil {
+		return nil
+	}
+	return forwarder.Fire(entry)
+}
+
+var activeHomeAppLogForwarders = homeAppLogForwarderRegistry{items: make(map[*HomeAppLogForwarder]struct{})}
+var homeAppLogHookOnce sync.Once
 var activeHomeAppLogScopes atomic.Int64
 
 func BeginHomeAppLogScope() func() {
@@ -79,7 +101,7 @@ func startHomeAppLogForwarder(queueSize int, client homeAppLogClient) *HomeAppLo
 	forwarder.wg.Add(1)
 	go forwarder.run()
 	registerHomeAppLogForwarder(forwarder)
-	log.AddHook(forwarder)
+	homeAppLogHookOnce.Do(func() { log.AddHook(&activeHomeAppLogForwarders) })
 	return forwarder
 }
 
@@ -190,6 +212,7 @@ func (f *HomeAppLogForwarder) Fire(entry *log.Entry) error {
 	}
 
 	payload := homeAppLogPayload{
+		owner:     client,
 		Line:      line,
 		Level:     entry.Level.String(),
 		Timestamp: entry.Time.Format(time.RFC3339Nano),
@@ -242,7 +265,7 @@ func (f *HomeAppLogForwarder) forward(payload homeAppLogPayload) {
 	if !f.enabled.Load() {
 		return
 	}
-	client := f.homeClient()
+	client := payload.owner
 	if client == nil || !client.HeartbeatOK() {
 		return
 	}

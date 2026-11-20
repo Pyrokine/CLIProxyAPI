@@ -94,24 +94,30 @@ func TestLockoutEscalatesAfterRepeatFailures(t *testing.T) {
 	}
 }
 
-func TestRecordSuccess_ClearsFailures(t *testing.T) {
+func TestRecordAccountSuccessPreservesIPFailures(t *testing.T) {
 	rl := NewAuthRateLimiter()
 	defer rl.Stop()
 
 	ip := "172.16.0.1"
-
-	// Record some failures (not enough to trigger lockout).
+	account := HashAccountKey("test-account")
+	other := HashAccountKey("other-account")
 	for range maxFailures - 1 {
 		rl.RecordFailure(ip)
+		rl.RecordAccountFailure(account)
+		rl.RecordAccountFailure(other)
 	}
-
-	// Record success should clear the entry.
-	rl.RecordSuccess(ip)
-
-	// Now even after recording one more failure, should not be limited.
+	rl.RecordAccountSuccess(account)
 	rl.RecordFailure(ip)
-	if rl.IsLimited(ip) {
-		t.Fatal("expected not limited after success cleared failures")
+	rl.RecordAccountFailure(account)
+	rl.RecordAccountFailure(other)
+	if !rl.IsLimited(ip) {
+		t.Fatal("account success cleared the IP failure history")
+	}
+	if rl.IsAccountLimited(account) {
+		t.Fatal("successful account retained its old failure history")
+	}
+	if !rl.IsAccountLimited(other) {
+		t.Fatal("account success cleared another account's failure history")
 	}
 }
 
@@ -205,6 +211,7 @@ func TestRateLimitCapacityKeepsLockoutsAndNewFailures(t *testing.T) {
 	}
 	rl.ipEntries.mu.Unlock()
 
+	//goland:noinspection SpellCheckingInspection
 	newKey := "2001:db8::ffff"
 	rl.RecordFailure(newKey)
 	rl.ipEntries.mu.Lock()
@@ -246,6 +253,7 @@ func TestRateLimitCapacityFailsClosedWhenAllEntriesAreLocked(t *testing.T) {
 	}
 	rl.ipEntries.mu.Unlock()
 
+	//goland:noinspection SpellCheckingInspection
 	if !rl.IsLimited("2001:db8::ffff") {
 		t.Fatal("unknown client was allowed while capacity contained only active lockouts")
 	}

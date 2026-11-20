@@ -6,20 +6,22 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
 type clientRequestMetadataKey struct{}
 
 // ClientRequestMetadata stores immutable downstream request metadata for asynchronous consumers.
 type ClientRequestMetadata struct {
-	ClientIP        string
-	XForwardedFor   string
-	UserAgent       string
-	SessionID       string
-	ParentSessionID string
-	NodeKind        string
-	IsFork          bool
-	IsCompaction    bool
+	ClientIP         string
+	ResolvedClientIP string
+	XForwardedFor    string
+	UserAgent        string
+	SessionID        string
+	ParentSessionID  string
+	NodeKind         string
+	IsFork           bool
+	IsCompaction     bool
 }
 
 // ExtractClientRequestMetadata captures the bounded request metadata allowed in usage records.
@@ -32,9 +34,10 @@ func ExtractClientRequestMetadata(request *http.Request) ClientRequestMetadata {
 		client = access.ResolveClientAddress(request, nil)
 	}
 	return ClientRequestMetadata{
-		ClientIP:      client.IP,
-		XForwardedFor: strings.TrimSpace(strings.Join(request.Header.Values("X-Forwarded-For"), ", ")),
-		UserAgent:     strings.TrimSpace(request.UserAgent()),
+		ClientIP:         client.IP,
+		ResolvedClientIP: client.IP,
+		XForwardedFor:    strings.TrimSpace(strings.Join(request.Header.Values("X-Forwarded-For"), ", ")),
+		UserAgent:        strings.TrimSpace(request.UserAgent()),
 	}
 }
 
@@ -42,6 +45,9 @@ func ExtractClientRequestMetadata(request *http.Request) ClientRequestMetadata {
 func WithClientRequestMetadata(ctx context.Context, metadata ClientRequestMetadata) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if metadata.SessionID != "" || GetClientRequestMetadata(ctx).SessionID != "" {
+		ctx = util.WithInferredSessionID(ctx, metadata.SessionID)
 	}
 	return context.WithValue(ctx, clientRequestMetadataKey{}, metadata)
 }

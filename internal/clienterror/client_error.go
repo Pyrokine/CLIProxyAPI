@@ -183,7 +183,13 @@ func hasAuthenticationErrorBody(err error) bool {
 		return false
 	}
 	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
-		if errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); errType == "authentication_error" {
+		if errType := strings.ToLower(
+			strings.TrimSpace(
+				gjson.Get(
+					body, path,
+				).String(),
+			),
+		); errType == "authentication_error" {
 			return true
 		}
 	}

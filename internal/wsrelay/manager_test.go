@@ -25,6 +25,7 @@ func TestSessionLimit(t *testing.T) {
 	mgr.sessMutex.Unlock()
 
 	rr := httptest.NewRecorder()
+	//goland:noinspection HttpUrlsUsage
 	req := httptest.NewRequest(http.MethodGet, "http://example.com"+mgr.Path(), nil)
 	mgr.handleWebsocket(rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
@@ -94,6 +95,7 @@ func TestProviderFactoryErrorBeforeUpgrade(t *testing.T) {
 	)
 
 	rr := httptest.NewRecorder()
+	//goland:noinspection HttpUrlsUsage
 	req := httptest.NewRequest(http.MethodGet, "http://example.com"+mgr.Path(), nil)
 	mgr.handleWebsocket(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -104,6 +106,7 @@ func TestProviderFactoryErrorBeforeUpgrade(t *testing.T) {
 func TestCheckOrigin(t *testing.T) {
 	mgr := NewManager(Options{})
 
+	//goland:noinspection HttpUrlsUsage
 	tests := []struct {
 		name    string
 		origin  string

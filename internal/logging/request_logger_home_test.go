@@ -98,7 +98,11 @@ func TestFileRequestLogger_HomeEnabled_ForwardsWhenRequestLogEnabled(t *testing.
 		},
 		[]byte(`{"ok":true,"refresh_token":"response-body-secret"}`),
 		nil,
-		[]byte("Authorization: Bearer upstream-header-secret\nBody:\n{\"access_token\":\"upstream-body-secret\",\"max_tokens\":128}"),
+		[]byte(
+			("Authorization: Bearer upstream-header-secret\nBody:" +
+				"\n{\"access_token\":\"upstream-body-secret\",\"max_tokens\":" +
+				"128}"),
+		),
 		[]byte(`{"access_token":"upstream-response-secret"}`),
 		nil,
 		nil,
@@ -201,7 +205,11 @@ func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequest(t *testing.T) {
 	); errStatus != nil {
 		t.Fatalf("WriteStatus error: %v", errStatus)
 	}
-	if errAPI := writer.WriteAPIRequest([]byte("Authorization: Bearer stream-upstream-secret\nBody:\n{\"refresh_token\":\"stream-upstream-body-secret\"}")); errAPI != nil {
+	if errAPI := writer.WriteAPIRequest(
+		[]byte(("Authorization: Bearer stream-upstream-secret\nBody:" +
+			"\n{\"refresh_token\":\"stream-upstream-body-secret\"}")),
+	); errAPI !=
+		nil {
 		t.Fatalf("WriteAPIRequest error: %v", errAPI)
 	}
 	if errClose := writer.Close(); errClose != nil {
@@ -477,7 +485,11 @@ func TestFileStreamingLogWriterConcurrentCloseWritesAPIWebsocketTimelineSource(t
 	if errSource != nil {
 		t.Fatalf("NewFileBodySource error: %v", errSource)
 	}
-	if errAppend := source.AppendBytes([]byte(`{"type":"response.done","api_key":"source-secret","visible":"yes"}`)); errAppend != nil {
+	if errAppend := source.AppendBytes(
+		[]byte((`{"type":"response.done","api_key":"source-secret","visible":` +
+			`"yes"}`)),
+	); errAppend !=
+		nil {
 		t.Fatalf("AppendBytes error: %v", errAppend)
 	}
 	sourcePaths := source.Paths()
@@ -583,7 +595,12 @@ func TestHomeStreamingLogWriterConcurrentCloseWritesAPIWebsocketTimelineSource(t
 	if errSource != nil {
 		t.Fatalf("NewFileBodySource error: %v", errSource)
 	}
-	if errAppend := source.AppendBytes([]byte(`{"type":"response.done","api_key":"home-source-secret","visible":"yes"}`)); errAppend != nil {
+	if errAppend := source.AppendBytes(
+		[]byte((`{"type":"response.done","api_key":"home-source-secret",` +
+			`"visible":` +
+			`"yes"}`)),
+	); errAppend !=
+		nil {
 		t.Fatalf("AppendBytes error: %v", errAppend)
 	}
 	sourcePaths := source.Paths()
@@ -671,7 +688,8 @@ func TestFileRequestLogger_AllSourcesWritesAndCleansFileBackedSections(t *testin
 	if errAppend := apiResponseSource.AppendBytes([]byte("=== API RESPONSE 1 ===\nBody:\n")); errAppend != nil {
 		t.Fatalf("append api response header: %v", errAppend)
 	}
-	if errAppend := apiResponseSource.AppendBytes([]byte(`{"refresh_token":"source-response-secret"}`)); errAppend != nil {
+	if errAppend := apiResponseSource.AppendBytes([]byte(`{"refresh_token":"source-response-secret"}`)); errAppend !=
+		nil {
 		t.Fatalf("append api response body: %v", errAppend)
 	}
 

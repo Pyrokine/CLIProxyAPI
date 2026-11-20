@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -27,7 +28,7 @@ var (
 
 // LogFormatter defines a custom log format for logrus.
 // This formatter adds timestamp, level, request ID, and source location to each log entry.
-// Format: [2025-12-23 20:14:04] [debug] [manager.go:524] | a1b2c3d4 | Use API key sk-9...0RHO for model gpt-5.2
+// Format: [2026-11-06T01:02:03Z] [request-id] [debug] [manager.go:524] message provider=codex
 type LogFormatter struct{}
 
 // logFieldOrder defines the display order for common log fields.
@@ -37,6 +38,9 @@ var logFieldOrder = []string{
 	"auth_index", "auth_id", "credential", "connection", "proxy_scheme", "remote_transport",
 	"media_session_id", "call_id", "peer", "state", "reason",
 	"plugin_id", "plugin_name", "active_version", "retired_version", "path", "active_path", "retired_path",
+	"component", "target_provider", "action", "actions", "contents_path", "content_index", "part_index",
+	"block_kind", "detected_provider", "has_signature", "signature_length", "sanitized_count",
+	"dropped_signatures", "replaced_signatures", "positions", "omitted_positions",
 }
 
 var quotedLogFields = map[string]struct{}{
@@ -54,13 +58,14 @@ var quotedLogFields = map[string]struct{}{
 }
 
 func formatLogFieldValue(key string, value any) string {
-	if stringValue, ok := value.(string); ok {
-		needsEscape := strings.IndexFunc(stringValue, func(r rune) bool { return !strconv.IsPrint(r) }) >= 0
-		if _, quoted := quotedLogFields[key]; quoted || needsEscape {
-			return strconv.Quote(stringValue)
-		}
+	text := fmt.Sprint(value)
+	_, stringValue := value.(string)
+	_, quoted := quotedLogFields[key]
+	needsEscape := strings.IndexFunc(text, func(r rune) bool { return !strconv.IsPrint(r) }) >= 0
+	if stringValue && quoted || needsEscape {
+		return strconv.Quote(text)
 	}
-	return fmt.Sprint(value)
+	return text
 }
 
 // Format renders a single log entry with custom formatting.
@@ -72,7 +77,7 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 		buffer = &bytes.Buffer{}
 	}
 
-	timestamp := entry.Time.Format("2006-01-02 15:04:05")
+	timestamp := entry.Time.UTC().Format(time.RFC3339Nano)
 	message := strings.TrimRight(entry.Message, "\r\n")
 
 	reqID := "--------"
@@ -142,7 +147,8 @@ func SetupBaseLogger() {
 	)
 }
 
-// isDirWritable checks if the specified directory exists and is writable by attempting to create and remove a test file.
+// isDirWritable checks if the specified directory exists and is writable by attempting to create and remove a test
+// file.
 func isDirWritable(dir string) bool {
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {

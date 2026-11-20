@@ -14,7 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Manager exposes a websocket endpoint that proxies Gemini requests to
+// Manager exposes a WebSocket endpoint that proxies Gemini requests to
 // connected clients.
 type Manager struct {
 	path      string
@@ -71,7 +71,8 @@ func NewManager(opts Options) *Manager {
 					return false
 				}
 				host := u.Hostname()
-				return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == r.Host || host+":"+u.Port() == r.Host
+				return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == r.Host ||
+					host+":"+u.Port() == r.Host
 			},
 		},
 		providerFactory: opts.ProviderFactory,

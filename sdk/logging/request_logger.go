@@ -13,6 +13,8 @@ import (
 const defaultErrorLogsMaxFiles = 10
 
 // PendingCleanupRetrier is an optional request logger capability for retrying deferred cleanup.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PendingCleanupRetrier interface {
 	RetryPendingCleanup() error
 }
@@ -63,7 +65,8 @@ type fileRequestLoggerSnapshot struct {
 }
 
 // NewFileRequestLogger creates a new file-based request logger with default error log retention (10 files).
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func NewFileRequestLogger(enabled bool, logsDir string, configDir string) *FileRequestLogger {
 	return &FileRequestLogger{
 		inner: internallogging.NewFileRequestLogger(enabled, logsDir, configDir, defaultErrorLogsMaxFiles),
@@ -103,6 +106,7 @@ func (l *FileRequestLogger) LogRequest(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *FileRequestLogger) LogRequestWithOptions(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -125,6 +129,7 @@ func (l *FileRequestLogger) LogRequestWithOptions(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *FileRequestLogger) LogRequestWithOptionsAndTimeline(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -148,6 +153,7 @@ func (l *FileRequestLogger) LogRequestWithOptionsAndTimeline(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *FileRequestLogger) LogRequestWithOptionsAndAllSources(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -213,6 +219,7 @@ func (l *FileRequestLogger) IsEnabled() bool {
 	return l != nil && l.inner != nil && l.inner.IsEnabled()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *FileRequestLogger) Snapshot() RequestLogger {
 	if l == nil || l.inner == nil {
 		return nil
@@ -255,6 +262,7 @@ func (s *fileRequestLoggerSnapshot) LogRequest(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *fileRequestLoggerSnapshot) LogRequestWithOptionsAndTimeline(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -292,6 +300,7 @@ func (s *fileRequestLoggerSnapshot) LogRequestWithOptionsAndTimeline(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *fileRequestLoggerSnapshot) LogRequestWithOptionsAndAllSources(
 	url, method string,
 	requestHeaders map[string][]string,
@@ -363,18 +372,21 @@ func (s *fileRequestLoggerSnapshot) LogStreamingRequest(
 	return s.inner.LogStreamingRequest(url, method, headers, body, requestID)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *FileRequestLogger) SetHomeEnabled(enabled bool) {
 	if l != nil && l.inner != nil {
 		l.inner.SetHomeEnabled(enabled)
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *FileRequestLogger) SetEnabled(enabled bool) {
 	if l != nil && l.inner != nil {
 		l.inner.SetEnabled(enabled)
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
 	if l != nil && l.inner != nil {
 		l.inner.SetErrorLogsMaxFiles(maxFiles)

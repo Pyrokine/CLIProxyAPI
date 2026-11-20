@@ -39,7 +39,7 @@ func TestHomeAppLogForwarderOldOwnerCannotDisableReplacementRace(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		forwarder.forward(homeAppLogPayload{Line: "old lifetime"})
+		forwarder.forward(homeAppLogPayload{owner: oldClient, Line: "old lifetime"})
 	}()
 	<-oldClient.entered
 	forwarder.bind(newClient)

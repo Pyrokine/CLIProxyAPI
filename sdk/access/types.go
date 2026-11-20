@@ -1,6 +1,8 @@
 package access
 
 // Config groups request authentication providers.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Config struct {
 	// Providers lists configured authentication providers.
 	Providers []ProviderEntry `yaml:"providers,omitempty" json:"providers,omitempty"`
@@ -34,7 +36,8 @@ const (
 
 // MakeInlineAPIKeyProvider constructs an inline API key provider configuration.
 // It returns nil when no keys are supplied.
-// noinspection GoUnusedExportedFunction
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func MakeInlineAPIKeyProvider(keys []string) *ProviderEntry {
 	if len(keys) == 0 {
 		return nil

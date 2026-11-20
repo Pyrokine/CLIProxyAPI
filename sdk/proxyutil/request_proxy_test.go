@@ -3,6 +3,7 @@ package proxyutil
 import "testing"
 
 func TestValidRequestProxy(t *testing.T) {
+	//goland:noinspection HttpUrlsUsage
 	tests := []struct {
 		proxy string
 		valid bool
@@ -20,10 +21,12 @@ func TestValidRequestProxy(t *testing.T) {
 		{"http://proxy.example:invalid", false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.proxy, func(t *testing.T) {
-			if got := ValidRequestProxy(tt.proxy); got != tt.valid {
-				t.Fatalf("ValidRequestProxy(%q) = %t, want %t", tt.proxy, got, tt.valid)
-			}
-		})
+		t.Run(
+			tt.proxy, func(t *testing.T) {
+				if got := ValidRequestProxy(tt.proxy); got != tt.valid {
+					t.Fatalf("ValidRequestProxy(%q) = %t, want %t", tt.proxy, got, tt.valid)
+				}
+			},
+		)
 	}
 }

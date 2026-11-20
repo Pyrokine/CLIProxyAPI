@@ -15,25 +15,38 @@ import (
 func newSessionTestPair(t *testing.T) (*session, *websocket.Conn) {
 	t.Helper()
 	sessionCh := make(chan *session, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, errUpgrade := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
-		if errUpgrade != nil {
-			t.Errorf("upgrade websocket: %v", errUpgrade)
-			return
-		}
-		sessionCh <- newSession(conn, nil, "test")
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				conn,
+					errUpgrade := (&websocket.Upgrader{
+					CheckOrigin: func(*http.Request) bool { return true },
+				}).Upgrade(
+					w,
+					r,
+					nil,
+				)
+				if errUpgrade != nil {
+					t.Errorf("upgrade websocket: %v", errUpgrade)
+					return
+				}
+				sessionCh <- newSession(conn, nil, "test")
+			},
+		),
+	)
 	client, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	if errDial != nil {
 		server.Close()
 		t.Fatalf("dial websocket: %v", errDial)
 	}
 	s := <-sessionCh
-	t.Cleanup(func() {
-		s.cleanup(errClosed)
-		_ = client.Close()
-		server.Close()
-	})
+	t.Cleanup(
+		func() {
+			s.cleanup(errClosed)
+			_ = client.Close()
+			server.Close()
+		},
+	)
 	return s, client
 }
 
@@ -136,10 +149,12 @@ func TestSessionDispatchDeliversTerminalAfterRegularBufferIsFull(t *testing.T) {
 	s := &session{closed: make(chan struct{})}
 	req := newPendingRequest(context.Background(), s.closed)
 	stopCalled := false
-	req.setStopCancel(func() bool {
-		stopCalled = true
-		return true
-	})
+	req.setStopCancel(
+		func() bool {
+			stopCalled = true
+			return true
+		},
+	)
 	s.pending.Store("request", req)
 	for range cap(req.ch) {
 		req.ch <- message{ID: "request", Type: MessageTypeStreamChunk}
@@ -196,10 +211,12 @@ func TestSessionCleanupUnblocksPendingReceive(t *testing.T) {
 	s := &session{closed: make(chan struct{})}
 	req := newPendingRequest(context.Background(), s.closed)
 	stopCalled := false
-	req.setStopCancel(func() bool {
-		stopCalled = true
-		return true
-	})
+	req.setStopCancel(
+		func() bool {
+			stopCalled = true
+			return true
+		},
+	)
 	s.pending.Store("request", req)
 
 	s.cleanup(errors.New("test cleanup"))

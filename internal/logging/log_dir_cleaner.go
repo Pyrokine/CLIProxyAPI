@@ -2,6 +2,7 @@ package logging
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,10 +23,13 @@ func configureLogDirCleanerLocked(logDir string, maxTotalSizeMB int, protectedPa
 		return
 	}
 
-	maxBytes := int64(maxTotalSizeMB) * 1024 * 1024
-	if maxBytes <= 0 {
-		return
+	const maxSizeMB = math.MaxInt64 / (1024 * 1024)
+	sizeMB := int64(maxTotalSizeMB)
+	if sizeMB > maxSizeMB {
+		log.Warnf("logging: log directory capacity exceeds the supported range; using %d MB", maxSizeMB)
+		sizeMB = maxSizeMB
 	}
+	maxBytes := sizeMB * 1024 * 1024
 
 	dir := strings.TrimSpace(logDir)
 	if dir == "" {

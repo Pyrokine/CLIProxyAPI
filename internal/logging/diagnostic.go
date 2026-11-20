@@ -18,44 +18,52 @@ import (
 const diagnosticLogRuneLimit = 300
 
 var (
-	diagnosticExpiredPattern       = regexp.MustCompile(`(?i)access token expired`)
-	diagnosticStatusPattern        = regexp.MustCompile(`(?i)\bstatus(?:\s+code)?\s*[:=]?\s*([1-5][0-9]{2})\b`)
-	diagnosticURLPattern           = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
-	diagnosticAssignmentPattern    = regexp.MustCompile(`(?i)["']?([a-z][a-z0-9_.%\[\]-]*(?:\s+(?:token|key|secret))?)["']?\s*[:=]\s*`)
-	diagnosticValuePattern         = regexp.MustCompile(`^(?:"(?:\\.|[^"\\])*(?:"|\\?$)|'(?:\\.|[^'\\])*(?:'|\\?$)|(?i:bearer|basic)\s+[^\s,;&}\]]+|[^\s,;&}\]]+)`)
+	diagnosticExpiredPattern    = regexp.MustCompile(`(?i)access token expired`)
+	diagnosticStatusPattern     = regexp.MustCompile(`(?i)\bstatus(?:\s+code)?\s*[:=]?\s*([1-5][0-9]{2})\b`)
+	diagnosticURLPattern        = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
+	diagnosticAssignmentPattern = regexp.MustCompile(
+		`(?i)["']?([a-z][a-z0-9_.%\[\]-]*(?:\s+(?:token|key|secret))?)["']?\s*[:=]\s*`,
+	)
+	diagnosticValuePattern = regexp.MustCompile(
+		`^(?:"(?:\\.|[^"\\])*(?:"|\\?$)|'(?:\\.|[^'\\])*(?:'|\\?$)|(?i:bearer|basic)\s+[^\s,;&}\]]+|[^\s,;&}\]]+)`,
+	)
 	diagnosticAuthorizationPattern = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[^\s,;"'<>]+`)
 )
 
 // SafeDiagnosticForLog 返回有界、单行的诊断摘要，隐藏凭证值并保留 token 过期信号
 func SafeDiagnosticForLog(message string) string {
 	excerpt, truncated := diagnosticPrefix(message, 2*diagnosticLogRuneLimit)
-	excerpt = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) {
-			return ' '
-		}
-		return r
-	}, excerpt)
+	excerpt = strings.Map(
+		func(r rune) rune {
+			if unicode.IsControl(r) || unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) {
+				return ' '
+			}
+			return r
+		}, excerpt,
+	)
 	excerpt = strings.Join(strings.Fields(excerpt), " ")
-	excerpt = diagnosticURLPattern.ReplaceAllStringFunc(excerpt, func(raw string) string {
-		// 被截断的 URL 无法可靠区分主机名与未结束的 userinfo
-		if truncated && strings.HasSuffix(excerpt, raw) {
-			return "[REDACTED URL]"
-		}
-		parsed, err := url.Parse(raw)
-		if err != nil {
-			return "[REDACTED URL]"
-		}
-		if parsed.User != nil {
-			parsed.User = url.User("[REDACTED]")
-		}
-		if parsed.RawQuery != "" {
-			parsed.RawQuery = "[REDACTED]"
-		}
-		if parsed.Fragment != "" {
-			parsed.Fragment = "[REDACTED]"
-		}
-		return parsed.String()
-	})
+	excerpt = diagnosticURLPattern.ReplaceAllStringFunc(
+		excerpt, func(raw string) string {
+			// 被截断的 URL 无法可靠区分主机名与未结束的 userinfo
+			if truncated && strings.HasSuffix(excerpt, raw) {
+				return "[REDACTED URL]"
+			}
+			parsed, err := url.Parse(raw)
+			if err != nil {
+				return "[REDACTED URL]"
+			}
+			if parsed.User != nil {
+				parsed.User = url.User("[REDACTED]")
+			}
+			if parsed.RawQuery != "" {
+				parsed.RawQuery = "[REDACTED]"
+			}
+			if parsed.Fragment != "" {
+				parsed.Fragment = "[REDACTED]"
+			}
+			return parsed.String()
+		},
+	)
 
 	var masked strings.Builder
 	cursor := 0
@@ -131,7 +139,9 @@ func SafeErrorDiagnostic(err error) string {
 	if strings.TrimSpace(raw) == "eof" {
 		add("EOF")
 	}
-	if strings.Contains(raw, "socks") && (strings.Contains(raw, "authentication failed") || strings.Contains(raw, "authentication required")) {
+	if strings.Contains(raw, "socks") && (strings.Contains(raw, "authentication failed") || strings.Contains(
+		raw, "authentication required",
+	)) {
 		add("proxy_authentication_failed")
 	}
 	for _, signal := range []struct {

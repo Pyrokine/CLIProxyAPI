@@ -1,6 +1,8 @@
 package logging
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -95,21 +97,87 @@ func TestLogFormatterOmitsGenericPathFields(t *testing.T) {
 }
 
 func TestLogFormatterEscapesPluginFieldControls(t *testing.T) {
-	for _, field := range []string{"plugin_id", "plugin_name", "version", "active_version", "retired_version", "path", "active_path", "retired_path"} {
-		t.Run(field, func(t *testing.T) {
-			value := "plugin\nsecondary\r\t\x1b\x00" + string([]rune{0x2028, 0x202e})
-			entry := log.NewEntry(log.New())
-			entry.Data["plugin_id"] = "sample-provider"
-			entry.Data[field] = value
-			formatted, err := (&LogFormatter{}).Format(entry)
-			if err != nil {
-				t.Fatal(err)
-			}
-			line := string(formatted)
-			if strings.Count(line, "\n") != 1 || !strings.Contains(line, field+"="+strconv.Quote(value)) {
-				t.Fatalf("plugin field contains unescaped controls: %q", line)
-			}
-		})
+	for _, field := range []string{
+		"plugin_id", "plugin_name", "version", "active_version", "retired_version", "path", "active_path",
+		"retired_path",
+	} {
+		t.Run(
+			field, func(t *testing.T) {
+				value := "plugin\nsecondary\r\t\x1b\x00" + string([]rune{0x2028, 0x202e})
+				entry := log.NewEntry(log.New())
+				entry.Data["plugin_id"] = "sample-provider"
+				entry.Data[field] = value
+				formatted, err := (&LogFormatter{}).Format(entry)
+				if err != nil {
+					t.Fatal(err)
+				}
+				line := string(formatted)
+				if strings.Count(line, "\n") != 1 || !strings.Contains(line, field+"="+strconv.Quote(value)) {
+					t.Fatalf("plugin field contains unescaped controls: %q", line)
+				}
+			},
+		)
+	}
+}
+
+func TestLogFormatterUsesExplicitUTCForLocalTimes(t *testing.T) {
+	entry := log.NewEntry(log.New())
+	entry.Time = time.Date(2026, 11, 6, 8, 0, 0, 123456789, time.FixedZone("fixture-local", 8*60*60))
+	entry.Message = "fixture log"
+	formatted, err := (&LogFormatter{}).Format(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "[2026-11-06T00:00:00.123456789Z]"
+	if !strings.HasPrefix(string(formatted), prefix) {
+		t.Fatalf("local timestamp was not converted to explicit UTC: %s", formatted)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, string(formatted[1:len(prefix)-1]))
+	if err != nil || !parsed.Equal(entry.Time) {
+		t.Fatalf("formatted timestamp changed the instant: parsed=%v err=%v", parsed, err)
+	}
+}
+
+func TestLogFormatterPrintsSignatureDiagnosticsWithoutPayload(t *testing.T) {
+	entry := log.NewEntry(log.New())
+	entry.Data = log.Fields{
+		"component": "signature_sanitizer", "target_provider": "gemini",
+		"actions": "drop_signature=2", "contents_path": "contents",
+		"sanitized_count": 2, "dropped_signatures": 2, "replaced_signatures": 0,
+		"positions": "contents[0].parts[1],contents[1].parts[0]", "omitted_positions": 0,
+		"signature": "fixture-private-signature", "payload": "fixture-private-payload",
+	}
+	formatted, err := (&LogFormatter{}).Format(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(formatted)
+	for _, key := range []string{
+		"component", "target_provider", "actions", "contents_path", "sanitized_count",
+		"dropped_signatures", "replaced_signatures", "positions", "omitted_positions",
+	} {
+		if !strings.Contains(text, key+"="+fmt.Sprint(entry.Data[key])) {
+			t.Errorf("signature diagnostics missing %s: %s", key, text)
+		}
+	}
+	if strings.Contains(text, "fixture-private-") {
+		t.Fatalf("signature payload was exposed: %s", text)
+	}
+}
+
+func TestLogFormatterEscapesControlsInTypedFields(t *testing.T) {
+	for _, value := range []any{errors.New("fixture\nforged\r\x1b"), []string{"contents[0]\nforged"}} {
+		entry := log.NewEntry(log.New())
+		entry.Data["error"] = value
+		formatted, err := (&LogFormatter{}).Format(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(formatted)
+		if strings.Count(text, "\n") != 1 || strings.ContainsAny(text, "\r\x1b") ||
+			!strings.Contains(text, "error="+strconv.Quote(fmt.Sprint(value))) {
+			t.Fatalf("typed field contains unescaped controls: %q", text)
+		}
 	}
 }
 

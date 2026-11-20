@@ -14,6 +14,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 func (h *Handler) resolveRequestLogByID(c *gin.Context, dir, requestID string) {
@@ -271,11 +272,25 @@ func findLegacyRequestLogFiles(dir, requestID string) ([]string, error) {
 		return nil, errRead
 	}
 	suffix := "-" + requestID + ".log"
+	shortSuffix := ""
+	if parsed, err := uuid.Parse(requestID); err == nil {
+		uuidString := parsed.String()
+		shortSuffix = "-" + uuidString[len(uuidString)-8:] + ".log"
+	}
 	matches := make([]string, 0, 1)
+	shortMatches := make([]string, 0, 1)
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), suffix) {
-			matches = append(matches, entry.Name())
+		if entry.IsDir() {
+			continue
 		}
+		if strings.HasSuffix(entry.Name(), suffix) {
+			matches = append(matches, entry.Name())
+		} else if shortSuffix != "" && strings.HasSuffix(entry.Name(), shortSuffix) {
+			shortMatches = append(shortMatches, entry.Name())
+		}
+	}
+	if len(matches) == 0 {
+		matches = shortMatches
 	}
 	sort.Strings(matches)
 	return matches, nil

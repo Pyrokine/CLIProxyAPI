@@ -36,9 +36,18 @@ func TestOrderedRequestConnReordersKeepAliveRequestsWithoutChangingBodies(t *tes
 		},
 	)
 
-	firstInput := "POST /v1/messages?beta=true HTTP/1.1\r\nHost: api.anthropic.com\r\nUser-Agent: claude-cli/2.1.220 (external, cli)\r\nContent-Length: 7\r\nAccept: application/json\r\nX-Unknown: keep\r\nAuthorization: Bearer placeholder\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nAccept-Encoding: gzip, deflate, br, zstd\r\n\r\n{\"a\":1}"
-	secondInput := "GET /api/oauth/profile HTTP/1.1\r\nConnection: close\r\nHost: api.anthropic.com\r\nAccept: application/json\r\n\r\n"
-	want := "POST /v1/messages?beta=true HTTP/1.1\r\nAccept: application/json\r\nAuthorization: Bearer placeholder\r\nContent-Type: application/json\r\nUser-Agent: claude-cli/2.1.220 (external, cli)\r\nConnection: keep-alive\r\nHost: api.anthropic.com\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: 7\r\nX-Unknown: keep\r\n\r\n{\"a\":1}GET /api/oauth/profile HTTP/1.1\r\nAccept: application/json\r\nHost: api.anthropic.com\r\nConnection: close\r\n\r\n"
+	firstInput := "POST /v1/messages?beta=true HTTP/1.1\r\nHost: api.anthropic.com\r\nUser-Agent: claude-cli/" +
+		"2.1.220 (external, cli)\r\nContent-Length: 7\r\nAccept: application/json\r\nX-Unknown: keep\r\n" +
+		"Authorization: Bearer placeholder\r\nContent-Type: application/json\r\nConnection: keep-alive\r\n" +
+		"Accept-Encoding: gzip, deflate, br, zstd\r\n\r\n{\"a\":1}"
+	secondInput := "GET /api/oauth/profile HTTP/1.1\r\nConnection: close\r\nHost: " +
+		"api.anthropic.com\r\nAccept: application/" +
+		"json\r\n\r\n"
+	want := "POST /v1/messages?beta=true HTTP/1.1\r\nAccept: application/json\r\nAuthorization: Bearer " +
+		"placeholder\r\nContent-Type: application/json\r\nUser-Agent: claude-cli/2.1.220 (external, cli)\r\n" +
+		"Connection: keep-alive\r\nHost: api.anthropic.com\r\nAccept-Encoding: gzip, deflate, br, zstd\r\n" +
+		"Content-Length: 7\r\nX-Unknown: keep\r\n\r\n{\"a\":1}GET /api/oauth/profile HTTP/1.1\r\nAccept: " +
+		"application/json\r\nHost: api.anthropic.com\r\nConnection: close\r\n\r\n"
 
 	readDone := make(chan []byte, 1)
 	go func() {
@@ -82,9 +91,11 @@ func TestOrderedRequestConnReordersKeepAliveRequestsWithoutChangingBodies(t *tes
 
 func TestOrderedRequestConnRewritesExactHeaderCasing(t *testing.T) {
 	input := []byte("GET / HTTP/1.1\r\nHost: example.test\r\nX-Custom-B: b\r\nX-Custom-A: a\r\n\r\n")
-	ordered, _, _ := orderRequestHeader(input, func(string, string) []string {
-		return []string{"x-custom-b", "X-CUSTOM-A", "host"}
-	})
+	ordered, _, _ := orderRequestHeader(
+		input, func(string, string) []string {
+			return []string{"x-custom-b", "X-CUSTOM-A", "host"}
+		},
+	)
 	want := "GET / HTTP/1.1\r\nx-custom-b: b\r\nX-CUSTOM-A: a\r\nhost: example.test\r\n\r\n"
 	if string(ordered) != want {
 		t.Fatalf("ordered header = %q, want %q", ordered, want)
@@ -113,12 +124,14 @@ func TestOrderedRequestConnBypassesNonHTTPHandshakeBytes(t *testing.T) {
 
 func TestOrderedRequestConnSupportsSplitLowercaseCustomMethod(t *testing.T) {
 	underlying := &partialErrorConn{}
-	conn := NewOrderedRequestConn(underlying, func(method, target string) []string {
-		if method != "propfind-custom-method" || target != "/resource" {
-			t.Fatalf("method and target = %q %q", method, target)
-		}
-		return []string{"x-custom", "host"}
-	})
+	conn := NewOrderedRequestConn(
+		underlying, func(method, target string) []string {
+			if method != "propfind-custom-method" || target != "/resource" {
+				t.Fatalf("method and target = %q %q", method, target)
+			}
+			return []string{"x-custom", "host"}
+		},
+	)
 	parts := [][]byte{
 		[]byte("prop"),
 		[]byte("find-custom-method /resource HTTP/1.1\r\nHost: example.test\r\nX-Custom: value\r\n\r\n"),
@@ -145,11 +158,17 @@ func TestOrderedRequestConnPreservesChunkedBodyAndReordersNextRequest(t *testing
 			_ = server.Close()
 		},
 	)
-	conn := NewOrderedRequestConn(client, func(_, _ string) []string { return []string{"Host", "Transfer-Encoding"} })
-	first := "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\nHost: example.com\r\n\r\n4\r\ntest\r\n0\r\nX-Trailer: done\r\n\r\n"
+	conn := NewOrderedRequestConn(
+		client,
+		func(_, _ string) []string { return []string{"Host", "Transfer-Encoding"} },
+	)
+	first := "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\nHost: example.c" +
+		"om\r\n\r\n4\r\ntest\r\n0\r\nX-Trailer: done\r\n\r\n"
 	second := "GET /next HTTP/1.1\r\nTransfer-Encoding: identity\r\nHost: example.com\r\n\r\n"
 	input := []byte(first + second)
-	want := []byte("POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\nX-Trailer: done\r\n\r\nGET /next HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: identity\r\n\r\n")
+	want := []byte("POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunk" +
+		"ed\r\n\r\n4\r\ntest\r\n0\r\nX-Trailer: done\r\n\r\nGET /next HTTP/1.1" +
+		"\r\nHost: example.com\r\nTransfer-Encoding: identity\r\n\r\n")
 
 	readDone := make(chan []byte, 1)
 	go func() {
@@ -197,7 +216,10 @@ func (*partialErrorConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestOrderedRequestConnReportsPartialBodyWrite(t *testing.T) {
 	underlying := &partialErrorConn{}
-	conn := NewOrderedRequestConn(underlying, func(_, _ string) []string { return []string{"Host", "Content-Length"} })
+	conn := NewOrderedRequestConn(
+		underlying,
+		func(_, _ string) []string { return []string{"Host", "Content-Length"} },
+	)
 	header := []byte("POST /upload HTTP/1.1\r\nContent-Length: 5\r\nHost: example.com\r\n\r\n")
 	if written, errWrite := conn.Write(header); errWrite != nil || written != len(header) {
 		t.Fatalf("header write = %d, %v", written, errWrite)
@@ -225,7 +247,9 @@ func TestOrderedRequestConnReportsPartialBodyWrite(t *testing.T) {
 	if written, errWrite = conn.Write(second); errWrite != nil || written != len(second) {
 		t.Fatalf("next request write = %d, %v", written, errWrite)
 	}
-	want := "POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhelloGET /next HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+	want := "POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r" +
+		"\nhelloGET /next HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r" +
+		"\n\r\n"
 	if got := underlying.String(); got != want {
 		t.Fatalf("wire bytes differ after retry\n got: %q\nwant: %q", got, want)
 	}
@@ -251,14 +275,17 @@ func TestOrderedRequestConnTracksOnlyWrittenChunkBytesAfterPartialError(t *testi
 	}
 
 	underlying.failErr = nil
-	if retried, errRetry := conn.Write(chunkedBody[written:]); errRetry != nil || retried != len(chunkedBody)-written {
+	if retried, errRetry := conn.Write(chunkedBody[written:]); errRetry != nil ||
+		retried != len(chunkedBody)-written {
 		t.Fatalf("retried chunk write = %d, %v", retried, errRetry)
 	}
 	second := []byte("GET /next HTTP/1.1\r\nTransfer-Encoding: identity\r\nHost: example.com\r\n\r\n")
 	if written, errWrite = conn.Write(second); errWrite != nil || written != len(second) {
 		t.Fatalf("next request write = %d, %v", written, errWrite)
 	}
-	want := "POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n" + string(chunkedBody) +
+	want := "POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n" + string(
+		chunkedBody,
+	) +
 		"GET /next HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: identity\r\n\r\n"
 	if got := underlying.String(); got != want {
 		t.Fatalf("wire bytes differ after chunk retry\n got: %q\nwant: %q", got, want)

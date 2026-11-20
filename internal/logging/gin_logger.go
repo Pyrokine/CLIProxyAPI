@@ -70,9 +70,14 @@ func GinLogrusLogger() gin.HandlerFunc {
 		if requestID == "" {
 			requestID = "--------"
 		}
-		logLine := fmt.Sprintf("%3d | %13v | %15s | %-7s \"%s\"", statusCode, latency, clientIP, method, path)
+		logLine := fmt.Sprintf(
+			"%3d | %13v | %15s | %-7s %q", statusCode, latency, clientIP, escapeLogField(method), path,
+		)
 		if errorMessage != "" {
-			logLine = logLine + " | " + errorMessage
+			logLine = logLine + " | " + escapeLogField(errorMessage)
+		}
+		if c.GetBool("__antigravity_credits_used__") {
+			logLine += " [credits]"
 		}
 
 		entry := log.WithField("request_id", requestID)

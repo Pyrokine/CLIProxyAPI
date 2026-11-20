@@ -71,6 +71,7 @@ func TestFileRequestLoggerRecordsAvailableLocalArtifact(t *testing.T) {
 	sink := &recordingRequestLogArtifactSink{}
 	logger.SetRequestLogArtifactSink(sink)
 
+	//goland:noinspection SpellCheckingInspection
 	const requestID = "requestlocal"
 	if err := logRequestForArtifactTest(logger, requestID); err != nil {
 		t.Fatalf("LogRequest: %v", err)
@@ -80,7 +81,8 @@ func TestFileRequestLoggerRecordsAvailableLocalArtifact(t *testing.T) {
 		t.Fatalf("artifacts = %#v, want one available artifact", artifacts)
 	}
 	artifact := artifacts[0]
-	if artifact.State != RequestLogAvailable || artifact.Location != RequestLogLocationLocal || artifact.FileName == "" {
+	if artifact.State != RequestLogAvailable || artifact.Location != RequestLogLocationLocal ||
+		artifact.FileName == "" {
 		t.Fatalf("artifact = %#v, want available local artifact", artifact)
 	}
 	if _, err := os.Stat(filepath.Join(logsDir, artifact.FileName)); err != nil {
@@ -98,6 +100,7 @@ func TestFileRequestLoggerRecordsPublishFailedArtifact(t *testing.T) {
 	sink := &recordingRequestLogArtifactSink{}
 	logger.SetRequestLogArtifactSink(sink)
 
+	//goland:noinspection SpellCheckingInspection
 	const requestID = "requestfailed"
 	if err := logRequestForArtifactTest(logger, requestID); err == nil {
 		t.Fatal("LogRequest returned nil error for an invalid log directory")
@@ -139,6 +142,7 @@ func TestFileRequestLoggerRecordsExpiredArtifactAfterRetention(t *testing.T) {
 	if _, err := os.Stat(newPath); err != nil {
 		t.Fatalf("new request log was removed: %v", err)
 	}
+	//goland:noinspection SpellCheckingInspection
 	artifacts := sink.artifactsFor("requestold")
 	if len(artifacts) != 1 || artifacts[0].State != RequestLogExpired {
 		t.Fatalf("artifacts = %#v, want one expired artifact", artifacts)
@@ -151,6 +155,7 @@ func TestStreamingRequestLogRecordsTerminalArtifacts(t *testing.T) {
 			logger := NewFileRequestLogger(true, t.TempDir(), "", 0)
 			sink := &recordingRequestLogArtifactSink{}
 			logger.SetRequestLogArtifactSink(sink)
+			//goland:noinspection SpellCheckingInspection
 			writer, err := logger.LogStreamingRequest(
 				"/v1/responses",
 				http.MethodPost,
@@ -165,6 +170,7 @@ func TestStreamingRequestLogRecordsTerminalArtifacts(t *testing.T) {
 			if err = writer.Close(); err != nil {
 				t.Fatalf("Close: %v", err)
 			}
+			//goland:noinspection SpellCheckingInspection
 			artifacts := sink.artifactsFor("streamlocal")
 			if len(artifacts) != 1 || artifacts[0].State != RequestLogAvailable ||
 				artifacts[0].Location != RequestLogLocationLocal {
@@ -182,6 +188,7 @@ func TestStreamingRequestLogRecordsTerminalArtifacts(t *testing.T) {
 			}
 			sink := &recordingRequestLogArtifactSink{}
 			logger.SetRequestLogArtifactSink(sink)
+			//goland:noinspection SpellCheckingInspection
 			writer, err := logger.LogStreamingRequest(
 				"/v1/responses",
 				http.MethodPost,
@@ -196,6 +203,7 @@ func TestStreamingRequestLogRecordsTerminalArtifacts(t *testing.T) {
 			if err = writer.Close(); err != nil {
 				t.Fatalf("Close: %v", err)
 			}
+			//goland:noinspection SpellCheckingInspection
 			artifacts := sink.artifactsFor("streamhome")
 			if len(artifacts) != 1 || artifacts[0].State != RequestLogAvailable ||
 				artifacts[0].Location != RequestLogLocationHome {
@@ -213,6 +221,7 @@ func TestStreamingRequestLogRecordsTerminalArtifacts(t *testing.T) {
 			}
 			sink := &recordingRequestLogArtifactSink{}
 			logger.SetRequestLogArtifactSink(sink)
+			//goland:noinspection SpellCheckingInspection
 			writer, err := logger.LogStreamingRequest(
 				"/v1/responses",
 				http.MethodPost,
@@ -227,6 +236,7 @@ func TestStreamingRequestLogRecordsTerminalArtifacts(t *testing.T) {
 			if err = writer.Close(); err == nil {
 				t.Fatal("Close returned nil error for failed Home publish")
 			}
+			//goland:noinspection SpellCheckingInspection
 			artifacts := sink.artifactsFor("streamfailed")
 			if len(artifacts) != 1 || artifacts[0].State != RequestLogPublishFailed || artifacts[0].Reason == "" {
 				t.Fatalf("artifacts = %#v, want publish_failed artifact", artifacts)

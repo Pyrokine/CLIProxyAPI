@@ -10,7 +10,11 @@ import (
 func TestJSONBodyEscapesStringValues(t *testing.T) {
 	t.Parallel()
 
-	got, ok := jsonBody([]byte(`{"title":"<script>alert(1)</script>","items":["safe & sound",{"description":"<b>mode</b>"}],"count":1}`))
+	got, ok := jsonBody(
+		[]byte(
+			`{"title":"<script>alert(1)</script>","items":["safe & sound",{"description":"<b>mode</b>"}],"count":1}`,
+		),
+	)
 	if !ok {
 		t.Fatal("JSONBody() ok = false, want true")
 	}

@@ -118,14 +118,18 @@ func TestAuthenticate_QueryAuth_Disabled(t *testing.T) {
 }
 
 func TestAuthenticate_QueryAuth_Enabled_KeyParam(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	p := newTestProvider([]string{"qkey-123"}, true)
+	//goland:noinspection SpellCheckingInspection
 	req := httptest.NewRequest(http.MethodGet, "/v1/models?key=qkey-123", nil)
 
 	result, authErr := p.Authenticate(context.Background(), req)
 	if authErr != nil {
 		t.Fatalf("expected success with query key, got error: %v", authErr)
 	}
+	//goland:noinspection SpellCheckingInspection
 	if result.Principal != "qkey-123" {
+		//goland:noinspection SpellCheckingInspection
 		t.Fatalf("expected principal qkey-123, got %s", result.Principal)
 	}
 	if result.Metadata["source"] != "query-key" {
@@ -193,6 +197,7 @@ func TestIdentifier(t *testing.T) {
 }
 
 func TestExtractBearerToken(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	tests := []struct {
 		input string
 		want  string

@@ -93,7 +93,8 @@ func ValidateRequestLogArtifact(artifact RequestLogArtifact) error {
 	if artifact.State == RequestLogAvailable && artifact.Location == "" {
 		return fmt.Errorf("available request log artifact requires a location")
 	}
-	if artifact.Location == RequestLogLocationLocal && artifact.State == RequestLogAvailable && artifact.FileName == "" {
+	if artifact.Location == RequestLogLocationLocal && artifact.State == RequestLogAvailable &&
+		artifact.FileName == "" {
 		return fmt.Errorf("available local request log artifact requires a file name")
 	}
 	if artifact.Revision <= 0 {
@@ -133,6 +134,8 @@ func AdvanceRequestLogArtifactRevision(revision int64) {
 }
 
 // SetRequestLogArtifactSink updates the lifecycle sink used by this logger.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *FileRequestLogger) SetRequestLogArtifactSink(sink RequestLogArtifactSink) {
 	if l == nil {
 		return

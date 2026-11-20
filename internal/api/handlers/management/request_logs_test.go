@@ -131,7 +131,8 @@ func TestGetRequestLogByIDMapsLifecycleStates(t *testing.T) {
 					t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
 				}
 				response := decodeRequestLogStateResponse(t, recorder)
-				if response.RequestID != requestID || response.State != test.state || response.Reason != "stored reason" {
+				if response.RequestID != requestID || response.State != test.state ||
+					response.Reason != "stored reason" {
 					t.Fatalf("response = %#v, want request ID, state, and stored reason", response)
 				}
 				if test.state == logging.RequestLogPending && recorder.Header().Get("Retry-After") != "1" {
@@ -207,6 +208,7 @@ func TestGetRequestLogByIDDistinguishesLegacyAndUnknownRequests(t *testing.T) {
 
 	t.Run(
 		"duplicate legacy files", func(t *testing.T) {
+			//goland:noinspection SpellCheckingInspection
 			const requestID = "legacyduplicate"
 			for _, name := range []string{
 				"error-v1-responses-2026-08-30T100000-" + requestID + ".log",
@@ -229,6 +231,7 @@ func TestGetRequestLogByIDDistinguishesLegacyAndUnknownRequests(t *testing.T) {
 
 	t.Run(
 		"legacy event without lifecycle row", func(t *testing.T) {
+			//goland:noinspection SpellCheckingInspection
 			const requestID = "legacyevent"
 			persister.Record(
 				usage.FlatDetail{
@@ -262,6 +265,7 @@ func TestGetRequestLogByIDDistinguishesLegacyAndUnknownRequests(t *testing.T) {
 
 	t.Run(
 		"unknown request ID", func(t *testing.T) {
+			//goland:noinspection SpellCheckingInspection
 			recorder := performRequestLogLookup(t, handler, "unknownrequest", "lines=10")
 			if recorder.Code != http.StatusNotFound || !strings.Contains(recorder.Body.String(), "unknown request ID") {
 				t.Fatalf("status = %d, body=%s; want unknown 404", recorder.Code, recorder.Body.String())

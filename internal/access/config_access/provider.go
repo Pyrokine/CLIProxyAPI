@@ -81,7 +81,8 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		queryAuthToken = r.URL.Query().Get("auth_token")
 	}
 
-	if authHeader == "" && authHeaderGoogle == "" && authHeaderAnthropic == "" && queryKey == "" && queryAuthToken == "" {
+	if authHeader == "" && authHeaderGoogle == "" && authHeaderAnthropic == "" && queryKey == "" &&
+		queryAuthToken == "" {
 		return nil, sdkaccess.NewNoCredentialsError()
 	}
 
