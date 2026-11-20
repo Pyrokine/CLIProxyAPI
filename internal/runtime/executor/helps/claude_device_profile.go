@@ -49,8 +49,9 @@ type claudeDeviceProfileKVClient interface {
 	KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 }
 
-var currentClaudeDeviceProfileKVClient = func() (claudeDeviceProfileKVClient, bool, error) {
-	return homekv.CurrentKVClient()
+var currentClaudeDeviceProfileKVClient = func(ctx context.Context) (claudeDeviceProfileKVClient, bool, error) {
+	client, homeMode, err := homekv.KVClientFromContext(ctx)
+	return claudeRequestKVClient{client}, homeMode, err
 }
 
 type claudeCLIVersion struct {
@@ -357,17 +358,18 @@ func ResolveClaudeDeviceProfileRequired(
 	headers http.Header,
 	cfg *config.Config,
 ) (ClaudeDeviceProfile, error) {
-	client, homeMode, errClient := currentClaudeDeviceProfileKVClient()
+	client, homeMode, errClient := currentClaudeDeviceProfileKVClient(ctx)
 	if homeMode {
 		if errClient != nil {
 			return ClaudeDeviceProfile{}, errClient
 		}
 		return resolveClaudeDeviceProfileHome(ctx, client, auth, apiKey, headers, cfg)
 	}
-	return resolveClaudeDeviceProfileLocal(auth, apiKey, headers, cfg), nil
+	return resolveClaudeDeviceProfileLocal(ctx, auth, apiKey, headers, cfg), nil
 }
 
 func resolveClaudeDeviceProfileLocal(
+	ctx context.Context,
 	auth *cliproxyauth.Auth,
 	apiKey string,
 	headers http.Header,
@@ -388,7 +390,7 @@ func resolveClaudeDeviceProfileLocal(
 	if hasCandidate {
 		cacheProfile = candidate
 	}
-	cacheKey := claudeDeviceProfileCacheKey(auth, apiKey, cacheProfile)
+	cacheKey := claudeLocalCacheKey(ctx, claudeDeviceProfileCacheKey(auth, apiKey, cacheProfile))
 
 	claudeDeviceProfileCacheMu.RLock()
 	entry, hasCached := claudeDeviceProfileCache[cacheKey]
@@ -614,6 +616,26 @@ func ApplyClaudeDefaultDeviceProfileHeaders(r *http.Request, cfg *config.Config)
 	ApplyClaudeDeviceProfileHeaders(r, defaultClaudeDeviceProfile(cfg))
 }
 
+// ApplyClaudeLegacyPlatformHeaders 保留请求平台，缺省值取当前运行环境
+func ApplyClaudeLegacyPlatformHeaders(r *http.Request, incoming http.Header) {
+	if r == nil {
+		return
+	}
+	for _, field := range []struct{ name, fallback string }{
+		{"X-Stainless-Os", mapStainlessOS()},
+		{"X-Stainless-Arch", mapStainlessArch()},
+	} {
+		if HeaderValueCaseInsensitive(r.Header, field.name) != "" {
+			continue
+		}
+		value := HeaderValueCaseInsensitive(incoming, field.name)
+		if value == "" {
+			value = field.fallback
+		}
+		r.Header.Set(field.name, value)
+	}
+}
+
 func ApplyClaudeLegacyDeviceHeaders(
 	r *http.Request,
 	ginHeaders http.Header,
@@ -624,6 +646,7 @@ func ApplyClaudeLegacyDeviceHeaders(
 		return
 	}
 	profile := defaultClaudeDeviceProfile(cfg)
+	ApplyClaudeLegacyPlatformHeaders(r, ginHeaders)
 	miscEnsure := func(name, fallback string, valid func(string) bool) {
 		if current := strings.TrimSpace(r.Header.Get(name)); current != "" && (valid == nil || valid(current)) {
 			return
@@ -644,8 +667,6 @@ func ApplyClaudeLegacyDeviceHeaders(
 			"X-Stainless-Package-Version", profile.PackageVersion,
 			func(value string) bool { return value == profile.PackageVersion },
 		)
-		miscEnsure("X-Stainless-Os", mapStainlessOS(), nil)
-		miscEnsure("X-Stainless-Arch", mapStainlessArch(), nil)
 		if clientUA := strings.TrimSpace(ginHeaders.Get("User-Agent")); plausibleClaudeCodeUserAgent(clientUA, cfg) {
 			r.Header.Set("User-Agent", clientUA)
 			return
@@ -656,7 +677,5 @@ func ApplyClaudeLegacyDeviceHeaders(
 	// into the upstream Claude Code SDK fingerprint.
 	r.Header.Set("X-Stainless-Runtime-Version", profile.RuntimeVersion)
 	r.Header.Set("X-Stainless-Package-Version", profile.PackageVersion)
-	r.Header.Set("X-Stainless-Os", profile.OS)
-	r.Header.Set("X-Stainless-Arch", profile.Arch)
 	r.Header.Set("User-Agent", profile.UserAgent)
 }

@@ -15,8 +15,12 @@ import (
 
 var (
 	claudeCodeUserAgentPattern        = regexp.MustCompile(`(?i)^claude-cli/`)
-	claudeCodeUserAgentDetailsPattern = regexp.MustCompile(`(?i)^claude-cli/\S+\s+\(external,\s*([^,)]+)(?:,\s*agent-sdk/([^,)]+))?`)
-	claudeCodeNativeUserAgentPattern  = regexp.MustCompile(`(?i)^claude-cli/[0-9]+\.[0-9]+\.[0-9]+\s+\(external,\s*[^,)]+(?:,\s*agent-sdk/[0-9]+\.[0-9]+\.[0-9]+)?\)$`)
+	claudeCodeUserAgentDetailsPattern = regexp.MustCompile(
+		`(?i)^claude-cli/\S+\s+\(external,\s*([^,)]+)(?:,\s*agent-sdk/([^,)]+))?`,
+	)
+	claudeCodeNativeUserAgentPattern = regexp.MustCompile(
+		`(?i)^claude-cli/[0-9]+\.[0-9]+\.[0-9]+\s+\(external,\s*[^,)]+(?:,\s*agent-sdk/[0-9]+\.[0-9]+\.[0-9]+)?\)$`,
+	)
 )
 
 var claudeCodeSubclientByEntrypoint = map[string]string{
@@ -147,7 +151,8 @@ func DetectClaudeCodeRequest(
 	}
 
 	metadataUserID := gjson.GetBytes(payload, "metadata.user_id")
-	detection.MetadataUserID = metadataUserID.Exists() && metadataUserID.Type == gjson.String && isValidUserID(metadataUserID.String())
+	detection.MetadataUserID = metadataUserID.Exists() && metadataUserID.Type == gjson.String &&
+		isValidUserID(metadataUserID.String())
 	detection.NativeClient = nativeClaudeEntrypoints[entrypoint]
 	standardSignals := detection.XAppCLI && detection.UserAgent && detection.BetasPresent &&
 		(countTokens || detection.MetadataUserID)
@@ -217,7 +222,7 @@ func normalizedClaudeBetaHeader(headers http.Header) string {
 	}
 	var betas []string
 	for _, value := range values {
-		for _, beta := range strings.Split(value, ",") {
+		for beta := range strings.SplitSeq(value, ",") {
 			if beta = strings.TrimSpace(beta); beta != "" {
 				betas = append(betas, beta)
 			}
@@ -286,10 +291,12 @@ func measuredClaudeCodeHelperSessionMatches(headers http.Header, payload []byte)
 	}
 	identityRaw := []byte(userID.String())
 	if !claudeJSONObjectHasKeys(identityRaw, []string{"device_id", "account_uuid", "session_id"}) &&
-		!claudeJSONObjectHasKeys(identityRaw, []string{"device_id", "account_uuid", "session_id", "parent_session_id"}) {
+		!claudeJSONObjectHasKeys(
+			identityRaw, []string{"device_id", "account_uuid", "session_id", "parent_session_id"},
+		) {
 		return false
 	}
-	return headerValue(headers, ClaudeCodeSessionHeader) == gjson.GetBytes(identityRaw, "session_id").String()
+	return headerValue(headers, claudeCodeSessionHeader) == gjson.GetBytes(identityRaw, "session_id").String()
 }
 
 func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
@@ -297,10 +304,12 @@ func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
 	switch {
 	case claudeJSONObjectHasKeys(payload, []string{"model", "max_tokens", "messages", "metadata"}):
 		shape = claudeCodeHelperShapeMinimal
-	case claudeJSONObjectHasKeys(payload, []string{
-		"model", "messages", "system", "tools", "metadata",
-		"max_tokens", "thinking", "temperature", "output_config", "stream",
-	}):
+	case claudeJSONObjectHasKeys(
+		payload, []string{
+			"model", "messages", "system", "tools", "metadata",
+			"max_tokens", "thinking", "temperature", "output_config", "stream",
+		},
+	):
 		shape = claudeCodeHelperShapeStructured
 	case claudeJSONObjectHasKeys(payload, []string{"model", "max_tokens", "messages", "metadata", "output_config"}):
 		shape = claudeCodeHelperShapeTitle280
@@ -368,7 +377,9 @@ func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
 		!claudeJSONObjectHasKeys([]byte(outputConfig.Raw), []string{"format"}) ||
 		!claudeJSONObjectHasKeys([]byte(format.Raw), []string{"type", "schema"}) ||
 		format.Get("type").String() != "json_schema" ||
-		!claudeJSONObjectHasKeys([]byte(schema.Raw), []string{"type", "properties", "required", "additionalProperties"}) ||
+		!claudeJSONObjectHasKeys(
+			[]byte(schema.Raw), []string{"type", "properties", "required", "additionalProperties"},
+		) ||
 		schema.Get("type").String() != "object" ||
 		!claudeJSONObjectHasKeys([]byte(properties.Raw), []string{"title"}) ||
 		!claudeJSONObjectHasKeys([]byte(titleProperty.Raw), []string{"type"}) ||

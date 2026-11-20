@@ -39,65 +39,92 @@ func TestClaudeResponsesStopReasonStatus(t *testing.T) {
 		{reason: "max_tokens", status: "incomplete", details: `{"reason":"max_output_tokens"}`},
 		{reason: "end_turn", status: "completed", details: "null"},
 	} {
-		t.Run(tc.reason, func(t *testing.T) {
-			chunks := [][]byte{
-				[]byte(`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":3}}}`),
-				[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
-				[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}`),
-				[]byte(`data: {"type":"content_block_stop","index":0}`),
-				[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"` + tc.reason + `"},"usage":{"output_tokens":2}}`),
-				[]byte(`data: {"type":"message_stop"}`),
-			}
-			check := func(t *testing.T, response gjson.Result) {
-				t.Helper()
-				if got := response.Get("status").String(); got != tc.status {
-					t.Fatalf("status = %q, want %q", got, tc.status)
+		t.Run(
+			tc.reason, func(t *testing.T) {
+				chunks := [][]byte{
+					[]byte(
+						`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":3}}}`,
+					),
+					[]byte(
+						`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+					),
+					[]byte(
+						`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}`,
+					),
+					[]byte(`data: {"type":"content_block_stop","index":0}`),
+					[]byte(
+						`data: {"type":"message_delta","delta":{"stop_reason":"` +
+							tc.reason +
+							`"},"usage":{"output_tokens":2}}`,
+					),
+					[]byte(`data: {"type":"message_stop"}`),
 				}
-				if got := response.Get("incomplete_details").Raw; got != tc.details && !(tc.status == "completed" && got == "") {
-					t.Fatalf("incomplete_details = %s, want %s", got, tc.details)
-				}
-				if got := response.Get("output.0.status").String(); got != tc.status {
-					t.Fatalf("output status = %q, want %q", got, tc.status)
-				}
-				if got := response.Get("usage.total_tokens").Int(); got != 5 {
-					t.Fatalf("usage total = %d, want 5", got)
-				}
-			}
-			t.Run("stream", func(t *testing.T) {
-				var state any
-				var terminals int
-				for _, chunk := range chunks {
-					for _, output := range convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &state) {
-						event, data := parseClaudeResponsesSSEEvent(t, output)
-						if event != "response.completed" && event != "response.incomplete" {
-							continue
-						}
-						terminals++
-						if event != "response."+tc.status {
-							t.Fatalf("terminal event = %q, want response.%s", event, tc.status)
-						}
-						check(t, data.Get("response"))
+				check := func(t *testing.T, response gjson.Result) {
+					t.Helper()
+					if got := response.Get("status").String(); got != tc.status {
+						t.Fatalf("status = %q, want %q", got, tc.status)
+					}
+					if got := response.Get("incomplete_details").Raw; got != tc.details &&
+						!(tc.status == "completed" && got == "") {
+						t.Fatalf("incomplete_details = %s, want %s", got, tc.details)
+					}
+					if got := response.Get("output.0.status").String(); got != tc.status {
+						t.Fatalf("output status = %q, want %q", got, tc.status)
+					}
+					if got := response.Get("usage.total_tokens").Int(); got != 5 {
+						t.Fatalf("usage total = %d, want 5", got)
 					}
 				}
-				if terminals != 1 {
-					t.Fatalf("terminal count = %d, want 1", terminals)
-				}
-			})
-			t.Run("buffered", func(t *testing.T) {
-				out := convertClaudeResponseToOpenAIResponsesNonStream(
-					context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil,
+				t.Run(
+					"stream", func(t *testing.T) {
+						var state any
+						var terminals int
+						for _, chunk := range chunks {
+							for _, output := range convertClaudeResponseToOpenAIResponses(
+								context.Background(), "claude-test", nil, nil, chunk, &state,
+							) {
+								event, data := parseClaudeResponsesSSEEvent(t, output)
+								if event != "response.completed" && event != "response.incomplete" {
+									continue
+								}
+								terminals++
+								if event != "response."+tc.status {
+									t.Fatalf("terminal event = %q, want response.%s", event, tc.status)
+								}
+								check(t, data.Get("response"))
+							}
+						}
+						if terminals != 1 {
+							t.Fatalf("terminal count = %d, want 1", terminals)
+						}
+					},
 				)
-				check(t, gjson.ParseBytes(out))
-			})
-		})
+				t.Run(
+					"buffered", func(t *testing.T) {
+						out := convertClaudeResponseToOpenAIResponsesNonStream(
+							context.Background(),
+							"claude-test",
+							nil,
+							nil,
+							bytes.Join(chunks, []byte("\n")),
+							nil,
+						)
+						check(t, gjson.ParseBytes(out))
+					},
+				)
+			},
+		)
 	}
 }
 
 func TestClaudeToolArgumentsKeepHTMLCharactersInResponses(t *testing.T) {
 	chunks := [][]byte{
-		[]byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test","usage":{"input_tokens":1,"output_tokens":0}}}`),
-		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}}`),
-		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"2>&1 <work>\"}"}}`),
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-` +
+			`test","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+			`"tool_use","id":"toolu_1","name":"lookup","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_j` +
+			`son_delta","partial_json":"{\"command\":\"2>&1 <work>\"}"}}`),
 		[]byte(`data: {"type":"content_block_stop","index":0}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
@@ -106,17 +133,24 @@ func TestClaudeToolArgumentsKeepHTMLCharactersInResponses(t *testing.T) {
 	for _, chunk := range chunks {
 		rawNonStream = append(rawNonStream, chunk...)
 		rawNonStream = append(rawNonStream, '\n', '\n')
-		for _, output := range convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &state) {
+		for _, output := range convertClaudeResponseToOpenAIResponses(
+			context.Background(), "claude-test", nil, nil, chunk, &state,
+		) {
 			event, _ := parseClaudeResponsesSSEEvent(t, output)
 			switch event {
-			case "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed":
+			case "response.function_call_arguments.delta",
+				"response.function_call_arguments.done",
+				"response.output_item.done",
+				"response.completed":
 				if !strings.Contains(string(output), `2>&1 <work>`) {
 					t.Fatalf("%s escaped tool argument HTML: %s", event, output)
 				}
 			}
 		}
 	}
-	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, rawNonStream, nil)
+	out := convertClaudeResponseToOpenAIResponsesNonStream(
+		context.Background(), "claude-test", nil, nil, rawNonStream, nil,
+	)
 	if !strings.Contains(string(out), `2>&1 <work>`) {
 		t.Fatalf("non-stream tool arguments escaped: %s", out)
 	}
@@ -152,11 +186,25 @@ func TestConvertClaudeResponseToOpenAIResponsesCreatedIncludesOriginalRequestMod
 func TestConvertClaudeResponseToOpenAIResponsesThinkingIncludesSignature(t *testing.T) {
 	signature := "claude_sig_123"
 	chunks := [][]byte{
-		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
-		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
-		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"internal "}}`),
-		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reasoning"}}`),
-		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + signature + `"}}`),
+		[]byte(
+			`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		),
+		[]byte(
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+		),
+		[]byte(
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"internal "}}`,
+		),
+		[]byte(
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reasoning"}}`,
+		),
+		[]byte(
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+				`"signature_delta","signature":` +
+				`"` +
+				signature +
+				`"}}`,
+		),
 		[]byte(`data: {"type":"content_block_stop","index":0}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
@@ -166,7 +214,14 @@ func TestConvertClaudeResponseToOpenAIResponsesThinkingIncludesSignature(t *test
 	for _, chunk := range chunks {
 		outputs = append(
 			outputs,
-			convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...,
+			convertClaudeResponseToOpenAIResponses(
+				context.Background(),
+				"claude-test",
+				nil,
+				nil,
+				chunk,
+				&param,
+			)...,
 		)
 	}
 
@@ -208,7 +263,11 @@ func TestConvertClaudeResponseToOpenAIResponsesSuppressesSignatureDeltaPassthrou
 		"claude-test",
 		nil,
 		nil,
-		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"claude_sig_123"}}`),
+		[]byte(
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":`+
+				`"signature_delta","signature":`+
+				`"claude_sig_123"}}`,
+		),
 		&param,
 	)
 	if len(outputs) != 0 {
@@ -221,11 +280,13 @@ func TestClaudeResponsesAdjacentTextBlocksShareMessage(t *testing.T) {
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_adjacent"}}`),
 		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
 		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first"}}`),
-		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"url":"https://example.com/a"}}}`),
+		[]byte((`data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"` +
+			`url":"https://example.com/a"}}}`)),
 		[]byte(`data: {"type":"content_block_stop","index":0}`),
 		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
 		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" second"}}`),
-		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"url":"https://example.com/b"}}}`),
+		[]byte((`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"` +
+			`url":"https://example.com/b"}}}`)),
 		[]byte(`data: {"type":"content_block_stop","index":1}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
@@ -242,48 +303,66 @@ func TestClaudeResponsesAdjacentTextBlocksShareMessage(t *testing.T) {
 			t.Fatalf("adjacent message citations = %d, want 2", got)
 		}
 	}
-	t.Run("stream", func(t *testing.T) {
-		var state any
-		var completed gjson.Result
-		added := 0
-		for _, chunk := range chunks {
-			for _, eventChunk := range convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &state) {
-				event, response := parseClaudeResponsesSSEEvent(t, eventChunk)
-				if event == "response.output_item.added" {
-					added++
-				}
-				if event == "response.completed" {
-					completed = response.Get("response")
+	t.Run(
+		"stream", func(t *testing.T) {
+			var state any
+			var completed gjson.Result
+			added := 0
+			for _, chunk := range chunks {
+				for _, eventChunk := range convertClaudeResponseToOpenAIResponses(
+					context.Background(), "claude-test", nil, nil, chunk, &state,
+				) {
+					event, response := parseClaudeResponsesSSEEvent(t, eventChunk)
+					if event == "response.output_item.added" {
+						added++
+					}
+					if event == "response.completed" {
+						completed = response.Get("response")
+					}
 				}
 			}
-		}
-		if added != 1 || !completed.Exists() {
-			t.Fatalf("adjacent text added items = %d, completed = %t", added, completed.Exists())
-		}
-		check(t, completed)
-	})
-	t.Run("buffered", func(t *testing.T) {
-		out := convertClaudeResponseToOpenAIResponsesNonStream(
-			context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil,
-		)
-		check(t, gjson.ParseBytes(out))
-	})
+			if added != 1 || !completed.Exists() {
+				t.Fatalf("adjacent text added items = %d, completed = %t", added, completed.Exists())
+			}
+			check(t, completed)
+		},
+	)
+	t.Run(
+		"buffered", func(t *testing.T) {
+			out := convertClaudeResponseToOpenAIResponsesNonStream(
+				context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil,
+			)
+			check(t, gjson.ParseBytes(out))
+		},
+	)
 }
 
 func TestConvertClaudeResponseToOpenAIResponsesAggregatesTextBlocksUntilMessageStop(t *testing.T) {
 	chunks := [][]byte{
-		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(
+			`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		),
 		[]byte(`data: {"type":"content_block_start","index":4,"content_block":{"type":"text","text":""}}`),
-		[]byte(`data: {"type":"content_block_delta","index":4,"delta":{"type":"text_delta","text":"**对比竞品**\n- "}}`),
+		[]byte(
+			`data: {"type":"content_block_delta","index":4,"delta":{"type":"text_delta","text":"**对比竞品**\n- "}}`,
+		),
 		[]byte(`data: {"type":"content_block_stop","index":4}`),
-		[]byte(`data: {"type":"content_block_start","index":5,"content_block":{"type":"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`),
-		[]byte(`data: {"type":"content_block_delta","index":5,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`),
+		[]byte(`data: {"type":"content_block_start","index":5,"content_block":{"type":` +
+			`"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":5,"delta":{"type":"input_j` +
+			`son_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`),
 		[]byte(`data: {"type":"content_block_stop","index":5}`),
-		[]byte(`data: {"type":"content_block_start","index":6,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv_123","content":[{"type":"web_search_result","title":"Example","url":"https://example.com"}]}}`),
+		[]byte(`data: {"type":"content_block_start","index":6,"content_block":{"type":` +
+			`"web_search_tool_result","tool_use_id":"srv_123","content":[{"type":"w` +
+			`eb_search_result","title":"Example","url":"https://example.com"}]}}`),
 		[]byte(`data: {"type":"content_block_stop","index":6}`),
-		[]byte(`data: {"type":"content_block_delta","index":5,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","cited_text":"Qwen 3.7 Max","url":"https://example.com","title":"Example"}}}`),
+		[]byte((`data: {"type":"content_block_delta","index":5,"delta":{"type":"citations_delta","citation":{"` +
+			`type":"web_search_result_location","cited_text":"Qwen 3.7 Max","url":"https://example.com","` +
+			`title":"Example"}}}`)),
 		[]byte(`data: {"type":"content_block_start","index":7,"content_block":{"type":"text","text":""}}`),
-		[]byte(`data: {"type":"content_block_delta","index":7,"delta":{"type":"text_delta","text":"Qwen 3.7 Max leads."}}`),
+		[]byte(
+			`data: {"type":"content_block_delta","index":7,"delta":{"type":"text_delta","text":"Qwen 3.7 Max leads."}}`,
+		),
 		[]byte(`data: {"type":"content_block_stop","index":7}`),
 		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":12}}`),
 		[]byte(`data: {"type":"message_stop"}`),
@@ -294,7 +373,14 @@ func TestConvertClaudeResponseToOpenAIResponsesAggregatesTextBlocksUntilMessageS
 	for _, chunk := range chunks {
 		outputs = append(
 			outputs,
-			convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...,
+			convertClaudeResponseToOpenAIResponses(
+				context.Background(),
+				"claude-test",
+				nil,
+				nil,
+				chunk,
+				&param,
+			)...,
 		)
 	}
 
@@ -356,27 +442,41 @@ func TestConvertClaudeResponseToOpenAIResponsesAggregatesTextBlocksUntilMessageS
 	if got := completed.Get("response.output.2.content.0.text").String(); got != wantText {
 		t.Fatalf("last completed message text = %q, want %q", got, wantText)
 	}
-	if got := completed.Get("response.output.2.content.0.annotations.0.type").String(); got != "web_search_result_location" {
+	if got := completed.Get("response.output.2.content.0.annotations.0.type").String(); got !=
+		"web_search_result_location" {
 		t.Fatalf("completed annotation type = %q", got)
 	}
 }
 
-func TestConvertClaudeResponseToOpenAIResponsesNonStreamAggregatesCitationsAndSuppressesServerTool(t *testing.T) {
+func TestConvertClaudeResponseToOpenAIResponsesNonStreamAggregatesCitationsAndSuppressesServerTool(
+	t *testing.T,
+) {
 	raw := []byte(strings.Join(
 		[]string{
-			`data: {"type":"message_start","message":{"id":"msg_nonstream_annotations","usage":{"input_tokens":1,"output_tokens":0}}}`,
+			`data: {"type":"message_start","message":{"id":"msg_nonstream_annotatio` +
+				`ns","usage":{"input_tokens":1,"output_tokens":0}}}`,
 			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Answer"}}`,
 			`data: {"type":"content_block_stop","index":0}`,
-			`data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`,
-			`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`,
-			`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://example.com","title":"Example"}}}`,
+			`data: {"type":"content_block_start","index":1,"content_block":{"type":` +
+				`"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_j` +
+				`son_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"` +
+				`type":"web_search_result_location","url":"https://example.com","title":"Example"}}}`,
 			`data: {"type":"content_block_stop","index":1}`,
 			`data: {"type":"message_stop"}`,
 		}, "\n",
 	))
 
-	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+	out := convertClaudeResponseToOpenAIResponsesNonStream(
+		context.Background(),
+		"claude-test",
+		nil,
+		nil,
+		raw,
+		nil,
+	)
 	root := gjson.ParseBytes(out)
 
 	if got := root.Get("output.#").Int(); got != 2 {
@@ -397,16 +497,31 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamThinkingIncludesSignatur
 	signature := "claude_sig_nonstream"
 	raw := []byte(strings.Join(
 		[]string{
-			`data: {"type":"message_start","message":{"id":"msg_nonstream","usage":{"input_tokens":1,"output_tokens":0}}}`,
+			`data: {"type":"message_start","message":{"id":"msg_nonstream","usage":` +
+				`{"input_tokens":1,"output_tokens":` +
+				`0}}}`,
 			`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
-			`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"nonstream reasoning"}}`,
-			`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + signature + `"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+				`"thinking_delta","thinking":"nonstream ` +
+				`reasoning"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+				`"signature_delta","signature":` +
+				`"` +
+				signature +
+				`"}}`,
 			`data: {"type":"content_block_stop","index":0}`,
 			`data: {"type":"message_stop"}`,
 		}, "\n",
 	))
 
-	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+	out := convertClaudeResponseToOpenAIResponsesNonStream(
+		context.Background(),
+		"claude-test",
+		nil,
+		nil,
+		raw,
+		nil,
+	)
 	root := gjson.ParseBytes(out)
 
 	if got := root.Get("output.0.encrypted_content").String(); got != signature {
@@ -420,13 +535,27 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamThinkingIncludesSignatur
 func TestConvertClaudeResponseToOpenAIResponsesKeepsOutputIndexOrder(t *testing.T) {
 	signature := "claude_sig_second"
 	chunks := [][]byte{
-		[]byte(`data: {"type":"message_start","message":{"id":"msg_order","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(
+			`data: {"type":"message_start","message":{"id":"msg_order","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		),
 		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
 		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"visible"}}`),
 		[]byte(`data: {"type":"content_block_stop","index":0}`),
-		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`),
-		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"later reasoning"}}`),
-		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"` + signature + `"}}`),
+		[]byte(
+			`data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`,
+		),
+		[]byte(
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":` +
+				`"thinking_delta","thinking":"later ` +
+				`reasoning"}}`,
+		),
+		[]byte(
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":` +
+				`"signature_delta","signature":` +
+				`"` +
+				signature +
+				`"}}`,
+		),
 		[]byte(`data: {"type":"content_block_stop","index":1}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
@@ -462,19 +591,34 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamKeepsOutputIndexOrder(t 
 	signature := "claude_sig_nonstream_second"
 	raw := []byte(strings.Join(
 		[]string{
-			`data: {"type":"message_start","message":{"id":"msg_nonstream_order","usage":{"input_tokens":1,"output_tokens":0}}}`,
+			`data: {"type":"message_start","message":{"id":"msg_nonstream_order",` +
+				`"usage":{"input_tokens":1,"output_tokens":` +
+				`0}}}`,
 			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"visible"}}`,
 			`data: {"type":"content_block_stop","index":0}`,
 			`data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`,
-			`data: {"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"later reasoning"}}`,
-			`data: {"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"` + signature + `"}}`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":` +
+				`"thinking_delta","thinking":"later ` +
+				`reasoning"}}`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":` +
+				`"signature_delta","signature":` +
+				`"` +
+				signature +
+				`"}}`,
 			`data: {"type":"content_block_stop","index":1}`,
 			`data: {"type":"message_stop"}`,
 		}, "\n",
 	))
 
-	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+	out := convertClaudeResponseToOpenAIResponsesNonStream(
+		context.Background(),
+		"claude-test",
+		nil,
+		nil,
+		raw,
+		nil,
+	)
 	root := gjson.ParseBytes(out)
 
 	if got := root.Get("output.0.type").String(); got != "message" {
@@ -493,7 +637,9 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamKeepsOutputIndexOrder(t 
 
 func TestConvertClaudeResponseToOpenAIResponsesIncludesZeroReasoningTokens(t *testing.T) {
 	chunks := [][]byte{
-		[]byte(`data: {"type":"message_start","message":{"id":"msg_usage","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(
+			`data: {"type":"message_start","message":{"id":"msg_usage","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		),
 		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":2}}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
@@ -526,7 +672,14 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamIncludesZeroReasoningTok
 		}, "\n",
 	))
 
-	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+	out := convertClaudeResponseToOpenAIResponsesNonStream(
+		context.Background(),
+		"claude-test",
+		nil,
+		nil,
+		raw,
+		nil,
+	)
 	reasoningTokens := gjson.GetBytes(out, "usage.output_tokens_details.reasoning_tokens")
 	if !reasoningTokens.Exists() || reasoningTokens.Int() != 0 {
 		t.Fatalf("reasoning_tokens = %s, want present with value 0; output: %s", reasoningTokens.Raw, out)

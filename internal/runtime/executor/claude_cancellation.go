@@ -16,6 +16,7 @@ func (e *claudeOAuthCancellationError) Error() string {
 	return e.cause.Error()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *claudeOAuthCancellationError) Unwrap() error {
 	if e == nil {
 		return nil

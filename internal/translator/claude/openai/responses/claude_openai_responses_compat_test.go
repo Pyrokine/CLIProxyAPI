@@ -17,8 +17,14 @@ func TestConvertOpenAIResponsesRequestToClaudeWithCompatPreservesReasoning(t *te
 	for _, testCase := range tests {
 		t.Run(
 			testCase.name, func(t *testing.T) {
-				payload := []byte(`{"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"reason"}],"encrypted_content":"` + testCase.encrypted + `"}]}`)
-				withCompat := ConvertOpenAIResponsesRequestToClaudeWithCompat(
+				payload := []byte(
+					(`{"input":[{"type":"reasoning","summary":[{"type":"summary_text",` +
+						`"text":"reason"}],"encrypted_content":` +
+						`"`) +
+						testCase.encrypted +
+						`"}]}`,
+				)
+				withCompat := convertOpenAIResponsesRequestToClaudeWithCompat(
 					"deepseek-v4",
 					payload,
 					false,

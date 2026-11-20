@@ -46,18 +46,23 @@ func TestClaudeOAuthToolAliasesRespectCallerScopeAndEviction(t *testing.T) {
 			!errors.As(err, &status) || status.StatusCode() != http.StatusNotFound {
 			t.Fatalf("scope %q missing alias error = %v, want request-scoped 404", scope, err)
 		}
-		if body := err.(interface{ ResponseBody() []byte }).ResponseBody(); gjson.GetBytes(body, "error.type").String() != "not_found_error" {
+		if body := err.(interface{ ResponseBody() []byte }).ResponseBody(); gjson.GetBytes(
+			body, "error.type",
+		).String() != "not_found_error" {
 			t.Fatalf("missing alias error body = %s", body)
 		}
 	}
 
-	for i := 0; i < claudeOAuthToolAliasStateLimit; i++ {
+	for i := range claudeOAuthToolAliasStateLimit {
 		exec.rememberClaudeOAuthToolAliases(create, nil, fmt.Sprintf("msg-%d", i), scopeA)
 	}
 	_, _, err = exec.prepareClaudeOAuthToolNamesForRequest(continueFromFirst, claudeMCPAliasOptions{}, scopeA)
 	var requestErr cliproxyexecutor.RequestScopedError
 	if !errors.As(err, &requestErr) || !requestErr.IsRequestScoped() ||
 		len(exec.oauthToolAliases.entries) != claudeOAuthToolAliasStateLimit {
-		t.Fatalf("evicted state = (%v, %d entries), want bounded request-scoped error", err, len(exec.oauthToolAliases.entries))
+		t.Fatalf(
+			"evicted state = (%v, %d entries), want bounded request-scoped error", err,
+			len(exec.oauthToolAliases.entries),
+		)
 	}
 }

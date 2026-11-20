@@ -17,7 +17,10 @@ func init() {
 			NonStream: convertClaudeResponseToOpenAINonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, func(model string, body []byte, stream bool) ([]byte, error) {
-		return convertOpenAIRequestToClaudeChecked(model, body, stream, false)
-	})
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatOpenAI, sdktranslator.FormatClaude,
+		func(model string, body []byte, stream bool) ([]byte, error) {
+			return convertOpenAIRequestToClaudeChecked(model, body, stream, false)
+		},
+	)
 }

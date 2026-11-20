@@ -24,7 +24,8 @@ func TestConvertClaudeResponseToOpenAIIncludesCachedCreationTokens(t *testing.T)
 		"claude-test",
 		nil,
 		nil,
-		[]byte(`data: {"type":"message_delta","usage":{"input_tokens":10,"output_tokens":3,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}`),
+		[]byte(`data: {"type":"message_delta","usage":{"input_tokens":10,"output_token`+
+			`s":3,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}`),
 		&param,
 	)
 	if len(result) != 1 {
@@ -37,7 +38,8 @@ func TestConvertClaudeResponseToOpenAINonStreamIncludesCachedCreationTokens(t *t
 	raw := []byte(strings.Join(
 		[]string{
 			`data: {"type":"message_start","message":{"id":"msg_1"}}`,
-			`data: {"type":"message_delta","usage":{"input_tokens":10,"output_tokens":3,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}`,
+			`data: {"type":"message_delta","usage":{"input_tokens":10,"output_token` +
+				`s":3,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}`,
 			`data: {"type":"message_stop"}`,
 		}, "\n",
 	))
@@ -84,7 +86,8 @@ func TestConvertClaudeResponseToOpenAIMergesUsageAcrossEvents(t *testing.T) {
 		"claude-test",
 		nil,
 		nil,
-		[]byte(`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}}`),
+		[]byte((`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"` +
+			`output_tokens":1,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}}`)),
 		&param,
 	)
 	result := convertClaudeResponseToOpenAI(
@@ -104,7 +107,8 @@ func TestConvertClaudeResponseToOpenAIMergesUsageAcrossEvents(t *testing.T) {
 func TestConvertClaudeResponseToOpenAINonStreamMergesUsageAcrossEvents(t *testing.T) {
 	raw := []byte(strings.Join(
 		[]string{
-			`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}}`,
+			`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"output_tokens"` +
+				`:1,"cache_read_input_tokens":4,"cache_creation_input_tokens":5}}}`,
 			`data: {"type":"message_delta","usage":{"output_tokens":3}}`,
 		}, "\n",
 	))

@@ -10,6 +10,7 @@ import (
 )
 
 func claudeOAuthTestMetadata() map[string]any {
+	//goland:noinspection SpellCheckingInspection
 	return map[string]any{
 		"account_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		claudeauth.DeviceIDsMetadataKey: []string{
@@ -29,11 +30,11 @@ func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Reques
 }
 
 func extractTag(header, prefix string) string {
-	index := strings.Index(header, prefix)
-	if index < 0 {
+	_, after, ok := strings.Cut(header, prefix)
+	if !ok {
 		return ""
 	}
-	value := header[index+len(prefix):]
+	value := after
 	if end := strings.IndexByte(value, ';'); end >= 0 {
 		value = value[:end]
 	}

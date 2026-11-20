@@ -20,11 +20,16 @@ import (
 )
 
 func TestInjectClaudeDiagnosticsMatchesNativeFieldOrderAndContinuity(t *testing.T) {
-	body := []byte(`{"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"max_tokens":1,"messages":[]}`)
+	body := []byte(
+		`{"context_management":{"edits":[{"type":"clear_thinking_20251015",` +
+			`"keep":"all"}]},"max_tokens":1,"messages":` +
+			`[]}`,
+	)
 	testID := uuid.NewString()
 	auth := &cliproxyauth.Auth{ID: "credential-diagnostics-order-" + testID}
 	first, state := injectClaudeDiagnostics(body, auth, "session-diagnostics-order-"+testID)
-	wantOrder := `"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"diagnostics":{"previous_message_id":null},"max_tokens"`
+	wantOrder := `"context_management":{"edits":[{"type":"clear_thinking_20251015","keep` +
+		`":"all"}]},"diagnostics":{"previous_message_id":null},"max_tokens"`
 	if !bytes.Contains(first, []byte(wantOrder)) {
 		t.Fatalf("diagnostics field order differs from native: %s", first)
 	}
@@ -56,7 +61,10 @@ func TestClaudeExecutorDiagnosticsAdvancesAfterSuccessfulResponse(t *testing.T) 
 				previousValues = append(previousValues, gjson.GetBytes(body, "diagnostics.previous_message_id"))
 				betaValues = append(betaValues, headerValueCaseInsensitive(req.Header, "Anthropic-Beta"))
 				call++
-				response := `{"id":"msg_diagnostics_` + string(rune('0'+call)) + `","type":"message","model":"claude-opus-4-7","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`
+				response := `{"id":"msg_diagnostics_` + string(
+					rune('0'+call),
+				) + (`","type":"message","model":"claude-opus-4-7","role":"assistant","content":[{"type":"` +
+					`text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Header:     http.Header{"Content-Type": {"application/json"}},
@@ -68,6 +76,7 @@ func TestClaudeExecutorDiagnosticsAdvancesAfterSuccessfulResponse(t *testing.T) 
 	)
 	deviceIDs := []string{"0000000000000000000000000000000000000000000000000000000000000000"}
 	testID := uuid.NewString()
+	//goland:noinspection SpellCheckingInspection
 	auth := &cliproxyauth.Auth{
 		ID:         "diagnostics-live-path-" + testID,
 		Provider:   "claude",
@@ -79,8 +88,10 @@ func TestClaudeExecutorDiagnosticsAdvancesAfterSuccessfulResponse(t *testing.T) 
 	}
 	executor := NewClaudeExecutor(&config.Config{})
 	request := cliproxyexecutor.Request{
-		Model:   "claude-opus-4-7",
-		Payload: []byte(`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"x"}],"max_tokens":16}`),
+		Model: "claude-opus-4-7",
+		Payload: []byte(
+			`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"x"}],"max_tokens":16}`,
+		),
 	}
 	options := cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatClaude,
@@ -111,7 +122,8 @@ func TestClaudeExecutorDiagnosticsAdvancesAfterSuccessfulResponse(t *testing.T) 
 }
 
 func TestClaudeMessageIDFromSSECommitsOnlyCompletedMessage(t *testing.T) {
-	complete := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_complete\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	complete := []byte(("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"" +
+		"msg_complete\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 	if got := claudeMessageIDFromSSE(complete); got != "msg_complete" {
 		t.Fatalf("completed SSE message ID = %q, want msg_complete", got)
 	}
@@ -126,27 +138,38 @@ func TestClaudeMessageIDFromSSECommitsOnlyCompletedMessage(t *testing.T) {
 func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *testing.T) {
 	var capturedBillingHeaders []string
 	call := 0
-	transport := protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, errRead := io.ReadAll(req.Body)
-		if errRead != nil {
-			t.Fatal(errRead)
-		}
-		capturedBillingHeaders = append(capturedBillingHeaders, gjson.GetBytes(body, "system.0.text").String())
-		call++
-		response := fmt.Sprintf(`{"id":"msg_turn_%d","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`, call)
-		header := http.Header{
-			"Content-Type": {"application/json"},
-			"request-id":   {fmt.Sprintf("req_upstream_turn_%d", call)},
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     header,
-			Body:       io.NopCloser(strings.NewReader(response)),
-			Request:    req,
-		}, nil
-	})
+	transport := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			capturedBillingHeaders = append(
+				capturedBillingHeaders,
+				gjson.GetBytes(body, "system.0.text").String(),
+			)
+			call++
+			response := fmt.Sprintf(
+				`{"id":"msg_turn_%d","type":"message","model":"claude-sonnet-5","role":`+
+					`"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_to`+
+					`kens":1,"output_tokens":1}}`,
+				call,
+			)
+			header := http.Header{
+				"Content-Type": {"application/json"},
+				"request-id":   {fmt.Sprintf("req_upstream_turn_%d", call)},
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(response)),
+				Request:    req,
+			}, nil
+		},
+	)
 	ctx := util.WithRoundTripper(context.Background(), transport)
 	testID := uuid.NewString()
+	//goland:noinspection SpellCheckingInspection
 	auth := &cliproxyauth.Auth{
 		ID:         "continuity-test-" + testID,
 		Attributes: map[string]string{"api_key": "sk-ant-oat-continuity-test"},
@@ -172,37 +195,58 @@ func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *
 	}{
 		{
 			name: "turn 1",
-			request: cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(
-				`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn 1 prompt"}],"max_tokens":100}`,
-			)},
+			request: cliproxyexecutor.Request{
+				Model: "claude-sonnet-5", Payload: []byte(
+					`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn ` +
+						`1 prompt"}],"max_tokens":` +
+						`100}`,
+				),
+			},
 			options: options,
 		},
 		{
 			name: "turn 2",
-			request: cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(
-				`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn 1 prompt"},{"role":"assistant","content":"ok"},{"role":"user","content":"turn 2 prompt"}],"max_tokens":100}`,
-			)},
+			request: cliproxyexecutor.Request{
+				Model: "claude-sonnet-5", Payload: []byte(
+					`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn ` +
+						`1 prompt"},{"role":"assistant","content":"ok"},{"role":"user","content` +
+						`":"turn 2 prompt"}],"max_tokens":100}`,
+				),
+			},
 			options: options,
 		},
 		{
 			name: "turn 2 tool continuation",
-			request: cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(
-				`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn 1 prompt"},{"role":"assistant","content":"ok"},{"role":"user","content":"turn 2 prompt"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"tool output"}]}],"max_tokens":100}`,
-			)},
+			request: cliproxyexecutor.Request{
+				Model: "claude-sonnet-5", Payload: []byte(
+					`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn ` +
+						`1 prompt"},{"role":"assistant","content":"ok"},{"role":"user","content` +
+						`":"turn 2 prompt"},{"role":"assistant","content":[{"type":"tool_use","` +
+						`id":"t1","name":"bash","input":{}}]},{"role":"user","content":[{"type"` +
+						`:"tool_result","tool_use_id":"t1","content":"tool output"}]}],"max_tok` +
+						`ens":100}`,
+				),
+			},
 			options: options,
 		},
 		{
 			name: "probe",
-			request: cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(
-				`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"probe"}],"max_tokens":1}`,
-			)},
+			request: cliproxyexecutor.Request{
+				Model: "claude-sonnet-5", Payload: []byte(
+					`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"probe"}],"max_tokens":1}`,
+				),
+			},
 			options: options,
 		},
 		{
 			name: "subagent",
-			request: cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(
-				`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"subagent prompt"}],"max_tokens":100}`,
-			)},
+			request: cliproxyexecutor.Request{
+				Model: "claude-sonnet-5", Payload: []byte(
+					`{"model":"claude-sonnet-5","messages":[{"role":"user","content":` +
+						`"subagent prompt"}],"max_tokens":` +
+						`100}`,
+				),
+			},
 			options: cliproxyexecutor.Options{
 				SourceFormat: sdktranslator.FormatClaude,
 				Headers:      http.Header{"X-Claude-Code-Agent-Id": {"subagent-worker-1"}},
@@ -213,9 +257,13 @@ func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *
 		},
 		{
 			name: "turn 5",
-			request: cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(
-				`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn 5 prompt"}],"max_tokens":100}`,
-			)},
+			request: cliproxyexecutor.Request{
+				Model: "claude-sonnet-5", Payload: []byte(
+					`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn ` +
+						`5 prompt"}],"max_tokens":` +
+						`100}`,
+				),
+			},
 			options: options,
 		},
 	}
@@ -229,7 +277,9 @@ func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *
 		t.Fatalf("captured %d billing headers, want 6", len(capturedBillingHeaders))
 	}
 	h1 := capturedBillingHeaders[0]
-	if !strings.Contains(h1, "cc_version=2.1.280.") || !strings.Contains(h1, "cc_entrypoint=cli;") || !strings.Contains(h1, "cch=") {
+	if !strings.Contains(h1, "cc_version=2.1.280.") || !strings.Contains(
+		h1, "cc_entrypoint=cli;",
+	) || !strings.Contains(h1, "cch=") {
 		t.Fatalf("h1 invalid: %s", h1)
 	}
 	if strings.Contains(h1, "cc_prev_req=") {

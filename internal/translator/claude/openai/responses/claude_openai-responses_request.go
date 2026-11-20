@@ -33,9 +33,9 @@ func convertOpenAIResponsesRequestToClaudeDefault(modelName string, inputRawJSON
 	return convertOpenAIResponsesRequestToClaude(modelName, inputRawJSON, stream, false)
 }
 
-// ConvertOpenAIResponsesRequestToClaudeWithCompat preserves reasoning items
+// convertOpenAIResponsesRequestToClaudeWithCompat preserves reasoning items
 // with empty or provider-specific encrypted content for compatibility endpoints.
-func ConvertOpenAIResponsesRequestToClaudeWithCompat(
+func convertOpenAIResponsesRequestToClaudeWithCompat(
 	modelName string,
 	inputRawJSON []byte,
 	stream bool,
@@ -49,7 +49,12 @@ func convertOpenAIResponsesRequestToClaude(
 	stream bool,
 	preserveThinkingBlocks bool,
 ) []byte {
-	body, err := convertOpenAIResponsesRequestToClaudeChecked(modelName, inputRawJSON, stream, preserveThinkingBlocks)
+	body, err := convertOpenAIResponsesRequestToClaudeChecked(
+		modelName,
+		inputRawJSON,
+		stream,
+		preserveThinkingBlocks,
+	)
 	if err != nil {
 		return nil
 	}
@@ -57,7 +62,11 @@ func convertOpenAIResponsesRequestToClaude(
 }
 
 // ConvertOpenAIResponsesRequestToClaudeWithCompatReturningError reports unsupported user attachments.
-func ConvertOpenAIResponsesRequestToClaudeWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+func ConvertOpenAIResponsesRequestToClaudeWithCompatReturningError(
+	modelName string,
+	inputRawJSON []byte,
+	stream bool,
+) ([]byte, error) {
 	return convertOpenAIResponsesRequestToClaudeChecked(modelName, inputRawJSON, stream, true)
 }
 
@@ -154,7 +163,9 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 	// Max tokens
 	if mot := root.Get("max_output_tokens"); mot.Exists() && mot.Type != gjson.Null {
 		maxTokens := mot.Int()
-		if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && maxTokens > int64(info.MaxCompletionTokens) {
+		if info := registry.LookupModelInfo(
+			modelName, "claude",
+		); info != nil && info.MaxCompletionTokens > 0 && maxTokens > int64(info.MaxCompletionTokens) {
 			maxTokens = int64(info.MaxCompletionTokens)
 		}
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens)
@@ -163,7 +174,8 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 	// Stream
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	if serviceTier := root.Get("service_tier"); serviceTier.Type == gjson.String && serviceTier.String() == "priority" {
+	if serviceTier := root.Get("service_tier"); serviceTier.Type == gjson.String &&
+		serviceTier.String() == "priority" {
 		out, _ = sjson.SetBytes(out, "speed", "fast")
 	}
 
@@ -267,7 +279,8 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 				if _, answered := answeredToolCalls[rawID]; answered {
 					continue
 				}
-				result := []byte(`{"type":"tool_result","tool_use_id":"","content":"Tool call was interrupted before a result was returned.","is_error":true}`)
+				result := []byte((`{"type":"tool_result","tool_use_id":"","content":"Tool call was ` +
+					`interrupted before a result was returned.","is_error":true}`))
 				result, _ = sjson.SetBytes(result, "tool_use_id", pendingToolUses[rawID])
 				results = append(results, result)
 			}
@@ -281,7 +294,8 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 			message, _ = sjson.SetBytes(message, "role", pendingRole)
 			if len(parts) == 1 {
 				part := gjson.ParseBytes(parts[0])
-				if part.Get("type").String() == "text" && !part.Get("cache_control").Exists() && !part.Get("citations").Exists() {
+				if part.Get("type").String() == "text" && !part.Get("cache_control").Exists() &&
+					!part.Get("citations").Exists() {
 					message, _ = sjson.SetBytes(message, "content", part.Get("text").String())
 				} else {
 					message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(parts))
@@ -412,10 +426,15 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 									role = "assistant"
 								}
 							case "refusal":
-								if refusal := part.Get("refusal"); refusal.Type == gjson.String && refusal.String() != "" {
+								if refusal := part.Get("refusal"); refusal.Type ==
+									gjson.String &&
+									refusal.String() !=
+										"" {
 									contentPart := []byte(`{"type":"text","text":""}`)
 									contentPart, _ = sjson.SetBytes(contentPart, "text", refusal.String())
-									partsJSON = append(partsJSON, translatorcommon.AttachCacheControl(contentPart, part))
+									partsJSON = append(
+										partsJSON, translatorcommon.AttachCacheControl(contentPart, part),
+									)
 									role = "assistant"
 								}
 							case "input_image":
@@ -424,6 +443,9 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 									if role == "" {
 										role = "user"
 									}
+								} else if item.Get("role").String() != "assistant" {
+									drops.Drop("input_image")
+									droppedPartTypes["input_image"]++
 								}
 							case "input_file":
 								fileData := part.Get("file_data").String()
@@ -444,7 +466,9 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 											data = mediaAndData[1]
 										}
 									}
-									contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
+									contentPart := []byte((`{"type":"document","source":{"type":"base64",` +
+										`"media_type":"","data":` +
+										`""}}`))
 									contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
 									contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
 									contentPart = translatorcommon.AttachCacheControl(contentPart, part)
@@ -481,7 +505,11 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 				if role == "user" {
 					sendable := 0
 					for _, part := range partsJSON {
-						if gjson.GetBytes(part, "type").String() != "text" || strings.TrimSpace(gjson.GetBytes(part, "text").String()) != "" {
+						if gjson.GetBytes(part, "type").String() != "text" || strings.TrimSpace(
+							gjson.GetBytes(
+								part, "text",
+							).String(),
+						) != "" {
 							sendable++
 						}
 					}
@@ -507,7 +535,11 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 				// Map function and freeform custom calls to Claude tool_use blocks.
 				rawID := translatorcommon.ExtractResponsesCallID(item)
 				callID := toolCallIDs[rawID]
-				name := mapFunctionName(toolIdentity.ResolveName(item.Get("name").String(), item.Get("namespace").String()))
+				name := mapFunctionName(
+					toolIdentity.ResolveName(
+						item.Get("name").String(), item.Get("namespace").String(),
+					),
+				)
 
 				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
@@ -549,13 +581,17 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 					var text strings.Builder
 					structured := false
 					for _, part := range outputParts {
-						if gjson.GetBytes(part, "type").String() != "text" || gjson.GetBytes(part, "cache_control").Exists() {
+						if gjson.GetBytes(part, "type").String() != "text" || gjson.GetBytes(
+							part, "cache_control",
+						).Exists() {
 							structured = true
 						}
 						text.WriteString(gjson.GetBytes(part, "text").String())
 					}
 					if structured {
-						toolResult, _ = sjson.SetRawBytes(toolResult, "content", translatorcommon.JoinRawArray(outputParts))
+						toolResult, _ = sjson.SetRawBytes(
+							toolResult, "content", translatorcommon.JoinRawArray(outputParts),
+						)
 					} else {
 						toolResult, _ = sjson.SetBytes(toolResult, "content", text.String())
 					}
@@ -565,7 +601,11 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 				} else {
 					content := outputParts[:0]
 					for _, part := range outputParts {
-						if gjson.GetBytes(part, "type").String() != "text" || strings.TrimSpace(gjson.GetBytes(part, "text").String()) != "" {
+						if gjson.GetBytes(part, "type").String() != "text" || strings.TrimSpace(
+							gjson.GetBytes(
+								part, "text",
+							).String(),
+						) != "" {
 							content = append(content, part)
 						}
 					}
@@ -592,10 +632,18 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 		flushPendingMessage()
 	}
 	if len(unmappedItemTypes) > 0 {
-		log.Warnf("responses->claude: dropped unmapped input types %q (model=%q)", fmt.Sprint(unmappedItemTypes), modelName)
+		log.Warnf(
+			"responses->claude: dropped unmapped input types %q (model=%q)",
+			fmt.Sprint(unmappedItemTypes),
+			modelName,
+		)
 	}
 	if len(droppedPartTypes) > 0 {
-		log.Warnf("responses->claude: dropped unsupported user content types %q (model=%q)", fmt.Sprint(droppedPartTypes), modelName)
+		log.Warnf(
+			"responses->claude: dropped unsupported user content types %q (model=%q)",
+			fmt.Sprint(droppedPartTypes),
+			modelName,
+		)
 	}
 	messageResults := gjson.GetBytes(out, "messages").Array()
 	messageBlocks := make([][]byte, 0, len(messageResults))
@@ -705,7 +753,10 @@ func convertOpenAIResponsesRequestToClaudeChecked(
 		}
 	}
 
-	return out, drops.Err()
+	if err := drops.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
@@ -746,7 +797,8 @@ func responsesSystemUnsupportedBlock(part gjson.Result) []byte {
 func convertResponsesDeclarationToClaude(declaration translatorcommon.ResponsesToolDeclaration) ([]byte, bool) {
 	tool := gjson.Parse(declaration.Raw)
 	if declaration.Kind == translatorcommon.ResponsesCustomTool {
-		tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}`)
+		tJSON := []byte((`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"` +
+			`type":"string"}},"required":["input"]}}`))
 		tJSON, _ = sjson.SetBytes(tJSON, "name", declaration.QualifiedName)
 		if description := responsesToolDescription(tool); description != "" {
 			tJSON, _ = sjson.SetBytes(tJSON, "description", description)
@@ -797,7 +849,8 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 }
 
 func convertResponsesWebSearchToolToClaude(tool gjson.Result) ([]byte, bool) {
-	if externalWebAccess := tool.Get("external_web_access"); externalWebAccess.Exists() && !externalWebAccess.Bool() {
+	if externalWebAccess := tool.Get("external_web_access"); externalWebAccess.Exists() &&
+		!externalWebAccess.Bool() {
 		return nil, false
 	}
 

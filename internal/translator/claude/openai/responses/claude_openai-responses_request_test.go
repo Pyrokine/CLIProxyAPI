@@ -338,14 +338,24 @@ func TestConvertOpenAIResponsesRequestToClaudeGroupsAssistantAndToolResultTurns(
 	signature := validClaudeThinkingSignature()
 	raw := []byte(`{
 		"input":[
-			{"type":"reasoning","encrypted_content":"` + signature + `","summary":[{"type":"summary_text","text":"reason"}]},
-			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]},
-			{"type":"function_call","call_id":"call_1","name":"first","arguments":"{}"},
-			{"type":"function_call","call_id":"call_2","name":"second","arguments":"{}"},
-			{"type":"function_call_output","call_id":"call_1","output":"one"},
-			{"type":"function_call_output","call_id":"call_2","output":"two"}
-		]
-	}`)
+			{"type":"reasoning","encrypted_content":"` +
+		signature +
+		(`","summary":[{"type":"summary_text",` +
+			"\"text\":\"reason\"}]},\n\t\t\t" +
+			`{"type":"message","role":"assistant",` +
+			`"content":[{"type":"output_text",` +
+			"\"text\":\"answer\"}]},\n\t\t\t" +
+			`{"type":"function_call","call_id":` +
+			`"call_1","name":"first","arguments":` +
+			"\"{}\"},\n\t\t\t{\"type\":" +
+			`"function_call","call_id":"call_2",` +
+			`"name":"second","arguments":"{}"},` +
+			"\n\t\t\t{\"type\":\"function_call_outpu" +
+			`t","call_id":"call_1","output":"one"},` +
+			"\n\t\t\t{\"type\":\"function_call_outpu" +
+			`t","call_id":"call_2","output":` +
+			"\"two\"}\n\t\t]\n\t" +
+			`}`))
 
 	out := convertOpenAIResponsesRequestToClaudeDefault("claude-test", raw, false)
 	messages := gjson.GetBytes(out, "messages").Array()
@@ -414,12 +424,10 @@ func TestConvertOpenAIResponsesRequestToClaudeMatchesMissingOutputBeforeFutureEx
 }
 
 func TestConvertOpenAIResponsesRequestToClaudeMergesUserMessagesAndPreservesCacheControl(t *testing.T) {
-	raw := []byte(`{
-		"input":[
-			{"type":"message","role":"user","cache_control":{"type":"ephemeral"},"content":[{"type":"input_text","text":"first"}]},
-			{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}
-		]
-	}`)
+	raw := []byte(("{\n\t\t\"input\":[\n\t\t\t{\"type\":\"message\",\"role\":\"user\",\"ca" +
+		`che_control":{"type":"ephemeral"},"content":[{"type":"input_text","tex` +
+		"t\":\"first\"}]},\n\t\t\t{\"type\":\"message\",\"role\":\"user\",\"con" +
+		"tent\":[{\"type\":\"input_text\",\"text\":\"second\"}]}\n\t\t]\n\t}"))
 
 	out := convertOpenAIResponsesRequestToClaudeDefault("claude-test", raw, false)
 	messages := gjson.GetBytes(out, "messages").Array()
@@ -606,22 +614,36 @@ func TestConvertOpenAIResponsesRequestToClaudeServiceTierAndTokenDefaults(t *tes
 		{"priority", "claude-test", `{"service_tier":"priority","input":"hi"}`, 32000, "fast"},
 		{"default tier", "claude-test", `{"service_tier":"default","input":"hi"}`, 32000, ""},
 		{"fable default", "claude-fable-5-1", `{"input":"hi"}`, 64000, ""},
-		{"registered maximum", "claude-3-5-haiku-20241022", `{"max_output_tokens":128000,"input":"hi"}`, 8192, ""},
+		{
+			"registered maximum",
+			"claude-3-5-haiku-20241022",
+			`{"max_output_tokens":128000,"input":"hi"}`,
+			8192,
+			"",
+		},
 		{"null keeps default", "claude-fable-5-1", `{"max_output_tokens":null,"input":"hi"}`, 64000, ""},
 		{"opus 5.5 uses registry limit", "claude-opus-5-5", `{"input":"hi"}`, 128000, ""},
-		{"opus 5.5 null uses registry limit", "claude-opus-5-5", `{"max_output_tokens":null,"input":"hi"}`, 128000, ""},
-		{"sonnet 4.6 uses registry limit", "claude-sonnet-4-6", `{"input":"hi"}`, 64000, ""},
+		{
+			"opus 5.5 null uses registry limit",
+			"claude-opus-5-5",
+			`{"max_output_tokens":null,"input":"hi"}`,
+			128000,
+			"",
+		},
+		{"sonnet 4.6 uses registry limit", "claude-sonnet-4-6", `{"input":"hi"}`, 128000, ""},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			out := convertOpenAIResponsesRequestToClaudeDefault(test.model, []byte(test.body), false)
-			if got := gjson.GetBytes(out, "max_tokens").Int(); got != test.wantToken {
-				t.Fatalf("max_tokens = %d, want %d; output=%s", got, test.wantToken, out)
-			}
-			if got := gjson.GetBytes(out, "speed").String(); got != test.wantSpeed {
-				t.Fatalf("speed = %q, want %q; output=%s", got, test.wantSpeed, out)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				out := convertOpenAIResponsesRequestToClaudeDefault(test.model, []byte(test.body), false)
+				if got := gjson.GetBytes(out, "max_tokens").Int(); got != test.wantToken {
+					t.Fatalf("max_tokens = %d, want %d; output=%s", got, test.wantToken, out)
+				}
+				if got := gjson.GetBytes(out, "speed").String(); got != test.wantSpeed {
+					t.Fatalf("speed = %q, want %q; output=%s", got, test.wantSpeed, out)
+				}
+			},
+		)
 	}
 }
 
@@ -633,23 +655,34 @@ func TestConvertOpenAIResponsesRequestToClaudeStringInput(t *testing.T) {
 		wantSystem string
 	}{
 		{name: "plain text", request: `{"input":"hi"}`, wantText: "hi"},
-		{name: "instructions", request: `{"instructions":"Be concise.","input":"hello world"}`, wantText: "hello world", wantSystem: "Be concise."},
-		{name: "escaped Unicode text", request: `{"input":"line 1\n\"line 2\"\n你好，世界 🌍"}`, wantText: "line 1\n\"line 2\"\n你好，世界 🌍"},
+		{
+			name: "instructions", request: `{"instructions":"Be concise.","input":"hello world"}`,
+			wantText: "hello world", wantSystem: "Be concise.",
+		},
+		{
+			name: "escaped Unicode text", request: `{"input":"line 1\n\"line 2\"\n你好，世界 🌍"}`,
+			wantText: "line 1\n\"line 2\"\n你好，世界 🌍",
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, preserveThinking := range []bool{false, true} {
-				out, err := convertOpenAIResponsesRequestToClaudeChecked("claude-sonnet-4-6", []byte(tc.request), false, preserveThinking)
-				if err != nil {
-					t.Fatalf("translate Responses string: %v", err)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				for _, preserveThinking := range []bool{false, true} {
+					out, err := convertOpenAIResponsesRequestToClaudeChecked(
+						"claude-sonnet-4-6", []byte(tc.request), false, preserveThinking,
+					)
+					if err != nil {
+						t.Fatalf("translate Responses string: %v", err)
+					}
+					messages := gjson.GetBytes(out, "messages").Array()
+					if len(messages) != 1 || messages[0].Get("role").String() != "user" ||
+						messages[0].Get("content").String() != tc.wantText {
+						t.Fatalf("messages = %s, want one user message with %q", out, tc.wantText)
+					}
+					if got := gjson.GetBytes(out, "system.0.text").String(); got != tc.wantSystem {
+						t.Fatalf("system = %q, want %q; output=%s", got, tc.wantSystem, out)
+					}
 				}
-				messages := gjson.GetBytes(out, "messages").Array()
-				if len(messages) != 1 || messages[0].Get("role").String() != "user" || messages[0].Get("content").String() != tc.wantText {
-					t.Fatalf("messages = %s, want one user message with %q", out, tc.wantText)
-				}
-				if got := gjson.GetBytes(out, "system.0.text").String(); got != tc.wantSystem {
-					t.Fatalf("system = %q, want %q; output=%s", got, tc.wantSystem, out)
-				}
-			}
-		})
+			},
+		)
 	}
 }

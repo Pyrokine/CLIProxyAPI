@@ -4,12 +4,17 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
+
+// 单次请求会多次解析同一配置值，已告警的值保留到进程结束
+var claudeFingerprintProfileWarned sync.Map
 
 // A CLI wire profile does not confer OAuth lifecycle authority.
 type claudeFingerprintPolicy struct {
@@ -18,10 +23,33 @@ type claudeFingerprintPolicy struct {
 	UseOAuthBetas        bool
 }
 
-func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) claudeFingerprintPolicy {
+func resolveClaudeFingerprintPolicy(
+	cfg *config.Config,
+	auth *cliproxyauth.Auth,
+	apiKey string,
+) claudeFingerprintPolicy {
 	raw, present, err := cliproxyauth.ClaudeFingerprintProfile(auth)
 	if err != nil {
-		log.Warnf("invalid Claude fingerprint profile: %v; using caller-owned profile", err)
+		var invalidValue any
+		if value, exists := auth.Attributes[cliproxyauth.AttributeClaudeFingerprintProfile]; exists {
+			invalidValue = value
+		} else {
+			invalidValue, exists = util.ReadClaudeMetadataValue(
+				&auth.Metadata, cliproxyauth.AttributeClaudeFingerprintProfile,
+			)
+			if !exists {
+				invalidValue, _ = util.ReadClaudeMetadataValue(&auth.Metadata, "fingerprint-profile")
+			}
+		}
+		warningValue := fmt.Sprint(invalidValue)
+		warningKey := fmt.Sprintf("%T:%s", invalidValue, warningValue)
+		if value, ok := invalidValue.(string); ok {
+			warningValue = strings.TrimSpace(value)
+			warningKey = "string:" + warningValue
+		}
+		if _, warned := claudeFingerprintProfileWarned.LoadOrStore(warningKey, struct{}{}); !warned {
+			log.Warnf("invalid Claude fingerprint profile %q: %v; using caller-owned profile", warningValue, err)
+		}
 		raw = ""
 	}
 	if !present {
@@ -31,7 +59,10 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 	}
 	profile, valid := config.NormalizeClaudeFingerprintProfile(raw)
 	if !valid {
-		log.Warn("invalid Claude fingerprint profile; using caller-owned profile")
+		key := "string:" + strings.TrimSpace(raw)
+		if _, warned := claudeFingerprintProfileWarned.LoadOrStore(key, struct{}{}); !warned {
+			log.Warnf("invalid Claude fingerprint profile %q; using caller-owned profile", strings.TrimSpace(raw))
+		}
 		profile = config.ClaudeFingerprintProfileDefault
 	}
 	oauth := isClaudeOAuthToken(apiKey)
@@ -43,7 +74,12 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 	}
 }
 
-func applyClaudeCLIIdentity(body []byte, auth *cliproxyauth.Auth, apiKey, sessionID string, policy claudeFingerprintPolicy) ([]byte, error) {
+func applyClaudeCLIIdentity(
+	body []byte,
+	auth *cliproxyauth.Auth,
+	apiKey, sessionID string,
+	policy claudeFingerprintPolicy,
+) ([]byte, error) {
 	seed := apiKey
 	if auth != nil && strings.TrimSpace(auth.Attributes["api_key"]) == "" && !policy.AuthIsOAuthToken {
 		seed = helps.ClaudeCLIAuthIdentitySeed(auth)

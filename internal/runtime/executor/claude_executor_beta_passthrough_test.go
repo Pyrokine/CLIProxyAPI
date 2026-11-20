@@ -30,7 +30,10 @@ func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas(t *testing.T) {
 	}
 	incoming := http.Header{}
 	incoming.Set("Anthropic-Beta", "message-threads-2026-08-12")
-	if errHeaders := applyClaudeHeaders(req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil, []byte(`{"model":"claude-fable-5-1"}`), &config.Config{}, incoming, false); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(
+		req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil, []byte(`{"model":"claude-fable-5-1"}`),
+		&config.Config{}, incoming, false,
+	); errHeaders != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
 	}
 	betas := req.Header.Get("Anthropic-Beta")
@@ -54,30 +57,34 @@ func TestApplyClaudeHeadersPreservesNativeGatewayHintsOnly(t *testing.T) {
 		{name: "native auxiliary", requestClass: "auxiliary", confirmed: true},
 		{name: "unconfirmed", requestClass: "main"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			incoming := http.Header{
-				"x-claude-code-request-class":       {test.requestClass},
-				"x-claude-code-agent-type":          {"builtin"},
-				"x-claude-code-prev-tool-durations": {"5"},
-				"x-claude-code-compaction":          {"false"},
-				"x-claude-code-context-compacted":   {"false"},
-			}
-			req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			auth := fixtureAuth()
-			if err := applyClaudeHeaders(req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil,
-				[]byte(`{"model":"claude-opus-5-5"}`), &config.Config{}, incoming, test.confirmed); err != nil {
-				t.Fatal(err)
-			}
-			for header, values := range incoming {
-				got := req.Header.Get(header)
-				if test.confirmed && got != values[0] || !test.confirmed && got != "" {
-					t.Errorf("confirmed=%t: %s = %q", test.confirmed, header, got)
+		t.Run(
+			test.name, func(t *testing.T) {
+				incoming := http.Header{
+					"x-claude-code-request-class":       {test.requestClass},
+					"x-claude-code-agent-type":          {"builtin"},
+					"x-claude-code-prev-tool-durations": {"5"},
+					"x-claude-code-compaction":          {"false"},
+					"x-claude-code-context-compacted":   {"false"},
 				}
-			}
-		})
+				req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				auth := fixtureAuth()
+				if err := applyClaudeHeaders(
+					req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil,
+					[]byte(`{"model":"claude-opus-5-5"}`), &config.Config{}, incoming, test.confirmed,
+				); err != nil {
+					t.Fatal(err)
+				}
+				for header, values := range incoming {
+					got := req.Header.Get(header)
+					if test.confirmed && got != values[0] || !test.confirmed && got != "" {
+						t.Errorf("confirmed=%t: %s = %q", test.confirmed, header, got)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -94,7 +101,10 @@ func TestApplyClaudeHeaders_StillGatesManagedCallerBetas(t *testing.T) {
 	}
 	incoming := http.Header{}
 	incoming.Set("Anthropic-Beta", "effort-2025-11-24")
-	if errHeaders := applyClaudeHeaders(req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil, []byte(`{"model":"claude-haiku-4-5"}`), &config.Config{}, incoming, false); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(
+		req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil, []byte(`{"model":"claude-haiku-4-5"}`),
+		&config.Config{}, incoming, false,
+	); errHeaders != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
 	}
 	if betas := req.Header.Get("Anthropic-Beta"); strings.Contains(betas, "effort-2025-11-24") {
@@ -125,12 +135,16 @@ func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas_OAuth(t *testing.T) {
 			{"role": "user",   "content": "say ok"}
 		]
 	}`)
-	if errHeaders := applyClaudeHeaders(req, auth, "sk-ant-oat-fixture", false, nil, body, &config.Config{}, incoming, false); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(
+		req, auth, "sk-ant-oat-fixture", false, nil, body, &config.Config{}, incoming, false,
+	); errHeaders != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
 	}
 	betas := req.Header.Get("Anthropic-Beta")
 	if !strings.Contains(betas, "message-threads-2026-08-12") ||
-		!strings.Contains(betas, claudeMidConvSystemBeta+","+claudePerTurnControlBeta+","+claudeMidConvToolChangesBeta) {
+		!strings.Contains(
+			betas, claudeMidConvSystemBeta+","+claudePerTurnControlBeta+","+claudeMidConvToolChangesBeta,
+		) {
 		t.Fatalf("Anthropic-Beta = %q, want unknown beta plus OAuth model-gated betas", betas)
 	}
 }

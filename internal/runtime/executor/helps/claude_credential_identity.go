@@ -43,9 +43,9 @@ func claudeAgentSessionUUID(
 	metadataSets ...map[string]any,
 ) string {
 	metadata := mergeClaudeSessionMetadata(metadataSets...)
-	identity := cliproxyauth.ExtractSessionID(headers, originalPayload, metadata)
+	identity := cliproxyauth.CanonicalSessionID(headers, originalPayload, metadata)
 	if identity == "" && len(translatedPayload) > 0 {
-		identity = cliproxyauth.ExtractSessionID(headers, translatedPayload, metadata)
+		identity = cliproxyauth.CanonicalSessionID(headers, translatedPayload, metadata)
 	}
 	if identity == "" {
 		return uuid.NewString()
@@ -83,6 +83,9 @@ func mergeClaudeSessionMetadata(metadataSets ...map[string]any) map[string]any {
 			merged = make(map[string]any)
 		}
 		for key, value := range metadata {
+			if text, ok := value.(string); ok && strings.TrimSpace(text) == "" {
+				continue
+			}
 			if _, exists := merged[key]; !exists {
 				merged[key] = value
 			}
@@ -96,8 +99,10 @@ type claudeCredentialDevicePoolKVClient interface {
 	KVSet(context.Context, string, []byte, homekv.KVSetOptions) (bool, error)
 }
 
-var currentClaudeCredentialDevicePoolKVClient = func() (claudeCredentialDevicePoolKVClient, bool, error) {
-	client, homeMode, errClient := homekv.CurrentKVClient()
+var currentClaudeCredentialDevicePoolKVClient = func(
+	ctx context.Context,
+) (claudeCredentialDevicePoolKVClient, bool, error) {
+	client, homeMode, errClient := homekv.KVClientFromContext(ctx)
 	return client, homeMode, errClient
 }
 
@@ -113,7 +118,7 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 	}
 	credentialCandidate := claudeauth.NormalizeDeviceIDPool(rawCredentialDeviceIDs)
 
-	client, homeMode, errClient := currentClaudeCredentialDevicePoolKVClient()
+	client, homeMode, errClient := currentClaudeCredentialDevicePoolKVClient(ctx)
 	if !homeMode {
 		deviceIDs, _, errEnsure := claudeauth.EnsureDeviceIDPoolFor(&auth.Metadata)
 		return deviceIDs, errEnsure
@@ -149,7 +154,11 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 						)
 					}
 					if !written {
-						return nil, fmt.Errorf("ensure Claude credential device pool: canonical Home KV value was not written")
+						return nil, fmt.Errorf(
+							"ensure Claude credential device pool: canonical Home KV " +
+								"value was not " +
+								"written",
+						)
 					}
 				}
 				claudeauth.StoreDeviceIDPool(&auth.Metadata, deviceIDs)
@@ -220,6 +229,7 @@ func (e *claudeCredentialMetadataRequestError) Error() string {
 	return e.cause.Error()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *claudeCredentialMetadataRequestError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -246,7 +256,11 @@ func newClaudeCredentialMetadataRequestError(err error) error {
 }
 
 // ApplyClaudeCredentialMetadata rewrites the identity exception shared by native and cloaked OAuth requests.
-func ApplyClaudeCredentialMetadata(payload []byte, auth *cliproxyauth.Auth, sessionID string) ([]byte, string, error) {
+func ApplyClaudeCredentialMetadata(
+	payload []byte,
+	auth *cliproxyauth.Auth,
+	sessionID string,
+) ([]byte, string, error) {
 	if auth == nil {
 		return nil, "", fmt.Errorf("apply Claude credential metadata: auth is nil")
 	}

@@ -101,49 +101,54 @@ func waitForClaudeClose(t *testing.T, count *atomic.Int32) {
 func TestCloseConnectionBodyReadPreservesContextError(t *testing.T) {
 	bodyErr := errors.New("http2: response body closed")
 	for _, state := range []string{"active", "canceled", "deadline"} {
-		t.Run(state, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			if state == "deadline" {
-				cancel()
-				ctx, cancel = context.WithDeadline(context.Background(), time.Unix(1, 0))
-			}
-			defer cancel()
-			reader, writer := io.Pipe()
-			defer reader.Close()
-			defer writer.Close()
-			if err := writer.CloseWithError(bodyErr); err != nil {
-				t.Fatal(err)
-			}
-			body := &trackedClaudeBody{Reader: reader}
-			var closed atomic.Int32
-			wrapped := newCloseConnectionBody(ctx, body, func() error {
-				closed.Add(1)
-				return nil
-			})
-			defer wrapped.Close()
-			if state == "canceled" {
-				cancel()
-			}
-			_, errRead := io.ReadAll(wrapped)
-			want := bodyErr
-			if state == "canceled" {
-				want = context.Canceled
-			} else if state == "deadline" {
-				want = context.DeadlineExceeded
-			}
-			if !errors.Is(errRead, want) {
-				t.Fatalf("read error = %v, want %v", errRead, want)
-			}
-			if err := wrapped.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if closed.Load() != 1 || body.closeCount.Load() != 1 {
-				t.Fatalf("connection/body closes = %d/%d, want 1/1", closed.Load(), body.closeCount.Load())
-			}
-		})
+		t.Run(
+			state, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				if state == "deadline" {
+					cancel()
+					ctx, cancel = context.WithDeadline(context.Background(), time.Unix(1, 0))
+				}
+				defer cancel()
+				reader, writer := io.Pipe()
+				defer func(closeResource func() error) { _ = closeResource() }(reader.Close)
+				defer func(closeResource func() error) { _ = closeResource() }(writer.Close)
+				if err := writer.CloseWithError(bodyErr); err != nil {
+					t.Fatal(err)
+				}
+				body := &trackedClaudeBody{Reader: reader}
+				var closed atomic.Int32
+				wrapped := newCloseConnectionBody(
+					ctx, body, func() error {
+						closed.Add(1)
+						return nil
+					},
+				)
+				defer func(closeResource func() error) { _ = closeResource() }(wrapped.Close)
+				if state == "canceled" {
+					cancel()
+				}
+				_, errRead := io.ReadAll(wrapped)
+				want := bodyErr
+				if state == "canceled" {
+					want = context.Canceled
+				} else if state == "deadline" {
+					want = context.DeadlineExceeded
+				}
+				if !errors.Is(errRead, want) {
+					t.Fatalf("read error = %v, want %v", errRead, want)
+				}
+				if err := wrapped.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if closed.Load() != 1 || body.closeCount.Load() != 1 {
+					t.Fatalf("connection/body closes = %d/%d, want 1/1", closed.Load(), body.closeCount.Load())
+				}
+			},
+		)
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestCloseConnectionBodyClosesConnectionAndBodyOnce(t *testing.T) {
 	bodyErr := errors.New("body close failed")
 	connectionErr := errors.New("connection close failed")
@@ -156,11 +161,13 @@ func TestCloseConnectionBodyClosesConnectionAndBodyOnce(t *testing.T) {
 		},
 	}
 	connectionCloseCount := 0
-	wrapped := newCloseConnectionBody(context.Background(), body, func() error {
-		connectionCloseCount++
-		closeOrder = append(closeOrder, "connection")
-		return connectionErr
-	})
+	wrapped := newCloseConnectionBody(
+		context.Background(), body, func() error {
+			connectionCloseCount++
+			closeOrder = append(closeOrder, "connection")
+			return connectionErr
+		},
+	)
 
 	payload, errRead := io.ReadAll(wrapped)
 	if errRead != nil {
@@ -191,11 +198,13 @@ func TestCloseConnectionBodyClosesConnectionAndBodyOnce(t *testing.T) {
 func TestClaudeUtlsRoundTripperDialUsesRequestContext(t *testing.T) {
 	dialStarted := make(chan struct{})
 	roundTripper := &claudeUtlsRoundTripper{
-		dialer: claudeContextDialerFunc(func(ctx context.Context, _, _ string) (net.Conn, error) {
-			close(dialStarted)
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}),
+		dialer: claudeContextDialerFunc(
+			func(ctx context.Context, _, _ string) (net.Conn, error) {
+				close(dialStarted)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		),
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	roundTripDone := make(chan error, 1)
@@ -223,10 +232,12 @@ func TestClaudeUtlsRoundTripperDialUsesRequestContext(t *testing.T) {
 func TestClaudeUtlsRoundTripperPropagatesCancellationBeforeDial(t *testing.T) {
 	var dialCount atomic.Int32
 	roundTripper := &claudeUtlsRoundTripper{
-		dialer: claudeContextDialerFunc(func(ctx context.Context, _, _ string) (net.Conn, error) {
-			dialCount.Add(1)
-			return nil, ctx.Err()
-		}),
+		dialer: claudeContextDialerFunc(
+			func(ctx context.Context, _, _ string) (net.Conn, error) {
+				dialCount.Add(1)
+				return nil, ctx.Err()
+			},
+		),
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -245,17 +256,21 @@ func TestClaudeUtlsRoundTripperPropagatesCancellationBeforeDial(t *testing.T) {
 
 func TestClaudeUtlsRoundTripperHandshakeUsesRequestContext(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
-	t.Cleanup(func() {
-		_ = clientConn.Close()
-		_ = serverConn.Close()
-	})
+	t.Cleanup(
+		func() {
+			_ = clientConn.Close()
+			_ = serverConn.Close()
+		},
+	)
 	trackedConn := &trackedClaudeNetConn{Conn: clientConn}
 	dialDone := make(chan struct{})
 	roundTripper := &claudeUtlsRoundTripper{
-		dialer: claudeContextDialerFunc(func(context.Context, string, string) (net.Conn, error) {
-			close(dialDone)
-			return trackedConn, nil
-		}),
+		dialer: claudeContextDialerFunc(
+			func(context.Context, string, string) (net.Conn, error) {
+				close(dialDone)
+				return trackedConn, nil
+			},
+		),
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	connectionDone := make(chan error, 1)
@@ -288,15 +303,19 @@ func TestClaudeUtlsRoundTripperHandshakeUsesRequestContext(t *testing.T) {
 
 func TestClaudeUtlsRoundTripperHandshakeHonorsRequestDeadline(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
-	t.Cleanup(func() {
-		_ = clientConn.Close()
-		_ = serverConn.Close()
-	})
+	t.Cleanup(
+		func() {
+			_ = clientConn.Close()
+			_ = serverConn.Close()
+		},
+	)
 	trackedConn := &trackedClaudeNetConn{Conn: clientConn}
 	roundTripper := &claudeUtlsRoundTripper{
-		dialer: claudeContextDialerFunc(func(context.Context, string, string) (net.Conn, error) {
-			return trackedConn, nil
-		}),
+		dialer: claudeContextDialerFunc(
+			func(context.Context, string, string) (net.Conn, error) {
+				return trackedConn, nil
+			},
+		),
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
@@ -319,15 +338,17 @@ func TestClaudeUtlsRoundTripperClosesOrdinaryHandshakeFailureOnce(t *testing.T) 
 	serverDone := make(chan struct{})
 	go func() {
 		defer close(serverDone)
-		defer serverConn.Close()
+		defer func(closeResource func() error) { _ = closeResource() }(serverConn.Close)
 		buffer := make([]byte, 4096)
 		_, _ = serverConn.Read(buffer)
 	}()
 
 	roundTripper := &claudeUtlsRoundTripper{
-		dialer: claudeContextDialerFunc(func(context.Context, string, string) (net.Conn, error) {
-			return trackedConn, nil
-		}),
+		dialer: claudeContextDialerFunc(
+			func(context.Context, string, string) (net.Conn, error) {
+				return trackedConn, nil
+			},
+		),
 	}
 	connection, errConnect := roundTripper.createConnection(t.Context(), "8.8.8.8", "8.8.8.8:443")
 	if connection != nil {
@@ -344,9 +365,11 @@ func TestClaudeUtlsRoundTripperClosesOrdinaryHandshakeFailureOnce(t *testing.T) 
 
 func TestInitializeClaudeHTTP2ClientConnClosesTLSOnFailure(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
-	t.Cleanup(func() {
-		_ = serverConn.Close()
-	})
+	t.Cleanup(
+		func() {
+			_ = serverConn.Close()
+		},
+	)
 	trackedConn := &trackedClaudeNetConn{Conn: clientConn}
 	tlsConn := utls.UClient(trackedConn, &utls.Config{ServerName: "8.8.8.8"}, utls.HelloChrome_Auto)
 	initializeErr := errors.New("initialize HTTP/2 failed")
@@ -383,33 +406,35 @@ func TestClaudeUtlsRoundTripperClosesFailedAndEmptyResponses(t *testing.T) {
 	}
 
 	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			connection := &fakeClaudeHTTP2ClientConn{
-				roundTrip: func(*http.Request) (*http.Response, error) {
-					return testCase.response, testCase.err
-				},
-			}
-			roundTripper := &claudeUtlsRoundTripper{
-				connectionFactory: func(context.Context, string, string) (claudeHTTPClientConn, error) {
-					return connection, nil
-				},
-			}
-
-			response, errRoundTrip := roundTripper.RoundTrip(newPublicClaudeRequest(t, t.Context()))
-			if response != nil {
-				t.Fatalf("response = %#v, want nil", response)
-			}
-			if testCase.err != nil {
-				if !errors.Is(errRoundTrip, testCase.wantError) {
-					t.Fatalf("RoundTrip error = %v, want %v", errRoundTrip, testCase.wantError)
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				connection := &fakeClaudeHTTP2ClientConn{
+					roundTrip: func(*http.Request) (*http.Response, error) {
+						return testCase.response, testCase.err
+					},
 				}
-			} else if errRoundTrip == nil || !strings.Contains(errRoundTrip.Error(), "empty response") {
-				t.Fatalf("RoundTrip error = %v, want empty response error", errRoundTrip)
-			}
-			if got := connection.closeCount.Load(); got != 1 {
-				t.Fatalf("connection close count = %d, want 1", got)
-			}
-		})
+				roundTripper := &claudeUtlsRoundTripper{
+					connectionFactory: func(context.Context, string, string) (claudeHTTPClientConn, error) {
+						return connection, nil
+					},
+				}
+
+				response, errRoundTrip := roundTripper.RoundTrip(newPublicClaudeRequest(t, t.Context()))
+				if response != nil {
+					t.Fatalf("response = %#v, want nil", response)
+				}
+				if testCase.err != nil {
+					if !errors.Is(errRoundTrip, testCase.wantError) {
+						t.Fatalf("RoundTrip error = %v, want %v", errRoundTrip, testCase.wantError)
+					}
+				} else if errRoundTrip == nil || !strings.Contains(errRoundTrip.Error(), "empty response") {
+					t.Fatalf("RoundTrip error = %v, want empty response error", errRoundTrip)
+				}
+				if got := connection.closeCount.Load(); got != 1 {
+					t.Fatalf("connection close count = %d, want 1", got)
+				}
+			},
+		)
 	}
 }
 
@@ -476,11 +501,15 @@ func TestClaudeUtlsRoundTripperClosesUnreadBodyWhenContextEnds(t *testing.T) {
 
 func TestProtectedUtlsHTTPClientProxyPrecedence(t *testing.T) {
 	newProxy := func(name string, calls *atomic.Int32) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			calls.Add(1)
-			w.Header().Set("X-Claude-Test-Transport", name)
-			w.WriteHeader(http.StatusOK)
-		}))
+		return httptest.NewServer(
+			http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					calls.Add(1)
+					w.Header().Set("X-Claude-Test-Transport", name)
+					w.WriteHeader(http.StatusOK)
+				},
+			),
+		)
 	}
 
 	for _, test := range []struct {
@@ -493,62 +522,75 @@ func TestProtectedUtlsHTTPClientProxyPrecedence(t *testing.T) {
 		{name: "config proxy overrides context", useConfig: true, want: "config"},
 		{name: "context transport used without proxy", want: "context"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			var authCalls, configCalls, contextCalls atomic.Int32
-			authProxy := newProxy("auth", &authCalls)
-			defer authProxy.Close()
-			configProxy := newProxy("config", &configCalls)
-			defer configProxy.Close()
+		t.Run(
+			test.name, func(t *testing.T) {
+				var authCalls, configCalls, contextCalls atomic.Int32
+				authProxy := newProxy("auth", &authCalls)
+				defer authProxy.Close()
+				configProxy := newProxy("config", &configCalls)
+				defer configProxy.Close()
 
-			ctx := util.WithRoundTripper(t.Context(), protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				contextCalls.Add(1)
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     http.Header{"X-Claude-Test-Transport": {"context"}},
-					Body:       http.NoBody,
-					Request:    req,
-				}, nil
-			}))
-			cfg := &config.Config{}
-			if test.useConfig {
-				cfg.ProxyURL = configProxy.URL
-			}
-			auth := &cliproxyauth.Auth{}
-			if test.useAuth {
-				auth.ProxyURL = authProxy.URL
-			}
-
-			client := newProtectedUtlsHTTPClient(ctx, cfg, auth, time.Second)
-			req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, "http://public.example.invalid/test", nil)
-			if errRequest != nil {
-				t.Fatal(errRequest)
-			}
-			response, errDo := client.Do(req)
-			if errDo != nil {
-				t.Fatal(errDo)
-			}
-			defer response.Body.Close()
-			if got := response.Header.Get("X-Claude-Test-Transport"); got != test.want {
-				t.Fatalf("transport = %q, want %q", got, test.want)
-			}
-
-			wantAuthCalls, wantConfigCalls, wantContextCalls := int32(0), int32(0), int32(0)
-			switch test.want {
-			case "auth":
-				wantAuthCalls = 1
-			case "config":
-				wantConfigCalls = 1
-			case "context":
-				wantContextCalls = 1
-			}
-			if authCalls.Load() != wantAuthCalls || configCalls.Load() != wantConfigCalls || contextCalls.Load() != wantContextCalls {
-				t.Fatalf(
-					"transport calls auth/config/context = %d/%d/%d, want %d/%d/%d",
-					authCalls.Load(), configCalls.Load(), contextCalls.Load(),
-					wantAuthCalls, wantConfigCalls, wantContextCalls,
+				ctx := util.WithRoundTripper(
+					t.Context(), protectedUtlsRoundTripFunc(
+						func(req *http.Request) (*http.Response, error) {
+							contextCalls.Add(1)
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     http.Header{"X-Claude-Test-Transport": {"context"}},
+								Body:       http.NoBody,
+								Request:    req,
+							}, nil
+						},
+					),
 				)
-			}
-		})
+				cfg := &config.Config{}
+				if test.useConfig {
+					cfg.ProxyURL = configProxy.URL
+				}
+				auth := &cliproxyauth.Auth{}
+				if test.useAuth {
+					auth.ProxyURL = authProxy.URL
+				}
+
+				client := newProtectedUtlsHTTPClient(ctx, cfg, auth, time.Second)
+				req, errRequest := http.NewRequestWithContext(
+					ctx, http.MethodGet, "http://public.example.invalid/test", nil,
+				)
+				if errRequest != nil {
+					t.Fatal(errRequest)
+				}
+				response, errDo := client.Do(req)
+				if errDo != nil {
+					t.Fatal(errDo)
+				}
+				defer func(closeResource func() error) {
+					if err := closeResource(); err != nil {
+						t.Errorf("close proxy fixture response: %v", err)
+					}
+				}(response.Body.Close)
+				if got := response.Header.Get("X-Claude-Test-Transport"); got != test.want {
+					t.Fatalf("transport = %q, want %q", got, test.want)
+				}
+
+				wantAuthCalls, wantConfigCalls, wantContextCalls := int32(0), int32(0), int32(0)
+				switch test.want {
+				case "auth":
+					wantAuthCalls = 1
+				case "config":
+					wantConfigCalls = 1
+				case "context":
+					wantContextCalls = 1
+				}
+				if authCalls.Load() != wantAuthCalls || configCalls.Load() != wantConfigCalls ||
+					contextCalls.Load() != wantContextCalls {
+					t.Fatalf(
+						"transport calls auth/config/context = %d/%d/%d, want %d/%d/%d",
+						authCalls.Load(), configCalls.Load(), contextCalls.Load(),
+						wantAuthCalls, wantConfigCalls, wantContextCalls,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -606,58 +648,108 @@ func TestProtectedUtlsHTTPClientRequestProxyOverride(t *testing.T) {
 		{name: "claude", make: newClaudeUtlsHTTPClient},
 	} {
 		for _, sample := range []string{"proxy", "direct", "invalid"} {
-			t.Run(factory.name+"/"+sample, func(t *testing.T) {
-				var requestCalls, authCalls, configCalls, contextCalls, directCalls atomic.Int32
-				server := func(name string, calls *atomic.Int32) *httptest.Server {
-					result := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-						calls.Add(1)
-						writer.Header().Set("X-Claude-Test-Transport", name)
-						writer.WriteHeader(http.StatusOK)
-					}))
-					t.Cleanup(result.Close)
-					return result
-				}
-				requestProxy := server("request", &requestCalls)
-				authProxy := server("auth", &authCalls)
-				configProxy := server("config", &configCalls)
-				destination := server("direct", &directCalls)
-				ctx := util.WithRoundTripper(t.Context(), protectedUtlsRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-					contextCalls.Add(1)
-					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Claude-Test-Transport": {"context"}}, Body: http.NoBody, Request: request}, nil
-				}))
-				override := requestProxy.URL
-				if sample == "direct" {
-					override = "direct"
-				} else if sample == "invalid" {
-					override = "file:///invalid-proxy"
-				}
-				ctx = cliproxyexecutor.WithRequestProxyURL(ctx, override)
-				client := factory.make(ctx, &config.Config{ProxyURL: configProxy.URL}, &cliproxyauth.Auth{ProxyURL: authProxy.URL}, time.Second)
-				request, err := http.NewRequestWithContext(ctx, http.MethodGet, destination.URL+"/request-proxy", nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				response, err := client.Do(request)
-				if response != nil {
-					defer response.Body.Close()
-				}
-				if sample == "invalid" {
-					if err == nil || requestCalls.Load()+authCalls.Load()+configCalls.Load()+contextCalls.Load()+directCalls.Load() != 0 {
-						t.Fatalf("invalid override: error=%v, calls=%d/%d/%d/%d/%d", err, requestCalls.Load(), authCalls.Load(), configCalls.Load(), contextCalls.Load(), directCalls.Load())
+			t.Run(
+				factory.name+"/"+sample, func(t *testing.T) {
+					var requestCalls, authCalls, configCalls, contextCalls, directCalls atomic.Int32
+					server := func(name string, calls *atomic.Int32) *httptest.Server {
+						result := httptest.NewServer(
+							http.HandlerFunc(
+								func(writer http.ResponseWriter, _ *http.Request) {
+									calls.Add(1)
+									writer.Header().Set("X-Claude-Test-Transport", name)
+									writer.WriteHeader(http.StatusOK)
+								},
+							),
+						)
+						t.Cleanup(result.Close)
+						return result
 					}
-					return
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				want, wantRequest, wantDirect := "request", int32(1), int32(0)
-				if sample == "direct" {
-					want, wantRequest, wantDirect = "direct", 0, 1
-				}
-				if response.Header.Get("X-Claude-Test-Transport") != want || requestCalls.Load() != wantRequest || directCalls.Load() != wantDirect || authCalls.Load()+configCalls.Load()+contextCalls.Load() != 0 {
-					t.Fatalf("transport=%q, want %q, calls=%d/%d/%d/%d/%d", response.Header.Get("X-Claude-Test-Transport"), want, requestCalls.Load(), authCalls.Load(), configCalls.Load(), contextCalls.Load(), directCalls.Load())
-				}
-			})
+					requestProxy := server("request", &requestCalls)
+					authProxy := server("auth", &authCalls)
+					configProxy := server("config", &configCalls)
+					destination := server("direct", &directCalls)
+					ctx := util.WithRoundTripper(
+						t.Context(), protectedUtlsRoundTripFunc(
+							func(request *http.Request) (*http.Response, error) {
+								contextCalls.Add(1)
+								return &http.Response{
+									StatusCode: http.StatusOK,
+									Header: http.Header{
+										"X-Claude-Test-Transport": {"context"},
+									}, Body: http.NoBody,
+									Request: request,
+								}, nil
+							},
+						),
+					)
+					override := requestProxy.URL
+					if sample == "direct" {
+						override = "direct"
+					} else if sample == "invalid" {
+						override = "file:///invalid-proxy"
+					}
+					ctx = cliproxyexecutor.WithRequestProxyURL(ctx, override)
+					client := factory.make(
+						ctx,
+						&config.Config{ProxyURL: configProxy.URL},
+						&cliproxyauth.Auth{ProxyURL: authProxy.URL},
+						time.Second,
+					)
+					request, err := http.NewRequestWithContext(
+						ctx, http.MethodGet, destination.URL+"/request-proxy", nil,
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+					response, err := client.Do(request)
+					if response != nil {
+						defer func(closeResource func() error) {
+							if err := closeResource(); err != nil {
+								t.Errorf("close request proxy fixture response: %v", err)
+							}
+						}(response.Body.Close)
+					}
+					if sample == "invalid" {
+						if err == nil ||
+							requestCalls.Load()+
+								authCalls.Load()+
+								configCalls.Load()+
+								contextCalls.Load()+
+								directCalls.Load() !=
+								0 {
+							t.Fatalf(
+								"invalid override: error=%v, calls=%d/%d/%d/%d/%d", err, requestCalls.Load(),
+								authCalls.Load(), configCalls.Load(), contextCalls.Load(), directCalls.Load(),
+							)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					want, wantRequest, wantDirect := "request", int32(1), int32(0)
+					if sample == "direct" {
+						want, wantRequest, wantDirect = "direct", 0, 1
+					}
+					if response.Header.Get("X-Claude-Test-Transport") != want ||
+						requestCalls.Load() != wantRequest ||
+						directCalls.Load() != wantDirect ||
+						authCalls.Load()+configCalls.Load()+contextCalls.Load() != 0 {
+						t.Fatalf(
+							"transport=%q, want %q, calls=%d/%d/%d/%d/%d",
+							response.Header.Get(
+								"X-Claude-Test-Transport",
+							),
+							want,
+							requestCalls.Load(),
+							authCalls.Load(),
+							configCalls.Load(),
+							contextCalls.Load(),
+							directCalls.Load(),
+						)
+					}
+				},
+			)
 		}
 	}
 }

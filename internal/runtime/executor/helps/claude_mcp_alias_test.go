@@ -77,18 +77,20 @@ func TestClaudeMCPToolAliasSemanticSuffixIsSafeAndBounded(t *testing.T) {
 		{name: "unicode only", original: "搜索网页", wantSuffix: "_tool"},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			alias := ClaudeMCPToolAlias("credential-secret", test.original, 0)
-			if !IsClaudeMCPToolName(alias) {
-				t.Fatalf("generated alias %q is not a valid MCP tool name", alias)
-			}
-			if len(alias) > 64 {
-				t.Fatalf("generated alias length = %d, want <= 64: %q", len(alias), alias)
-			}
-			if !strings.HasSuffix(alias, test.wantSuffix) {
-				t.Fatalf("generated alias %q does not end in %q", alias, test.wantSuffix)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				alias := ClaudeMCPToolAlias("credential-secret", test.original, 0)
+				if !IsClaudeMCPToolName(alias) {
+					t.Fatalf("generated alias %q is not a valid MCP tool name", alias)
+				}
+				if len(alias) > 64 {
+					t.Fatalf("generated alias length = %d, want <= 64: %q", len(alias), alias)
+				}
+				if !strings.HasSuffix(alias, test.wantSuffix) {
+					t.Fatalf("generated alias %q does not end in %q", alias, test.wantSuffix)
+				}
+			},
+		)
 	}
 
 	const original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -110,10 +112,15 @@ func TestClaudeMCPAliasEnglishWordlistIntegrity(t *testing.T) {
 	if got := len(claudeMCPAliasEnglishWords); got != 2048 {
 		t.Fatalf("word count = %d, want 2048", got)
 	}
-	if first, last := claudeMCPAliasEnglishWords[0], claudeMCPAliasEnglishWords[len(claudeMCPAliasEnglishWords)-1]; first != "abandon" || last != "zoo" {
+	if first, last := claudeMCPAliasEnglishWords[0], claudeMCPAliasEnglishWords[len(claudeMCPAliasEnglishWords)-
+		1]; first !=
+		"abandon" ||
+		last != "zoo" {
 		t.Fatalf("wordlist endpoints = %q, %q, want abandon, zoo", first, last)
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(rawBIP39EnglishWords))); got != "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda" {
+	if got := fmt.Sprintf(
+		"%x", sha256.Sum256([]byte(rawBIP39EnglishWords)),
+	); got != "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda" {
 		t.Fatalf("wordlist SHA-256 = %s", got)
 	}
 

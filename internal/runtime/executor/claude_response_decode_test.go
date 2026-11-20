@@ -39,11 +39,13 @@ func TestDecodeResponseBodyStackedRepeatedHeaders(t *testing.T) {
 	if errDecode != nil {
 		t.Fatal(errDecode)
 	}
-	t.Cleanup(func() {
-		if errClose := decoded.Close(); errClose != nil {
-			t.Errorf("close decoded response: %v", errClose)
-		}
-	})
+	t.Cleanup(
+		func() {
+			if errClose := decoded.Close(); errClose != nil {
+				t.Errorf("close decoded response: %v", errClose)
+			}
+		},
+	)
 
 	got, errRead := io.ReadAll(decoded)
 	if errRead != nil {
@@ -74,11 +76,13 @@ func TestDecodeResponseBodyDeflateVariants(t *testing.T) {
 				if errDecode != nil {
 					t.Fatal(errDecode)
 				}
-					t.Cleanup(func() {
+				t.Cleanup(
+					func() {
 						if errClose := decoded.Close(); errClose != nil {
 							t.Errorf("close decoded response: %v", errClose)
 						}
-					})
+					},
+				)
 
 				got, errRead := io.ReadAll(decoded)
 				if errRead != nil {

@@ -14,7 +14,7 @@ func TestConvertOpenAIRequestToClaudeWithCompatPreservesReasoningContent(t *test
 		t.Fatalf("default translation preserved reasoning_content: %s", withoutCompat)
 	}
 
-	withCompat := ConvertOpenAIRequestToClaudeWithCompat("deepseek-v4", payload, false)
+	withCompat := convertOpenAIRequestToClaudeWithCompat("deepseek-v4", payload, false)
 	part := gjson.GetBytes(withCompat, "messages.0.content.#(type=thinking)")
 	if part.Get("thinking").String() != "reason" || part.Get("signature").String() != "" {
 		t.Fatalf("compat translation missing unsigned thinking block: %s", withCompat)

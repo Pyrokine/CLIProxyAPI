@@ -20,13 +20,14 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-type claudeToolChoiceError string
+type claudeRequestError string
 
-func (e claudeToolChoiceError) Error() string       { return string(e) }
-func (claudeToolChoiceError) StatusCode() int       { return 400 }
-func (claudeToolChoiceError) IsRequestScoped() bool { return true }
+func (e claudeRequestError) Error() string       { return string(e) }
+func (claudeRequestError) StatusCode() int       { return 400 }
+func (claudeRequestError) IsRequestScoped() bool { return true }
 
-// convertOpenAIRequestToClaudeDefault parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
+// convertOpenAIRequestToClaudeDefault parses and transforms an OpenAI Chat Completions API request into Claude
+// Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
 // The function performs comprehensive transformation including:
@@ -47,9 +48,9 @@ func convertOpenAIRequestToClaudeDefault(modelName string, inputRawJSON []byte, 
 	return convertOpenAIRequestToClaude(modelName, inputRawJSON, stream, false)
 }
 
-// ConvertOpenAIRequestToClaudeWithCompat preserves assistant reasoning content
+// convertOpenAIRequestToClaudeWithCompat preserves assistant reasoning content
 // as an unsigned thinking block for configured compatibility endpoints.
-func ConvertOpenAIRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertOpenAIRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
 	return convertOpenAIRequestToClaude(modelName, inputRawJSON, stream, true)
 }
 
@@ -64,7 +65,10 @@ func convertOpenAIRequestToClaude(
 }
 
 // ConvertOpenAIRequestToClaudeWithCompatReturningError reports unsupported user attachments.
-func ConvertOpenAIRequestToClaudeWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+func ConvertOpenAIRequestToClaudeWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) (
+	[]byte,
+	error,
+) {
 	return convertOpenAIRequestToClaudeChecked(modelName, inputRawJSON, stream, true)
 }
 
@@ -195,14 +199,40 @@ func convertOpenAIRequestToClaudeChecked(
 	var drops translatorcommon.UserTurnDrops
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		lastToolMessage := make(map[string]gjson.Result)
-		messages.ForEach(func(_, message gjson.Result) bool {
-			if message.Get("role").String() == "tool" {
-				if rawID := message.Get("tool_call_id").String(); rawID != "" {
+		toolCallIDs := make(map[string]struct{})
+		previousRole := ""
+		var pairingErr error
+		messages.ForEach(
+			func(_, message gjson.Result) bool {
+				switch message.Get("role").String() {
+				case "assistant":
+					if previousRole != "assistant" {
+						clear(toolCallIDs)
+					}
+					previousRole = "assistant"
+					for _, call := range message.Get("tool_calls").Array() {
+						if rawID := call.Get("id").String(); rawID != "" &&
+							call.Get("type").String() == "function" {
+							toolCallIDs[rawID] = struct{}{}
+						}
+					}
+				case "user":
+					previousRole = "user"
+				case "tool":
+					previousRole = "user"
+					rawID := message.Get("tool_call_id").String()
+					if _, exists := toolCallIDs[rawID]; !exists {
+						pairingErr = claudeRequestError("tool result has no matching assistant tool call")
+						return false
+					}
 					lastToolMessage[rawID] = message
 				}
-			}
-			return true
-		})
+				return true
+			},
+		)
+		if pairingErr != nil {
+			return nil, pairingErr
+		}
 		emittedToolResults := make(map[string]struct{})
 		messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(
 			int(messages.Get("#").Int()),
@@ -215,7 +245,8 @@ func convertOpenAIRequestToClaudeChecked(
 				switch role {
 				case "system", "developer":
 					systemStart := len(systemBlocks)
-					if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
+					if contentResult.Exists() && contentResult.Type == gjson.String &&
+						contentResult.String() != "" {
 						textPart := []byte(`{"type":"text","text":""}`)
 						textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
 						textPart = translatorcommon.AttachCacheControl(textPart, message)
@@ -260,7 +291,8 @@ func convertOpenAIRequestToClaudeChecked(
 					}
 
 					// Handle content based on its type (string or array)
-					if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
+					if contentResult.Exists() && contentResult.Type == gjson.String &&
+						contentResult.String() != "" {
 						part := []byte(`{"type":"text","text":""}`)
 						part, _ = sjson.SetBytes(part, "text", contentResult.String())
 						msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
@@ -282,7 +314,8 @@ func convertOpenAIRequestToClaudeChecked(
 					}
 
 					// Handle tool calls (for assistant messages)
-					if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && role == "assistant" {
+					if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() &&
+						role == "assistant" {
 						toolCalls.ForEach(
 							func(_, toolCall gjson.Result) bool {
 								if toolCall.Get("type").String() == "function" {
@@ -296,7 +329,9 @@ func convertOpenAIRequestToClaudeChecked(
 									function := toolCall.Get("function")
 									toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 									toolUse, _ = sjson.SetBytes(toolUse, "id", toolCallID)
-									toolUse, _ = sjson.SetBytes(toolUse, "name", mapFunctionName(function.Get("name").String()))
+									toolUse, _ = sjson.SetBytes(
+										toolUse, "name", mapFunctionName(function.Get("name").String()),
+									)
 
 									// Parse arguments for the tool call
 									if args := function.Get("arguments"); args.Exists() {
@@ -304,7 +339,11 @@ func convertOpenAIRequestToClaudeChecked(
 										if argsStr != "" && gjson.Valid(argsStr) {
 											argsJSON := gjson.Parse(argsStr)
 											if argsJSON.IsObject() {
-												toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+												toolUse, _ = sjson.SetRawBytes(
+													toolUse,
+													"input",
+													[]byte(argsJSON.Raw),
+												)
 											} else {
 												toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte("{}"))
 											}
@@ -325,7 +364,8 @@ func convertOpenAIRequestToClaudeChecked(
 					if role == "user" {
 						sendable := 0
 						for _, part := range gjson.GetBytes(msg, "content").Array() {
-							if part.Get("type").String() != "text" || strings.TrimSpace(part.Get("text").String()) != "" {
+							if part.Get("type").String() != "text" ||
+								strings.TrimSpace(part.Get("text").String()) != "" {
 								sendable++
 							}
 						}
@@ -352,7 +392,9 @@ func convertOpenAIRequestToClaudeChecked(
 					toolCallID := util.SanitizeClaudeToolID(rawID)
 					toolContentResult := targetMessage.Get("content")
 
-					msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
+					msg := []byte(
+						`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`,
+					)
 					msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)
 					toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
 					if toolResultContentRaw {
@@ -399,22 +441,23 @@ func convertOpenAIRequestToClaudeChecked(
 		}
 		toolList := allowed.Get("tools")
 		if !allowed.IsObject() || !toolList.IsArray() {
-			return nil, claudeToolChoiceError("tool_choice allowed_tools requires a tools array")
+			return nil, claudeRequestError("tool_choice allowed_tools requires a tools array")
 		}
 		for _, tool := range toolList.Array() {
 			name := tool.Get("function.name")
 			if !name.Exists() {
 				name = tool.Get("name")
 			}
-			if tool.Get("type").String() != "function" || name.Type != gjson.String || strings.TrimSpace(name.String()) == "" {
-				return nil, claudeToolChoiceError("allowed_tools supports named function tools only")
+			if tool.Get("type").String() != "function" || name.Type != gjson.String ||
+				strings.TrimSpace(name.String()) == "" {
+				return nil, claudeRequestError("allowed_tools supports named function tools only")
 			}
 			allowedNames[name.String()] = struct{}{}
 		}
 		if mode := allowed.Get("mode"); mode.Exists() {
 			allowedMode = strings.ToLower(strings.TrimSpace(mode.String()))
 			if mode.Type != gjson.String || (allowedMode != "auto" && allowedMode != "required") {
-				return nil, claudeToolChoiceError("allowed_tools mode must be auto or required")
+				return nil, claudeRequestError("allowed_tools mode must be auto or required")
 			}
 		}
 	}
@@ -427,12 +470,19 @@ func convertOpenAIRequestToClaudeChecked(
 				if tool.Get("type").String() == "function" {
 					function := tool.Get("function")
 					if isAllowedTools {
-						if _, allowed := allowedNames[function.Get("name").String()]; !allowed {
+						name := function.Get("name").String()
+						_, originalAllowed := allowedNames[name]
+						_, mappedAllowed := allowedNames[mapFunctionName(name)]
+						if !originalAllowed && !mappedAllowed {
 							return true
 						}
 					}
-					anthropicTool := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
-					anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", mapFunctionName(function.Get("name").String()))
+					anthropicTool := []byte(
+						`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`,
+					)
+					anthropicTool, _ = sjson.SetBytes(
+						anthropicTool, "name", mapFunctionName(function.Get("name").String()),
+					)
 					anthropicTool, _ = sjson.SetBytes(
 						anthropicTool, "description", function.Get("description").String(),
 					)
@@ -479,7 +529,7 @@ func convertOpenAIRequestToClaudeChecked(
 	if isAllowedTools {
 		if gjson.GetBytes(out, "tools.#").Int() == 0 {
 			if allowedMode == "required" {
-				return nil, claudeToolChoiceError("required allowed_tools has no available function tools")
+				return nil, claudeRequestError("required allowed_tools has no available function tools")
 			}
 			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
 		} else if allowedMode == "required" {
@@ -492,7 +542,7 @@ func convertOpenAIRequestToClaudeChecked(
 		if toolChoice.IsObject() {
 			choiceType = toolChoice.Get("type").String()
 		} else if toolChoice.Type != gjson.String {
-			return nil, claudeToolChoiceError("tool_choice must be a string or object")
+			return nil, claudeRequestError("tool_choice must be a string or object")
 		}
 		switch choiceType {
 		case "none", "auto":
@@ -505,15 +555,17 @@ func convertOpenAIRequestToClaudeChecked(
 				name = toolChoice.Get("name")
 			}
 			if name.Type != gjson.String || strings.TrimSpace(name.String()) == "" {
-				return nil, claudeToolChoiceError("function tool_choice requires a name")
+				return nil, claudeRequestError("function tool_choice requires a name")
 			}
 			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"tool"}`))
 			out, _ = sjson.SetBytes(out, "tool_choice.name", mapFunctionName(name.String()))
 		default:
-			return nil, claudeToolChoiceError("unsupported tool_choice type")
+			return nil, claudeRequestError("unsupported tool_choice type")
 		}
 	}
-	if root.Get("parallel_tool_calls").Type == gjson.False && gjson.GetBytes(out, "tool_choice.type").String() != "none" {
+	if root.Get("parallel_tool_calls").Type == gjson.False && gjson.GetBytes(
+		out, "tool_choice.type",
+	).String() != "none" {
 		if !gjson.GetBytes(out, "tool_choice").Exists() && gjson.GetBytes(out, "tools.#").Int() > 0 {
 			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
 		}
@@ -684,15 +736,17 @@ func stableMessageText(content gjson.Result) string {
 		return ""
 	}
 	var texts []string
-	content.ForEach(func(_, part gjson.Result) bool {
-		switch part.Get("type").String() {
-		case "text", "input_text", "output_text":
-			if text := strings.TrimSpace(part.Get("text").String()); text != "" {
-				texts = append(texts, text)
+	content.ForEach(
+		func(_, part gjson.Result) bool {
+			switch part.Get("type").String() {
+			case "text", "input_text", "output_text":
+				if text := strings.TrimSpace(part.Get("text").String()); text != "" {
+					texts = append(texts, text)
+				}
 			}
-		}
-		return true
-	})
+			return true
+		},
+	)
 	return strings.Join(texts, "\n")
 }
 
@@ -702,7 +756,8 @@ func claudeStructuredOutputInstruction(format gjson.Result) string {
 	}
 	switch strings.ToLower(strings.TrimSpace(format.Get("type").String())) {
 	case "json_object":
-		return "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object."
+		return "You must format your entire response as a valid JSON object. Do not include any explanations," +
+			" markdown code blocks (such as ```json), or any text outside of the JSON object."
 	case "json_schema":
 		jsonSchema := format.Get("json_schema")
 		schema := jsonSchema.Get("schema")
@@ -710,10 +765,14 @@ func claudeStructuredOutputInstruction(format gjson.Result) string {
 			schema = format.Get("schema")
 		}
 		if !schema.Exists() {
-			return "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object."
+			return "You must format your entire response as a valid JSON object. Do not include any " +
+				"explanations, markdown code blocks (such as ```json), or any text outside of the JSON " +
+				"object."
 		}
 		var instruction strings.Builder
-		instruction.WriteString("You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n")
+		instruction.WriteString(
+			"You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n",
+		)
 		name := strings.TrimSpace(jsonSchema.Get("name").String())
 		if name == "" {
 			name = strings.TrimSpace(format.Get("name").String())
@@ -734,7 +793,11 @@ func claudeStructuredOutputInstruction(format gjson.Result) string {
 		}
 		instruction.WriteString("JSON Schema:\n")
 		instruction.WriteString(schema.Raw)
-		instruction.WriteString("\nDo not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.")
+		instruction.WriteString(
+			"\nDo not include any explanations, markdown code blocks (such as " +
+				"```json), or any text outside of the JSON " +
+				"object.",
+		)
 		return instruction.String()
 	default:
 		return ""

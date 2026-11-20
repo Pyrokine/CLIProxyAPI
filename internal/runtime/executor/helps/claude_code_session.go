@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -12,16 +13,17 @@ import (
 )
 
 const (
-	ClaudeCodeSessionHeader = "X-Claude-Code-Session-Id"
+	claudeCodeSessionHeader = "X-Claude-Code-Session-Id"
 	claudeCodeAgentHeader   = "X-Claude-Code-Agent-Id"
 	claudeCodeMainAgentID   = "main"
 )
 
 var claudeCodeSessionSuffixPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 
-// ExtractClaudeCodeSessionID resolves a Claude Code session ID, preferring X-Claude-Code-Session-Id over payload metadata.
+// ExtractClaudeCodeSessionID resolves a Claude Code session ID, preferring X-Claude-Code-Session-Id over payload
+// metadata.
 func ExtractClaudeCodeSessionID(ctx context.Context, payload []byte, headers http.Header) string {
-	if sessionID := claudeCodeHeader(ctx, headers, ClaudeCodeSessionHeader); sessionID != "" {
+	if sessionID := claudeCodeHeader(ctx, headers, claudeCodeSessionHeader); sessionID != "" {
 		return sessionID
 	}
 	return extractClaudeCodeSessionIDFromPayload(payload)
@@ -41,7 +43,11 @@ func ClaudeCodeExecutionScope(ctx context.Context, payload []byte, headers http.
 	if sessionID == "" {
 		return "", false
 	}
-	return "claude:" + sessionID + ":agent:" + ExtractClaudeCodeAgentID(ctx, headers), true
+	return "claude:" + url.QueryEscape(sessionID) + ":agent:" + url.QueryEscape(
+		ExtractClaudeCodeAgentID(
+			ctx, headers,
+		),
+	), true
 }
 
 func claudeCodeHeader(ctx context.Context, headers http.Header, name string) string {
@@ -49,7 +55,8 @@ func claudeCodeHeader(ctx context.Context, headers http.Header, name string) str
 		return value
 	}
 	if ctx != nil {
-		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil &&
+			ginCtx.Request != nil {
 			return headerValueCaseInsensitive(ginCtx.Request.Header, name)
 		}
 	}

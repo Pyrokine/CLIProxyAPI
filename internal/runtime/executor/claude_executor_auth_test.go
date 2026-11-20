@@ -30,43 +30,66 @@ func TestPrepareRequestAuthSkipsProfileForSetupTokens(t *testing.T) {
 		name  string
 		apply func(*cliproxyauth.Auth)
 	}{
-		{name: "skip account profile", apply: func(auth *cliproxyauth.Auth) { auth.Metadata["skip_account_profile"] = true }},
+		{
+			name:  "skip account profile",
+			apply: func(auth *cliproxyauth.Auth) { auth.Metadata["skip_account_profile"] = true },
+		},
 		{name: "is setup token", apply: func(auth *cliproxyauth.Auth) { auth.Metadata["is_setup_token"] = true }},
 		{name: "setup token", apply: func(auth *cliproxyauth.Auth) { auth.Metadata["setup_token"] = true }},
-		{name: "auth kind underscore", apply: func(auth *cliproxyauth.Auth) { auth.Attributes["auth_kind"] = "setup_token" }},
-		{name: "auth kind hyphen", apply: func(auth *cliproxyauth.Auth) { auth.Attributes["auth_kind"] = "setup-token" }},
-		{name: "scope without profile", apply: func(auth *cliproxyauth.Auth) { auth.Metadata["scope"] = "org:create_api_key user:inference" }},
-		{name: "scopes without office", apply: func(auth *cliproxyauth.Auth) { auth.Metadata["scopes"] = "user:inference" }},
+		{
+			name:  "auth kind underscore",
+			apply: func(auth *cliproxyauth.Auth) { auth.Attributes["auth_kind"] = "setup_token" },
+		},
+		{
+			name:  "auth kind hyphen",
+			apply: func(auth *cliproxyauth.Auth) { auth.Attributes["auth_kind"] = "setup-token" },
+		},
+		{
+			name:  "scope without profile",
+			apply: func(auth *cliproxyauth.Auth) { auth.Metadata["scope"] = "org:create_api_key user:inference" },
+		},
+		{
+			name:  "scopes without office",
+			apply: func(auth *cliproxyauth.Auth) { auth.Metadata["scopes"] = "user:inference" },
+		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			auth := newClaudeProfileTestAuth("setup-token-" + test.name)
-			test.apply(auth)
-			var profileCalls atomic.Int32
-			executor := NewClaudeExecutor(&config.Config{})
-			executor.oauthProfileFetcher = func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error) {
-				profileCalls.Add(1)
-				return nil, errors.New("profile fetch must not run")
-			}
+		t.Run(
+			test.name, func(t *testing.T) {
+				auth := newClaudeProfileTestAuth("setup-token-" + test.name)
+				test.apply(auth)
+				var profileCalls atomic.Int32
+				executor := NewClaudeExecutor(&config.Config{})
+				executor.oauthProfileFetcher = func(
+					context.Context,
+					*cliproxyauth.Auth,
+					string,
+				) (*claudeauth.OAuthProfile, error) {
+					profileCalls.Add(1)
+					return nil, errors.New("profile fetch must not run")
+				}
 
-			prepared, errPrepare := executor.PrepareRequestAuth(t.Context(), auth)
-			if errPrepare != nil {
-				t.Fatal(errPrepare)
-			}
-			if prepared != auth {
-				t.Fatal("PrepareRequestAuth returned a different auth")
-			}
-			if got := profileCalls.Load(); got != 0 {
-				t.Fatalf("profile calls = %d, want 0", got)
-			}
-			wantUUID := helps.StableClaudeCLIAccountUUID(helps.ClaudeCLIAuthIdentitySeed(auth))
-			if got := helps.ClaudeCredentialAccountUUID(auth); got != wantUUID {
-				t.Fatalf("account UUID = %q, want %q", got, wantUUID)
-			}
-			if checkedAt := claudeauth.ReadMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey); checkedAt == "" {
-				t.Fatal("profile checked timestamp is empty")
-			}
-		})
+				prepared, errPrepare := executor.PrepareRequestAuth(t.Context(), auth)
+				if errPrepare != nil {
+					t.Fatal(errPrepare)
+				}
+				if prepared != auth {
+					t.Fatal("PrepareRequestAuth returned a different auth")
+				}
+				if got := profileCalls.Load(); got != 0 {
+					t.Fatalf("profile calls = %d, want 0", got)
+				}
+				wantUUID := helps.StableClaudeCLIAccountUUID(helps.ClaudeCLIAuthIdentitySeed(auth))
+				if got := helps.ClaudeCredentialAccountUUID(auth); got != wantUUID {
+					t.Fatalf("account UUID = %q, want %q", got, wantUUID)
+				}
+				if checkedAt := claudeauth.ReadMetadataString(
+					&auth.Metadata, claudeAccountProfileCheckedAtKey,
+				); checkedAt == "" {
+					t.Fatal("profile checked timestamp is empty")
+				}
+			},
+		)
 	}
 }
 
@@ -79,7 +102,11 @@ func TestPrepareRequestAuthStoresOAuthProfile(t *testing.T) {
 	profile.Organization.Name = "organization-name"
 	var profileCalls atomic.Int32
 	executor := NewClaudeExecutor(&config.Config{})
-	executor.oauthProfileFetcher = func(ctx context.Context, gotAuth *cliproxyauth.Auth, apiKey string) (*claudeauth.OAuthProfile, error) {
+	executor.oauthProfileFetcher = func(
+		ctx context.Context,
+		gotAuth *cliproxyauth.Auth,
+		apiKey string,
+	) (*claudeauth.OAuthProfile, error) {
 		profileCalls.Add(1)
 		if gotAuth != auth || apiKey != auth.Attributes["api_key"] {
 			t.Fatalf("profile fetch auth/key = %#v/%q", gotAuth, apiKey)
@@ -127,35 +154,41 @@ func TestPrepareRequestAuthFallsBackForProfileScopeLimitations(t *testing.T) {
 		{name: "nil profile"},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			auth := newClaudeProfileTestAuth("profile-fallback-" + test.name)
-			var profileCalls atomic.Int32
-			executor := NewClaudeExecutor(&config.Config{})
-			executor.oauthProfileFetcher = func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error) {
-				profileCalls.Add(1)
-				return test.profile, test.err
-			}
+		t.Run(
+			test.name, func(t *testing.T) {
+				auth := newClaudeProfileTestAuth("profile-fallback-" + test.name)
+				var profileCalls atomic.Int32
+				executor := NewClaudeExecutor(&config.Config{})
+				executor.oauthProfileFetcher = func(
+					context.Context,
+					*cliproxyauth.Auth,
+					string,
+				) (*claudeauth.OAuthProfile, error) {
+					profileCalls.Add(1)
+					return test.profile, test.err
+				}
 
-			prepared, errPrepare := executor.PrepareRequestAuth(t.Context(), auth)
-			if errPrepare != nil {
-				t.Fatal(errPrepare)
-			}
-			if prepared != auth || profileCalls.Load() != 1 {
-				t.Fatalf("prepared = %p, auth = %p, profile calls = %d", prepared, auth, profileCalls.Load())
-			}
-			wantUUID := helps.StableClaudeCLIAccountUUID(helps.ClaudeCLIAuthIdentitySeed(auth))
-			if got := helps.ClaudeCredentialAccountUUID(auth); got != wantUUID {
-				t.Fatalf("account UUID = %q, want %q", got, wantUUID)
-			}
+				prepared, errPrepare := executor.PrepareRequestAuth(t.Context(), auth)
+				if errPrepare != nil {
+					t.Fatal(errPrepare)
+				}
+				if prepared != auth || profileCalls.Load() != 1 {
+					t.Fatalf("prepared = %p, auth = %p, profile calls = %d", prepared, auth, profileCalls.Load())
+				}
+				wantUUID := helps.StableClaudeCLIAccountUUID(helps.ClaudeCLIAuthIdentitySeed(auth))
+				if got := helps.ClaudeCredentialAccountUUID(auth); got != wantUUID {
+					t.Fatalf("account UUID = %q, want %q", got, wantUUID)
+				}
 
-			preparedAgain, errAgain := executor.PrepareRequestAuth(t.Context(), auth)
-			if errAgain != nil || preparedAgain != auth {
-				t.Fatalf("second preparation = %p, error = %v", preparedAgain, errAgain)
-			}
-			if got := profileCalls.Load(); got != 1 {
-				t.Fatalf("profile calls after repeated preparation = %d, want 1", got)
-			}
-		})
+				preparedAgain, errAgain := executor.PrepareRequestAuth(t.Context(), auth)
+				if errAgain != nil || preparedAgain != auth {
+					t.Fatalf("second preparation = %p, error = %v", preparedAgain, errAgain)
+				}
+				if got := profileCalls.Load(); got != 1 {
+					t.Fatalf("profile calls after repeated preparation = %d, want 1", got)
+				}
+			},
+		)
 	}
 }
 
@@ -169,24 +202,30 @@ func TestPrepareRequestAuthPropagatesProfileFailures(t *testing.T) {
 		{name: "unrelated permission error", err: errors.New("permission_error from unrelated policy")},
 		{name: "generic forbidden", err: errors.New("forbidden by unrelated policy")},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			auth := newClaudeProfileTestAuth("profile-error-" + test.name)
-			executor := NewClaudeExecutor(&config.Config{})
-			executor.oauthProfileFetcher = func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error) {
-				return nil, test.err
-			}
+		t.Run(
+			test.name, func(t *testing.T) {
+				auth := newClaudeProfileTestAuth("profile-error-" + test.name)
+				executor := NewClaudeExecutor(&config.Config{})
+				executor.oauthProfileFetcher = func(
+					context.Context,
+					*cliproxyauth.Auth,
+					string,
+				) (*claudeauth.OAuthProfile, error) {
+					return nil, test.err
+				}
 
-			prepared, errPrepare := executor.PrepareRequestAuth(t.Context(), auth)
-			if prepared != nil {
-				t.Fatalf("prepared = %#v, want nil", prepared)
-			}
-			if !errors.Is(errPrepare, test.err) {
-				t.Fatalf("PrepareRequestAuth error = %v, want %v", errPrepare, test.err)
-			}
-			if got := helps.ClaudeCredentialAccountUUID(auth); got != "" {
-				t.Fatalf("account UUID = %q, want empty", got)
-			}
-		})
+				prepared, errPrepare := executor.PrepareRequestAuth(t.Context(), auth)
+				if prepared != nil {
+					t.Fatalf("prepared = %#v, want nil", prepared)
+				}
+				if !errors.Is(errPrepare, test.err) {
+					t.Fatalf("PrepareRequestAuth error = %v, want %v", errPrepare, test.err)
+				}
+				if got := helps.ClaudeCredentialAccountUUID(auth); got != "" {
+					t.Fatalf("account UUID = %q, want empty", got)
+				}
+			},
+		)
 	}
 }
 
@@ -196,36 +235,46 @@ func TestPrepareRequestAuthPropagatesCancellationAndDeadline(t *testing.T) {
 		newContext func() (context.Context, context.CancelFunc)
 		want       error
 	}{
-		{name: "canceled", newContext: func() (context.Context, context.CancelFunc) {
-			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
-			return ctx, func() {}
-		}, want: context.Canceled},
-		{name: "deadline", newContext: func() (context.Context, context.CancelFunc) {
-			return context.WithTimeout(t.Context(), 20*time.Millisecond)
-		}, want: context.DeadlineExceeded},
+		{
+			name: "canceled", newContext: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				return ctx, func() {}
+			}, want: context.Canceled,
+		},
+		{
+			name: "deadline", newContext: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(t.Context(), 20*time.Millisecond)
+			}, want: context.DeadlineExceeded,
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			auth := newClaudeProfileTestAuth("profile-context-" + test.name)
-			executor := NewClaudeExecutor(&config.Config{})
-			executor.oauthProfileFetcher = func(ctx context.Context, _ *cliproxyauth.Auth, _ string) (*claudeauth.OAuthProfile, error) {
-				<-ctx.Done()
-				return nil, ctx.Err()
-			}
-			ctx, cancel := test.newContext()
-			defer cancel()
+		t.Run(
+			test.name, func(t *testing.T) {
+				auth := newClaudeProfileTestAuth("profile-context-" + test.name)
+				executor := NewClaudeExecutor(&config.Config{})
+				executor.oauthProfileFetcher = func(
+					ctx context.Context,
+					_ *cliproxyauth.Auth,
+					_ string,
+				) (*claudeauth.OAuthProfile, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				ctx, cancel := test.newContext()
+				defer cancel()
 
-			prepared, errPrepare := executor.PrepareRequestAuth(ctx, auth)
-			if prepared != nil {
-				t.Fatalf("prepared = %#v, want nil", prepared)
-			}
-			if !errors.Is(errPrepare, test.want) {
-				t.Fatalf("PrepareRequestAuth error = %v, want %v", errPrepare, test.want)
-			}
-			if got := helps.ClaudeCredentialAccountUUID(auth); got != "" {
-				t.Fatalf("account UUID = %q, want empty", got)
-			}
-		})
+				prepared, errPrepare := executor.PrepareRequestAuth(ctx, auth)
+				if prepared != nil {
+					t.Fatalf("prepared = %#v, want nil", prepared)
+				}
+				if !errors.Is(errPrepare, test.want) {
+					t.Fatalf("PrepareRequestAuth error = %v, want %v", errPrepare, test.want)
+				}
+				if got := helps.ClaudeCredentialAccountUUID(auth); got != "" {
+					t.Fatalf("account UUID = %q, want empty", got)
+				}
+			},
+		)
 	}
 }
 
@@ -233,7 +282,11 @@ func TestFetchClaudeOAuthProfileAppliesInternalTimeout(t *testing.T) {
 	auth := newClaudeProfileTestAuth("profile-internal-timeout")
 	executor := NewClaudeExecutor(&config.Config{})
 	var observedDeadline time.Time
-	executor.oauthProfileFetcher = func(ctx context.Context, gotAuth *cliproxyauth.Auth, apiKey string) (*claudeauth.OAuthProfile, error) {
+	executor.oauthProfileFetcher = func(
+		ctx context.Context,
+		gotAuth *cliproxyauth.Auth,
+		apiKey string,
+	) (*claudeauth.OAuthProfile, error) {
 		if gotAuth != auth || apiKey != auth.Attributes["api_key"] {
 			t.Fatalf("profile fetch auth/key = %#v/%q", gotAuth, apiKey)
 		}
@@ -246,7 +299,9 @@ func TestFetchClaudeOAuthProfileAppliesInternalTimeout(t *testing.T) {
 	}
 	startedAt := time.Now()
 
-	if _, errFetch := executor.fetchClaudeOAuthProfile(context.Background(), auth, auth.Attributes["api_key"]); errFetch != nil {
+	if _, errFetch := executor.fetchClaudeOAuthProfile(
+		context.Background(), auth, auth.Attributes["api_key"],
+	); errFetch != nil {
 		t.Fatal(errFetch)
 	}
 	if got := observedDeadline.Sub(startedAt); got < claudeAccountProfileTimeout-500*time.Millisecond ||
@@ -263,19 +318,24 @@ func TestClaudeRefreshTokenAcceptsMetadataSpellings(t *testing.T) {
 	}{
 		{name: "snake case", metadata: map[string]any{"refresh_token": "snake"}, want: "snake"},
 		{name: "camel case", metadata: map[string]any{"refreshToken": "camel"}, want: "camel"},
-		{name: "snake case precedence", metadata: map[string]any{"refresh_token": "snake", "refreshToken": "camel"}, want: "snake"},
+		{
+			name: "snake case precedence", metadata: map[string]any{"refresh_token": "snake", "refreshToken": "camel"},
+			want: "snake",
+		},
 		{name: "missing", metadata: map[string]any{}},
 		{name: "nil auth"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			var auth *cliproxyauth.Auth
-			if test.metadata != nil {
-				auth = &cliproxyauth.Auth{Metadata: test.metadata}
-			}
-			if got := claudeRefreshToken(auth); got != test.want {
-				t.Fatalf("claudeRefreshToken() = %q, want %q", got, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				var auth *cliproxyauth.Auth
+				if test.metadata != nil {
+					auth = &cliproxyauth.Auth{Metadata: test.metadata}
+				}
+				if got := claudeRefreshToken(auth); got != test.want {
+					t.Fatalf("claudeRefreshToken() = %q, want %q", got, test.want)
+				}
+			},
+		)
 	}
 }
 

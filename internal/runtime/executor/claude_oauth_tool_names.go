@@ -30,7 +30,10 @@ func resolveClaudeMCPAliasOptions(ctx context.Context) claudeMCPAliasOptions {
 
 // prepareClaudeOAuthToolNamesForUpstream applies one request-local MCP symbol
 // table across every Claude OAuth request path.
-func prepareClaudeOAuthToolNamesForUpstream(body []byte, mcpAliases claudeMCPAliasOptions) ([]byte, map[string]string) {
+func prepareClaudeOAuthToolNamesForUpstream(
+	body []byte,
+	mcpAliases claudeMCPAliasOptions,
+) ([]byte, map[string]string) {
 	return remapOAuthToolNamesWithOptions(body, mcpAliases)
 }
 
@@ -310,21 +313,23 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 						case "tool_search_tool_result":
 							toolRefs := part.Get("content.tool_references")
 							if toolRefs.Exists() && toolRefs.IsArray() {
-								toolRefs.ForEach(func(_, refPart gjson.Result) bool {
-									if refPart.Get("type").String() != "tool_reference" {
-										return true
-									}
-									nameResult := refPart.Get("tool_name")
-									refToolName := nameResult.String()
-									if newName, renamed := rewriteName(refToolName); renamed {
-										if !appendStringEdit(nameResult, newName) {
-											validOffsets = false
-											return false
+								toolRefs.ForEach(
+									func(_, refPart gjson.Result) bool {
+										if refPart.Get("type").String() != "tool_reference" {
+											return true
 										}
-										recordRename(refToolName, newName)
-									}
-									return true
-								})
+										nameResult := refPart.Get("tool_name")
+										refToolName := nameResult.String()
+										if newName, renamed := rewriteName(refToolName); renamed {
+											if !appendStringEdit(nameResult, newName) {
+												validOffsets = false
+												return false
+											}
+											recordRename(refToolName, newName)
+										}
+										return true
+									},
+								)
 							}
 						}
 						return validOffsets
@@ -382,7 +387,10 @@ func applyClaudeRawJSONEdits(body []byte, edits []claudeRawJSONEdit) ([]byte, bo
 // remapOAuthToolNamesWithOptionsLegacy is the byte-for-byte compatibility
 // fallback for malformed JSON or an unexpected GJSON offset. Keep it available
 // as a differential-test oracle for the batched implementation.
-func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAliasOptions) ([]byte, map[string]string) {
+func remapOAuthToolNamesWithOptionsLegacy(
+	body []byte,
+	mcpAliases claudeMCPAliasOptions,
+) ([]byte, map[string]string) {
 	reverseMap := make(map[string]string)
 	recordRename := func(original, renamed string) {
 		// Preserve the first-seen original name if the same upstream name is
@@ -546,7 +554,11 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 						case "tool_use":
 							name := part.Get("name").String()
 							if newName, renamed := rewriteName(name); renamed {
-								path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
+								path := fmt.Sprintf(
+									"messages.%d.content.%d.name",
+									msgIndex.Int(),
+									contentIndex.Int(),
+								)
 								body, _ = sjson.SetBytes(body, path, newName)
 								recordRename(name, newName)
 							}
@@ -563,7 +575,12 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 							if namePath := claudeToolChangeNamePath(part); namePath != "" {
 								changeToolName := part.Get(namePath).String()
 								if newName, renamed := rewriteName(changeToolName); renamed {
-									changePath := fmt.Sprintf("messages.%d.content.%d.%s", msgIndex.Int(), contentIndex.Int(), namePath)
+									changePath := fmt.Sprintf(
+										"messages.%d.content.%d.%s",
+										msgIndex.Int(),
+										contentIndex.Int(),
+										namePath,
+									)
 									body, _ = sjson.SetBytes(body, changePath, newName)
 									recordRename(changeToolName, newName)
 								}
@@ -580,8 +597,10 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 											nestedToolName := nestedPart.Get("tool_name").String()
 											if newName, renamed := rewriteName(nestedToolName); renamed {
 												nestedPath := fmt.Sprintf(
-													"messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(),
-													contentIndex.Int(), nestedIndex.Int(),
+													"messages.%d.content.%d.content.%d.tool_name",
+													msgIndex.Int(),
+													contentIndex.Int(),
+													nestedIndex.Int(),
 												)
 												body, _ = sjson.SetBytes(body, nestedPath, newName)
 												recordRename(nestedToolName, newName)
@@ -594,21 +613,23 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 						case "tool_search_tool_result":
 							toolRefs := part.Get("content.tool_references")
 							if toolRefs.Exists() && toolRefs.IsArray() {
-								toolRefs.ForEach(func(refIndex, refPart gjson.Result) bool {
-									if refPart.Get("type").String() != "tool_reference" {
+								toolRefs.ForEach(
+									func(refIndex, refPart gjson.Result) bool {
+										if refPart.Get("type").String() != "tool_reference" {
+											return true
+										}
+										refToolName := refPart.Get("tool_name").String()
+										if newName, renamed := rewriteName(refToolName); renamed {
+											refPath := fmt.Sprintf(
+												"messages.%d.content.%d.content.tool_references.%d.tool_name",
+												msgIndex.Int(), contentIndex.Int(), refIndex.Int(),
+											)
+											body, _ = sjson.SetBytes(body, refPath, newName)
+											recordRename(refToolName, newName)
+										}
 										return true
-									}
-									refToolName := refPart.Get("tool_name").String()
-									if newName, renamed := rewriteName(refToolName); renamed {
-										refPath := fmt.Sprintf(
-											"messages.%d.content.%d.content.tool_references.%d.tool_name",
-											msgIndex.Int(), contentIndex.Int(), refIndex.Int(),
-										)
-										body, _ = sjson.SetBytes(body, refPath, newName)
-										recordRename(refToolName, newName)
-									}
-									return true
-								})
+									},
+								)
 							}
 						}
 						return true
@@ -627,7 +648,8 @@ func claudeToolChangeNamePath(part gjson.Result) string {
 	case "tool_reference":
 		return "tool.name"
 	case "tool_definition":
-		if part.Get("type").String() != "tool_addition" || helps.IsClaudeServerToolType(part.Get("tool.definition.type").String()) {
+		if part.Get("type").String() != "tool_addition" ||
+			helps.IsClaudeServerToolType(part.Get("tool.definition.type").String()) {
 			return ""
 		}
 		return "tool.definition.name"
@@ -657,6 +679,7 @@ type claudeMCPAliasRestoreError struct {
 	error
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e claudeMCPAliasRestoreError) Unwrap() error {
 	return e.error
 }
@@ -777,9 +800,11 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return matchedOriginal, true, nil
 	}
 	if matchCount > 1 {
-		return "", false, claudeMCPAliasRestoreError{fmt.Errorf(
-			"cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name,
-		)}
+		return "", false, claudeMCPAliasRestoreError{
+			fmt.Errorf(
+				"cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name,
+			),
+		}
 	}
 
 	parts, validAlias := parseClaudeMCPAlias(normalizedName)
@@ -831,9 +856,12 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return matchedOriginal, true, nil
 	}
 	if matchCount > 1 {
-		return "", false, claudeMCPAliasRestoreError{fmt.Errorf(
-			"cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name,
-		)}
+		return "", false, claudeMCPAliasRestoreError{
+			fmt.Errorf(
+				"cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools",
+				name,
+			),
+		}
 	}
 
 	passthrough := "mcp__" + suffix
@@ -854,14 +882,21 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return matchedOriginal, true, nil
 	}
 	if matchCount > 1 {
-		return "", false, claudeMCPAliasRestoreError{fmt.Errorf(
-			"cannot restore Claude OAuth MCP tool alias %q: passthrough tool suffix matches multiple declared tools", name,
-		)}
+		return "", false, claudeMCPAliasRestoreError{
+			fmt.Errorf(
+				"cannot restore Claude OAuth MCP tool alias %q: passthrough tool "+
+					"suffix matches multiple declared "+
+					"tools",
+				name,
+			),
+		}
 	}
 
-	return "", false, claudeMCPAliasRestoreError{fmt.Errorf(
-		"cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name,
-	)}
+	return "", false, claudeMCPAliasRestoreError{
+		fmt.Errorf(
+			"cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name,
+		),
+	}
 }
 
 // reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses
@@ -918,7 +953,11 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 								return false
 							}
 							if matched {
-								path := fmt.Sprintf("content.%d.content.%d.tool_name", index.Int(), nestedIndex.Int())
+								path := fmt.Sprintf(
+									"content.%d.content.%d.tool_name",
+									index.Int(),
+									nestedIndex.Int(),
+								)
 								body, _ = sjson.SetBytes(body, path, origName)
 							}
 							return true
@@ -928,24 +967,28 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 			case "tool_search_tool_result":
 				toolRefs := part.Get("content.tool_references")
 				if toolRefs.Exists() && toolRefs.IsArray() {
-					toolRefs.ForEach(func(refIndex, refPart gjson.Result) bool {
-						if refPart.Get("type").String() != "tool_reference" {
+					toolRefs.ForEach(
+						func(refIndex, refPart gjson.Result) bool {
+							if refPart.Get("type").String() != "tool_reference" {
+								return true
+							}
+							toolName := refPart.Get("tool_name").String()
+							origName, matched, errResolve := resolver.resolve(toolName)
+							if errResolve != nil {
+								resolveErr = errResolve
+								return false
+							}
+							if matched {
+								path := fmt.Sprintf(
+									"content.%d.content.tool_references.%d.tool_name",
+									index.Int(),
+									refIndex.Int(),
+								)
+								body, _ = sjson.SetBytes(body, path, origName)
+							}
 							return true
-						}
-						toolName := refPart.Get("tool_name").String()
-						origName, matched, errResolve := resolver.resolve(toolName)
-						if errResolve != nil {
-							resolveErr = errResolve
-							return false
-						}
-						if matched {
-							path := fmt.Sprintf(
-								"content.%d.content.tool_references.%d.tool_name", index.Int(), refIndex.Int(),
-							)
-							body, _ = sjson.SetBytes(body, path, origName)
-						}
-						return true
-					})
+						},
+					)
 				}
 			}
 			return resolveErr == nil
@@ -1004,26 +1047,28 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string
 		updatedPayload := payload
 		var resolveErr error
 		hasChange := false
-		toolRefs.ForEach(func(refIndex, refPart gjson.Result) bool {
-			if refPart.Get("type").String() != "tool_reference" {
-				return true
-			}
-			toolName := refPart.Get("tool_name").String()
-			origName, matched, errResolve := resolver.resolve(toolName)
-			if errResolve != nil {
-				resolveErr = errResolve
-				return false
-			}
-			if matched {
-				path := fmt.Sprintf("content_block.content.tool_references.%d.tool_name", refIndex.Int())
-				updatedPayload, err = sjson.SetBytes(updatedPayload, path, origName)
-				if err != nil {
+		toolRefs.ForEach(
+			func(refIndex, refPart gjson.Result) bool {
+				if refPart.Get("type").String() != "tool_reference" {
+					return true
+				}
+				toolName := refPart.Get("tool_name").String()
+				origName, matched, errResolve := resolver.resolve(toolName)
+				if errResolve != nil {
+					resolveErr = errResolve
 					return false
 				}
-				hasChange = true
-			}
-			return true
-		})
+				if matched {
+					path := fmt.Sprintf("content_block.content.tool_references.%d.tool_name", refIndex.Int())
+					updatedPayload, err = sjson.SetBytes(updatedPayload, path, origName)
+					if err != nil {
+						return false
+					}
+					hasChange = true
+				}
+				return true
+			},
+		)
 		if resolveErr != nil {
 			return line, resolveErr
 		}

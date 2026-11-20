@@ -45,12 +45,15 @@ func claudeWebSearchResultsToResponses(content gjson.Result) []byte {
 		return nil
 	}
 	var results [][]byte
-	content.ForEach(func(_, entry gjson.Result) bool {
-		if entry.Get("type").String() == "web_search_tool_result_error" || strings.TrimSpace(entry.Get("url").String()) != "" {
-			results = append(results, []byte(entry.Raw))
-		}
-		return true
-	})
+	content.ForEach(
+		func(_, entry gjson.Result) bool {
+			if entry.Get("type").String() == "web_search_tool_result_error" ||
+				strings.TrimSpace(entry.Get("url").String()) != "" {
+				results = append(results, []byte(entry.Raw))
+			}
+			return true
+		},
+	)
 	if len(results) == 0 {
 		return []byte(`[]`)
 	}
@@ -106,19 +109,21 @@ func responsesWebSearchResultsToClaude(results gjson.Result) []byte {
 		return nil
 	}
 	var blocks [][]byte
-	results.ForEach(func(_, entry gjson.Result) bool {
-		if entry.Get("type").String() == "web_search_tool_result_error" {
-			blocks = append(blocks, []byte(entry.Raw))
+	results.ForEach(
+		func(_, entry gjson.Result) bool {
+			if entry.Get("type").String() == "web_search_tool_result_error" {
+				blocks = append(blocks, []byte(entry.Raw))
+				return true
+			}
+			if strings.TrimSpace(entry.Get("encrypted_content").String()) == "" {
+				return true
+			}
+			block := []byte(entry.Raw)
+			block, _ = sjson.SetBytes(block, "type", "web_search_result")
+			blocks = append(blocks, block)
 			return true
-		}
-		if strings.TrimSpace(entry.Get("encrypted_content").String()) == "" {
-			return true
-		}
-		block := []byte(entry.Raw)
-		block, _ = sjson.SetBytes(block, "type", "web_search_result")
-		blocks = append(blocks, block)
-		return true
-	})
+		},
+	)
 	if len(blocks) == 0 {
 		return nil
 	}
@@ -130,12 +135,14 @@ func attachClaudeCitations(textBlock []byte, annotations gjson.Result) []byte {
 		return textBlock
 	}
 	var citations [][]byte
-	annotations.ForEach(func(_, annotation gjson.Result) bool {
-		if strings.TrimSpace(annotation.Get("encrypted_index").String()) != "" {
-			citations = append(citations, []byte(annotation.Raw))
-		}
-		return true
-	})
+	annotations.ForEach(
+		func(_, annotation gjson.Result) bool {
+			if strings.TrimSpace(annotation.Get("encrypted_index").String()) != "" {
+				citations = append(citations, []byte(annotation.Raw))
+			}
+			return true
+		},
+	)
 	if len(citations) == 0 {
 		return textBlock
 	}

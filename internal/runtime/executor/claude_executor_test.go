@@ -23,7 +23,8 @@ import (
 )
 
 func TestSignAnthropicMessagesBodyReplacesCCHPlaceholder(t *testing.T) {
-	body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.63.abc; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte((`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.63.abc; ` +
+		`cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hi"}]}`))
 
 	out, err := signAnthropicMessagesBody(body)
 	if err != nil {
@@ -65,7 +66,10 @@ func TestRebuildMidSystemMessagesToTopLevel(t *testing.T) {
 		t.Fatalf("system.2.cache_control.type = %q, want ephemeral", got)
 	}
 	if gjson.GetBytes(out, `messages.#(role=="system")`).Exists() {
-		t.Fatalf("messages should not contain system role after rebuild: %s", gjson.GetBytes(out, "messages").Raw)
+		t.Fatalf(
+			"messages should not contain system role after rebuild: %s",
+			gjson.GetBytes(out, "messages").Raw,
+		)
 	}
 	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
 		t.Fatalf("messages count = %d, want 3", got)
@@ -73,10 +77,17 @@ func TestRebuildMidSystemMessagesToTopLevel(t *testing.T) {
 }
 
 func TestExperimentalCCHSigningDoesNotAuthorizeRuntime(t *testing.T) {
-	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "sk-ant-api03-test", ExperimentalCCHSigning: true}}}
-	auth := &cliproxyauth.Auth{Provider: "claude", Attributes: map[string]string{"api_key": "sk-ant-api03-test"}}
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{APIKey: "sk-ant-api03-test", ExperimentalCCHSigning: true}},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider:   "claude",
+		Attributes: map[string]string{"api_key": "sk-ant-api03-test"},
+	}
 	policy := resolveClaudeFingerprintPolicy(cfg, auth, "sk-ant-api03-test")
-	if policy.ProfileClaudeCodeCLI || claudeCCHSigningEnabled("sk-ant-api03-test", policy.ProfileClaudeCodeCLI, "https://api.anthropic.com") {
+	if policy.ProfileClaudeCodeCLI || claudeCCHSigningEnabled(
+		"sk-ant-api03-test", policy.ProfileClaudeCodeCLI, "https://api.anthropic.com",
+	) {
 		t.Fatal("experimental setting authorized CLI runtime")
 	}
 }
@@ -183,7 +194,12 @@ func TestNewProtectedUtlsHTTPClientAllowsLocalFallbackURL(t *testing.T) {
 
 func TestPrepareClaudeRequestSignsOAuthCCHByDefault(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
-	payload := []byte(`{"model":"claude-opus-4-7","system":"custom system","messages":[{"role":"user","content":"hello"}],"max_tokens":16}`)
+	payload := []byte(
+		`{"model":"claude-opus-4-7","system":"custom system","messages":` +
+			`[{"role":"user","content":"hello"}],"max_tokens":` +
+			`16}`,
+	)
+	//goland:noinspection SpellCheckingInspection
 	auth := &cliproxyauth.Auth{
 		Provider: "claude",
 		Metadata: map[string]any{
@@ -221,6 +237,8 @@ func TestPrepareClaudeRequestSignsOAuthCCHByDefault(t *testing.T) {
 
 func TestApplyCloakingGlobalDisableLeavesPayloadUnchanged(t *testing.T) {
 	payload := []byte(`{"system":"custom system","messages":[{"role":"user","content":"hello"}]}`)
+	//noinspection GoMaybeNil
+	//noinspection GoMaybeNil
 	out, cloaked, err := applyCloaking(
 		context.Background(), &config.Config{DisableClaudeCloakMode: true}, nil, payload, "claude-opus-4-7",
 		"sk-ant-oat-test", false,
@@ -238,7 +256,9 @@ func TestApplyCloakingGlobalDisableLeavesPayloadUnchanged(t *testing.T) {
 
 func TestApplyClaudeToolPrefix(t *testing.T) {
 	input := []byte(
-		`{"tools":[{"name":"alpha"},{"name":"proxy_bravo"}],"tool_choice":{"type":"tool","name":"charlie"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"delta","id":"t1","input":{}}]}]}`,
+		`{"tools":[{"name":"alpha"},{"name":"proxy_bravo"}],"tool_choice":{"typ` +
+			`e":"tool","name":"charlie"},"messages":[{"role":"assistant","content":` +
+			`[{"type":"tool_use","name":"delta","id":"t1","input":{}}]}]}`,
 	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 
@@ -258,7 +278,9 @@ func TestApplyClaudeToolPrefix(t *testing.T) {
 
 func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 	input := []byte(
-		`{"tools":[{"name":"alpha"}],"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"beta"},{"type":"tool_reference","tool_name":"proxy_gamma"}]}]}`,
+		`{"tools":[{"name":"alpha"}],"messages":[{"role":"user","content":[{"ty` +
+			`pe":"tool_reference","tool_name":"beta"},{"type":"tool_reference","too` +
+			`l_name":"proxy_gamma"}]}]}`,
 	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 
@@ -272,7 +294,8 @@ func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 
 func TestApplyClaudeToolPrefix_SkipsBuiltinTools(t *testing.T) {
 	input := []byte(
-		`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"my_custom_tool","input_schema":{"type":"object"}}]}`,
+		`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"` +
+			`my_custom_tool","input_schema":{"type":"object"}}]}`,
 	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 
@@ -377,7 +400,8 @@ func TestApplyClaudeToolPrefix_ToolChoiceBuiltin(t *testing.T) {
 
 func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	input := []byte(
-		`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`,
+		`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":` +
+			`{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`,
 	)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
 
@@ -391,7 +415,9 @@ func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 
 func TestStripClaudeToolPrefixFromResponse_WithToolReference(t *testing.T) {
 	input := []byte(
-		`{"content":[{"type":"tool_reference","tool_name":"proxy_alpha"},{"type":"tool_reference","tool_name":"bravo"}]}`,
+		`{"content":[{"type":"tool_reference","tool_name":"proxy_alpha"},` +
+			`{"type":"tool_reference","tool_name":` +
+			`"bravo"}]}`,
 	)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
 
@@ -405,7 +431,9 @@ func TestStripClaudeToolPrefixFromResponse_WithToolReference(t *testing.T) {
 
 func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 	line := []byte(
-		`data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"proxy_alpha","id":"t1"},"index":0}`,
+		`data: {"type":"content_block_start","content_block":{"type":` +
+			`"tool_use","name":"proxy_alpha","id":"t1"},"index":` +
+			`0}`,
 	)
 	out := stripClaudeToolPrefixFromStreamLine(line, "proxy_")
 
@@ -420,7 +448,9 @@ func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 
 func TestStripClaudeToolPrefixFromStreamLine_WithToolReference(t *testing.T) {
 	line := []byte(
-		`data: {"type":"content_block_start","content_block":{"type":"tool_reference","tool_name":"proxy_beta"},"index":0}`,
+		`data: {"type":"content_block_start","content_block":{"type":` +
+			`"tool_reference","tool_name":"proxy_beta"},"index":` +
+			`0}`,
 	)
 	out := stripClaudeToolPrefixFromStreamLine(line, "proxy_")
 
@@ -435,7 +465,9 @@ func TestStripClaudeToolPrefixFromStreamLine_WithToolReference(t *testing.T) {
 
 func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 	input := []byte(
-		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"mcp__nia__manage_resource"}]}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use` +
+			`_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"mcp_` +
+			`_nia__manage_resource"}]}]}]}`,
 	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
@@ -446,7 +478,7 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 
 func TestNormalizeClaudeSamplingForUpstreamRemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
-	out := normalizeClaudeSamplingForUpstream(payload, false)
+	out := normalizeClaudeSamplingForUpstream(payload, false, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -455,7 +487,7 @@ func TestNormalizeClaudeSamplingForUpstreamRemovesTemperature(t *testing.T) {
 
 func TestNormalizeClaudeSamplingForUpstreamRemovesTemperatureWithThinkingEnabled(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
-	out := normalizeClaudeSamplingForUpstream(payload, false)
+	out := normalizeClaudeSamplingForUpstream(payload, false, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -464,7 +496,7 @@ func TestNormalizeClaudeSamplingForUpstreamRemovesTemperatureWithThinkingEnabled
 
 func TestNormalizeClaudeSamplingForUpstreamPreservesNativeHelperTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":1,"thinking":{"type":"adaptive"}}`)
-	out := normalizeClaudeSamplingForUpstream(payload, true)
+	out := normalizeClaudeSamplingForUpstream(payload, true, false)
 
 	if got := gjson.GetBytes(out, "temperature"); !got.Exists() || got.Num != 1 {
 		t.Fatalf("temperature = %s, want 1", got.Raw)
@@ -473,7 +505,7 @@ func TestNormalizeClaudeSamplingForUpstreamPreservesNativeHelperTemperature(t *t
 
 func TestNormalizeClaudeSamplingForUpstreamRemovesTopPAndTopKForThinking(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"top_p":0.9,"top_k":40,"thinking":{"type":"adaptive"}}`)
-	out := normalizeClaudeSamplingForUpstream(payload, false)
+	out := normalizeClaudeSamplingForUpstream(payload, false, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -488,7 +520,7 @@ func TestNormalizeClaudeSamplingForUpstreamRemovesTopPAndTopKForThinking(t *test
 
 func TestNormalizeClaudeSamplingForUpstreamNoThinkingRemovesTemperatureAndTopP(t *testing.T) {
 	payload := []byte(`{"temperature":0,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
-	out := normalizeClaudeSamplingForUpstream(payload, false)
+	out := normalizeClaudeSamplingForUpstream(payload, false, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -502,9 +534,13 @@ func TestNormalizeClaudeSamplingForUpstreamNoThinkingRemovesTemperatureAndTopP(t
 }
 
 func TestNormalizeClaudeSamplingForUpstreamAfterForcedToolChoiceRemovesTemperature(t *testing.T) {
-	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"any"}}`)
+	payload := []byte(
+		`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":` +
+			`{"effort":"max"},"tool_choice":{"type":` +
+			`"any"}}`,
+	)
 	out := disableThinkingIfToolChoiceForced(payload)
-	out = normalizeClaudeSamplingForUpstream(out, false)
+	out = normalizeClaudeSamplingForUpstream(out, false, false)
 
 	if gjson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("thinking should be removed when tool_choice forces tool use")
@@ -583,7 +619,10 @@ func TestCapMaxTokensUsesDeepSeekV41Limit(t *testing.T) {
 		want int64
 	}{
 		{name: "default", body: `{"messages":[{"role":"user","content":"hi"}]}`, want: 393216},
-		{name: "clamped", body: `{"messages":[{"role":"user","content":"hi"}],"max_tokens":400000}`, want: 393216},
+		{
+			name: "above limit preserved", body: `{"messages":[{"role":"user","content":"hi"}],"max_tokens":400000}`,
+			want: 400000,
+		},
 		{name: "preserved", body: `{"messages":[{"role":"user","content":"hi"}],"max_tokens":200000}`, want: 200000},
 	} {
 		t.Run(
@@ -651,12 +690,14 @@ func TestAppendClaudeFastModeBeta(t *testing.T) {
 		[]byte(`{"speed":"fast","betas":["fast-mode-2026-02-01"]}`),
 	)
 	explicitBetas = appendClaudeFastModeBeta(body, explicitBetas)
-	if len(explicitBetas) != 1 || explicitBetas[0] != claudeFastModeBeta || gjson.GetBytes(body, "betas").Exists() {
+	if len(explicitBetas) != 1 || explicitBetas[0] != claudeFastModeBeta ||
+		gjson.GetBytes(body, "betas").Exists() {
 		t.Fatalf("explicit beta extraction = betas %v, body %s", explicitBetas, body)
 	}
 }
 
 func TestPrepareClaudeRequestAddsFastModeBetaAcrossStreamAndCredentials(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	credentials := []struct {
 		name string
 		auth *cliproxyauth.Auth
@@ -793,53 +834,84 @@ func TestClaudeSonnet55CountTokensValidatesOutboundRequest(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
 	calls := 0
 	var sent []byte
-	ctx := util.WithRoundTripper(context.Background(), protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		var err error
-		sent, err = io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"input_tokens":7}`)),
-			Request:    req,
-		}, nil
-	}))
-	valid := []byte(`{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"},"tool_choice":{"type":"auto"}}`)
-	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: valid},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	ctx := util.WithRoundTripper(
+		context.Background(), protectedUtlsRoundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				calls++
+				var err error
+				sent, err = io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"input_tokens":7}`)),
+					Request:    req,
+				}, nil
+			},
+		),
+	)
+	valid := []byte(`{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"` +
+		`}],"thinking":{"type":"disabled"},"tool_choice":{"type":"auto"}}`)
+	_, err := executor.CountTokens(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: valid},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
+	)
 	if err != nil || calls != 1 || gjson.GetBytes(sent, "thinking.type").String() != "between_tools" {
 		t.Fatalf("CountTokens() error = %v, calls = %d, outbound = %s", err, calls, sent)
 	}
 	bare := []byte(`{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"}]}`)
-	_, err = executor.CountTokens(ctx, auth, cliproxyexecutor.Request{Model: "claude-sonnet-5-5(none)", Payload: bare},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	_, err = executor.CountTokens(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-sonnet-5-5(none)", Payload: bare},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
+	)
 	if err != nil || calls != 2 || gjson.GetBytes(sent, "thinking.type").String() != "between_tools" {
 		t.Fatalf("CountTokens(model(none)) error = %v, calls = %d, outbound = %s", err, calls, sent)
 	}
 	for _, choice := range []string{`{"type":"any"}`, `{"type":"tool","name":"search"}`} {
-		invalid := []byte(`{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"}],"tool_choice":` + choice + `}`)
-		_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: invalid},
-			cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+		invalid := []byte(
+			`{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"}],"tool_choice":` + choice + `}`,
+		)
+		_, err := executor.CountTokens(
+			ctx, auth, cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: invalid},
+			cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
+		)
 		var scoped interface{ IsRequestScoped() bool }
-		if err == nil || !errors.As(err, &scoped) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest || calls != 2 {
-			t.Fatalf("choice=%s: CountTokens() error = %v, calls = %d, want request-scoped 400 before upstream", choice, err, calls)
+		if err == nil || !errors.As(
+			err, &scoped,
+		) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest || calls != 2 {
+			t.Fatalf(
+				"choice=%s: CountTokens() error = %v, calls = %d, want request-scoped 400 before upstream",
+				choice,
+				err,
+				calls,
+			)
 		}
 	}
-	invalidBudget := []byte(`{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":2048}}`)
-	_, err = executor.CountTokens(ctx, auth, cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: invalidBudget},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	invalidBudget := []byte(`{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"` +
+		`}],"thinking":{"type":"enabled","budget_tokens":2048}}`)
+	_, err = executor.CountTokens(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: invalidBudget},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
+	)
 	var scoped interface{ IsRequestScoped() bool }
-	if err == nil || !errors.As(err, &scoped) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest || calls != 2 {
-		t.Fatalf("manual budget CountTokens() error = %v, calls = %d, want request-scoped 400 before upstream", err, calls)
+	if err == nil || !errors.As(
+		err, &scoped,
+	) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest || calls != 2 {
+		t.Fatalf(
+			"manual budget CountTokens() error = %v, calls = %d, want request-scoped 400 before upstream",
+			err,
+			calls,
+		)
 	}
 }
 
 func TestNormalizeClaudeSonnet55Request(t *testing.T) {
-	body := []byte(`{"model":"claude-sonnet-5-5","thinking":{"type":"disabled","display":"updates","budget_tokens":1024,"block_binding":{"prefix_mismatch_behavior":"drop_block"}},"output_config":{"effort":"low"}}`)
-	got, err := normalizeClaudeSonnet55Request(body)
+	body := []byte(`{"model":"claude-sonnet-5-5","thinking":{"type":"disabled","display":"` +
+		`updates","budget_tokens":1024,"block_binding":{"prefix_mismatch_behavi` +
+		`or":"drop_block"}},"output_config":{"effort":"low"}}`)
+	got, err := normalizeClaudeThinkingRequest(body, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,15 +930,17 @@ func TestNormalizeClaudeSonnet55Request(t *testing.T) {
 		`{"model":"claude-sonnet-5-5","thinking":{"type":"between_tools","display":"updates"}}`,
 		`{"model":"claude-sonnet-5-5","thinking":{"type":"between_tools"},"output_config":{"effort":"max"}}`,
 	} {
-		_, err := normalizeClaudeSonnet55Request([]byte(request))
+		_, err := normalizeClaudeThinkingRequest([]byte(request), false)
 		var scoped interface{ IsRequestScoped() bool }
-		if err == nil || !errors.As(err, &scoped) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest {
+		if err == nil || !errors.As(
+			err, &scoped,
+		) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest {
 			t.Fatalf("request %s: error = %v, want request-scoped 400", request, err)
 		}
 	}
 
 	legacy := []byte(`{"model":"claude-sonnet-5","thinking":{"type":"disabled"},"tool_choice":{"type":"any"}}`)
-	got, err = normalizeClaudeSonnet55Request(legacy)
+	got, err = normalizeClaudeThinkingRequest(legacy, false)
 	if err != nil || !bytes.Equal(got, legacy) {
 		t.Fatalf("Sonnet 5 request = %s, error %v; want unchanged", got, err)
 	}
@@ -874,12 +948,17 @@ func TestNormalizeClaudeSonnet55Request(t *testing.T) {
 
 func TestPrepareClaudeSonnet55Request(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"},
+	}
 	for _, stream := range []bool{false, true} {
-		payload := []byte(`{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}}`)
-		request, err := executor.prepareClaudeRequest(context.Background(), auth,
+		payload := []byte(`{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user` +
+			`","content":"hi"}],"thinking":{"type":"disabled"}}`)
+		request, err := executor.prepareClaudeRequest(
+			context.Background(), auth,
 			cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: payload},
-			cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, stream)
+			cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, stream,
+		)
 		if err != nil {
 			t.Fatalf("stream=%v: prepareClaudeRequest() error = %v", stream, err)
 		}
@@ -894,47 +973,75 @@ func TestPrepareClaudeSonnet55Request(t *testing.T) {
 }
 
 func TestPrepareClaudeSonnet55ZeroEffortAcrossFormats(t *testing.T) {
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"},
+	}
 	for _, test := range []struct {
 		name    string
 		format  sdktranslator.Format
 		model   string
 		payload string
 	}{
-		{name: "suffix", format: sdktranslator.FormatClaude, model: "claude-sonnet-5-5(none)", payload: `{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`},
-		{name: "responses", format: sdktranslator.FormatOpenAIResponse, model: "claude-sonnet-5-5", payload: `{"model":"claude-sonnet-5-5","input":"hi","reasoning":{"effort":"none"}}`},
-		{name: "chat", format: sdktranslator.FormatOpenAI, model: "claude-sonnet-5-5", payload: `{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`},
-		{name: "interactions", format: sdktranslator.FormatInteractions, model: "claude-sonnet-5-5", payload: `{"model":"claude-sonnet-5-5","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"reasoning":{"effort":"none"}}`},
+		{
+			name: "suffix", format: sdktranslator.FormatClaude, model: "claude-sonnet-5-5(none)",
+			payload: `{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name: "responses", format: sdktranslator.FormatOpenAIResponse, model: "claude-sonnet-5-5",
+			payload: `{"model":"claude-sonnet-5-5","input":"hi","reasoning":{"effort":"none"}}`,
+		},
+		{
+			name: "chat", format: sdktranslator.FormatOpenAI, model: "claude-sonnet-5-5",
+			payload: `{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":` +
+				`"hi"}],"reasoning_effort":` +
+				`"none"}`,
+		},
+		{
+			name: "interactions", format: sdktranslator.FormatInteractions, model: "claude-sonnet-5-5",
+			payload: `{"model":"claude-sonnet-5-5","input":[{"role":"user","content":[{"type` +
+				`":"input_text","text":"hi"}]}],"reasoning":{"effort":"none"}}`,
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			request, err := NewClaudeExecutor(&config.Config{}).prepareClaudeRequest(context.Background(), auth,
-				cliproxyexecutor.Request{Model: test.model, Payload: []byte(test.payload)},
-				cliproxyexecutor.Options{SourceFormat: test.format}, false)
-			if err != nil {
-				t.Fatalf("prepareClaudeRequest() error = %v", err)
-			}
-			body, err := io.ReadAll(request.httpReq.Body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := gjson.GetBytes(body, "thinking.type").String(); got != "between_tools" {
-				t.Fatalf("thinking.type = %q, want between_tools; body=%s", got, body)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				request, err := NewClaudeExecutor(&config.Config{}).prepareClaudeRequest(
+					context.Background(), auth,
+					cliproxyexecutor.Request{Model: test.model, Payload: []byte(test.payload)},
+					cliproxyexecutor.Options{SourceFormat: test.format}, false,
+				)
+				if err != nil {
+					t.Fatalf("prepareClaudeRequest() error = %v", err)
+				}
+				body, err := io.ReadAll(request.httpReq.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := gjson.GetBytes(body, "thinking.type").String(); got != "between_tools" {
+					t.Fatalf("thinking.type = %q, want between_tools; body=%s", got, body)
+				}
+			},
+		)
 	}
 }
 
 func TestPrepareClaudeSonnet55ForcedToolChoiceRejected(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"},
+	}
 	for _, choice := range []string{`{"type":"any"}`, `{"type":"tool","name":"search"}`} {
-		payload := []byte(`{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"search","input_schema":{"type":"object"}}],"tool_choice":` + choice + `}`)
+		payload := []byte((`{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":` +
+			`"hi"}],"tools":[{"name":"search","input_schema":{"type":"object"}}],"tool_choice":`) + choice + `}`)
 		for _, stream := range []bool{false, true} {
-			_, err := executor.prepareClaudeRequest(context.Background(), auth,
+			_, err := executor.prepareClaudeRequest(
+				context.Background(), auth,
 				cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: payload},
-				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, stream)
+				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, stream,
+			)
 			var scoped interface{ IsRequestScoped() bool }
-			if err == nil || !errors.As(err, &scoped) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest {
+			if err == nil || !errors.As(
+				err, &scoped,
+			) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest {
 				t.Fatalf("choice=%s stream=%v: error = %v, want request-scoped 400", choice, stream, err)
 			}
 		}
@@ -943,7 +1050,9 @@ func TestPrepareClaudeSonnet55ForcedToolChoiceRejected(t *testing.T) {
 
 func TestPrepareClaudeSonnet55ThinkingConstraints(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"},
+	}
 	for _, test := range []struct {
 		name   string
 		fields string
@@ -951,28 +1060,50 @@ func TestPrepareClaudeSonnet55ThinkingConstraints(t *testing.T) {
 		{name: "manual budget", fields: `,"thinking":{"type":"enabled","budget_tokens":2048}`},
 		{name: "between tools display", fields: `,"thinking":{"type":"between_tools","display":"updates"}`},
 		{name: "between tools budget", fields: `,"thinking":{"type":"between_tools","budget_tokens":2048}`},
-		{name: "between tools block binding", fields: `,"thinking":{"type":"between_tools","block_binding":{"prefix_mismatch_behavior":"drop_block"}}`},
-		{name: "between tools max effort", fields: `,"thinking":{"type":"between_tools"},"output_config":{"effort":"max"}`},
+		{
+			name:   "between tools block binding",
+			fields: `,"thinking":{"type":"between_tools","block_binding":{"prefix_mismatch_behavior":"drop_block"}}`,
+		},
+		{
+			name:   "between tools max effort",
+			fields: `,"thinking":{"type":"between_tools"},"output_config":{"effort":"max"}`,
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			payload := []byte(`{"model":"claude-sonnet-5-5","max_tokens":8192,"messages":[{"role":"user","content":"hi"}]` + test.fields + `}`)
-			request, err := executor.prepareClaudeRequest(context.Background(), auth,
-				cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: payload},
-				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, false)
-			var scoped interface{ IsRequestScoped() bool }
-			if err == nil || !errors.As(err, &scoped) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest {
-				var body []byte
-				if request != nil {
-					body, _ = io.ReadAll(request.httpReq.Body)
+		t.Run(
+			test.name, func(t *testing.T) {
+				payload := []byte(
+					`{"model":"claude-sonnet-5-5","max_tokens":8192,"messages":[{"role":` +
+						`"user","content":` +
+						`"hi"}]` +
+						test.fields +
+						`}`,
+				)
+				request, err := executor.prepareClaudeRequest(
+					context.Background(), auth,
+					cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: payload},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, false,
+				)
+				var scoped interface{ IsRequestScoped() bool }
+				if err == nil || !errors.As(
+					err, &scoped,
+				) || !scoped.IsRequestScoped() || statusErrCode(err) != http.StatusBadRequest {
+					var body []byte
+					if request != nil {
+						body, _ = io.ReadAll(request.httpReq.Body)
+					}
+					t.Fatalf("error = %v, outbound = %s; want request-scoped 400", err, body)
 				}
-				t.Fatalf("error = %v, outbound = %s; want request-scoped 400", err, body)
-			}
-		})
+			},
+		)
 	}
-	valid := []byte(`{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"between_tools"},"output_config":{"effort":"medium"},"tool_choice":{"type":"none"}}`)
-	request, err := executor.prepareClaudeRequest(context.Background(), auth,
+	valid := []byte(`{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user` +
+		`","content":"hi"}],"thinking":{"type":"between_tools"},"output_config"` +
+		`:{"effort":"medium"},"tool_choice":{"type":"none"}}`)
+	request, err := executor.prepareClaudeRequest(
+		context.Background(), auth,
 		cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: valid},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, false)
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, false,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,9 +1116,11 @@ func TestPrepareClaudeSonnet55ThinkingConstraints(t *testing.T) {
 }
 
 func TestPrepareClaudeSonnet55CloakProgressDisplay(t *testing.T) {
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key": "test-key", "base_url": "https://api.anthropic.com", "fingerprint_profile": "claude-code-cli",
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key": "test-key", "base_url": "https://api.anthropic.com", "fingerprint_profile": "claude-code-cli",
+		},
+	}
 	for _, test := range []struct {
 		name          string
 		model         string
@@ -995,74 +1128,135 @@ func TestPrepareClaudeSonnet55CloakProgressDisplay(t *testing.T) {
 		modelOverride string
 		wantDisplay   string
 	}{
-		{name: "Sonnet 5.5 adaptive", model: "claude-sonnet-5-5", thinking: `"thinking":{"type":"adaptive"}`, wantDisplay: "updates"},
-		{name: "Sonnet 5 adaptive", model: "claude-sonnet-5", thinking: `"thinking":{"type":"adaptive"}`, wantDisplay: "updates"},
+		{
+			name: "Sonnet 5.5 adaptive", model: "claude-sonnet-5-5", thinking: `"thinking":{"type":"adaptive"}`,
+			wantDisplay: "updates",
+		},
+		{
+			name: "Sonnet 5 adaptive", model: "claude-sonnet-5", thinking: `"thinking":{"type":"adaptive"}`,
+			wantDisplay: "updates",
+		},
 		{name: "Sonnet 5.5 zero upfront", model: "claude-sonnet-5-5", thinking: `"thinking":{"type":"disabled"}`},
-		{name: "explicit display", model: "claude-sonnet-5-5", thinking: `"thinking":{"type":"adaptive","display":"omitted"}`, wantDisplay: "omitted"},
-		{name: "model changed to nonprogress", model: "claude-sonnet-5-5", thinking: `"thinking":{"type":"adaptive"}`, modelOverride: "claude-opus-5"},
-		{name: "model changed into Sonnet", model: "claude-opus-5", thinking: `"thinking":{"type":"adaptive"}`, modelOverride: "claude-sonnet-5-5", wantDisplay: "updates"},
+		{
+			name: "explicit display", model: "claude-sonnet-5-5",
+			thinking: `"thinking":{"type":"adaptive","display":"omitted"}`, wantDisplay: "omitted",
+		},
+		{
+			name: "model changed to nonprogress", model: "claude-sonnet-5-5",
+			thinking: `"thinking":{"type":"adaptive"}`, modelOverride: "claude-opus-5",
+		},
+		{
+			name: "model changed into Sonnet", model: "claude-opus-5", thinking: `"thinking":{"type":"adaptive"}`,
+			modelOverride: "claude-sonnet-5-5", wantDisplay: "updates",
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			cfg := &config.Config{}
-			if test.modelOverride != "" {
-				cfg.Payload.Override = []config.PayloadRule{{
-					Models: []config.PayloadModelRule{{Name: "*"}},
-					Params: map[string]any{"model": test.modelOverride},
-				}}
-			}
-			payload := []byte(`{"model":"` + test.model + `","max_tokens":64,"messages":[{"role":"user","content":"hi"}],` + test.thinking + `}`)
-			request, err := NewClaudeExecutor(cfg).prepareClaudeRequest(context.Background(), auth,
-				cliproxyexecutor.Request{Model: test.model, Payload: payload},
-				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			body, err := io.ReadAll(request.httpReq.Body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := gjson.GetBytes(body, "thinking.display").String(); got != test.wantDisplay {
-				t.Fatalf("thinking.display = %q, want %q; body=%s", got, test.wantDisplay, body)
-			}
-			if test.name == "Sonnet 5.5 zero upfront" && gjson.GetBytes(body, "thinking.type").String() != "between_tools" {
-				t.Fatalf("zero-upfront thinking = %s, want between_tools", gjson.GetBytes(body, "thinking").Raw)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				cfg := &config.Config{}
+				if test.modelOverride != "" {
+					cfg.Payload.Override = []config.PayloadRule{
+						{
+							Models: []config.PayloadModelRule{{Name: "*"}},
+							Params: map[string]any{"model": test.modelOverride},
+						},
+					}
+				}
+				payload := []byte(
+					`{"model":"` +
+						test.model +
+						`","max_tokens":64,"messages":[{"role":"user","content":"hi"}],` +
+						test.thinking +
+						`}`,
+				)
+				request, err := NewClaudeExecutor(cfg).prepareClaudeRequest(
+					context.Background(), auth,
+					cliproxyexecutor.Request{Model: test.model, Payload: payload},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, false,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := io.ReadAll(request.httpReq.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := gjson.GetBytes(body, "thinking.display").String(); got != test.wantDisplay {
+					t.Fatalf("thinking.display = %q, want %q; body=%s", got, test.wantDisplay, body)
+				}
+				if test.name == "Sonnet 5.5 zero upfront" && gjson.GetBytes(
+					body, "thinking.type",
+				).String() != "between_tools" {
+					t.Fatalf(
+						"zero-upfront thinking = %s, want between_tools",
+						gjson.GetBytes(body, "thinking").Raw,
+					)
+				}
+			},
+		)
 	}
 }
 
 func TestReconcileClaudeCloakDisplayAfterPayload(t *testing.T) {
 	for _, model := range []string{"claude-opus-5-5", "claude-sonnet-5", "claude-sonnet-5-5", "claude-fable-5-1"} {
-		t.Run(model, func(t *testing.T) {
-			for _, test := range []struct {
-				name     string
-				thinking string
-				injected bool
-				touched  bool
-				want     string
-			}{
-				{name: "disabled removes synthetic display", thinking: `{"type":"disabled","display":"updates"}`, injected: true},
-				{name: "missing type removes synthetic display", thinking: `{"display":"updates"}`, injected: true},
-				{name: "adaptive keeps synthetic display", thinking: `{"type":"adaptive","display":"updates"}`, injected: true, want: "updates"},
-				{name: "enabled keeps synthetic display", thinking: `{"type":"enabled","budget_tokens":2048,"display":"updates"}`, injected: true, want: "updates"},
-				{name: "caller display stays caller-owned", thinking: `{"type":"disabled","display":"summarized"}`, want: "summarized"},
-				{name: "payload display stays operator-owned", thinking: `{"type":"disabled","display":"omitted"}`, injected: true, touched: true, want: "omitted"},
-				{name: "payload deletion is not refilled", thinking: `{"type":"adaptive"}`, injected: true, touched: true},
-			} {
-				t.Run(test.name, func(t *testing.T) {
-					body := []byte(`{"model":"` + model + `","thinking":` + test.thinking + `}`)
-					out := reconcileClaudeCodeFableModelAfterPayload(body,
-						claudeCodeFableState{injectedDisplay: test.injected}, map[string]bool{"thinking.display": test.touched}, true, false)
-					display := gjson.GetBytes(out, "thinking.display")
-					if display.String() != test.want || (test.want == "" && display.Exists()) {
-						t.Fatalf("display=%s, want %q; body=%s", display.Raw, test.want, out)
-					}
-				})
-			}
-		})
+		t.Run(
+			model, func(t *testing.T) {
+				for _, test := range []struct {
+					name     string
+					thinking string
+					injected bool
+					touched  bool
+					want     string
+				}{
+					{
+						name: "disabled removes synthetic display", thinking: `{"type":"disabled","display":"updates"}`,
+						injected: true,
+					},
+					{name: "missing type removes synthetic display", thinking: `{"display":"updates"}`, injected: true},
+					{
+						name: "adaptive keeps synthetic display", thinking: `{"type":"adaptive","display":"updates"}`,
+						injected: true, want: "updates",
+					},
+					{
+						name:     "enabled keeps synthetic display",
+						thinking: `{"type":"enabled","budget_tokens":2048,"display":"updates"}`, injected: true,
+						want: "updates",
+					},
+					{
+						name:     "caller display stays caller-owned",
+						thinking: `{"type":"disabled","display":"summarized"}`, want: "summarized",
+					},
+					{
+						name:     "payload display stays operator-owned",
+						thinking: `{"type":"disabled","display":"omitted"}`, injected: true, touched: true,
+						want: "omitted",
+					},
+					{
+						name: "payload deletion is not refilled", thinking: `{"type":"adaptive"}`, injected: true,
+						touched: true,
+					},
+				} {
+					t.Run(
+						test.name, func(t *testing.T) {
+							body := []byte(`{"model":"` + model + `","thinking":` + test.thinking + `}`)
+							out := reconcileClaudeCodeFableModelAfterPayload(
+								body,
+								claudeCodeFableState{injectedDisplay: test.injected},
+								map[string]bool{"thinking.display": test.touched}, true, false,
+							)
+							display := gjson.GetBytes(out, "thinking.display")
+							if display.String() != test.want || (test.want == "" && display.Exists()) {
+								t.Fatalf("display=%s, want %q; body=%s", display.Raw, test.want, out)
+							}
+						},
+					)
+				}
+			},
+		)
 	}
 	body := []byte(`{"model":"claude-opus-4-8","thinking":{"type":"adaptive","display":"updates"}}`)
-	out := reconcileClaudeCodeFableModelAfterPayload(body, claudeCodeFableState{injectedDisplay: true}, nil, true, false)
+	out := reconcileClaudeCodeFableModelAfterPayload(
+		body, claudeCodeFableState{injectedDisplay: true}, nil, true, false,
+	)
 	if display := gjson.GetBytes(out, "thinking.display"); display.Exists() {
 		t.Fatalf("synthetic display survived for non-progress model: %s", out)
 	}
@@ -1070,11 +1264,15 @@ func TestReconcileClaudeCloakDisplayAfterPayload(t *testing.T) {
 
 func TestPrepareClaudeSonnet55PayloadModelOverrideUsesFinalModelRules(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.Payload.Override = []config.PayloadRule{{
-		Models: []config.PayloadModelRule{{Name: "*"}},
-		Params: map[string]any{"model": "claude-sonnet-5"},
-	}}
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}}
+	cfg.Payload.Override = []config.PayloadRule{
+		{
+			Models: []config.PayloadModelRule{{Name: "*"}},
+			Params: map[string]any{"model": "claude-sonnet-5"},
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"},
+	}
 	for _, test := range []struct {
 		name         string
 		choice       string
@@ -1083,25 +1281,30 @@ func TestPrepareClaudeSonnet55PayloadModelOverrideUsesFinalModelRules(t *testing
 		{name: "no forced tool", wantThinking: "disabled"},
 		{name: "forced tool", choice: `,"tool_choice":{"type":"any"}`},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			payload := []byte(`{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}` + test.choice + `}`)
-			request, err := NewClaudeExecutor(cfg).prepareClaudeRequest(context.Background(), auth,
-				cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: payload},
-				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			body, err := io.ReadAll(request.httpReq.Body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := gjson.GetBytes(body, "model").String(); got != "claude-sonnet-5" {
-				t.Fatalf("model = %q, want claude-sonnet-5; body=%s", got, body)
-			}
-			if got := gjson.GetBytes(body, "thinking.type").String(); got != test.wantThinking {
-				t.Fatalf("thinking.type = %q, want %q; body=%s", got, test.wantThinking, body)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				payload := []byte(`{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user` +
+					`","content":"hi"}],"thinking":{"type":"disabled"}` + test.choice + `}`)
+				request, err := NewClaudeExecutor(cfg).prepareClaudeRequest(
+					context.Background(), auth,
+					cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: payload},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, false,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := io.ReadAll(request.httpReq.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := gjson.GetBytes(body, "model").String(); got != "claude-sonnet-5" {
+					t.Fatalf("model = %q, want claude-sonnet-5; body=%s", got, body)
+				}
+				if got := gjson.GetBytes(body, "thinking.type").String(); got != test.wantThinking {
+					t.Fatalf("thinking.type = %q, want %q; body=%s", got, test.wantThinking, body)
+				}
+			},
+		)
 	}
 }
 
@@ -1109,13 +1312,19 @@ func TestPrepareClaudeRequest_AddsContext1MBetaFromModelTag(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
 	ctx := context.Background()
 	req := cliproxyexecutor.Request{
-		Model:   "claude-opus-4-7[1m]",
-		Payload: []byte(`{"model":"claude-opus-4-7[1m]","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`),
+		Model: "claude-opus-4-7[1m]",
+		Payload: []byte(
+			`{"model":"claude-opus-4-7[1m]","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`,
+		),
 	}
 	cr, err := executor.prepareClaudeRequest(
 		ctx,
-		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}},
-		req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}, false,
+		&cliproxyauth.Auth{
+			Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"},
+		},
+		req,
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+		false,
 	)
 	if err != nil {
 		t.Fatalf("prepareClaudeRequest error: %v", err)
@@ -1128,22 +1337,21 @@ func TestPrepareClaudeRequest_AddsContext1MBetaFromModelTag(t *testing.T) {
 
 func TestPrepareClaudeRequestSanitizesIncompatibleSignatures(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
-	payload := []byte(`{
-		"model":"claude-opus-4-7",
-		"messages":[{
-			"role":"assistant",
-			"content":[
-				{"type":"thinking","thinking":"bad","signature":"skip_thought_signature_validator"},
-				{"type":"tool_use","id":"toolu_1","name":"Read","input":{},"signature":"skip_thought_signature_validator","extra_content":{"google":{"thought_signature":"skip_thought_signature_validator"}},"model":"gemini-3-pro"},
-				{"type":"text","text":"visible"}
-			]
-		},{"role":"user","content":"continue"}],
-		"max_tokens":16
-	}`)
+	payload := []byte("{\n\t\t\"model\":\"claude-opus-4-7\",\n\t\t\"messages\":[{\n\t\t\t\"ro" +
+		"le\":\"assistant\",\n\t\t\t\"content\":[\n\t\t\t\t{\"type\":\"thinking" +
+		`","thinking":"bad","signature":"skip_thought_signature_validator"},` +
+		"\n\t\t\t\t{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Read\"," +
+		`"input":{},"signature":"skip_thought_signature_validator","extra_conte` +
+		`nt":{"google":{"thought_signature":"skip_thought_signature_validator"}` +
+		"},\"model\":\"gemini-3-pro\"},\n\t\t\t\t{\"type\":\"text\",\"text\":\"" +
+		"visible\"}\n\t\t\t]\n\t\t},{\"role\":\"user\",\"content\":\"continue\"" +
+		"}],\n\t\t\"max_tokens\":16\n\t}")
 
 	cr, err := executor.prepareClaudeRequest(
 		context.Background(),
-		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}},
+		&cliproxyauth.Auth{
+			Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"},
+		},
 		cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: payload},
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
 		false,
@@ -1176,22 +1384,18 @@ func TestPrepareClaudeRequestSanitizesIncompatibleSignatures(t *testing.T) {
 
 func TestPrepareClaudeRequestBypassesSignatureSanitizerForNonClaudeModel(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
-	payload := []byte(`{
-		"model":"gpt-5.4",
-		"messages":[{
-			"role":"assistant",
-			"content":[
-				{"type":"thinking","thinking":"keep","signature":"skip_thought_signature_validator"},
-				{"type":"tool_use","id":"toolu_1","name":"Read","input":{},"signature":"skip_thought_signature_validator","extra_content":{"google":{"thought_signature":"skip_thought_signature_validator"}},"model":"gemini-3-pro"},
-				{"type":"text","text":"visible"}
-			]
-		}],
-		"max_tokens":16
-	}`)
+	payload := []byte(("{\n\t\t\"model\":\"gpt-5.4\",\n\t\t\"messages\":[{\n\t\t\t\"role\":\"assistant\",\n\t" +
+		"\t\t\"content\":[\n\t\t\t\t{\"type\":\"thinking\",\"thinking\":\"keep\",\"signature\":\"" +
+		"skip_thought_signature_validator\"},\n\t\t\t\t{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"" +
+		"Read\",\"input\":{},\"signature\":\"skip_thought_signature_validator\",\"extra_content\":{\"google\"" +
+		":{\"thought_signature\":\"skip_thought_signature_validator\"}},\"model\":\"gemini-3-pro\"},\n\t\t\t" +
+		"\t{\"type\":\"text\",\"text\":\"visible\"}\n\t\t\t]\n\t\t}],\n\t\t\"max_tokens\":16\n\t}"))
 
 	cr, err := executor.prepareClaudeRequest(
 		context.Background(),
-		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}},
+		&cliproxyauth.Auth{
+			Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"},
+		},
 		cliproxyexecutor.Request{Model: "gpt-5.4", Payload: payload},
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
 		false,
@@ -1232,11 +1436,18 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 				model := gjson.GetBytes(body, "model").String()
 				userIDs = append(userIDs, userID)
 				requestModels = append(requestModels, model)
-				t.Logf("HTTP Server received request: model=%s, user_id=%s, url=%s", model, userID, r.URL.String())
+				t.Logf(
+					"HTTP Server received request: model=%s, user_id=%s, url=%s",
+					model,
+					userID,
+					r.URL.String(),
+				)
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write(
 					[]byte(
-						`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+						(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","` +
+							`content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens"` +
+							`:1}}`),
 					),
 				)
 			},
@@ -1312,7 +1523,9 @@ func TestClaudeExecutor_DefaultPreservesAbsentUserID(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write(
 					[]byte(
-						`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+						(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","` +
+							`content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens"` +
+							`:1}}`),
 					),
 				)
 			},
@@ -1353,7 +1566,9 @@ func TestClaudeExecutor_DefaultPreservesAbsentUserID(t *testing.T) {
 
 func TestStripClaudeToolPrefixFromResponse_NestedToolReference(t *testing.T) {
 	input := []byte(
-		`{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"proxy_mcp__nia__manage_resource"}]}]}`,
+		`{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":` +
+			`[{"type":"tool_reference","tool_name":"proxy_mcp__nia__manage_resource` +
+			`"}]}]}`,
 	)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
 	got := gjson.GetBytes(out, "content.0.content.0.tool_name").String()
@@ -1365,7 +1580,8 @@ func TestStripClaudeToolPrefixFromResponse_NestedToolReference(t *testing.T) {
 func TestApplyClaudeToolPrefix_NestedToolReferenceWithStringContent(t *testing.T) {
 	// tool_result.content can be a string - should not be processed
 	input := []byte(
-		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"plain string result"}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use` +
+			`_id":"toolu_123","content":"plain string result"}]}]}`,
 	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 	got := gjson.GetBytes(out, "messages.0.content.0.content").String()
@@ -1376,7 +1592,9 @@ func TestApplyClaudeToolPrefix_NestedToolReferenceWithStringContent(t *testing.T
 
 func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	input := []byte(
-		`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}]}`,
+		`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"message` +
+			`s":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"` +
+			`,"content":[{"type":"tool_reference","tool_name":"web_search"}]}]}]}`,
 	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
@@ -1386,11 +1604,10 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 }
 
 func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
-	payload := []byte(`{
-		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
-		"system": [{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}],
-		"messages": [{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]
-	}`)
+	payload := []byte(("{\n\t\t\"tools\": [{\"name\":\"t1\",\"cache_control\":{\"type\":\"ephemeral\",\"ttl\":" +
+		"\"1h\"}}],\n\t\t\"system\": [{\"type\":\"text\",\"text\":\"s1\",\"cache_control\":{\"type\":\"" +
+		"ephemeral\"}}],\n\t\t\"messages\": [{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"" +
+		"u1\",\"cache_control\":{\"type\":\"ephemeral\",\"ttl\":\"1h\"}}]}]\n\t}"))
 
 	out := normalizeCacheControlTTL(payload)
 
@@ -1403,7 +1620,10 @@ func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 }
 
 func TestNormalizeCacheControlTTL_PreservesKeyOrderWhenModified(t *testing.T) {
-	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"tools":[{"name":"t1","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
+	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","tex` +
+		`t":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"tools":[{` +
+		`"name":"t1","cache_control":{"type":"ephemeral"}}],"system":[{"type":"` +
+		`text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
 
 	out := normalizeCacheControlTTL(payload)
 
@@ -1456,7 +1676,12 @@ func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) 
 }
 
 func TestEnforceCacheControlLimit_PreservesKeyOrderWhenModified(t *testing.T) {
-	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}},{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]}],"tools":[{"name":"t1","cache_control":{"type":"ephemeral"}},{"name":"t2","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
+	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","tex` +
+		`t":"u1","cache_control":{"type":"ephemeral"}},{"type":"text","text":"u` +
+		`2","cache_control":{"type":"ephemeral"}}]}],"tools":[{"name":"t1","cac` +
+		`he_control":{"type":"ephemeral"}},{"name":"t2","cache_control":{"type"` +
+		`:"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{` +
+		`"type":"ephemeral"}}]}`)
 
 	out := enforceCacheControlLimit(payload, 4)
 
@@ -1561,7 +1786,8 @@ func TestClaudeExecutor_CountTokensRejectsInvalidRequests(t *testing.T) {
 		if err == nil {
 			t.Fatalf("CountTokens(%q) error = nil, want validation error", payload)
 		}
-		if statusProvider, ok := err.(interface{ StatusCode() int }); !ok || statusProvider.StatusCode() != http.StatusBadRequest {
+		if statusProvider, ok := err.(interface{ StatusCode() int }); !ok ||
+			statusProvider.StatusCode() != http.StatusBadRequest {
 			t.Fatalf("CountTokens(%q) error = %v, want status 400", payload, err)
 		}
 	}
@@ -1596,73 +1822,105 @@ func TestClaudeExecutor_ExecuteStream_InvalidGzipErrorBodyReturnsDecodeMessage(t
 }
 
 func TestClaudeExecutorResponsesPatchCompletion(t *testing.T) {
-	request := []byte(`{"model":"claude-3-5-sonnet-20241022","tools":[{"type":"custom","name":"apply_patch"}],"input":[{"role":"user","content":"apply the patch"}]}`)
-	prefix := "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_patch\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1}}}\n\n" +
-		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_patch\",\"name\":\"apply_patch\",\"input\":{}}}\n\n"
+	request := []byte(`{"model":"claude-3-5-sonnet-20241022","tools":[{"type":"custom","name"` +
+		`:"apply_patch"}],"input":[{"role":"user","content":"apply the patch"}]` +
+		`}`)
+	prefix := "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_patch\",\"" +
+		"model\":\"claude-test\",\"usage\":{\"input_tokens\":1}}}\n\n" +
+		("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":" +
+			"{\"type\":\"tool_use\",\"id\":\"call_patch\",\"name\":\"apply_patch\"," +
+			"\"input\":{}}}\n\n")
 	suffix := "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
-		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n\n"
+		("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":" +
+			"\"tool_use\"},\"usage\":{\"output_tokens\":" +
+			"1}}\n\n")
 	for _, tc := range []struct {
 		name, arguments, snapshot, want, wantErr string
 		terminate                                bool
 	}{
 		{name: "source terminator missing", arguments: `{"input":"ok"}`, wantErr: "missing message_stop"},
 		{name: "invalid tool input", arguments: `{"input":7}`, terminate: true, wantErr: "invalid apply_patch"},
-		{name: "conflicting partial snapshot", arguments: `{"input":"wrong`, snapshot: `{"input":"prefix"}`, terminate: true, wantErr: "conflict"},
-		{name: "valid partial snapshot", arguments: `{"input":"pre`, snapshot: `{"input":"prefix"}`, terminate: true, want: "prefix"},
+		{
+			name: "conflicting partial snapshot", arguments: `{"input":"wrong`, snapshot: `{"input":"prefix"}`,
+			terminate: true, wantErr: "conflict",
+		},
+		{
+			name: "valid partial snapshot", arguments: `{"input":"pre`, snapshot: `{"input":"prefix"}`, terminate: true,
+			want: "prefix",
+		},
 		{name: "valid stream with blank separators", arguments: `{"input":"ok"}`, terminate: true, want: "ok"},
 	} {
 		for _, mode := range []string{"buffered", "stream"} {
-			t.Run(tc.name+"/"+mode, func(t *testing.T) {
-				fragment, err := sjson.SetBytes([]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta"}}`), "delta.partial_json", tc.arguments)
-				if err != nil {
-					t.Fatal(err)
-				}
-				body := prefix + "data: " + string(fragment) + "\n\n"
-				if tc.snapshot != "" {
-					body += "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_patch\",\"name\":\"apply_patch\",\"input\":" + tc.snapshot + "}}\n\n"
-				}
-				body += suffix
-				if tc.terminate {
-					body += "data: {\"type\":\"message_stop\"}\n\n"
-				}
-				ctx := util.WithRoundTripper(t.Context(), protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-						Body:       io.NopCloser(strings.NewReader(body)),
-						Request:    req,
-					}, nil
-				}))
-				executor := NewClaudeExecutor(&config.Config{})
-				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-test", "base_url": "https://example.test"}}
-				req := cliproxyexecutor.Request{Model: "claude-3-5-sonnet-20241022", Payload: request}
-				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: request}
-				var output []byte
-				if mode == "buffered" {
-					var response cliproxyexecutor.Response
-					response, err = executor.Execute(ctx, auth, req, opts)
-					output = response.Payload
-				} else {
-					var stream *cliproxyexecutor.StreamResult
-					stream, err = executor.ExecuteStream(ctx, auth, req, opts)
-					if err == nil {
-						for chunk := range stream.Chunks {
-							if chunk.Err != nil {
-								err = chunk.Err
+			t.Run(
+				tc.name+"/"+mode, func(t *testing.T) {
+					fragment, err := sjson.SetBytes(
+						[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta"}}`),
+						"delta.partial_json", tc.arguments,
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+					start := prefix
+					if tc.snapshot != "" {
+						start = strings.Replace(start, `"input":{}`, `"input":`+tc.snapshot, 1)
+					}
+					body := start + "data: " + string(fragment) + "\n\n" + suffix
+					if tc.terminate {
+						body += "data: {\"type\":\"message_stop\"}\n\n"
+					}
+					ctx := util.WithRoundTripper(
+						t.Context(), protectedUtlsRoundTripFunc(
+							func(req *http.Request) (*http.Response, error) {
+								return &http.Response{
+									StatusCode: http.StatusOK,
+									Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+									Body:       io.NopCloser(strings.NewReader(body)),
+									Request:    req,
+								}, nil
+							},
+						),
+					)
+					executor := NewClaudeExecutor(&config.Config{})
+					auth := &cliproxyauth.Auth{
+						Attributes: map[string]string{
+							"api_key": "key-test", "base_url": "https://example.test",
+						},
+					}
+					req := cliproxyexecutor.Request{Model: "claude-3-5-sonnet-20241022", Payload: request}
+					opts := cliproxyexecutor.Options{
+						SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: request,
+					}
+					var output []byte
+					if mode == "buffered" {
+						var response cliproxyexecutor.Response
+						response, err = executor.Execute(ctx, auth, req, opts)
+						output = response.Payload
+					} else {
+						var stream *cliproxyexecutor.StreamResult
+						stream, err = executor.ExecuteStream(ctx, auth, req, opts)
+						if err == nil {
+							for chunk := range stream.Chunks {
+								if chunk.Err != nil {
+									err = chunk.Err
+								}
+								output = append(output, chunk.Payload...)
 							}
-							output = append(output, chunk.Payload...)
 						}
 					}
-				}
-				if tc.wantErr != "" {
-					var status interface{ StatusCode() int }
-					if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !errors.As(err, &status) || status.StatusCode() != http.StatusBadGateway {
-						t.Fatalf("completion error = %v, output = %s", err, output)
+					if tc.wantErr != "" {
+						var status interface{ StatusCode() int }
+						if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !errors.As(
+							err, &status,
+						) || status.StatusCode() != http.StatusBadGateway {
+							t.Fatalf("completion error = %v, output = %s", err, output)
+						}
+					} else if err != nil || !bytes.Contains(
+						output, []byte(`"input":"`+tc.want+`"`),
+					) || bytes.Contains(output, []byte(`"status":"failed"`)) {
+						t.Fatalf("successful patch completion = %s, error = %v", output, err)
 					}
-				} else if err != nil || !bytes.Contains(output, []byte(`"input":"`+tc.want+`"`)) || bytes.Contains(output, []byte(`"status":"failed"`)) {
-					t.Fatalf("successful patch completion = %s, error = %v", output, err)
-				}
-			})
+				},
+			)
 		}
 	}
 }
@@ -1687,13 +1945,19 @@ func TestClaudeExecutorExecuteValidatesTranslatedStream(t *testing.T) {
 		{
 			name: "missing message stop",
 			body: "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\"}}\n\n" +
-				"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+				("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":" +
+					"\"end_turn\"},\"usage\":{\"output_tokens\":" +
+					"1}}\n\n"),
 			wantErr: "missing message_stop",
 		},
 		{
 			name: "valid stream",
-			body: "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
-				"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" +
+			body: "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type" +
+				"\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"cont" +
+				"ent\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
+				("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":" +
+					"\"end_turn\"},\"usage\":{\"output_tokens\":" +
+					"1}}\n\n") +
 				"data: {\"type\":\"message_stop\"}\n\n",
 		},
 	}
@@ -1783,11 +2047,17 @@ func TestClaudeExecutorExecuteRejectsOversizedResponse(t *testing.T) {
 }
 
 func TestClaudeExecutorExecuteStreamPreservesDirectAndTranslatedPaths(t *testing.T) {
-	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n" +
+	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type" +
+		"\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"cont" +
+		"ent\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n" +
 		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
-		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n" +
+		("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":" +
+			"{\"type\":\"text_delta\",\"text\":" +
+			"\"hello\"}}\n\n") +
 		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
-		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+		("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":" +
+			"\"end_turn\"},\"usage\":{\"output_tokens\":" +
+			"3}}\n\n") +
 		"data: {\"type\":\"message_stop\"}\n\n"
 
 	tests := []struct {
@@ -1857,7 +2127,8 @@ func TestClaudeExecutorExecuteStreamPreservesDirectAndTranslatedPaths(t *testing
 					if record.Alias != tt.name || record.Failed || !record.Completed {
 						t.Fatalf("usage record outcome = %#v", record)
 					}
-					if record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 || record.Detail.TotalTokens != 5 {
+					if record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 ||
+						record.Detail.TotalTokens != 5 {
 						t.Fatalf("usage detail = %#v, want input/output/total 2/3/5", record.Detail)
 					}
 				case <-time.After(time.Second):
@@ -1869,8 +2140,11 @@ func TestClaudeExecutorExecuteStreamPreservesDirectAndTranslatedPaths(t *testing
 }
 
 func TestClaudeExecutorExecuteStreamReportsReadFailureForBothOutputPaths(t *testing.T) {
-	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":2}}}\n\n" +
-		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n"
+	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"mode" +
+		"l\":\"claude-test\",\"usage\":{\"input_tokens\":2}}}\n\n" +
+		("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":" +
+			"\"end_turn\"},\"usage\":{\"output_tokens\":" +
+			"3}}\n\n")
 
 	for _, sourceFormat := range []sdktranslator.Format{sdktranslator.FormatClaude, sdktranslator.FormatOpenAI} {
 		t.Run(
@@ -1930,7 +2204,8 @@ func TestClaudeExecutorExecuteStreamReportsReadFailureForBothOutputPaths(t *test
 					if !record.Failed || record.Completed || record.Fail.Body != io.ErrUnexpectedEOF.Error() {
 						t.Fatalf("usage record outcome = %#v", record)
 					}
-					if record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 || record.Detail.TotalTokens != 5 {
+					if record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 ||
+						record.Detail.TotalTokens != 5 {
 						t.Fatalf("usage detail = %#v, want input/output/total 2/3/5", record.Detail)
 					}
 				case <-time.After(time.Second):
@@ -1942,8 +2217,11 @@ func TestClaudeExecutorExecuteStreamReportsReadFailureForBothOutputPaths(t *test
 }
 
 func TestClaudeExecutorExecuteStreamCompletesBeforeUpstreamReadError(t *testing.T) {
-	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":2}}}\n\n" +
-		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"mode" +
+		"l\":\"claude-test\",\"usage\":{\"input_tokens\":2}}}\n\n" +
+		("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":" +
+			"\"end_turn\"},\"usage\":{\"output_tokens\":" +
+			"3}}\n\n") +
 		"data: {\"type\":\"message_stop\"}\n\n"
 
 	for _, tc := range []struct {
@@ -1955,119 +2233,148 @@ func TestClaudeExecutorExecuteStreamCompletesBeforeUpstreamReadError(t *testing.
 		{name: "Chat", format: sdktranslator.FormatOpenAI, marker: `"finish_reason":"stop"`},
 		{name: "Responses", format: sdktranslator.FormatOpenAIResponse, marker: "response.completed"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
-			registerTestUsagePlugin(t, plugin)
-			ctx := util.WithRoundTripper(context.Background(), protectedUtlsRoundTripFunc(
-				func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-						Body: io.NopCloser(&terminalErrorReader{
-							data: []byte(streamBody),
-							err:  io.ErrUnexpectedEOF,
-						}),
-						Request: req,
-					}, nil
-				},
-			))
-			result, err := NewClaudeExecutor(&config.Config{}).ExecuteStream(ctx, &cliproxyauth.Auth{
-				Attributes: map[string]string{"api_key": "key-123", "base_url": "http://localhost"},
-			}, cliproxyexecutor.Request{
-				Model:   "claude-test",
-				Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
-			}, cliproxyexecutor.Options{
-				SourceFormat: sdktranslator.FormatClaude, ResponseFormat: tc.format,
-			})
-			if err != nil {
-				t.Fatalf("ExecuteStream: %v", err)
-			}
-			var payload []byte
-			for chunk := range result.Chunks {
-				if chunk.Err != nil {
-					t.Fatalf("stream chunk error after terminal: %v", chunk.Err)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+				registerTestUsagePlugin(t, plugin)
+				ctx := util.WithRoundTripper(
+					context.Background(), protectedUtlsRoundTripFunc(
+						func(req *http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+								Body: io.NopCloser(
+									&terminalErrorReader{
+										data: []byte(streamBody),
+										err:  io.ErrUnexpectedEOF,
+									},
+								),
+								Request: req,
+							}, nil
+						},
+					),
+				)
+				result, err := NewClaudeExecutor(&config.Config{}).ExecuteStream(
+					ctx, &cliproxyauth.Auth{
+						Attributes: map[string]string{"api_key": "key-123", "base_url": "http://localhost"},
+					}, cliproxyexecutor.Request{
+						Model:   "claude-test",
+						Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+					}, cliproxyexecutor.Options{
+						SourceFormat: sdktranslator.FormatClaude, ResponseFormat: tc.format,
+					},
+				)
+				if err != nil {
+					t.Fatalf("ExecuteStream: %v", err)
 				}
-				payload = append(payload, chunk.Payload...)
-			}
-			if !bytes.Contains(payload, []byte(tc.marker)) {
-				t.Fatalf("missing terminal %q in %s", tc.marker, payload)
-			}
-			select {
-			case record := <-plugin.records:
-				if !record.Completed || record.Failed || record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 {
-					t.Fatalf("usage record = %#v", record)
+				var payload []byte
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error after terminal: %v", chunk.Err)
+					}
+					payload = append(payload, chunk.Payload...)
 				}
-			case <-time.After(time.Second):
-				t.Fatal("timed out waiting for terminal usage")
-			}
-		})
+				if !bytes.Contains(payload, []byte(tc.marker)) {
+					t.Fatalf("missing terminal %q in %s", tc.marker, payload)
+				}
+				select {
+				case record := <-plugin.records:
+					if !record.Completed || record.Failed || record.Detail.InputTokens != 2 ||
+						record.Detail.OutputTokens != 3 {
+						t.Fatalf("usage record = %#v", record)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("timed out waiting for terminal usage")
+				}
+			},
+		)
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestClaudeExecutorExecuteStreamPublishesUsageAfterTerminalCancellation(t *testing.T) {
-	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":2}}}\n\n" +
-		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"mode" +
+		"l\":\"claude-test\",\"usage\":{\"input_tokens\":2}}}\n\n" +
+		("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":" +
+			"\"end_turn\"},\"usage\":{\"output_tokens\":" +
+			"3}}\n\n") +
 		"data: {\"type\":\"message_stop\"}\n\n"
 
 	for _, format := range []sdktranslator.Format{
 		sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse,
 	} {
-		t.Run(string(format), func(t *testing.T) {
-			plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
-			registerTestUsagePlugin(t, plugin)
-			ctx, cancel := context.WithCancel(util.WithRoundTripper(context.Background(), protectedUtlsRoundTripFunc(
-				func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-						Body:       io.NopCloser(strings.NewReader(streamBody)),
-						Request:    req,
-					}, nil
-				},
-			)))
-			defer cancel()
-			observer := &recordingClaudeStreamObserver{onFinish: func(outcome claudeStreamOutcome) {
-				if outcome == claudeStreamOutcomeComplete {
-					cancel()
+		t.Run(
+			string(format), func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+				registerTestUsagePlugin(t, plugin)
+				ctx, cancel := context.WithCancel(
+					util.WithRoundTripper(
+						context.Background(), protectedUtlsRoundTripFunc(
+							func(req *http.Request) (*http.Response, error) {
+								return &http.Response{
+									StatusCode: http.StatusOK,
+									Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+									Body:       io.NopCloser(strings.NewReader(streamBody)),
+									Request:    req,
+								}, nil
+							},
+						),
+					),
+				)
+				defer cancel()
+				observer := &recordingClaudeStreamObserver{
+					onFinish: func(outcome claudeStreamOutcome) {
+						if outcome == claudeStreamOutcomeComplete {
+							cancel()
+						}
+					},
 				}
-			}}
-			result, err := NewClaudeExecutor(&config.Config{}).executeStreamWithObserver(
-				ctx,
-				&cliproxyauth.Auth{Attributes: map[string]string{
-					"api_key": "key-123", "base_url": "http://localhost",
-				}},
-				cliproxyexecutor.Request{
-					Model: "claude-test", Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
-				},
-				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: format},
-				observer,
-			)
-			if err != nil {
-				t.Fatalf("executeStreamWithObserver: %v", err)
-			}
-			for chunk := range result.Chunks {
-				if chunk.Err != nil {
-					t.Fatalf("terminal stream error: %v", chunk.Err)
+				result, err := NewClaudeExecutor(&config.Config{}).executeStreamWithObserver(
+					ctx,
+					&cliproxyauth.Auth{
+						Attributes: map[string]string{
+							"api_key": "key-123", "base_url": "http://localhost",
+						},
+					},
+					cliproxyexecutor.Request{
+						Model: "claude-test", Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+					},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: format},
+					observer,
+				)
+				if err != nil {
+					t.Fatalf("executeStreamWithObserver: %v", err)
 				}
-			}
-			if len(observer.outcomes) != 1 || observer.outcomes[0] != claudeStreamOutcomeComplete || ctx.Err() != context.Canceled {
-				t.Fatalf("stream outcome = %v, context = %v", observer.outcomes, ctx.Err())
-			}
-			select {
-			case record := <-plugin.records:
-				if !record.Completed || record.Failed || record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 {
-					t.Fatalf("usage after terminal cancellation = %#v", record)
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("terminal stream error: %v", chunk.Err)
+					}
 				}
-			case <-time.After(time.Second):
-				t.Fatal("timed out waiting for post-terminal usage")
-			}
-		})
+				if len(observer.outcomes) != 1 || observer.outcomes[0] != claudeStreamOutcomeComplete ||
+					ctx.Err() != context.Canceled {
+					t.Fatalf("stream outcome = %v, context = %v", observer.outcomes, ctx.Err())
+				}
+				select {
+				case record := <-plugin.records:
+					if !record.Completed || record.Failed || record.Detail.InputTokens != 2 ||
+						record.Detail.OutputTokens != 3 {
+						t.Fatalf("usage after terminal cancellation = %#v", record)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("timed out waiting for post-terminal usage")
+				}
+			},
+		)
 	}
 }
 
+// noinspection GoDirectComparisonOfErrors
 func TestClaudeExecutorExecuteStreamClientCancelsAfterTerminalFrame(t *testing.T) {
-	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":2}}}\n\n" +
-		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+	const streamBody = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"mode" +
+		"l\":\"claude-test\",\"usage\":{\"input_tokens\":2}}}\n\n" +
+		("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":" +
+			"\"end_turn\"},\"usage\":{\"output_tokens\":" +
+			"3}}\n\n") +
 		"data: {\"type\":\"message_stop\"}\n\n"
 
 	for _, tc := range []struct {
@@ -2078,57 +2385,66 @@ func TestClaudeExecutorExecuteStreamClientCancelsAfterTerminalFrame(t *testing.T
 		{name: "Claude", format: sdktranslator.FormatClaude, marker: `"type":"message_stop"`},
 		{name: "Responses", format: sdktranslator.FormatOpenAIResponse, marker: "response.completed"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
-			registerTestUsagePlugin(t, plugin)
-			release := make(chan struct{})
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = io.WriteString(w, streamBody)
-				w.(http.Flusher).Flush()
-				select {
-				case <-r.Context().Done():
-				case <-release:
-				}
-			}))
-			defer func() {
-				close(release)
-				server.Close()
-			}()
+		t.Run(
+			tc.name, func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+				registerTestUsagePlugin(t, plugin)
+				release := make(chan struct{})
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, r *http.Request) {
+							w.Header().Set("Content-Type", "text/event-stream")
+							_, _ = io.WriteString(w, streamBody)
+							w.(http.Flusher).Flush()
+							select {
+							case <-r.Context().Done():
+							case <-release:
+							}
+						},
+					),
+				)
+				defer func() {
+					close(release)
+					server.Close()
+				}()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			result, err := NewClaudeExecutor(&config.Config{}).ExecuteStream(ctx, &cliproxyauth.Auth{
-				Attributes: map[string]string{"api_key": "key-123", "base_url": server.URL},
-			}, cliproxyexecutor.Request{
-				Model: "claude-test", Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
-			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: tc.format})
-			if err != nil {
-				t.Fatalf("ExecuteStream: %v", err)
-			}
-			var payload []byte
-			for chunk := range result.Chunks {
-				if chunk.Err != nil {
-					t.Fatalf("stream before terminal: %v", chunk.Err)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				result, err := NewClaudeExecutor(&config.Config{}).ExecuteStream(
+					ctx, &cliproxyauth.Auth{
+						Attributes: map[string]string{"api_key": "key-123", "base_url": server.URL},
+					}, cliproxyexecutor.Request{
+						Model: "claude-test", Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+					}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: tc.format},
+				)
+				if err != nil {
+					t.Fatalf("ExecuteStream: %v", err)
 				}
-				payload = append(payload, chunk.Payload...)
-				if bytes.Contains(payload, []byte(tc.marker)) {
-					cancel()
-					break
+				var payload []byte
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream before terminal: %v", chunk.Err)
+					}
+					payload = append(payload, chunk.Payload...)
+					if bytes.Contains(payload, []byte(tc.marker)) {
+						cancel()
+						break
+					}
 				}
-			}
-			if ctx.Err() != context.Canceled || !bytes.Contains(payload, []byte(tc.marker)) {
-				t.Fatalf("terminal frame not delivered before context ended: %s (%v)", payload, ctx.Err())
-			}
-			select {
-			case record := <-plugin.records:
-				if !record.Completed || record.Failed || record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 {
-					t.Fatalf("usage after client cancellation = %#v", record)
+				if ctx.Err() != context.Canceled || !bytes.Contains(payload, []byte(tc.marker)) {
+					t.Fatalf("terminal frame not delivered before context ended: %s (%v)", payload, ctx.Err())
 				}
-			case <-time.After(time.Second):
-				t.Fatal("timed out waiting for successful usage after terminal frame")
-			}
-		})
+				select {
+				case record := <-plugin.records:
+					if !record.Completed || record.Failed || record.Detail.InputTokens != 2 ||
+						record.Detail.OutputTokens != 3 {
+						t.Fatalf("usage after client cancellation = %#v", record)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("timed out waiting for successful usage after terminal frame")
+				}
+			},
+		)
 	}
 }
 
@@ -2177,6 +2493,8 @@ func TestClaudeStreamingValidator(t *testing.T) {
 			lines: []string{
 				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`,
 				`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+				`data: {"type":"content_block_stop","index":0}`,
 				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
 				`data: {"type":"message_stop"}`,
 			},
@@ -2256,16 +2574,24 @@ func TestClaudeExecutorExecuteTransportMatchesResponseFormat(t *testing.T) {
 		[]string{
 			`event: message_start`,
 			`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+			`event: content_block_start`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 			`event: content_block_delta`,
 			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+			`event: content_block_stop`,
+			`data: {"type":"content_block_stop","index":0}`,
 			`event: message_delta`,
-			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},` +
+				`"usage":{"input_tokens":2,"output_tokens":` +
+				`1}}`,
 			`event: message_stop`,
 			`data: {"type":"message_stop"}`,
 			``,
 		}, "\n",
 	)
-	jsonResponse := `{"id":"msg_123","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":1}}`
+	jsonResponse := `{"id":"msg_123","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022"` +
+		`,"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"` +
+		`input_tokens":2,"output_tokens":1}}`
 
 	tests := []struct {
 		name           string
@@ -2334,7 +2660,9 @@ func TestClaudeExecutorExecuteTransportMatchesResponseFormat(t *testing.T) {
 					attributes["header:Accept-Encoding"] = "gzip, deflate, br, zstd"
 				}
 				auth := &cliproxyauth.Auth{Attributes: attributes}
-				payload := []byte(`{"model":"claude-3-5-sonnet-20241022","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+				payload := []byte(
+					`{"model":"claude-3-5-sonnet-20241022","stream":false,"messages":[{"role":"user","content":"hi"}]}`,
+				)
 
 				response, err := executor.Execute(
 					context.Background(), auth, cliproxyexecutor.Request{
@@ -2353,7 +2681,12 @@ func TestClaudeExecutorExecuteTransportMatchesResponseFormat(t *testing.T) {
 				}
 				stream := gjson.GetBytes(seenBody, "stream")
 				if !stream.Exists() || stream.Bool() != tt.wantStream {
-					t.Fatalf("upstream stream = %s, want %t; body=%s", stream.Raw, tt.wantStream, string(seenBody))
+					t.Fatalf(
+						"upstream stream = %s, want %t; body=%s",
+						stream.Raw,
+						tt.wantStream,
+						string(seenBody),
+					)
 				}
 				wantAccept := "application/json"
 				wantEncoding := "gzip, deflate, br, zstd"
@@ -2383,48 +2716,65 @@ func TestClaudeExecutorExecuteTransportMatchesResponseFormat(t *testing.T) {
 }
 
 func TestClaudeCountTokensPreservesThinkingNormalizerIntent(t *testing.T) {
-	const source = `{"reasoning":{"effort":"medium"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"hi"}]}`
+	const source = `{"reasoning":{"effort":"medium"},"input":[{"type":"configuration_update","reasoning":{"` +
+		`effort":"low"}},{"role":"user","content":"hi"}]}`
 	for _, effort := range []string{"", "high"} {
-		t.Run("edit="+effort, func(t *testing.T) {
-			hooks := &claudeThinkingNormalizerHooks{effort: effort}
-			calls := 0
-			var sent []byte
-			ctx := sdktranslator.WithPluginHooks(t.Context(), hooks)
-			ctx = util.WithRoundTripper(ctx, protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				calls++
-				var err error
-				sent, err = io.ReadAll(req.Body)
+		t.Run(
+			"edit="+effort, func(t *testing.T) {
+				hooks := &claudeThinkingNormalizerHooks{effort: effort}
+				calls := 0
+				var sent []byte
+				ctx := sdktranslator.WithPluginHooks(t.Context(), hooks)
+				ctx = util.WithRoundTripper(
+					ctx, protectedUtlsRoundTripFunc(
+						func(req *http.Request) (*http.Response, error) {
+							calls++
+							var err error
+							sent, err = io.ReadAll(req.Body)
+							if err != nil {
+								t.Fatal(err)
+							}
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     make(http.Header),
+								Body:       io.NopCloser(strings.NewReader(`{"input_tokens":7}`)),
+								Request:    req,
+							}, nil
+						},
+					),
+				)
+				request := cliproxyexecutor.Request{
+					Model: "claude-sonnet-5-5", Payload: []byte(source),
+					Metadata: map[string]any{
+						"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{
+							ID: "claude-sonnet-5-5", Type: "claude",
+							Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+						},
+					},
+				}
+				before := bytes.Clone(request.Payload)
+				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "synthetic-count-test-key"}}
+				_, err := NewClaudeExecutor(&config.Config{}).CountTokens(
+					ctx, auth, request,
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+				)
 				if err != nil {
 					t.Fatal(err)
 				}
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     make(http.Header),
-					Body:       io.NopCloser(strings.NewReader(`{"input_tokens":7}`)),
-					Request:    req,
-				}, nil
-			}))
-			request := cliproxyexecutor.Request{
-				Model: "claude-sonnet-5-5", Payload: []byte(source),
-				Metadata: map[string]any{"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{
-					ID: "claude-sonnet-5-5", Type: "claude",
-					Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-				}},
-			}
-			before := bytes.Clone(request.Payload)
-			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "synthetic-count-test-key"}}
-			_, err := NewClaudeExecutor(&config.Config{}).CountTokens(ctx, auth, request,
-				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !hooks.sawClaude || calls != 1 || hooks.requestCalls.Load() != 1 || !bytes.Equal(request.Payload, before) || len(request.Metadata) != 1 {
-				t.Fatal("Claude counting did not normalize the target schema exactly once or changed the caller request")
-			}
-			if got := gjson.GetBytes(sent, "output_config.effort").String(); got != effort {
-				t.Fatalf("counted Claude effort = %s, want %s from target request normalizer", got, effort)
-			}
-		})
+				if !hooks.sawClaude || calls != 1 || hooks.requestCalls.Load() != 1 || !bytes.Equal(
+					request.Payload, before,
+				) || len(request.Metadata) != 1 {
+					t.Fatal(
+						"Claude counting did not normalize the target schema exactly once or " +
+							"changed the caller " +
+							"request",
+					)
+				}
+				if got := gjson.GetBytes(sent, "output_config.effort").String(); got != effort {
+					t.Fatalf("counted Claude effort = %s, want %s from target request normalizer", got, effort)
+				}
+			},
+		)
 	}
 }
 
@@ -2438,57 +2788,99 @@ func TestPrepareClaudeRequestPromptCacheOptionsPreserveFinalCCH(t *testing.T) {
 		if test.stream {
 			name = mode + "/stream"
 		}
-		t.Run(name, func(t *testing.T) {
-			payload := []byte(`{"model":"claude-opus-4-7","system":"custom system","messages":[{"role":"user","content":"hello"}],"max_tokens":16,"prompt_cache_options":{"mode":"` + mode + `"}}`)
-			auth := &cliproxyauth.Auth{ID: t.Name(), Provider: "claude", Metadata: map[string]any{"access_token": "sk-ant-oat-test", "account_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "claude_device_ids": []string{strings.Repeat("a", 64)}}, Attributes: map[string]string{"base_url": "https://example.com", "disable_tool_name_prefix": "true"}}
-			prepared, err := NewClaudeExecutor(&config.Config{}).prepareClaudeRequest(context.Background(), auth, cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, test.stream)
-			if err != nil {
-				t.Fatal(err)
-			}
-			body, err := io.ReadAll(prepared.httpReq.Body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if gjson.GetBytes(body, "prompt_cache_options").Exists() {
-				t.Fatal("internal prompt cache options reached upstream")
-			}
-			if !strings.Contains(gjson.GetBytes(body, "system.0.text").String(), "cch=") {
-				t.Fatal("OAuth request missing CCH")
-			}
-			signed, err := signAnthropicMessagesBody(body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(signed, body) {
-				t.Fatal("CCH does not match the final outgoing body after prompt cache option removal")
-			}
-		})
+		t.Run(
+			name, func(t *testing.T) {
+				payload := []byte(`{"model":"claude-opus-4-7","system":"custom system","messages":[{"role` +
+					`":"user","content":"hello"}],"max_tokens":16,"prompt_cache_options":{"` +
+					`mode":"` + mode + `"}}`)
+				//goland:noinspection SpellCheckingInspection
+				auth := &cliproxyauth.Auth{
+					ID: t.Name(), Provider: "claude", Metadata: map[string]any{
+						"access_token": "sk-ant-oat-test", "account_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+						"claude_device_ids": []string{strings.Repeat("a", 64)},
+					},
+					Attributes: map[string]string{
+						"base_url":                 "https://example.com",
+						"disable_tool_name_prefix": "true",
+					},
+				}
+				prepared, err := NewClaudeExecutor(&config.Config{}).prepareClaudeRequest(
+					context.Background(),
+					auth, cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: payload},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}, test.stream,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := io.ReadAll(prepared.httpReq.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if gjson.GetBytes(body, "prompt_cache_options").Exists() {
+					t.Fatal("internal prompt cache options reached upstream")
+				}
+				if !strings.Contains(gjson.GetBytes(body, "system.0.text").String(), "cch=") {
+					t.Fatal("OAuth request missing CCH")
+				}
+				signed, err := signAnthropicMessagesBody(body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(signed, body) {
+					t.Fatal("CCH does not match the final outgoing body after prompt cache option removal")
+				}
+			},
+		)
 	}
 }
 
 func TestClaudeEmptyUpstreamFailsForEachResponseFormat(t *testing.T) {
 	for _, format := range []sdktranslator.Format{sdktranslator.FormatClaude, sdktranslator.FormatOpenAIResponse} {
-		t.Run(format.String(), func(t *testing.T) {
-			calls := 0
-			ctx := util.WithRoundTripper(context.Background(), geminiInteractionsRoundTripper(func(request *http.Request) (*http.Response, error) {
-				calls++
-				if request.URL.Host != "synthetic.invalid" {
-					return nil, errors.New("unexpected upstream host")
+		t.Run(
+			format.String(), func(t *testing.T) {
+				calls := 0
+				ctx := util.WithRoundTripper(
+					context.Background(), geminiInteractionsRoundTripper(
+						func(request *http.Request) (*http.Response, error) {
+							calls++
+							if request.URL.Host != "synthetic.invalid" {
+								return nil, errors.New("unexpected upstream host")
+							}
+							return &http.Response{
+								StatusCode: http.StatusOK, Header: make(http.Header), Request: request,
+								Body: io.NopCloser(strings.NewReader("")),
+							}, nil
+						},
+					),
+				)
+				auth := &cliproxyauth.Auth{
+					ID: t.Name(), Provider: "claude",
+					Attributes: map[string]string{
+						"api_key":  "synthetic-key",
+						"base_url": "https://synthetic.invalid",
+					},
 				}
-				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Request: request, Body: io.NopCloser(strings.NewReader(""))}, nil
-			}))
-			auth := &cliproxyauth.Auth{ID: t.Name(), Provider: "claude", Attributes: map[string]string{"api_key": "synthetic-key", "base_url": "https://synthetic.invalid"}}
-			response, err := NewClaudeExecutor(&config.Config{DisableClaudeCloakMode: true}).Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-sonnet-4-6", Payload: []byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hello"}],"max_tokens":16}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: format})
-			if calls != 1 {
-				t.Fatalf("upstream calls=%d, want 1", calls)
-			}
-			if err == nil {
-				t.Fatalf("empty upstream reported successful %s response: %q", format, response.Payload)
-			}
-			var status interface{ StatusCode() int }
-			if !errors.As(err, &status) || status.StatusCode() != http.StatusBadGateway {
-				t.Fatalf("empty upstream error=%v, want 502", err)
-			}
-		})
+				response, err := NewClaudeExecutor(&config.Config{DisableClaudeCloakMode: true}).Execute(
+					ctx, auth, cliproxyexecutor.Request{
+						Model: "claude-sonnet-4-6",
+						Payload: []byte(
+							`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":` +
+								`"hello"}],"max_tokens":` +
+								`16}`,
+						),
+					}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: format},
+				)
+				if calls != 1 {
+					t.Fatalf("upstream calls=%d, want 1", calls)
+				}
+				if err == nil {
+					t.Fatalf("empty upstream reported successful %s response: %q", format, response.Payload)
+				}
+				var status interface{ StatusCode() int }
+				if !errors.As(err, &status) || status.StatusCode() != http.StatusBadGateway {
+					t.Fatalf("empty upstream error=%v, want 502", err)
+				}
+			},
+		)
 	}
 }

@@ -19,7 +19,9 @@ func StableClaudeCLIAccountUUID(seed string) string {
 // ClaudeCLIAuthIdentitySeed remains stable across delegated token refreshes.
 func ClaudeCLIAuthIdentitySeed(auth *cliproxyauth.Auth) string {
 	if auth != nil {
-		for _, field := range []struct{ label, value string }{{"auth-id", auth.ID}, {"auth-index", auth.Index}, {"auth-file", auth.FileName}} {
+		for _, field := range []struct{ label, value string }{
+			{"auth-id", auth.ID}, {"auth-index", auth.Index}, {"auth-file", auth.FileName},
+		} {
 			if value := strings.TrimSpace(field.value); value != "" {
 				return field.label + "|" + value
 			}
@@ -29,12 +31,16 @@ func ClaudeCLIAuthIdentitySeed(auth *cliproxyauth.Auth) string {
 }
 
 // PrepareClaudeCLIFingerprintAuth isolates synthesized identity from shared credentials.
-func PrepareClaudeCLIFingerprintAuth(auth *cliproxyauth.Auth, seed string, synthesize bool) (*cliproxyauth.Auth, error) {
+func PrepareClaudeCLIFingerprintAuth(auth *cliproxyauth.Auth, seed string, synthesize bool) (
+	*cliproxyauth.Auth,
+	error,
+) {
 	if auth == nil {
 		return nil, errors.New("claude CLI identity: auth is nil")
 	}
 	if !synthesize {
-		if ClaudeCredentialAccountUUID(auth) == "" || !claudeauth.HasCanonicalDeviceIDPool(claudeauth.ReadDeviceIDPool(&auth.Metadata)) {
+		if ClaudeCredentialAccountUUID(auth) == "" ||
+			!claudeauth.HasCanonicalDeviceIDPool(claudeauth.ReadDeviceIDPool(&auth.Metadata)) {
 			return nil, errors.New("claude OAuth credential identity is not prepared")
 		}
 		return auth, nil

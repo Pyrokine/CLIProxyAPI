@@ -38,21 +38,22 @@ type claudeToInteractionsStreamState struct {
 }
 
 func convertClaudeResponseToInteractions(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	originalRequestRawJSON, _, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	_ = ctx
-	_ = requestRawJSON
+
 	if param == nil {
 		var local any
 		param = &local
 	}
 	if *param == nil {
 		*param = &claudeToInteractionsStreamState{
-			Model:            modelName,
-			ToolNamesReverse: util.ReverseToolNameMap(interactionsClaudeFunctionNameMap(originalRequestRawJSON)),
+			Model: modelName,
+			ToolNamesReverse: util.ReverseToolNameMap(
+				interactionsClaudeFunctionNameMap(originalRequestRawJSON),
+			),
 		}
 	}
 	st := (*param).(*claudeToInteractionsStreamState)
@@ -62,13 +63,12 @@ func convertClaudeResponseToInteractions(
 }
 
 func convertClaudeResponseToInteractionsNonStream(
-	ctx context.Context,
+	_ context.Context,
 	modelName string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	originalRequestRawJSON, _, rawJSON []byte,
 	_ *any,
 ) []byte {
-	_ = ctx
-	_ = requestRawJSON
+
 	root := gjson.ParseBytes(rawJSON)
 	var out []byte
 	if root.Exists() && (root.Get("content").Exists() || root.Get("type").String() == "error") {
@@ -79,7 +79,10 @@ func convertClaudeResponseToInteractionsNonStream(
 	reverse := util.ReverseToolNameMap(interactionsClaudeFunctionNameMap(originalRequestRawJSON))
 	for index, step := range gjson.GetBytes(out, "steps").Array() {
 		if step.Get("type").String() == "function_call" {
-			out, _ = sjson.SetBytes(out, fmt.Sprintf("steps.%d.name", index), util.RestoreSanitizedToolName(reverse, step.Get("name").String()))
+			out, _ = sjson.SetBytes(
+				out, fmt.Sprintf("steps.%d.name", index),
+				util.RestoreSanitizedToolName(reverse, step.Get("name").String()),
+			)
 		}
 	}
 	return out
@@ -88,7 +91,9 @@ func convertClaudeResponseToInteractionsNonStream(
 func convertClaudeMessageToInteractions(modelName string, root gjson.Result) []byte {
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
 	out, _ = sjson.SetBytes(
-		out, "id", firstNonEmptyString(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())),
+		out,
+		"id",
+		firstNonEmptyString(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())),
 	)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmptyString(root.Get("model").String(), modelName))
 	if root.Get("type").String() == "error" {
@@ -97,7 +102,9 @@ func convertClaudeMessageToInteractions(modelName string, root gjson.Result) []b
 		if errNode.IsObject() {
 			out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
 		} else {
-			out, _ = sjson.SetRawBytes(out, "error", []byte(`{"type":"api_error","message":"upstream execution failed"}`))
+			out, _ = sjson.SetRawBytes(
+				out, "error", []byte(`{"type":"api_error","message":"upstream execution failed"}`),
+			)
 		}
 		return out
 	}
@@ -160,7 +167,11 @@ func convertClaudeSSEToInteractionsNonStream(modelName string, rawJSON []byte) [
 	return out
 }
 
-func convertClaudeEventToInteractions(modelName string, rawJSON []byte, st *claudeToInteractionsStreamState) [][]byte {
+func convertClaudeEventToInteractions(
+	modelName string,
+	rawJSON []byte,
+	st *claudeToInteractionsStreamState,
+) [][]byte {
 	if st.Done {
 		return nil
 	}
@@ -175,7 +186,11 @@ func convertClaudeEventToInteractions(modelName string, rawJSON []byte, st *clau
 	switch root.Get("type").String() {
 	case "message_start":
 		msg := root.Get("message")
-		st.ID = firstNonEmptyString(msg.Get("id").String(), st.ID, fmt.Sprintf("interaction_%d", time.Now().UnixNano()))
+		st.ID = firstNonEmptyString(
+			msg.Get("id").String(),
+			st.ID,
+			fmt.Sprintf("interaction_%d", time.Now().UnixNano()),
+		)
 		st.Model = firstNonEmptyString(msg.Get("model").String(), st.Model, modelName)
 		mergeClaudeUsage(st, msg.Get("usage"))
 		return appendClaudeInteractionsCreated(nil, st, st.Model)
@@ -516,12 +531,20 @@ func setInteractionsUsageFromClaude(out []byte, path string, usage gjson.Result)
 	return out
 }
 
-func appendClaudeInteractionsCreated(out [][]byte, st *claudeToInteractionsStreamState, modelName string) [][]byte {
+func appendClaudeInteractionsCreated(
+	out [][]byte,
+	st *claudeToInteractionsStreamState,
+	modelName string,
+) [][]byte {
 	if st.Created {
 		return out
 	}
 	st.ID = firstNonEmptyString(st.ID, fmt.Sprintf("interaction_%d", time.Now().UnixNano()))
-	created := []byte(`{"interaction":{"id":"","status":"in_progress","object":"interaction","model":""},"event_type":"interaction.created"}`)
+	created := []byte(
+		(`{"interaction":{"id":"","status":"in_progress","object":"interaction",` +
+			`"model":""},"event_type":` +
+			`"interaction.created"}`),
+	)
 	created, _ = sjson.SetBytes(created, "interaction.id", st.ID)
 	created, _ = sjson.SetBytes(created, "interaction.model", firstNonEmptyString(st.Model, modelName))
 	out = append(out, translatorcommon.SSEEventData("interaction.created", created))
@@ -533,7 +556,9 @@ func appendClaudeInteractionsStatusUpdate(out [][]byte, st *claudeToInteractions
 	if st.StatusUpdated {
 		return out
 	}
-	statusUpdate := []byte(`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`)
+	statusUpdate := []byte(
+		`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`,
+	)
 	statusUpdate, _ = sjson.SetBytes(statusUpdate, "interaction_id", st.ID)
 	out = append(out, translatorcommon.SSEEventData("interaction.status_update", statusUpdate))
 	st.StatusUpdated = true
@@ -583,7 +608,9 @@ func appendClaudeInteractionsSignatureDelta(
 	st *claudeToInteractionsStreamState,
 	signature string,
 ) [][]byte {
-	payload := []byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`)
+	payload := []byte(
+		`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`,
+	)
 	payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
 	payload, _ = sjson.SetBytes(payload, "delta.signature", signature)
 	return append(out, translatorcommon.SSEEventData("step.delta", payload))
@@ -625,7 +652,9 @@ func appendClaudeInteractionsCompleted(
 	out = appendClaudeInteractionsCreated(out, st, modelName)
 	out = appendClaudeInteractionsStepStop(out, st)
 	now := time.Now().UTC().Format(time.RFC3339)
-	completed := []byte(`{"interaction":{"id":"","status":"completed","usage":{},"created":"","updated":"","service_tier":"standard","object":"interaction","model":""},"event_type":"interaction.completed"}`)
+	completed := []byte((`{"interaction":{"id":"","status":"completed","usage":{},"created":"","` +
+		`updated":"","service_tier":"standard","object":"interaction","model":"` +
+		`"},"event_type":"interaction.completed"}`))
 	completed, _ = sjson.SetBytes(completed, "interaction.id", st.ID)
 	completed, _ = sjson.SetBytes(completed, "interaction.created", now)
 	completed, _ = sjson.SetBytes(completed, "interaction.updated", now)
@@ -644,7 +673,9 @@ func appendClaudeInteractionsCompleted(
 		if errNode.IsObject() {
 			completed, _ = sjson.SetRawBytes(completed, "interaction.error", []byte(errNode.Raw))
 		} else {
-			completed, _ = sjson.SetRawBytes(completed, "interaction.error", []byte(`{"type":"api_error","message":"upstream execution failed"}`))
+			completed, _ = sjson.SetRawBytes(
+				completed, "interaction.error", []byte(`{"type":"api_error","message":"upstream execution failed"}`),
+			)
 		}
 		st.Done = true
 	}

@@ -9,7 +9,25 @@ import (
 func TestConvertOpenAIResponsesRequestToClaudeCollapsesAdjacentReasoning(t *testing.T) {
 	first := validClaudeThinkingSignature()
 	second := validClaudeThinkingSignature()
-	input := []byte(`{"model":"claude-test","input":[{"type":"reasoning","encrypted_content":"` + first + `","summary":[{"type":"summary_text","text":"old"}]},{"type":"reasoning","encrypted_content":"` + second + `","summary":[{"type":"summary_text","text":"latest"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)
+	input := []byte(
+		(`{"model":"claude-test","input":[{"type":"reasoning",` +
+			`"encrypted_content":` +
+			`"`) +
+			first +
+			(`","summary":` +
+				`[{"type":` +
+				`"summary_text"` +
+				`,"text":` +
+				`"old"}]},` +
+				`{"type":` +
+				`"reasoning",` +
+				`"encrypted_con` +
+				`tent":` +
+				`"`) +
+			second +
+			(`","summary":[{"type":"summary_text","text":"latest"}]},{"type":"message","role":"user","content"` +
+				`:[{"type":"input_text","text":"continue"}]}]}`),
+	)
 
 	output := convertOpenAIResponsesRequestToClaudeDefault("claude-test", input, false)
 	root := gjson.ParseBytes(output)

@@ -68,33 +68,49 @@ func TestConvertGeminiRequestToClaudeAcceptsInlineDataAliases(t *testing.T) {
 
 func TestConvertGeminiRequestToClaudeSplitsInlineDataByMIME(t *testing.T) {
 	for _, role := range []string{"user", "model"} {
-		t.Run(role, func(t *testing.T) {
-			out := ConvertGeminiRequestToClaude("claude-sonnet-5", []byte(`{"contents":[{"role":"`+role+`","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}`), false)
-			parts := gjson.GetBytes(out, "messages.0.content").Array()
-			wantCount := 1
-			if role == "model" {
-				wantCount = 3
-			}
-			if len(parts) != wantCount {
-				t.Fatalf("content count = %d, want %d; %s", len(parts), wantCount, out)
-			}
-			for _, part := range parts[:len(parts)-1] {
-				if part.Get("type").String() != "text" {
-					t.Fatalf("assistant media placeholder missing: %s", out)
+		t.Run(
+			role, func(t *testing.T) {
+				//goland:noinspection SpellCheckingInspection
+				out := ConvertGeminiRequestToClaude(
+					"claude-sonnet-5",
+					[]byte(
+						`{"contents":[{"role":"`+
+							role+
+							(`","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{`+
+								`"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineD`+
+								`ata":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}`),
+					),
+					false,
+				)
+				parts := gjson.GetBytes(out, "messages.0.content").Array()
+				wantCount := 1
+				if role == "model" {
+					wantCount = 3
 				}
-			}
-			pdf := parts[len(parts)-1]
-			if pdf.Get("type").String() != "document" || pdf.Get("source.media_type").String() != "application/pdf" {
-				t.Fatalf("PDF content changed: %s", out)
-			}
-		})
+				if len(parts) != wantCount {
+					t.Fatalf("content count = %d, want %d; %s", len(parts), wantCount, out)
+				}
+				for _, part := range parts[:len(parts)-1] {
+					if part.Get("type").String() != "text" {
+						t.Fatalf("assistant media placeholder missing: %s", out)
+					}
+				}
+				pdf := parts[len(parts)-1]
+				if pdf.Get("type").String() != "document" ||
+					pdf.Get("source.media_type").String() != "application/pdf" {
+					t.Fatalf("PDF content changed: %s", out)
+				}
+			},
+		)
 	}
 }
 
 func TestConvertGeminiRequestToClaudeConvertsCamelFileDataByMIME(t *testing.T) {
 	out := ConvertGeminiRequestToClaude(
 		"claude-sonnet-5",
-		[]byte(`{"contents":[{"role":"user","parts":[{"fileData":{"mimeType":"image/png","fileUri":"https://example.com/image.png"}},{"fileData":{"mimeType":"application/pdf","fileUri":"https://example.com/document.pdf"}}]}]}`),
+		[]byte(`{"contents":[{"role":"user","parts":[{"fileData":{"mimeType":"image/pn`+
+			`g","fileUri":"https://example.com/image.png"}},{"fileData":{"mimeType"`+
+			`:"application/pdf","fileUri":"https://example.com/document.pdf"}}]}]}`),
 		false,
 	)
 
@@ -183,7 +199,10 @@ func TestConvertGeminiRequestToClaudeGroupsConsecutiveRoleTurns(t *testing.T) {
 	wantTypes := []string{"text", "tool_use", "tool_use"}
 	if len(assistantContent) != len(wantTypes) {
 		t.Fatalf(
-			"assistant content count = %d, want %d. Output: %s", len(assistantContent), len(wantTypes), string(out),
+			"assistant content count = %d, want %d. Output: %s",
+			len(assistantContent),
+			len(wantTypes),
+			string(out),
 		)
 	}
 	for index, wantType := range wantTypes {
@@ -223,20 +242,14 @@ func TestConvertGeminiRequestToClaudeKeepsSystemInstructionSeparate(t *testing.T
 }
 
 func TestConvertGeminiRequestToClaudePreservesAndMatchesToolCallIDs(t *testing.T) {
-	raw := []byte(`{
-		"contents":[
-			{"role":"model","parts":[
-				{"functionCall":{"name":"alpha","args":{}}},
-				{"functionCall":{"call_id":"beta-id","name":"beta","args":{}}},
-				{"functionCall":{"id":"alpha-two","name":"alpha","args":{}}}
-			]},
-			{"role":"user","parts":[
-				{"functionResponse":{"callId":"alpha-two","name":"alpha","response":{"result":"explicit"}}},
-				{"functionResponse":{"name":"beta","response":{"result":"named"}}},
-				{"functionResponse":{"response":{"result":"fifo"}}}
-			]}
-		]
-	}`)
+	//goland:noinspection SpellCheckingInspection
+	raw := []byte(("{\n\t\t\"contents\":[\n\t\t\t{\"role\":\"model\",\"parts\":[\n\t\t\t\t{\"functionCall\":{" +
+		"\"name\":\"alpha\",\"args\":{}}},\n\t\t\t\t{\"functionCall\":{\"call_id\":\"beta-id\",\"name\":\"" +
+		"beta\",\"args\":{}}},\n\t\t\t\t{\"functionCall\":{\"id\":\"alpha-two\",\"name\":\"alpha\",\"args\":{" +
+		"}}}\n\t\t\t]},\n\t\t\t{\"role\":\"user\",\"parts\":[\n\t\t\t\t{\"functionResponse\":{\"callId\":\"" +
+		"alpha-two\",\"name\":\"alpha\",\"response\":{\"result\":\"explicit\"}}},\n\t\t\t\t{\"" +
+		"functionResponse\":{\"name\":\"beta\",\"response\":{\"result\":\"named\"}}},\n\t\t\t\t{\"" +
+		"functionResponse\":{\"response\":{\"result\":\"fifo\"}}}\n\t\t\t]}\n\t\t]\n\t}"))
 
 	out := ConvertGeminiRequestToClaude("claude-test", raw, false)
 	messages := gjson.GetBytes(out, "messages").Array()
@@ -265,22 +278,37 @@ func TestConvertGeminiRequestToClaudeScopesMetadataUserID(t *testing.T) {
 		return gjson.GetBytes(out, "metadata.user_id").String()
 	}
 
-	firstRetry := userID(`{"metadata":{"canonical_session_id":"session-a"},"contents":[{"role":"user","parts":[{"text":"first"}]}]}`)
-	secondRetry := userID(`{"metadata":{"canonical_session_id":"session-a"},"contents":[{"role":"user","parts":[{"text":"first"},{"text":"second turn"}]}]}`)
+	firstRetry := userID(
+		`{"metadata":{"canonical_session_id":"session-a"},"contents":[{"role":"user","parts":[{"text":"first"}]}]}`,
+	)
+	secondRetry := userID(
+		`{"metadata":{"canonical_session_id":"session-a"},"contents":[{"role":"` +
+			`user","parts":[{"text":"first"},{"text":"second turn"}]}]}`,
+	)
 	if firstRetry == "" || firstRetry != secondRetry {
 		t.Fatalf("same canonical session user IDs differ: %q != %q", firstRetry, secondRetry)
 	}
 
-	otherSession := userID(`{"metadata":{"canonical_session_id":"session-b"},"contents":[{"role":"user","parts":[{"text":"first"}]}]}`)
+	otherSession := userID(
+		`{"metadata":{"canonical_session_id":"session-b"},"contents":[{"role":"user","parts":[{"text":"first"}]}]}`,
+	)
 	if otherSession == firstRetry {
 		t.Fatalf("different canonical sessions share user ID %q", firstRetry)
 	}
 
-	credentialA := `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"11111111-1111-4111-8111-111111111111"}`
-	credentialB := `{"device_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","account_uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","session_id":"11111111-1111-4111-8111-111111111111"}`
+	//goland:noinspection SpellCheckingInspection
+	credentialA := `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` +
+		`aaaaaaaa","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sessi` +
+		`on_id":"11111111-1111-4111-8111-111111111111"}`
+	//goland:noinspection SpellCheckingInspection
+	credentialB := `{"device_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb` +
+		`bbbbbbbb","account_uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","sessi` +
+		`on_id":"11111111-1111-4111-8111-111111111111"}`
 	explicitIDs := make([]string, 0, 2)
 	for _, explicit := range []string{credentialA, credentialB} {
-		raw := fmt.Sprintf(`{"metadata":{"user_id":%q},"contents":[{"role":"user","parts":[{"text":"first"}]}]}`, explicit)
+		raw := fmt.Sprintf(
+			`{"metadata":{"user_id":%q},"contents":[{"role":"user","parts":[{"text":"first"}]}]}`, explicit,
+		)
 		got := userID(raw)
 		if got != explicit {
 			t.Fatalf("explicit metadata.user_id = %q, want %q", got, explicit)
@@ -299,7 +327,9 @@ func TestConvertGeminiRequestToClaudeConcurrentIdentityIsolation(t *testing.T) {
 	const workers = 64
 	expected := make([]string, workers)
 	for index := range expected {
-		raw := fmt.Sprintf(`{"session_id":"session-%d","contents":[{"role":"user","parts":[{"text":"request"}]}]}`, index)
+		raw := fmt.Sprintf(
+			`{"session_id":"session-%d","contents":[{"role":"user","parts":[{"text":"request"}]}]}`, index,
+		)
 		expected[index] = gjson.GetBytes(
 			ConvertGeminiRequestToClaude("claude-test", []byte(raw), false),
 			"metadata.user_id",
@@ -312,7 +342,9 @@ func TestConvertGeminiRequestToClaudeConcurrentIdentityIsolation(t *testing.T) {
 		waitGroup.Add(1)
 		go func(index int) {
 			defer waitGroup.Done()
-			raw := fmt.Sprintf(`{"session_id":"session-%d","contents":[{"role":"user","parts":[{"text":"request"}]}]}`, index)
+			raw := fmt.Sprintf(
+				`{"session_id":"session-%d","contents":[{"role":"user","parts":[{"text":"request"}]}]}`, index,
+			)
 			got := gjson.GetBytes(
 				ConvertGeminiRequestToClaude("claude-test", []byte(raw), false),
 				"metadata.user_id",

@@ -8,7 +8,10 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
-const validClaudeCodeMetadataUserID = `{"device_id":"0000000000000000000000000000000000000000000000000000000000000000","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"11111111-2222-4333-8444-555555555555"}`
+//goland:noinspection SpellCheckingInspection
+const validClaudeCodeMetadataUserID = `{"device_id":"00000000000000000000000000000000000000000000000000000000` +
+	`00000000","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sessi` +
+	`on_id":"11111111-2222-4333-8444-555555555555"}`
 
 func claudeCodeDetectionPayload(userID string) []byte {
 	encodedUserID, _ := json.Marshal(userID)
@@ -147,7 +150,8 @@ func TestDetectClaudeCodeRequestClassifiesEntrypoints(t *testing.T) {
 				if detection.Confirmed != test.native || detection.NativeClient != test.native {
 					t.Fatalf("detection = %#v, want native/confirmed %t", detection, test.native)
 				}
-				if detection.Entrypoint != test.entrypoint || detection.Subclient != test.subclient || detection.AgentSDKVersion != test.agentSDKVersion {
+				if detection.Entrypoint != test.entrypoint || detection.Subclient != test.subclient ||
+					detection.AgentSDKVersion != test.agentSDKVersion {
 					t.Fatalf(
 						"detection identity = %#v, want entrypoint %q subclient %q agent SDK %q", detection,
 						test.entrypoint, test.subclient, test.agentSDKVersion,
@@ -186,11 +190,13 @@ func TestDetectClaudeCodeRequestRejectsMalformedNativeSignals(t *testing.T) {
 		},
 		{
 			name: "uppercase device", headers: confirmedClaudeCodeHeaders(),
-			userID: `{"device_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","account_uuid":"","session_id":"11111111-2222-4333-8444-555555555555"}`,
+			userID: `{"device_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","` +
+				`account_uuid":"","session_id":"11111111-2222-4333-8444-555555555555"}`,
 		},
 		{
 			name: "invalid session", headers: confirmedClaudeCodeHeaders(),
-			userID: `{"device_id":"0000000000000000000000000000000000000000000000000000000000000000","account_uuid":"","session_id":"session"}`,
+			userID: `{"device_id":"00000000000000000000000000000000000000000000000000000000` +
+				`00000000","account_uuid":"","session_id":"session"}`,
 		},
 		{
 			name: "malformed user agent", headers: http.Header{

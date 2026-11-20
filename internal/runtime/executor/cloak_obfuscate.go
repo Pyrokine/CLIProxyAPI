@@ -152,6 +152,9 @@ func obfuscateSystemBlocks(payload []byte, matcher *sensitiveWordMatcher) []byte
 			func(key, value gjson.Result) bool {
 				if value.Get("type").String() == "text" {
 					text := value.Get("text").String()
+					if key.Int() == 0 && strings.HasPrefix(text, "x-anthropic-billing-header:") {
+						return true
+					}
 					obfuscated := matcher.obfuscateText(text)
 					if obfuscated != text {
 						path := "system." + key.String() + ".text"

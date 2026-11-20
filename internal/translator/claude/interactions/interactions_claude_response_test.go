@@ -21,18 +21,26 @@ func TestClaudeResponseToInteractionsValidatesSignatures(t *testing.T) {
 		{name: "foreign", signature: geminiSourceSignatureForTest()},
 		{name: "invalid", signature: "claude#invalid"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			raw := []byte(`{"id":"message-1","model":"claude-test","content":[{"type":"thinking","thinking":"","signature":"` + testCase.signature + `"}]}`)
-			out := convertClaudeResponseToInteractionsNonStream(
-				context.Background(), "claude-test", nil, nil, raw, nil,
-			)
-			if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
-				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
-			}
-			if got := gjson.GetBytes(out, "steps.0.content.0.text").String(); got != "" {
-				t.Fatalf("signature-only thought text = %q, want empty; output=%s", got, out)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				raw := []byte(
+					(`{"id":"message-1","model":"claude-test","content":[{"type":"thinking",` +
+						`"thinking":"","signature":` +
+						`"`) +
+						testCase.signature +
+						`"}]}`,
+				)
+				out := convertClaudeResponseToInteractionsNonStream(
+					context.Background(), "claude-test", nil, nil, raw, nil,
+				)
+				if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
+					t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
+				}
+				if got := gjson.GetBytes(out, "steps.0.content.0.text").String(); got != "" {
+					t.Fatalf("signature-only thought text = %q, want empty; output=%s", got, out)
+				}
+			},
+		)
 	}
 }
 
@@ -47,41 +55,53 @@ func TestClaudeResponseToInteractionsStreamValidatesSignatureDelta(t *testing.T)
 		{name: "foreign", signature: geminiSourceSignatureForTest()},
 		{name: "invalid", signature: "claude#invalid"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			var state any
-			convertClaudeResponseToInteractions(
-				context.Background(),
-				"claude-test",
-				nil,
-				nil,
-				[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
-				&state,
-			)
-			events := convertClaudeResponseToInteractions(
-				context.Background(),
-				"claude-test",
-				nil,
-				nil,
-				[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"`+testCase.signature+`"}}`),
-				&state,
-			)
-			var got string
-			for _, event := range events {
-				_, payload, ok := bytes.Cut(event, []byte("data: "))
-				if !ok {
-					continue
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				var state any
+				convertClaudeResponseToInteractions(
+					context.Background(),
+					"claude-test",
+					nil,
+					nil,
+					[]byte(
+						(`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+							`"thinking","thinking":` +
+							`""}}`),
+					),
+					&state,
+				)
+				events := convertClaudeResponseToInteractions(
+					context.Background(),
+					"claude-test",
+					nil,
+					nil,
+					[]byte(
+						(`data: {"type":"content_block_delta","index":0,"delta":{"type":`+
+							`"signature_delta","signature":`+
+							`"`)+
+							testCase.signature+
+							`"}}`,
+					),
+					&state,
+				)
+				var got string
+				for _, event := range events {
+					_, payload, ok := bytes.Cut(event, []byte("data: "))
+					if !ok {
+						continue
+					}
+					if end := bytes.IndexByte(payload, '\n'); end >= 0 {
+						payload = payload[:end]
+					}
+					if value := gjson.GetBytes(payload, "delta.signature"); value.Exists() {
+						got = value.String()
+					}
 				}
-				if end := bytes.IndexByte(payload, '\n'); end >= 0 {
-					payload = payload[:end]
+				if got != testCase.want {
+					t.Fatalf("stream signature = %q, want %q; events=%q", got, testCase.want, events)
 				}
-				if value := gjson.GetBytes(payload, "delta.signature"); value.Exists() {
-					got = value.String()
-				}
-			}
-			if got != testCase.want {
-				t.Fatalf("stream signature = %q, want %q; events=%q", got, testCase.want, events)
-			}
-		})
+			},
+		)
 	}
 }
 

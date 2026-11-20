@@ -26,7 +26,9 @@ const (
 
 var (
 	claudeRequestIDPattern = regexp.MustCompile(`^req_[A-Za-z0-9_-]{1,36}$`)
-	claudePromptIDPattern  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	claudePromptIDPattern  = regexp.MustCompile(
+		`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
+	)
 )
 
 type claudeDiagnosticsEntry struct {
@@ -48,8 +50,8 @@ var claudeDiagnosticsState = struct {
 	nextAccess   uint64
 }{entries: make(map[string]claudeDiagnosticsEntry)}
 
-// IsValidClaudePromptID verifies whether an explicit prompt ID adheres to strict RFC 4122 UUIDv4 semantics.
-func IsValidClaudePromptID(id string) bool {
+// isValidClaudePromptID verifies whether an explicit prompt ID adheres to strict RFC 4122 UUIDv4 semantics.
+func isValidClaudePromptID(id string) bool {
 	id = strings.TrimSpace(id)
 	if !claudePromptIDPattern.MatchString(id) {
 		return false
@@ -63,7 +65,8 @@ func ClaudeDeterministicPromptID(seed string) string {
 	digest := sha256.Sum256([]byte(seed))
 	digest[6] = (digest[6] & 0x0f) | 0x40 // Version 4
 	digest[8] = (digest[8] & 0x3f) | 0x80 // Variant RFC 4122
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+	return fmt.Sprintf(
+		"%08x-%04x-%04x-%04x-%012x",
 		digest[0:4],
 		digest[4:6],
 		digest[6:8],
@@ -75,9 +78,13 @@ func ClaudeDeterministicPromptID(seed string) string {
 // BeginClaudeContinuity starts one request generation for a stable credential
 // identity and Claude conversation. It tracks the previous upstream message ID,
 // previous upstream request ID (cc_prev_req), and active prompt ID (cc_prompt_id).
-// If explicitPromptID is provided and valid, it is adopted. Otherwise if isNewPromptTurn
+// If explicitPromptID is provided and valid, it is adopted. Otherwise, if isNewPromptTurn
 // is true (or if no prompt ID exists), a fresh UUIDv4 is generated.
-func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn bool, explicitPromptID string) (key string, sequence uint64, previousMessageID, previousRequestID, promptID string) {
+func BeginClaudeContinuity(
+	credentialIdentity, sessionID string,
+	isNewPromptTurn bool,
+	explicitPromptID string,
+) (key string, sequence uint64, previousMessageID, previousRequestID, promptID string) {
 	credentialIdentity = strings.TrimSpace(credentialIdentity)
 	sessionID = strings.TrimSpace(sessionID)
 	if credentialIdentity == "" || sessionID == "" {
@@ -105,7 +112,7 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 
 	activePromptID := entry.promptID
 	explicitPromptID = strings.TrimSpace(explicitPromptID)
-	if explicitPromptID != "" && IsValidClaudePromptID(explicitPromptID) {
+	if explicitPromptID != "" && isValidClaudePromptID(explicitPromptID) {
 		activePromptID = strings.ToLower(explicitPromptID)
 	} else if isNewPromptTurn || activePromptID == "" {
 		activePromptID = uuid.NewString()
@@ -140,10 +147,14 @@ func PinClaudeSessionDate(key, date string) string {
 
 // BeginClaudeDiagnostics starts one request generation for a stable credential
 // identity and Claude conversation. It returns the last successfully completed
-// upstream message ID, if any. Only a SHA-256 digest of the credential identity
-// and session is retained as the cache key, so access-token rotation does not
+// upstream message ID, if any. The cache key retains only the SHA-256 digest
+// of the credential identity and session, so access-token rotation does not
 // interrupt continuity.
-func BeginClaudeDiagnostics(credentialIdentity, sessionID string) (key string, sequence uint64, previousMessageID string) {
+func BeginClaudeDiagnostics(credentialIdentity, sessionID string) (
+	key string,
+	sequence uint64,
+	previousMessageID string,
+) {
 	key, sequence, prevMsg, _, _ := BeginClaudeContinuity(credentialIdentity, sessionID, false, "")
 	return key, sequence, prevMsg
 }
@@ -163,7 +174,8 @@ func CommitClaudeContinuity(key string, sequence uint64, messageID, requestID st
 	claudeDiagnosticsState.Lock()
 	defer claudeDiagnosticsState.Unlock()
 	entry, ok := claudeDiagnosticsState.entries[key]
-	if !ok || (!entry.expiresAt.IsZero() && now.After(entry.expiresAt)) || sequence < entry.minimumSequence || sequence < entry.committedSequence {
+	if !ok || (!entry.expiresAt.IsZero() && now.After(entry.expiresAt)) || sequence < entry.minimumSequence ||
+		sequence < entry.committedSequence {
 		return
 	}
 	claudeDiagnosticsState.nextAccess++
@@ -174,7 +186,7 @@ func CommitClaudeContinuity(key string, sequence uint64, messageID, requestID st
 		entry.previousRequestID = ""
 	}
 	if len(promptIDs) > 0 {
-		if pID := strings.TrimSpace(promptIDs[0]); pID != "" && IsValidClaudePromptID(pID) {
+		if pID := strings.TrimSpace(promptIDs[0]); pID != "" && isValidClaudePromptID(pID) {
 			entry.promptID = strings.ToLower(pID)
 		}
 	}
@@ -184,15 +196,16 @@ func CommitClaudeContinuity(key string, sequence uint64, messageID, requestID st
 	claudeDiagnosticsState.entries[key] = entry
 }
 
-// CommitClaudeDiagnostics advances continuity only after a response completes.
+// commitClaudeDiagnostics advances continuity only after a response completes.
 // A response from an older concurrently-started request cannot overwrite a
 // newer committed generation, including after TTL expiry or capacity eviction.
-func CommitClaudeDiagnostics(key string, sequence uint64, messageID string) {
+func commitClaudeDiagnostics(key string, sequence uint64, messageID string) {
 	CommitClaudeContinuity(key, sequence, messageID, "")
 }
 
 func cleanupClaudeDiagnosticsLocked(now time.Time) {
-	if !claudeDiagnosticsState.lastCleanup.IsZero() && now.Sub(claudeDiagnosticsState.lastCleanup) < claudeDiagnosticsCleanupPeriod {
+	if !claudeDiagnosticsState.lastCleanup.IsZero() &&
+		now.Sub(claudeDiagnosticsState.lastCleanup) < claudeDiagnosticsCleanupPeriod {
 		return
 	}
 	for key, entry := range claudeDiagnosticsState.entries {
@@ -215,9 +228,11 @@ func evictClaudeDiagnosticsLocked() {
 	for key, entry := range claudeDiagnosticsState.entries {
 		candidates = append(candidates, candidate{key: key, lastAccess: entry.lastAccess})
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].lastAccess < candidates[j].lastAccess
-	})
+	sort.Slice(
+		candidates, func(i, j int) bool {
+			return candidates[i].lastAccess < candidates[j].lastAccess
+		},
+	)
 	count := min(claudeDiagnosticsEvictBatchSize, len(candidates))
 	for _, candidate := range candidates[:count] {
 		delete(claudeDiagnosticsState.entries, candidate.key)
@@ -309,7 +324,8 @@ func isClaudeProbeRequest(body []byte) bool {
 				continue
 			}
 			nonReminderCount++
-			if t == "quota" || t == "test" || t == "." || t == "probe" || (t == "Hi" && part.Get("cache_control").Exists()) {
+			if t == "quota" || t == "test" || t == "." || t == "probe" ||
+				(t == "Hi" && part.Get("cache_control").Exists()) {
 				matched = true
 			}
 		}
@@ -374,7 +390,10 @@ func jsonMayContainASCII(body []byte, needles ...string) bool {
 }
 
 func isClaudeTitleHelperRequest(body []byte) bool {
-	if !jsonMayContainASCII(body, "output_config", "naming a coding session", "Return a short title", "Write the title in the predominant language") {
+	if !jsonMayContainASCII(
+		body, "output_config", "naming a coding session", "Return a short title",
+		"Write the title in the predominant language",
+	) {
 		return false
 	}
 	props := gjson.GetBytes(body, "output_config.format.schema.properties")
@@ -477,12 +496,14 @@ func ClaudePayloadHas1hTTL(payload []byte) bool {
 		}
 	}
 	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
-		messages.ForEach(func(_, message gjson.Result) bool {
-			if content := message.Get("content"); content.IsArray() {
-				content.ForEach(func(_, item gjson.Result) bool { return checkBlock(item) })
-			}
-			return !has1h
-		})
+		messages.ForEach(
+			func(_, message gjson.Result) bool {
+				if content := message.Get("content"); content.IsArray() {
+					content.ForEach(func(_, item gjson.Result) bool { return checkBlock(item) })
+				}
+				return !has1h
+			},
+		)
 	}
 	return has1h
 }
@@ -577,7 +598,7 @@ func ExtractClaudeBillingTags(body []byte) (prevReq, promptID string) {
 		if end := strings.IndexByte(val, ';'); end >= 0 {
 			val = val[:end]
 		}
-		if IsValidClaudePromptID(val) {
+		if isValidClaudePromptID(val) {
 			promptID = strings.ToLower(val)
 		}
 	}

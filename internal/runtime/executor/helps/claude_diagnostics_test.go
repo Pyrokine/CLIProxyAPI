@@ -14,7 +14,7 @@ func TestClaudeDiagnosticsTracksCompletedMessagePerCredentialSession(t *testing.
 	if key == "" || sequence != 1 || previous != "" {
 		t.Fatalf("first begin = %q/%d/%q, want key/1/empty", key, sequence, previous)
 	}
-	CommitClaudeDiagnostics(key, sequence, "msg_first")
+	commitClaudeDiagnostics(key, sequence, "msg_first")
 	_, secondSequence, previous := BeginClaudeDiagnostics("credential-a", "session-a")
 	if secondSequence != 2 || previous != "msg_first" {
 		t.Fatalf("second begin = %d/%q, want 2/msg_first", secondSequence, previous)
@@ -42,8 +42,8 @@ func TestClaudeDiagnosticsRejectsExpiredGenerationCommit(t *testing.T) {
 	if newKey != key || currentSequence <= expiredSequence || previous != "" {
 		t.Fatalf("new generation = %q/%d/%q, want same key/new sequence/empty", newKey, currentSequence, previous)
 	}
-	CommitClaudeDiagnostics(newKey, currentSequence, "msg_current")
-	CommitClaudeDiagnostics(key, expiredSequence, "msg_expired")
+	commitClaudeDiagnostics(newKey, currentSequence, "msg_current")
+	commitClaudeDiagnostics(key, expiredSequence, "msg_expired")
 	_, _, previous = BeginClaudeDiagnostics("credential", "session")
 	if previous != "msg_current" {
 		t.Fatalf("previous message = %q, want current generation", previous)
@@ -79,8 +79,8 @@ func TestClaudeDiagnosticsCacheEvictsOldestEntriesWithinCapacity(t *testing.T) {
 	if newKey != firstKey || newSequence <= firstSequence {
 		t.Fatalf("recreated generation = %q/%d, want same key after sequence %d", newKey, newSequence, firstSequence)
 	}
-	CommitClaudeDiagnostics(newKey, newSequence, "msg_recreated")
-	CommitClaudeDiagnostics(firstKey, firstSequence, "msg_evicted")
+	commitClaudeDiagnostics(newKey, newSequence, "msg_recreated")
+	commitClaudeDiagnostics(firstKey, firstSequence, "msg_evicted")
 	_, _, previous := BeginClaudeDiagnostics("credential", "session-0")
 	if previous != "msg_recreated" {
 		t.Fatalf("previous message = %q, want recreated generation", previous)
@@ -93,8 +93,8 @@ func TestClaudeDiagnosticsRejectsLateOlderCommit(t *testing.T) {
 
 	key, first, _ := BeginClaudeDiagnostics("credential", "session")
 	_, second, _ := BeginClaudeDiagnostics("credential", "session")
-	CommitClaudeDiagnostics(key, second, "msg_newer")
-	CommitClaudeDiagnostics(key, first, "msg_older")
+	commitClaudeDiagnostics(key, second, "msg_newer")
+	commitClaudeDiagnostics(key, first, "msg_older")
 	_, _, previous := BeginClaudeDiagnostics("credential", "session")
 	if previous != "msg_newer" {
 		t.Fatalf("previous message = %q, want newer completed generation", previous)
@@ -109,16 +109,23 @@ func TestClaudeJSONPrefilterKeepsClassifications(t *testing.T) {
 	}{
 		{"plain system title", `{"system":"Return a short title for this session"}`, true},
 		{"escaped system title", `{"system":"naming a\u0020coding session"}`, true},
-		{"title schema", `{"output_config":{"format":{"schema":{"properties":{"title":{}}}}},"messages":[{"role":"user","content":"<session>test</session>"}]}`, true},
+		{
+			"title schema",
+			`{"output_config":{"format":{"schema":{"properties":{"title":{}}}}},"messages":[{"role":"user","` +
+				`content":"<session>test</session>"}]}`,
+			true,
+		},
 		{"ordinary user request", `{"messages":[{"role":"user","content":"Return a short title"}]}`, false},
 		{"unrelated request", `{"system":"You are a coding assistant"}`, false},
 	}
 	for _, tt := range titles {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isClaudeTitleHelperRequest([]byte(tt.payload)); got != tt.want {
-				t.Fatalf("title helper = %t, want %t", got, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				if got := isClaudeTitleHelperRequest([]byte(tt.payload)); got != tt.want {
+					t.Fatalf("title helper = %t, want %t", got, tt.want)
+				}
+			},
+		)
 	}
 
 	ttls := []struct {
@@ -135,11 +142,13 @@ func TestClaudeJSONPrefilterKeepsClassifications(t *testing.T) {
 		{"malformed payload", `{"system":[{"cache_control":{"ttl":"1h"}}]`, false},
 	}
 	for _, tt := range ttls {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ClaudePayloadHas1hTTL([]byte(tt.payload)); got != tt.want {
-				t.Fatalf("one-hour TTL = %t, want %t", got, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				if got := ClaudePayloadHas1hTTL([]byte(tt.payload)); got != tt.want {
+					t.Fatalf("one-hour TTL = %t, want %t", got, tt.want)
+				}
+			},
+		)
 	}
 }
 

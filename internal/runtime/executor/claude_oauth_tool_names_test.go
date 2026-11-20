@@ -59,6 +59,20 @@ func TestPrepareClaudeOAuthToolNamesForUpstream(t *testing.T) {
 	}
 }
 
+func TestPrepareClaudeOAuthToolNamesPreservesUndeclaredHistoryWithoutTools(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"assistant","content":[` +
+		`{"type":"tool_use","id":"old","name":"unknown.history:tool","input":{"n":9007199254740993}},` +
+		`{"type":"tool_reference","tool_name":"unknown.history:tool"}]},{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"old","content":[` +
+		`{"type":"tool_reference","tool_name":"unknown.history:tool"}]}]}]}`)
+	output, reverse := prepareClaudeOAuthToolNamesForUpstream(
+		body, claudeMCPAliasOptions{callerIdentity: "synthetic-no-tools"},
+	)
+	if !bytes.Equal(output, body) || len(reverse) != 0 {
+		t.Fatalf("undeclared history changed: output=%s reverse=%v", output, reverse)
+	}
+}
+
 func TestPrepareClaudeOAuthToolNamesForUpstreamPreservesServerTools(t *testing.T) {
 	body := []byte(`{
 		"tools":[
@@ -110,7 +124,10 @@ func TestPrepareClaudeOAuthToolNamesForUpstreamPreservesServerTools(t *testing.T
 func TestPrepareClaudeOAuthToolNamesForUpstreamScopesAliasesByCaller(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"bash","input_schema":{"type":"object"}}]}`)
 	first, _ := prepareClaudeOAuthToolNamesForUpstream(body, claudeMCPAliasOptions{callerIdentity: "caller-a"})
-	repeated, _ := prepareClaudeOAuthToolNamesForUpstream(body, claudeMCPAliasOptions{callerIdentity: "caller-a"})
+	repeated, _ := prepareClaudeOAuthToolNamesForUpstream(
+		body,
+		claudeMCPAliasOptions{callerIdentity: "caller-a"},
+	)
 	other, _ := prepareClaudeOAuthToolNamesForUpstream(body, claudeMCPAliasOptions{callerIdentity: "caller-b"})
 	firstName := gjson.GetBytes(first, "tools.0.name").String()
 	if repeatedName := gjson.GetBytes(repeated, "tools.0.name").String(); repeatedName != firstName {
@@ -122,6 +139,7 @@ func TestPrepareClaudeOAuthToolNamesForUpstreamScopesAliasesByCaller(t *testing.
 }
 
 func TestRestoreClaudeOAuthToolNamesFromResponse(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	alias := "mcp__abcdefghijkl__mnopqrstuvwx_glob"
 	reverseMap := map[string]string{alias: "glob"}
 	response := []byte(`{"content":[` +
@@ -146,10 +164,12 @@ func TestRestoreClaudeOAuthToolNamesFromResponse(t *testing.T) {
 }
 
 func TestRestoreClaudeOAuthToolNamesFromStreamLine(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	alias := "mcp__abcdefghijkl__mnopqrstuvwx_glob"
 	reverseMap := map[string]string{alias: "glob"}
 
-	bashLine := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"Bash","input":{}}}`)
+	bashLine := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+		`"tool_use","id":"toolu_01","name":"Bash","input":{}}}`)
 	got, err := restoreClaudeOAuthToolNamesFromStreamLine(bashLine, reverseMap)
 	if err != nil {
 		t.Fatalf("restore Bash stream line error = %v", err)
@@ -158,7 +178,13 @@ func TestRestoreClaudeOAuthToolNamesFromStreamLine(t *testing.T) {
 		t.Fatalf("Bash was not preserved: %s", got)
 	}
 
-	globLine := []byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_02","name":"` + alias + `","input":{}}}`)
+	globLine := []byte(
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":` +
+			`"tool_use","id":"toolu_02","name":` +
+			`"` +
+			alias +
+			`","input":{}}}`,
+	)
 	got, err = restoreClaudeOAuthToolNamesFromStreamLine(globLine, reverseMap)
 	if err != nil {
 		t.Fatalf("restore glob stream line error = %v", err)
@@ -169,7 +195,9 @@ func TestRestoreClaudeOAuthToolNamesFromStreamLine(t *testing.T) {
 }
 
 func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
-	body := []byte(`{"tools":[{"name":"glob","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}}]}`)
+	body := []byte(
+		`{"tools":[{"name":"glob","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}}]}`,
+	)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(
 		body,
 		claudeMCPAliasOptions{callerIdentity: "mangled-alias-caller"},
@@ -231,7 +259,9 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 	for _, test := range streamTests {
 		t.Run(
 			test.name, func(t *testing.T) {
-				line := []byte(`data: {"type":"content_block_start","index":0,"content_block":` + test.block + `}`)
+				line := []byte(
+					`data: {"type":"content_block_start","index":0,"content_block":` + test.block + `}`,
+				)
 				restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
 				if errStream != nil {
 					t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
@@ -262,19 +292,21 @@ func TestReverseRemapOAuthToolNamesStripsRepeatedServerPrefixes(t *testing.T) {
 		"mcp__" + parts.server + "__" + alias,
 		"mcp__" + parts.server + "__mcp__" + parts.server + "__" + alias,
 	} {
-		t.Run(repeated, func(t *testing.T) {
-			response := []byte(fmt.Sprintf(
-				`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`,
-				repeated,
-			))
-			restored, errRestore := reverseRemapOAuthToolNames(response, reverseMap)
-			if errRestore != nil {
-				t.Fatal(errRestore)
-			}
-			if got := gjson.GetBytes(restored, "content.0.name").String(); got != "read_file" {
-				t.Fatalf("restored name = %q, want read_file", got)
-			}
-		})
+		t.Run(
+			repeated, func(t *testing.T) {
+				response := []byte(fmt.Sprintf(
+					`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`,
+					repeated,
+				))
+				restored, errRestore := reverseRemapOAuthToolNames(response, reverseMap)
+				if errRestore != nil {
+					t.Fatal(errRestore)
+				}
+				if got := gjson.GetBytes(restored, "content.0.name").String(); got != "read_file" {
+					t.Fatalf("restored name = %q, want read_file", got)
+				}
+			},
+		)
 	}
 }
 
@@ -298,8 +330,10 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 		t.Fatalf("semantic suffixes differ: %q != %q", firstParts.semantic, secondParts.semantic)
 	}
 
+	//goland:noinspection SpellCheckingInspection
 	unknownToolID := "aaaaaaaaaaaa"
 	if unknownToolID == firstParts.toolID || unknownToolID == secondParts.toolID {
+		//goland:noinspection SpellCheckingInspection
 		unknownToolID = "bbbbbbbbbbbb"
 	}
 	tests := []struct {
@@ -313,8 +347,14 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 			wantError: "semantic suffix matches multiple declared tools",
 		},
 		{
-			name:      "ambiguous semantic suffix with malformed tool ID",
-			alias:     "mcp__" + firstParts.server + "__" + unknownToolID[:len(unknownToolID)-1] + "_" + firstParts.semantic,
+			name: "ambiguous semantic suffix with malformed tool ID",
+			alias: "mcp__" +
+				firstParts.server +
+				"__" +
+				unknownToolID[:len(unknownToolID)-
+					1] +
+				"_" +
+				firstParts.semantic,
 			wantError: "semantic suffix matches multiple declared tools",
 		},
 		{
@@ -335,22 +375,32 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 					t.Fatalf("reverseRemapOAuthToolNames() error = %v, want %q", errReverse, test.wantError)
 				}
 				var requestScoped cliproxyexecutor.RequestScopedError
-				if !errors.As(errReverse, &requestScoped) || requestScoped == nil || !requestScoped.IsRequestScoped() {
-					t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
+				if !errors.As(errReverse, &requestScoped) || requestScoped == nil ||
+					!requestScoped.IsRequestScoped() {
+					t.Fatalf(
+						"reverseRemapOAuthToolNames() error = %T %v, want request-scoped",
+						errReverse,
+						errReverse,
+					)
 				}
 
 				line := []byte(fmt.Sprintf(
-					`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`,
+					`data: {"type":"content_block_start","index":0,"content_block":{"type":`+
+						`"tool_use","id":"toolu_1","name":%q,"input":`+
+						`{}}}`,
 					test.alias,
 				))
 				_, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
 				if errStream == nil || !strings.Contains(errStream.Error(), test.wantError) {
 					t.Fatalf(
-						"reverseRemapOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, test.wantError,
+						"reverseRemapOAuthToolNamesFromStreamLine() error = %v, want %q",
+						errStream,
+						test.wantError,
 					)
 				}
 				requestScoped = nil
-				if !errors.As(errStream, &requestScoped) || requestScoped == nil || !requestScoped.IsRequestScoped() {
+				if !errors.As(errStream, &requestScoped) || requestScoped == nil ||
+					!requestScoped.IsRequestScoped() {
 					t.Fatalf(
 						"reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped",
 						errStream,
@@ -372,8 +422,10 @@ func TestConsumeClaudeStreamReportsUnsafeMangledAlias(t *testing.T) {
 	if !ok {
 		t.Fatal("first generated alias is invalid")
 	}
+	//goland:noinspection SpellCheckingInspection
 	unknownToolID := "aaaaaaaaaaaa"
 	if unknownToolID == firstParts.toolID {
+		//goland:noinspection SpellCheckingInspection
 		unknownToolID = "bbbbbbbbbbbb"
 	}
 	ambiguousAlias := "mcp__" + firstParts.server + "__" + unknownToolID + "_" + firstParts.semantic
@@ -381,7 +433,9 @@ func TestConsumeClaudeStreamReportsUnsafeMangledAlias(t *testing.T) {
 		[]string{
 			`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-4-7"}}`,
 			fmt.Sprintf(
-				`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":`+
+					`"tool_use","id":"toolu_1","name":%q,"input":`+
+					`{}}}`,
 				ambiguousAlias,
 			),
 		}, "\n",
@@ -409,7 +463,8 @@ func TestConsumeClaudeStreamReportsUnsafeMangledAlias(t *testing.T) {
 			streamErr = chunk.Err
 		}
 	}
-	if streamErr == nil || !strings.Contains(streamErr.Error(), "semantic suffix matches multiple declared tools") {
+	if streamErr == nil ||
+		!strings.Contains(streamErr.Error(), "semantic suffix matches multiple declared tools") {
 		t.Fatalf("stream error = %v, want ambiguous alias diagnostic", streamErr)
 	}
 }
@@ -420,7 +475,9 @@ func TestReverseRemapOAuthToolNamesPreservesUnrelatedMCPName(t *testing.T) {
 		body,
 		claudeMCPAliasOptions{callerIdentity: "unrelated-mcp-caller"},
 	)
-	response := []byte(`{"content":[{"type":"tool_use","id":"toolu_1","name":"mcp__external__query","input":{}}]}`)
+	response := []byte(
+		`{"content":[{"type":"tool_use","id":"toolu_1","name":"mcp__external__query","input":{}}]}`,
+	)
 
 	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
 	if errReverse != nil {
@@ -432,6 +489,7 @@ func TestReverseRemapOAuthToolNamesPreservesUnrelatedMCPName(t *testing.T) {
 }
 
 func TestReverseRemapOAuthToolNamesMarksMalformedAliasRequestScoped(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_clear_thinking"
 	malformedAlias := alias + "</parameter>\n<parameter name=\"merge\""
 	reverseMap := map[string]string{alias: "clear_thinking"}
@@ -453,7 +511,9 @@ func TestReverseRemapOAuthToolNamesMarksMalformedAliasRequestScoped(t *testing.T
 	}
 
 	line := []byte(fmt.Sprintf(
-		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":`+
+			`"tool_use","id":"toolu_1","name":%q,"input":`+
+			`{}}}`,
 		malformedAlias,
 	))
 	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
@@ -465,7 +525,11 @@ func TestReverseRemapOAuthToolNamesMarksMalformedAliasRequestScoped(t *testing.T
 	}
 	requestScoped = nil
 	if !errors.As(errStream, &requestScoped) || requestScoped == nil || !requestScoped.IsRequestScoped() {
-		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
+		t.Fatalf(
+			"reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped",
+			errStream,
+			errStream,
+		)
 	}
 }
 
@@ -504,7 +568,8 @@ func TestClaudeOAuthToolSearchReferencesRoundTrip(t *testing.T) {
 		}
 	}
 
-	response := []byte(fmt.Sprintf(`{
+	response := []byte(fmt.Sprintf(
+		`{
 		"content":[{
 			"type":"tool_search_tool_result",
 			"tool_use_id":"srvtoolu_01",
@@ -514,7 +579,8 @@ func TestClaudeOAuthToolSearchReferencesRoundTrip(t *testing.T) {
 				{"type":"tool_reference","tool_name":"mcp__external__query"}
 			]}
 		}]
-	}`, taskAlias, fetchAlias))
+	}`, taskAlias, fetchAlias,
+	))
 	restored, errRestore := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
 	if errRestore != nil {
 		t.Fatal(errRestore)
@@ -530,7 +596,10 @@ func TestClaudeOAuthToolSearchReferencesRoundTrip(t *testing.T) {
 	}
 
 	line := []byte(fmt.Sprintf(
-		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_01","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":%q},{"type":"tool_reference","tool_name":%q},{"type":"tool_reference","tool_name":"mcp__external__query"}]}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_search_tool_result","`+
+			`tool_use_id":"srvtoolu_01","content":{"type":"tool_search_tool_search_result","tool_references":`+
+			`[{"type":"tool_reference","tool_name":%q},{"type":"tool_reference","tool_name":%q},{"type":"`+
+			`tool_reference","tool_name":"mcp__external__query"}]}}}`,
 		taskAlias,
 		fetchAlias,
 	))
@@ -549,7 +618,9 @@ func TestClaudeOAuthToolSearchReferencesRoundTrip(t *testing.T) {
 		}
 	}
 
-	errorResponse := []byte(`{"content":[{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_02","content":{"type":"tool_search_tool_result_error","error_code":"regex_compilation_failed"}}]}`)
+	errorResponse := []byte(`{"content":[{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_` +
+		`02","content":{"type":"tool_search_tool_result_error","error_code":"re` +
+		`gex_compilation_failed"}}]}`)
 	restoredError, errRestore := restoreClaudeOAuthToolNamesFromResponse(errorResponse, reverseMap)
 	if errRestore != nil {
 		t.Fatal(errRestore)
@@ -657,7 +728,9 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 			t.Fatalf("caller MCP tool %q restored as %q", name, got)
 		}
 		line := []byte(fmt.Sprintf(
-			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":`+
+				`"tool_use","id":"toolu_1","name":%q,"input":`+
+				`{}}}`,
 			name,
 		))
 		restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
@@ -693,7 +766,9 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 }
 
 func TestRemapKeepsReverseMapEmptyWhenOnlyCallerMCPToolsArePresent(t *testing.T) {
-	body := []byte(`{"tools":[{"name":"mcp__context7__query-docs"},{"type":"web_search_20250305","name":"web_search"}]}`)
+	body := []byte(
+		`{"tools":[{"name":"mcp__context7__query-docs"},{"type":"web_search_20250305","name":"web_search"}]}`,
+	)
 	out, reverseMap := remapOAuthToolNamesWithOptions(
 		body,
 		claudeMCPAliasOptions{callerIdentity: "no-proxied-tools"},
@@ -715,15 +790,18 @@ func TestRemapOAuthToolNamesForwardsOriginalAfterAliasSpaceExhaustion(t *testing
 		if attempt > 0 {
 			body.WriteByte(',')
 		}
-		fmt.Fprintf(&body, `{"name":%q}`, helps.ClaudeMCPToolAlias(caller, original, uint32(attempt)))
+		// strings.Builder.Write always returns the full length and a nil error.
+		_, _ = fmt.Fprintf(&body, `{"name":%q}`, helps.ClaudeMCPToolAlias(caller, original, uint32(attempt)))
 	}
-	fmt.Fprintf(&body, `,{"name":%q}]}`, original)
+	_, _ = fmt.Fprintf(&body, `,{"name":%q}]}`, original)
 
 	out, reverseMap := remapOAuthToolNamesWithOptions(
 		[]byte(body.String()),
 		claudeMCPAliasOptions{callerIdentity: caller},
 	)
-	if got := gjson.GetBytes(out, fmt.Sprintf("tools.%d.name", helps.ClaudeMCPAliasWordCount())).String(); got != original {
+	if got := gjson.GetBytes(
+		out, fmt.Sprintf("tools.%d.name", helps.ClaudeMCPAliasWordCount()),
+	).String(); got != original {
 		t.Fatalf("exhausted tool name = %q, want %q", got, original)
 	}
 	if len(reverseMap) != 0 {
@@ -734,34 +812,46 @@ func TestRemapOAuthToolNamesForwardsOriginalAfterAliasSpaceExhaustion(t *testing
 func TestClaudeExecutorRestoresOAuthToolNamesAcrossThreadContinuation(t *testing.T) {
 	var aliasMu sync.Mutex
 	var alias string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(request.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		switch gjson.GetBytes(body, "thread.type").String() {
-		case "create":
-			aliasMu.Lock()
-			alias = gjson.GetBytes(body, "tools.0.name").String()
-			aliasMu.Unlock()
-		case "continue":
-			if gjson.GetBytes(body, "thread.previous_message_id").String() != "msg-one" ||
-				gjson.GetBytes(body, "tools").Exists() {
-				http.Error(w, "unexpected continuation", http.StatusBadRequest)
-				return
-			}
-		default:
-			http.Error(w, "missing thread type", http.StatusBadRequest)
-			return
-		}
-		aliasMu.Lock()
-		responseAlias := alias
-		aliasMu.Unlock()
-		_, _ = fmt.Fprintf(w, `{"id":"msg-one","type":"message","role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"tool-one","name":%q,"input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`, responseAlias)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				switch gjson.GetBytes(body, "thread.type").String() {
+				case "create":
+					aliasMu.Lock()
+					alias = gjson.GetBytes(body, "tools.0.name").String()
+					aliasMu.Unlock()
+				case "continue":
+					if gjson.GetBytes(body, "thread.previous_message_id").String() != "msg-one" ||
+						gjson.GetBytes(body, "tools").Exists() {
+						http.Error(w, "unexpected continuation", http.StatusBadRequest)
+						return
+					}
+				default:
+					http.Error(w, "missing thread type", http.StatusBadRequest)
+					return
+				}
+				aliasMu.Lock()
+				responseAlias := alias
+				aliasMu.Unlock()
+				_, _ = fmt.Fprintf(
+					w,
+					`{"id":"msg-one","type":"message","role":"assistant","model":"claude-op`+
+						`us-4-7","content":[{"type":"tool_use","id":"tool-one","name":%q,"input`+
+						`":{}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_toke`+
+						`ns":1}}`,
+					responseAlias,
+				)
+			},
+		),
+	)
 	defer server.Close()
 
+	//goland:noinspection SpellCheckingInspection
 	auth := &cliproxyauth.Auth{
 		ID: "claude-thread-auth", Provider: "claude",
 		Attributes: map[string]string{"api_key": "sk-ant-oat01-test", "base_url": server.URL},
@@ -774,71 +864,105 @@ func TestClaudeExecutorRestoresOAuthToolNamesAcrossThreadContinuation(t *testing
 	for _, tc := range []struct {
 		name, body string
 	}{
-		{name: "create", body: `{"model":"claude-opus-4-7","thread":{"type":"create"},"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Read","input_schema":{"type":"object"}}],"max_tokens":16}`},
-		{name: "continue", body: `{"model":"claude-opus-4-7","thread":{"type":"continue","previous_message_id":"msg-one"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"ok"}]}],"max_tokens":16}`},
+		{
+			name: "create",
+			body: `{"model":"claude-opus-4-7","thread":{"type":"create"},"messages":[{"ro` +
+				`le":"user","content":"hi"}],"tools":[{"name":"Read","input_schema":{"t` +
+				`ype":"object"}}],"max_tokens":16}`,
+		},
+		{
+			name: "continue",
+			body: `{"model":"claude-opus-4-7","thread":{"type":"continue","previous_message_id":"msg-one"},"` +
+				`messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","` +
+				`content":"ok"}]}],"max_tokens":16}`,
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			response, err := executor.Execute(context.Background(), auth,
-				cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: []byte(tc.body)},
-				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			aliasMu.Lock()
-			selectedAlias := alias
-			aliasMu.Unlock()
-			if selectedAlias == "" || selectedAlias == "Read" {
-				t.Fatalf("create did not alias Read: %q", selectedAlias)
-			}
-			if got := gjson.GetBytes(response.Payload, "content.0.name").String(); got != "Read" {
-				t.Fatalf("%s tool name = %q, want Read; response=%s", tc.name, got, response.Payload)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				response, err := executor.Execute(
+					context.Background(), auth,
+					cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: []byte(tc.body)},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				aliasMu.Lock()
+				selectedAlias := alias
+				aliasMu.Unlock()
+				if selectedAlias == "" || selectedAlias == "Read" {
+					t.Fatalf("create did not alias Read: %q", selectedAlias)
+				}
+				if got := gjson.GetBytes(response.Payload, "content.0.name").String(); got != "Read" {
+					t.Fatalf("%s tool name = %q, want Read; response=%s", tc.name, got, response.Payload)
+				}
+			},
+		)
 	}
 }
 
 func TestClaudeExecutorStreamedOAuthToolNamesAcrossThreadContinuation(t *testing.T) {
 	var aliasMu sync.Mutex
 	var alias string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		body, err := io.ReadAll(request.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if !gjson.GetBytes(body, "stream").Bool() {
-			http.Error(w, "expected stream request", http.StatusBadRequest)
-			return
-		}
-		threadType := gjson.GetBytes(body, "thread.type").String()
-		incomplete := strings.Contains(string(body), `"incomplete"`)
-		aliasMu.Lock()
-		if threadType == "create" {
-			alias = gjson.GetBytes(body, "tools.0.name").String()
-		}
-		responseAlias := alias
-		aliasMu.Unlock()
-		if responseAlias == "" || (threadType == "continue" &&
-			(gjson.GetBytes(body, "thread.previous_message_id").String() != "msg-one" ||
-				gjson.GetBytes(body, "tools").Exists())) {
-			http.Error(w, "unexpected tool or thread state", http.StatusBadRequest)
-			return
-		}
-		messageID := "msg-one"
-		if incomplete {
-			messageID = "msg-incomplete"
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprintf(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":%q,\"model\":\"claude-opus-4-7\"}}\n", messageID)
-		_, _ = fmt.Fprintf(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-one\",\"name\":%q,\"input\":{}}}\n", responseAlias)
-		_, _ = fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n")
-		if !incomplete {
-			_, _ = fmt.Fprint(w, "data: {\"type\":\"message_stop\"}\n\n")
-		}
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if !gjson.GetBytes(body, "stream").Bool() {
+					http.Error(w, "expected stream request", http.StatusBadRequest)
+					return
+				}
+				threadType := gjson.GetBytes(body, "thread.type").String()
+				incomplete := strings.Contains(string(body), `"incomplete"`)
+				aliasMu.Lock()
+				if threadType == "create" {
+					alias = gjson.GetBytes(body, "tools.0.name").String()
+				}
+				responseAlias := alias
+				aliasMu.Unlock()
+				if responseAlias == "" || (threadType == "continue" &&
+					(gjson.GetBytes(body, "thread.previous_message_id").String() != "msg-one" ||
+						gjson.GetBytes(body, "tools").Exists())) {
+					http.Error(w, "unexpected tool or thread state", http.StatusBadRequest)
+					return
+				}
+				messageID := "msg-one"
+				if incomplete {
+					messageID = "msg-incomplete"
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(
+					w,
+					"data: {\"type\":\"message_start\",\"message\":{\"id\":%q,\"model\":\"claude-opus-4-7\"}}\n",
+					messageID,
+				)
+				_, _ = fmt.Fprintf(
+					w,
+					"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":"+
+						"{\"type\":\"tool_use\",\"id\":\"tool-one\",\"name\":%q,\"input\":{}}}"+
+						"\n",
+					responseAlias,
+				)
+				_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_stop\",\"index\":0}\n")
+				_, _ = fmt.Fprint(
+					w,
+					"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":"+
+						"\"tool_use\"},\"usage\":{\"output_tokens\":"+
+						"1}}\n",
+				)
+				if !incomplete {
+					_, _ = fmt.Fprint(w, "data: {\"type\":\"message_stop\"}\n\n")
+				}
+			},
+		),
+	)
 	defer server.Close()
 
+	//goland:noinspection SpellCheckingInspection
 	auth := &cliproxyauth.Auth{
 		ID: "claude-stream-thread-auth", Provider: "claude",
 		Attributes: map[string]string{"api_key": "sk-ant-oat01-test", "base_url": server.URL},
@@ -849,9 +973,11 @@ func TestClaudeExecutorStreamedOAuthToolNamesAcrossThreadContinuation(t *testing
 	}
 	executor := NewClaudeExecutor(&config.Config{})
 	run := func(body string) (string, error) {
-		result, err := executor.ExecuteStream(context.Background(), auth,
+		result, err := executor.ExecuteStream(
+			context.Background(), auth,
 			cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: []byte(body)},
-			cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+			cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
+		)
 		if err != nil {
 			return "", err
 		}
@@ -864,8 +990,12 @@ func TestClaudeExecutorStreamedOAuthToolNamesAcrossThreadContinuation(t *testing
 		}
 		return output.String(), nil
 	}
-	create := `{"model":"claude-opus-4-7","thread":{"type":"create"},"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Read","input_schema":{"type":"object"}}],"max_tokens":16}`
-	continuation := `{"model":"claude-opus-4-7","thread":{"type":"continue","previous_message_id":"msg-one"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"ok"}]}],"max_tokens":16}`
+	create := `{"model":"claude-opus-4-7","thread":{"type":"create"},"messages":[{"ro` +
+		`le":"user","content":"hi"}],"tools":[{"name":"Read","input_schema":{"t` +
+		`ype":"object"}}],"max_tokens":16}`
+	continuation := `{"model":"claude-opus-4-7","thread":{"type":"continue","previous_message_id":"msg-one"},` +
+		`"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"ok"}` +
+		`]}],"max_tokens":16}`
 	for _, payload := range []string{create, continuation} {
 		output, err := run(payload)
 		if err != nil {
@@ -899,11 +1029,17 @@ func TestClaudeExecutorExecuteOpenAINonStreamRestoresOAuthToolNames(t *testing.T
 		return strings.Join(
 			[]string{
 				`event: message_start`,
-				`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":10,"output_tokens":1}}}`,
+				`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"` +
+					`,"usage":{"input_tokens":10,"output_tokens":1}}}`,
 				`event: content_block_start`,
-				`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"` + toolName + `","input":{}}}`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+					`"tool_use","id":"toolu_01","name":` +
+					`"` +
+					toolName +
+					`","input":{}}}`,
 				`event: content_block_delta`,
-				`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"echo hi\"}"}}`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_j` +
+					`son_delta","partial_json":"{\"command\":\"echo hi\"}"}}`,
 				`event: content_block_stop`,
 				`data: {"type":"content_block_stop","index":0}`,
 				`event: message_delta`,
@@ -943,6 +1079,7 @@ func TestClaudeExecutorExecuteOpenAINonStreamRestoresOAuthToolNames(t *testing.T
 	defer server.Close()
 
 	executor := NewClaudeExecutor(&config.Config{})
+	//goland:noinspection SpellCheckingInspection
 	auth := &cliproxyauth.Auth{
 		Attributes: map[string]string{
 			"api_key":  "sk-ant-oat01-test",
@@ -953,9 +1090,11 @@ func TestClaudeExecutorExecuteOpenAINonStreamRestoresOAuthToolNames(t *testing.T
 			"claude_device_ids": []string{strings.Repeat("a", 64)},
 		},
 	}
-	payload := []byte(`{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"run echo hi"}],` +
-		`"tools":[{"type":"function","function":{"name":"bash","description":"run shell",` +
-		`"parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}]}`)
+	payload := []byte(
+		`{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"run echo hi"}],` +
+			`"tools":[{"type":"function","function":{"name":"bash","description":"run shell",` +
+			`"parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}]}`,
+	)
 
 	response, err := executor.Execute(
 		context.Background(), auth, cliproxyexecutor.Request{

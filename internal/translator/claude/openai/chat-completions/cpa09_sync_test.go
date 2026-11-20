@@ -10,14 +10,12 @@ import (
 func TestCPA09ChatRequestPreservesIdentityAndUsesLastDuplicateToolResult(t *testing.T) {
 	out := convertOpenAIRequestToClaudeDefault(
 		"claude-test",
-		[]byte(`{
-			"metadata":{"user_id":"caller-user"},
-			"messages":[
-				{"role":"assistant","tool_calls":[{"id":"call.raw/1","type":"function","function":{"name":"work","arguments":"{}"}}]},
-				{"role":"tool","tool_call_id":"call.raw/1","content":"first"},
-				{"role":"tool","tool_call_id":"call.raw/1","content":"last"}
-			]
-		}`),
+		[]byte(("{\n\t\t\t\"metadata\":{\"user_id\":\"caller-user\"},\n\t\t\t\"messages" +
+			"\":[\n\t\t\t\t{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call.r" +
+			`aw/1","type":"function","function":{"name":"work","arguments":"{}"}}]}` +
+			",\n\t\t\t\t{\"role\":\"tool\",\"tool_call_id\":\"call.raw/1\",\"conten" +
+			"t\":\"first\"},\n\t\t\t\t{\"role\":\"tool\",\"tool_call_id\":\"call.ra" +
+			"w/1\",\"content\":\"last\"}\n\t\t\t]\n\t\t}")),
 		false,
 	)
 	root := gjson.ParseBytes(out)
@@ -40,11 +38,11 @@ func TestCPA09ChatRequestPreservesIdentityAndUsesLastDuplicateToolResult(t *test
 func TestCPA09ChatRequestAddsStructuredOutputAndDefaultToolSchema(t *testing.T) {
 	out := convertOpenAIRequestToClaudeDefault(
 		"claude-test",
-		[]byte(`{
-			"messages":[{"role":"user","content":"return data"}],
-			"response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object","properties":{"value":{"type":"string"}}}}},
-			"tools":[{"type":"function","function":{"name":"work"}}]
-		}`),
+		[]byte(("{\n\t\t\t\"messages\":[{\"role\":\"user\",\"content\":\"return data\"}" +
+			"],\n\t\t\t\"response_format\":{\"type\":\"json_schema\",\"json_schema" +
+			`":{"name":"answer","schema":{"type":"object","properties":{"value":{"t` +
+			"ype\":\"string\"}}}}},\n\t\t\t\"tools\":[{\"type\":\"function\",\"func" +
+			"tion\":{\"name\":\"work\"}}]\n\t\t}")),
 		false,
 	)
 	root := gjson.ParseBytes(out)
@@ -64,9 +62,15 @@ func TestCPA09ChatRequestAddsStructuredOutputAndDefaultToolSchema(t *testing.T) 
 func TestCPA09ChatRequestDerivesStableRequestScopedIdentity(t *testing.T) {
 	requestA := []byte(`{"prompt_cache_key":"session-a","messages":[{"role":"user","content":"hello"}]}`)
 	requestB := []byte(`{"prompt_cache_key":"session-b","messages":[{"role":"user","content":"hello"}]}`)
-	first := gjson.GetBytes(convertOpenAIRequestToClaudeDefault("claude-test", requestA, false), "metadata.user_id").String()
-	retry := gjson.GetBytes(convertOpenAIRequestToClaudeDefault("claude-test", requestA, false), "metadata.user_id").String()
-	second := gjson.GetBytes(convertOpenAIRequestToClaudeDefault("claude-test", requestB, false), "metadata.user_id").String()
+	first := gjson.GetBytes(
+		convertOpenAIRequestToClaudeDefault("claude-test", requestA, false), "metadata.user_id",
+	).String()
+	retry := gjson.GetBytes(
+		convertOpenAIRequestToClaudeDefault("claude-test", requestA, false), "metadata.user_id",
+	).String()
+	second := gjson.GetBytes(
+		convertOpenAIRequestToClaudeDefault("claude-test", requestB, false), "metadata.user_id",
+	).String()
 	if first == "" || first != retry {
 		t.Fatalf("request identity is not stable: first=%q retry=%q", first, retry)
 	}

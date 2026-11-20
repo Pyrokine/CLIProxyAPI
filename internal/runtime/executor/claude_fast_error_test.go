@@ -20,6 +20,7 @@ import (
 )
 
 func claudeOAuthWireTestMetadata() map[string]any {
+	//goland:noinspection SpellCheckingInspection
 	return map[string]any{
 		"account_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		claudeauth.DeviceIDsMetadataKey: []string{
@@ -115,14 +116,20 @@ func TestClaudeExecutorFastHTTPErrorPassesThrough(t *testing.T) {
 					auth.Attributes = map[string]string{"api_key": "sk-ant-api03-fast-error"}
 					auth.Metadata = nil
 				}
-				requestPayload := []byte(`{"model":"claude-opus-4-7","max_tokens":16,"speed":"fast","messages":[{"role":"user","content":"reply OK"}]}`)
+				requestPayload := []byte(
+					(`{"model":"claude-opus-4-7","max_tokens":16,"speed":"fast","messages":` +
+						`[{"role":"user","content":"reply ` +
+						`OK"}]}`),
+				)
 				options := cliproxyexecutor.Options{
 					Stream:         test.stream,
 					SourceFormat:   sdktranslator.FormatClaude,
 					ResponseFormat: sdktranslator.FormatClaude,
 				}
 				if test.betaOnly {
-					requestPayload = []byte(`{"model":"claude-opus-4-7","max_tokens":16,"messages":[{"role":"user","content":"reply OK"}]}`)
+					requestPayload = []byte(
+						`{"model":"claude-opus-4-7","max_tokens":16,"messages":[{"role":"user","content":"reply OK"}]}`,
+					)
 					options.Headers = http.Header{"Anthropic-Beta": {claudeFastModeBeta}}
 				}
 				request := cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: requestPayload}
@@ -160,7 +167,8 @@ func TestClaudeExecutorFastHTTPErrorPassesThrough(t *testing.T) {
 					t.Fatalf("direct X-Upstream = %q, want preserved", got)
 				}
 				var requestScoped cliproxyexecutor.RequestScopedError
-				if !errors.As(errExecute, &requestScoped) || requestScoped == nil || !requestScoped.IsRequestScoped() {
+				if !errors.As(errExecute, &requestScoped) || requestScoped == nil ||
+					!requestScoped.IsRequestScoped() {
 					t.Fatalf("Fast direct response error = %T, want request-scoped", errExecute)
 				}
 			},
@@ -232,8 +240,12 @@ func TestClaudeExecutorFastSuccessfulHTTPDecodeErrorDoesNotExposeSuccessStatus(t
 					Metadata:   claudeOAuthWireTestMetadata(),
 				}
 				request := cliproxyexecutor.Request{
-					Model:   "claude-opus-4-7",
-					Payload: []byte(`{"model":"claude-opus-4-7","max_tokens":16,"speed":"fast","messages":[{"role":"user","content":"reply OK"}]}`),
+					Model: "claude-opus-4-7",
+					Payload: []byte(
+						(`{"model":"claude-opus-4-7","max_tokens":16,"speed":"fast","messages":` +
+							`[{"role":"user","content":"reply ` +
+							`OK"}]}`),
+					),
 				}
 				errRun := test.run(
 					ctx, NewClaudeExecutor(&config.Config{}), auth, request, cliproxyexecutor.Options{
@@ -280,8 +292,12 @@ func TestClaudeExecutorFastTransportErrorIsRequestScoped(t *testing.T) {
 		Metadata:   claudeOAuthWireTestMetadata(),
 	}
 	request := cliproxyexecutor.Request{
-		Model:   "claude-opus-4-7",
-		Payload: []byte(`{"model":"claude-opus-4-7","max_tokens":16,"speed":"fast","messages":[{"role":"user","content":"reply OK"}]}`),
+		Model: "claude-opus-4-7",
+		Payload: []byte(
+			(`{"model":"claude-opus-4-7","max_tokens":16,"speed":"fast","messages":` +
+				`[{"role":"user","content":"reply ` +
+				`OK"}]}`),
+		),
 	}
 
 	_, errExecute := NewClaudeExecutor(&config.Config{}).Execute(
@@ -326,8 +342,10 @@ func TestClaudeExecutorNonFastErrorKeepsCredentialScopedBehavior(t *testing.T) {
 		Metadata:   claudeOAuthWireTestMetadata(),
 	}
 	request := cliproxyexecutor.Request{
-		Model:   "claude-opus-4-7",
-		Payload: []byte(`{"model":"claude-opus-4-7","max_tokens":16,"messages":[{"role":"user","content":"reply OK"}]}`),
+		Model: "claude-opus-4-7",
+		Payload: []byte(
+			`{"model":"claude-opus-4-7","max_tokens":16,"messages":[{"role":"user","content":"reply OK"}]}`,
+		),
 	}
 
 	_, errExecute := NewClaudeExecutor(&config.Config{}).Execute(

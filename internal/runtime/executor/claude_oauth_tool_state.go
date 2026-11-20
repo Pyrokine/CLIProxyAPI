@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -16,7 +17,8 @@ import (
 const claudeOAuthToolAliasStateLimit = 1024
 const claudeOAuthToolAliasMessageIDLimit = 256
 
-const claudeThreadNotFoundMessage = "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."
+const claudeThreadNotFoundMessage = "No thread state was found for the requested previous_message_id. Repla" +
+	"y the full conversation with thread create to start a new Thread."
 
 type claudeOAuthToolAliasStore struct {
 	mu      sync.Mutex
@@ -69,9 +71,7 @@ func claudeOAuthToolAliasKey(scope, messageID string) string {
 
 func cloneClaudeOAuthToolAliases(source map[string]string) map[string]string {
 	clone := make(map[string]string, len(source))
-	for alias, original := range source {
-		clone[alias] = original
-	}
+	maps.Copy(clone, source)
 	return clone
 }
 
@@ -103,7 +103,11 @@ func (e *ClaudeExecutor) prepareClaudeOAuthToolNamesForRequest(
 		previousMessageID := gjson.GetBytes(payload, "thread.previous_message_id").String()
 		aliases, ok := e.oauthToolAliases.load(scope, previousMessageID)
 		if !ok {
-			return nil, nil, claudeThreadNotFoundError{statusErr{code: http.StatusNotFound, msg: claudeThreadNotFoundMessage}}
+			return nil, nil, claudeThreadNotFoundError{
+				statusErr{
+					code: http.StatusNotFound, msg: claudeThreadNotFoundMessage,
+				},
+			}
 		}
 		return payload, aliases, nil
 	}
@@ -111,7 +115,11 @@ func (e *ClaudeExecutor) prepareClaudeOAuthToolNamesForRequest(
 	return remapped, aliases, nil
 }
 
-func (e *ClaudeExecutor) rememberClaudeOAuthToolAliases(payload []byte, aliases map[string]string, messageID, scope string) {
+func (e *ClaudeExecutor) rememberClaudeOAuthToolAliases(
+	payload []byte,
+	aliases map[string]string,
+	messageID, scope string,
+) {
 	if gjson.GetBytes(payload, "thread.type").String() == "" {
 		return
 	}
@@ -124,6 +132,7 @@ type claudeThreadNotFoundError struct {
 
 func (claudeThreadNotFoundError) IsRequestScoped() bool { return true }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (claudeThreadNotFoundError) ResponseBody() []byte {
 	return []byte(`{"type":"error","error":{"type":"not_found_error","message":"` + claudeThreadNotFoundMessage + `"}}`)
 }

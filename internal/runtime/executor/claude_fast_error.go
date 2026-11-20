@@ -25,6 +25,7 @@ func (e *claudeFastRequestError) Error() string {
 	return e.cause.Error()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *claudeFastRequestError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -46,11 +47,13 @@ func (e *claudeFastRequestError) IsRequestScoped() bool {
 	return claudeRateLimitErrorFrom(e.cause) == nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *claudeFastRequestError) IsCredentialScoped() bool {
 	rateLimit := claudeRateLimitErrorFrom(e.cause)
 	return rateLimit != nil && rateLimit.IsCredentialScoped()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *claudeFastRequestError) RetryAfter() *time.Duration {
 	if e == nil {
 		return nil
@@ -76,6 +79,7 @@ func (e *claudeFastDirectResponseError) Error() string {
 	return fmt.Sprintf("claude Fast upstream request failed with status %d", e.response.HTTPStatus)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *claudeFastDirectResponseError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -87,10 +91,12 @@ func (e *claudeFastDirectResponseError) IsRequestScoped() bool {
 	return e != nil && e.rateLimit == nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *claudeFastDirectResponseError) IsCredentialScoped() bool {
 	return e != nil && e.rateLimit != nil && e.rateLimit.IsCredentialScoped()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *claudeFastDirectResponseError) RetryAfter() *time.Duration {
 	if e == nil || e.rateLimit == nil {
 		return nil
@@ -111,8 +117,7 @@ func (e *claudeFastDirectResponseError) ExecutionDisposition() cliproxyexecutor.
 }
 
 func claudeRateLimitErrorFrom(err error) *claudeRateLimitError {
-	var rateLimit *claudeRateLimitError
-	if errors.As(err, &rateLimit) {
+	if rateLimit, ok := errors.AsType[*claudeRateLimitError](err); ok {
 		return rateLimit
 	}
 	return nil
@@ -135,7 +140,11 @@ func newClaudeFastDirectResponseError(resp *http.Response, body []byte, modelLev
 
 	var rateLimit *claudeRateLimitError
 	if resp.StatusCode == http.StatusTooManyRequests {
-		rateLimit = claudeRateLimitErrorFrom(classifyClaudeUpstreamError(resp.StatusCode, body, modelLevelCooling, resp.Header))
+		rateLimit = claudeRateLimitErrorFrom(
+			classifyClaudeUpstreamError(
+				resp.StatusCode, body, modelLevelCooling, resp.Header,
+			),
+		)
 	}
 	return &claudeFastDirectResponseError{
 		response: &cliproxyexecutor.RequestTerminatedError{

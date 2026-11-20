@@ -9,6 +9,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+//goland:noinspection SpellCheckingInspection
 const (
 	geminiResponseSignatureA = "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
 	geminiResponseSignatureB = "CgQBBQYH"
@@ -23,9 +24,21 @@ func TestConvertClaudeResponseToGeminiStreamsAggregatedThinkingSignature(t *test
 		{
 			name: "content block signature and deltas",
 			events: []string{
-				`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"gemini#` + geminiResponseSignatureA[:24] + `"}}`,
-				`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + geminiResponseSignatureA[24:48] + `"}}`,
-				`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + geminiResponseSignatureA[48:] + `"}}`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+					`"thinking","thinking":"","signature":` +
+					`"gemini#` +
+					geminiResponseSignatureA[:24] +
+					`"}}`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+					`"signature_delta","signature":` +
+					`"` +
+					geminiResponseSignatureA[24:48] +
+					`"}}`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+					`"signature_delta","signature":` +
+					`"` +
+					geminiResponseSignatureA[48:] +
+					`"}}`,
 				`data: {"type":"content_block_stop","index":0}`,
 			},
 			wantSignature: geminiResponseSignatureA,
@@ -34,8 +47,16 @@ func TestConvertClaudeResponseToGeminiStreamsAggregatedThinkingSignature(t *test
 			name: "signature delta fragments",
 			events: []string{
 				`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
-				`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + geminiResponseSignatureB[:4] + `"}}`,
-				`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + geminiResponseSignatureB[4:] + `"}}`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+					`"signature_delta","signature":` +
+					`"` +
+					geminiResponseSignatureB[:4] +
+					`"}}`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+					`"signature_delta","signature":` +
+					`"` +
+					geminiResponseSignatureB[4:] +
+					`"}}`,
 				`data: {"type":"content_block_stop","index":0}`,
 			},
 			wantSignature: geminiResponseSignatureB,
@@ -53,41 +74,60 @@ func TestConvertClaudeResponseToGeminiStreamsAggregatedThinkingSignature(t *test
 	}
 
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			var param any
-			var chunks [][]byte
-			for index, event := range testCase.events {
-				chunks = ConvertClaudeResponseToGemini(
-					context.Background(),
-					"gemini-3-pro",
-					nil,
-					nil,
-					[]byte(event),
-					&param,
-				)
-				if index < len(testCase.events)-1 && len(chunks) != 0 {
-					t.Fatalf("event %d emitted %d chunks before signature completion", index, len(chunks))
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				var param any
+				var chunks [][]byte
+				for index, event := range testCase.events {
+					chunks = ConvertClaudeResponseToGemini(
+						context.Background(),
+						"gemini-3-pro",
+						nil,
+						nil,
+						[]byte(event),
+						&param,
+					)
+					if index < len(testCase.events)-1 && len(chunks) != 0 {
+						t.Fatalf("event %d emitted %d chunks before signature completion", index, len(chunks))
+					}
 				}
-			}
-			if len(chunks) != 1 {
-				t.Fatalf("final chunk count = %d, want 1", len(chunks))
-			}
-			part := gjson.GetBytes(chunks[0], "candidates.0.content.parts.0")
-			if !part.Get("thought").Bool() || part.Get("thoughtSignature").String() != testCase.wantSignature {
-				t.Fatalf("unexpected thought part: %s", part.Raw)
-			}
-		})
+				if len(chunks) != 1 {
+					t.Fatalf("final chunk count = %d, want 1", len(chunks))
+				}
+				part := gjson.GetBytes(chunks[0], "candidates.0.content.parts.0")
+				if !part.Get("thought").Bool() ||
+					part.Get("thoughtSignature").String() != testCase.wantSignature {
+					t.Fatalf("unexpected thought part: %s", part.Raw)
+				}
+			},
+		)
 	}
 }
 
 func TestConvertClaudeResponseToGeminiNonStreamAggregatesThinkingSignatureFragments(t *testing.T) {
-	raw := []byte(strings.Join([]string{
-		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"` + geminiResponseSignatureA[:20] + `"}}`,
-		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private reasoning"}}`,
-		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + geminiResponseSignatureA[20:50] + `"}}`,
-		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"` + geminiResponseSignatureA[50:] + `"}}`,
-		`data: {"type":"content_block_stop","index":0}`,
-	}, "\n"))
+	raw := []byte(strings.Join(
+		[]string{
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+				`"thinking","thinking":"","signature":` +
+				`"` +
+				geminiResponseSignatureA[:20] +
+				`"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+				`"thinking_delta","thinking":"private ` +
+				`reasoning"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+				`"signature_delta","signature":` +
+				`"` +
+				geminiResponseSignatureA[20:50] +
+				`"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+				`"signature_delta","signature":` +
+				`"` +
+				geminiResponseSignatureA[50:] +
+				`"}}`,
+			`data: {"type":"content_block_stop","index":0}`,
+		}, "\n",
+	))
 
 	output := ConvertClaudeResponseToGeminiNonStream(
 		context.Background(),
@@ -111,13 +151,15 @@ func TestConvertClaudeResponseToGeminiNonStreamAggregatesThinkingSignatureFragme
 
 func TestConvertClaudeResponseToGeminiPreservesToolEnvelope(t *testing.T) {
 	var param any
-	start := []byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"native-call-id","name":"lookup","signature":"` + geminiResponseSignatureA + `"}}`)
+	start := []byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":` +
+		`"tool_use","id":"native-call-id","name":"lookup","signature":"` + geminiResponseSignatureA + `"}}`)
 	if chunks := ConvertClaudeResponseToGemini(
 		context.Background(), "gemini-3-pro", nil, nil, start, &param,
 	); len(chunks) != 0 {
 		t.Fatalf("tool start emitted %d chunks, want 0", len(chunks))
 	}
-	delta := []byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"status\"}"}}`)
+	delta := []byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_j` +
+		`son_delta","partial_json":"{\"query\":\"status\"}"}}`)
 	if chunks := ConvertClaudeResponseToGemini(
 		context.Background(), "gemini-3-pro", nil, nil, delta, &param,
 	); len(chunks) != 0 {

@@ -6,6 +6,7 @@ import (
 )
 
 func TestIsAnthropicUpstreamURL(t *testing.T) {
+	//goland:noinspection HttpUrlsUsage
 	tests := []struct {
 		name      string
 		targetURL string

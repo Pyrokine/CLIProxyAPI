@@ -42,8 +42,10 @@ func TestClaudeExecutorExecuteStreamOAuthStartupCancellationIsRequestScoped(t *t
 	go func() {
 		_, errStream := executor.ExecuteStream(
 			ctx, auth, cliproxyexecutor.Request{
-				Model:   "claude-opus-4-7",
-				Payload: []byte(`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+				Model: "claude-opus-4-7",
+				Payload: []byte(
+					`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hello"}],"stream":true}`,
+				),
 			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
 		)
 		errCh <- errStream
@@ -92,7 +94,11 @@ func TestClaudeExecutorExecuteStreamOAuthActiveCancellationIsRequestScoped(t *te
 		},
 		Metadata: claudeOAuthWireTestMetadata(),
 	}
-	payload := []byte(`{"model":"claude-opus-4-7","system":"system prompt","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	payload := []byte(
+		(`{"model":"claude-opus-4-7","system":"system prompt","messages":` +
+			`[{"role":"user","content":"hello"}],"stream":` +
+			`true}`),
+	)
 	ctx, cancel := context.WithCancel(context.Background())
 	result, errStream := executor.ExecuteStream(
 		ctx, auth, cliproxyexecutor.Request{

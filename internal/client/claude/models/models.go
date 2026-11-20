@@ -4,6 +4,7 @@ package models
 import (
 	"encoding/base64"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -28,6 +29,7 @@ func NewCatalog(availableModels []map[string]any, disableCloaking bool) *Catalog
 	for _, model := range availableModels {
 		if providerID, ok := model["id"].(string); ok && providerID != "" {
 			providerIDs[providerID] = struct{}{}
+			resolved[providerID] = providerID
 		}
 	}
 	for _, model := range availableModels {
@@ -93,7 +95,12 @@ func (c *Catalog) ResolveModelID(id string) string {
 	base, suffix, hasSuffix := splitThinkingSuffix(id)
 	resolved := c.resolved[base]
 	if resolved == "" {
-		resolved = resolveClientModelID(base)
+		// 旧格式与 x-/c- 重叠时，由目录中的实际模型消除歧义
+		if legacy := ResolveClaudeModelIDPrefix(base); legacy != base && c.resolved[legacy] == legacy {
+			resolved = legacy
+		} else {
+			resolved = resolveClientModelID(base)
+		}
 	}
 	if resolved == base {
 		return id
@@ -102,6 +109,49 @@ func (c *Catalog) ResolveModelID(id string) string {
 		return resolved + "(" + suffix + ")"
 	}
 	return resolved
+}
+
+// buildResponse 返回使用旧版模型 ID 的有序列表
+func buildResponse(availableModels []map[string]any, disableCloaking bool) map[string]any {
+	if disableCloaking {
+		return NewCatalog(availableModels, true).Response()
+	}
+	legacyModels := make([]map[string]any, len(availableModels))
+	for index, model := range availableModels {
+		cloned := cloneModel(model)
+		if id, ok := cloned["id"].(string); ok {
+			cloned["id"] = EnsureClaudeModelIDPrefix(id)
+		}
+		legacyModels[index] = cloned
+	}
+	return NewCatalog(legacyModels, true).Response()
+}
+
+// EnsureClaudeModelIDPrefix 将非 Claude 模型 ID 编码为旧版反转格式
+func EnsureClaudeModelIDPrefix(id string) string {
+	if id == "" || strings.HasPrefix(id, "claude-") {
+		return id
+	}
+	return clientModelPrefix + reverseModelID(id)
+}
+
+// ResolveClaudeModelIDPrefix 还原旧版模型 ID，保留思考后缀
+func ResolveClaudeModelIDPrefix(id string) string {
+	base, suffix, hasSuffix := splitThinkingSuffix(id)
+	if !strings.HasPrefix(base, clientModelPrefix) || base == clientModelPrefix {
+		return id
+	}
+	resolved := reverseModelID(strings.TrimPrefix(base, clientModelPrefix))
+	if hasSuffix {
+		return resolved + "(" + suffix + ")"
+	}
+	return resolved
+}
+
+func reverseModelID(id string) string {
+	characters := []rune(id)
+	slices.Reverse(characters)
+	return string(characters)
 }
 
 // ClientModelID returns the collision-safe ID exposed to Anthropic clients.
@@ -131,7 +181,7 @@ func resolveClientModelID(id string) string {
 	case strings.HasPrefix(base, collisionClientModelPrefix):
 		encoded = strings.TrimPrefix(base, collisionClientModelPrefix)
 	default:
-		return id
+		return ResolveClaudeModelIDPrefix(id)
 	}
 	if encoded == "" {
 		return id

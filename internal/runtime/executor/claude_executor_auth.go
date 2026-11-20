@@ -8,6 +8,7 @@ import (
 
 	claudeauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -34,16 +35,14 @@ func isClaudeSetupToken(auth *cliproxyauth.Auth, apiKey string) bool {
 	if !isClaudeOAuthToken(apiKey) || auth == nil {
 		return false
 	}
-	if skip, _ := auth.Metadata["skip_account_profile"].(bool); skip {
-		return true
+	for _, key := range []string{"skip_account_profile", "is_setup_token", "setup_token"} {
+		value, _ := util.ReadClaudeMetadataValue(&auth.Metadata, key)
+		if enabled, _ := value.(bool); enabled {
+			return true
+		}
 	}
-	if setupToken, _ := auth.Metadata["is_setup_token"].(bool); setupToken {
-		return true
-	}
-	if setupToken, _ := auth.Metadata["setup_token"].(bool); setupToken {
-		return true
-	}
-	if kind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"])); kind == "setup_token" || kind == "setup-token" {
+	if kind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"])); kind == "setup_token" ||
+		kind == "setup-token" {
 		return true
 	}
 	scopes := strings.ToLower(claudeauth.ReadMetadataString(&auth.Metadata, "scopes"))
@@ -84,7 +83,10 @@ func storeClaudeFallbackAccountIdentity(auth *cliproxyauth.Auth, apiKey, kind st
 	)
 }
 
-func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+func (e *ClaudeExecutor) PrepareRequestAuth(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+) (*cliproxyauth.Auth, error) {
 	if auth == nil || !e.ShouldPrepareRequestAuth(auth) {
 		return auth, nil
 	}
@@ -108,7 +110,9 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 		}
 		if isClaudeOAuthScope403(errProfile) {
 			log.Debugf(
-				"Claude OAuth account profile lookup is not available for auth %s: %v; using stable credential identity",
+				"Claude OAuth account profile lookup is not available for auth %s: %v; "+
+					"using stable credential "+
+					"identity",
 				auth.ID,
 				errProfile,
 			)
@@ -119,7 +123,9 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 	}
 	if profile == nil || strings.TrimSpace(profile.Account.UUID) == "" {
 		log.Debugf(
-			"Claude OAuth account profile lookup returned no account UUID for auth %s; using stable credential identity",
+			"Claude OAuth account profile lookup returned no account UUID for auth "+
+				"%s; using stable credential "+
+				"identity",
 			auth.ID,
 		)
 		storeClaudeFallbackAccountIdentity(auth, apiKey, "claude-oauth-fallback")

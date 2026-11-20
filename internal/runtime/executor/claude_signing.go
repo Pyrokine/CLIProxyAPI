@@ -4,15 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/pierrec/xxHash/xxHash64"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-	"sort"
-	"strconv"
-	"strings"
 )
 
 const (
@@ -57,10 +58,11 @@ func finalizeAnthropicMessagesBodyCCH(body []byte, fallbackBillings ...string) (
 //
 // The measured minimal helper carries no system field at all, which is exactly the
 // native wire shape, so injecting a billing header there would be the deviation.
-// Keying on "system is absent" rather than "no billing header present" means that
-// if anything later in the pipeline (a payload rule, for instance) does attach a
-// system prompt, the fallback comes back and the request cannot go upstream with a
-// system block that native would never send unsigned.
+// Checking whether the system field is absent keeps this decision separate from
+// whether a billing header exists. If a later pipeline stage (such as a payload
+// rule) attaches a system prompt, the fallback is required again.
+// The request then cannot go upstream with a system block that the native client
+// would never send unsigned.
 func claudeBodyNeedsBillingFallback(body []byte) bool {
 	return gjson.GetBytes(body, "system").Exists()
 }
@@ -219,9 +221,11 @@ func normalizeClaudeCCHInput(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected JSON data at byte %d", scanner.pos)
 	}
 
-	sort.Slice(scanner.edits, func(i, j int) bool {
-		return scanner.edits[i].start < scanner.edits[j].start
-	})
+	sort.Slice(
+		scanner.edits, func(i, j int) bool {
+			return scanner.edits[i].start < scanner.edits[j].start
+		},
+	)
 	normalized := make([]byte, 0, len(body))
 	last := 0
 	for _, edit := range scanner.edits {
@@ -293,7 +297,9 @@ func (scanner *claudeCCHJSONScanner) parseObject(collect bool) error {
 
 		key := scanner.body[keyStart:keyEnd]
 		excluded := collect && isClaudeCCHExcludedKey(key)
-		if collect && bytes.Equal(key, []byte(`"model"`)) && scanner.pos < len(scanner.body) && scanner.body[scanner.pos] == '"' {
+		if collect && bytes.Equal(
+			key, []byte(`"model"`),
+		) && scanner.pos < len(scanner.body) && scanner.body[scanner.pos] == '"' {
 			valueStart, valueEnd, errString := scanner.parseString()
 			if errString != nil {
 				return errString
@@ -309,13 +315,15 @@ func (scanner *claudeCCHJSONScanner) parseObject(collect bool) error {
 		if scanner.consume(',') {
 			commaAfter = scanner.pos - 1
 		}
-		members = append(members, claudeCCHJSONMember{
-			start:       memberStart,
-			end:         memberEnd,
-			commaBefore: commaBefore,
-			commaAfter:  commaAfter,
-			excluded:    excluded,
-		})
+		members = append(
+			members, claudeCCHJSONMember{
+				start:       memberStart,
+				end:         memberEnd,
+				commaBefore: commaBefore,
+				commaAfter:  commaAfter,
+				excluded:    excluded,
+			},
+		)
 		if commaAfter >= 0 {
 			commaBefore = commaAfter
 			continue

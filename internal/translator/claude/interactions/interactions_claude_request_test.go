@@ -7,9 +7,18 @@ import (
 )
 
 func TestConvertInteractionsRequestToClaudePreservesToolError(t *testing.T) {
-	out := convertInteractionsRequestToClaude("claude-test", []byte(`{"input":[{"type":"function_result","name":"lookup","call_id":"call-1","result":"failed","is_error":true}]}`), false)
+	out := convertInteractionsRequestToClaude(
+		"claude-test",
+		[]byte(
+			(`{"input":[{"type":"function_result","name":"lookup","call_id":` +
+				`"call-1","result":"failed","is_error":` +
+				`true}]}`),
+		),
+		false,
+	)
 	result := gjson.GetBytes(out, "messages.0.content.0")
-	if result.Get("type").String() != "tool_result" || result.Get("tool_use_id").String() != "call-1" || !result.Get("is_error").Bool() {
+	if result.Get("type").String() != "tool_result" || result.Get("tool_use_id").String() != "call-1" ||
+		!result.Get("is_error").Bool() {
 		t.Fatalf("tool error was not preserved: %s", out)
 	}
 }
@@ -85,7 +94,10 @@ func TestConvertInteractionsRequestToClaudeGroupsConsecutiveRoleTurns(t *testing
 	wantTypes := []string{"thinking", "text", "tool_use", "tool_use"}
 	if len(assistantContent) != len(wantTypes) {
 		t.Fatalf(
-			"assistant content count = %d, want %d. Output: %s", len(assistantContent), len(wantTypes), string(out),
+			"assistant content count = %d, want %d. Output: %s",
+			len(assistantContent),
+			len(wantTypes),
+			string(out),
 		)
 	}
 	for index, wantType := range wantTypes {

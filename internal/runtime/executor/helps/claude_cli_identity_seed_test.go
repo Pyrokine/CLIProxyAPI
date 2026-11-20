@@ -29,17 +29,20 @@ func TestClaudeFingerprintIdentityIsolation(t *testing.T) {
 		before := auth.Clone()
 		var wg sync.WaitGroup
 		for range 20 {
-			wg.Go(func() {
-				local, err := PrepareClaudeCLIFingerprintAuth(auth, ClaudeCLIAuthIdentitySeed(auth), true)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				if ClaudeCredentialAccountUUID(local) == "" || !claudeauth.HasCanonicalDeviceIDPool(claudeauth.ReadDeviceIDPool(&local.Metadata)) {
-					t.Error("identity missing")
-				}
-				local.Metadata["local"] = true
-			})
+			wg.Go(
+				func() {
+					local, err := PrepareClaudeCLIFingerprintAuth(auth, ClaudeCLIAuthIdentitySeed(auth), true)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					if ClaudeCredentialAccountUUID(local) == "" ||
+						!claudeauth.HasCanonicalDeviceIDPool(claudeauth.ReadDeviceIDPool(&local.Metadata)) {
+						t.Error("identity missing")
+					}
+					local.Metadata["local"] = true
+				},
+			)
 		}
 		wg.Wait()
 		if !reflect.DeepEqual(auth.Metadata, before.Metadata) {
@@ -59,7 +62,9 @@ func TestClaudeFingerprintDelegatedIdentitySurvivesTokenRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Metadata["account_uuid"] != second.Metadata["account_uuid"] || !reflect.DeepEqual(first.Metadata[claudeauth.DeviceIDsMetadataKey], second.Metadata[claudeauth.DeviceIDsMetadataKey]) {
+	if first.Metadata["account_uuid"] != second.Metadata["account_uuid"] || !reflect.DeepEqual(
+		first.Metadata[claudeauth.DeviceIDsMetadataKey], second.Metadata[claudeauth.DeviceIDsMetadataKey],
+	) {
 		t.Fatal("token rotation changed identity")
 	}
 	if _, err = PrepareClaudeCLIFingerprintAuth(&cliproxyauth.Auth{}, "", true); err == nil {
@@ -68,7 +73,11 @@ func TestClaudeFingerprintDelegatedIdentitySurvivesTokenRotation(t *testing.T) {
 	if _, err = PrepareClaudeCLIFingerprintAuth(&cliproxyauth.Auth{}, "seed", false); err == nil {
 		t.Fatal("OAuth identity was synthesized")
 	}
-	prepared := &cliproxyauth.Auth{Metadata: map[string]any{"account_uuid": "real-account", claudeauth.DeviceIDsMetadataKey: []string{strings.Repeat("a", 64)}}}
+	prepared := &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"account_uuid": "real-account", claudeauth.DeviceIDsMetadataKey: []string{strings.Repeat("a", 64)},
+		},
+	}
 	if local, err := PrepareClaudeCLIFingerprintAuth(prepared, "", false); err != nil || local != prepared {
 		t.Fatalf("prepared OAuth changed: %v", err)
 	}

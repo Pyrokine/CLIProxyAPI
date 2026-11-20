@@ -3,6 +3,8 @@
 // extracting model information, system instructions, message contents, and tool declarations.
 // The package performs JSON data transformation to ensure compatibility
 // between Gemini API format and Claude Code API's expected format.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (
@@ -305,7 +307,9 @@ func ConvertGeminiRequestToClaudeChecked(modelName string, inputRawJSON []byte, 
 
 							// Inline data conversion to Claude Code content format
 							if inlineData := geminiClaudeInlineData(part); inlineData.Exists() {
-								if contentPart, ok := claudeContentPartFromGeminiInlineData(inlineData, role == "assistant"); ok {
+								if contentPart, ok := claudeContentPartFromGeminiInlineData(
+									inlineData, role == "assistant",
+								); ok {
 									msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
 									sendable++
 								} else if role != "assistant" {
@@ -316,7 +320,9 @@ func ConvertGeminiRequestToClaudeChecked(modelName string, inputRawJSON []byte, 
 
 							// File data conversion to Claude Code content format
 							if fileData := geminiClaudeFileData(part); fileData.Exists() {
-								if contentPart, ok := claudeContentPartFromGeminiFileData(fileData, role == "assistant"); ok {
+								if contentPart, ok := claudeContentPartFromGeminiFileData(
+									fileData, role == "assistant",
+								); ok {
 									msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
 									sendable++
 								} else if role != "assistant" {
@@ -356,7 +362,9 @@ func ConvertGeminiRequestToClaudeChecked(modelName string, inputRawJSON []byte, 
 				if funcDecls := tool.Get("functionDeclarations"); funcDecls.Exists() && funcDecls.IsArray() {
 					funcDecls.ForEach(
 						func(_, funcDecl gjson.Result) bool {
-							anthropicTool := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
+							anthropicTool := []byte(
+								`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`,
+							)
 
 							if name := funcDecl.Get("name"); name.Exists() {
 								anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", mapToolName(name.String()))

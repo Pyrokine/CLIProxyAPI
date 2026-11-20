@@ -90,19 +90,45 @@ func claudeReplayTextResponse(id string) string {
 
 func claudeReplayThinkingStream(id, label, toolID string) string {
 	return "event: message_start\n" +
-		`data: {"type":"message_start","message":{"id":"` + id + `","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}` + "\n\n" +
+		`data: {"type":"message_start","message":{"id":"` +
+		id +
+		(`","type":"message","role":"assistant","model":"claude-synthetic-4772",` +
+			`"content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`) + "\n\n" +
 		"event: content_block_start\n" +
-		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}` + "\n\n" +
+		(`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+			`"thinking","thinking":"","signature":` +
+			`""}}`) +
+		"\n\n" +
 		"event: content_block_delta\n" +
-		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"` + label + ` reasoning"}}` + "\n\n" +
+		(`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+			`"thinking_delta","thinking":` +
+			`"`) +
+		label +
+		` reasoning"}}` +
+		"\n\n" +
 		"event: content_block_delta\n" +
-		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-` + label + `"}}` + "\n\n" +
+		(`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+			`"signature_delta","signature":` +
+			`"sig-`) +
+		label +
+		`"}}` +
+		"\n\n" +
 		"event: content_block_stop\n" +
 		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
 		"event: content_block_start\n" +
-		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"` + toolID + `","name":"Read","input":{}}}` + "\n\n" +
+		(`data: {"type":"content_block_start","index":1,"content_block":{"type":` +
+			`"tool_use","id":` +
+			`"`) +
+		toolID +
+		`","name":"Read","input":{}}}` +
+		"\n\n" +
 		"event: content_block_delta\n" +
-		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"` + label + `\"}"}}` + "\n\n" +
+		(`data: {"type":"content_block_delta","index":1,"delta":{"type":` +
+			`"input_json_delta","partial_json":"{\"path\":` +
+			`\"`) +
+		label +
+		`\"}"}}` +
+		"\n\n" +
 		"event: content_block_stop\n" +
 		`data: {"type":"content_block_stop","index":1}` + "\n\n" +
 		"event: message_delta\n" +
@@ -113,7 +139,10 @@ func claudeReplayThinkingStream(id, label, toolID string) string {
 
 func claudeReplayTextStream(id string) string {
 	return "event: message_start\n" +
-		`data: {"type":"message_start","message":{"id":"` + id + `","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}` + "\n\n" +
+		`data: {"type":"message_start","message":{"id":"` +
+		id +
+		(`","type":"message","role":"assistant","model":"claude-synthetic-4772",` +
+			`"content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`) + "\n\n" +
 		"event: content_block_start\n" +
 		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
 		"event: content_block_delta\n" +
@@ -133,7 +162,9 @@ func claudeReplayOmittedPayload(
 	},
 ) []byte {
 	var body strings.Builder
-	body.WriteString(`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}`)
+	body.WriteString(
+		`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}`,
+	)
 	for _, turn := range turns {
 		body.WriteString(`,{"role":"assistant","content":[{"type":"tool_use","id":"`)
 		body.WriteString(turn.toolID)
@@ -212,7 +243,13 @@ func TestClaudeThinkingReplayEnabledRequiresExactCompatAPIKeyModel(t *testing.T)
 		options    cliproxyexecutor.Options
 		wantEnable bool
 	}{
-		{name: "compat Claude API key", auth: baseAuth, request: baseRequest, options: baseOptions, wantEnable: true},
+		{
+			name:       "compat Claude API key",
+			auth:       baseAuth,
+			request:    baseRequest,
+			options:    baseOptions,
+			wantEnable: true,
+		},
 		{
 			name: "non compat model",
 			auth: baseAuth,
@@ -297,7 +334,9 @@ func TestClaudeThinkingReplayEnabledRequiresExactCompatAPIKeyModel(t *testing.T)
 }
 
 func TestClaudeThinkingReplayScopeIsolation(t *testing.T) {
-	payload := []byte(`{"model":"claude-synthetic-4772","prompt_cache_key":"shared","messages":[{"role":"user","content":"hi"}]}`)
+	payload := []byte(
+		`{"model":"claude-synthetic-4772","prompt_cache_key":"shared","messages":[{"role":"user","content":"hi"}]}`,
+	)
 	req, opts := claudeReplayTestRequest(payload, "", true)
 	auth := claudeReplayTestAuth("https://provider-a.example")
 	ctxA := claudeReplayLocalContext(xaiC03ContextWithAPIKey("caller-a"))
@@ -331,7 +370,13 @@ func TestClaudeThinkingReplayScopeIsolation(t *testing.T) {
 	otherEndpoint.Attributes["base_url"] = "https://provider-b.example"
 	otherCredential := auth.Clone()
 	otherCredential.Attributes[cliproxyauth.AttributeAPIKey] = "other-key"
-	if claudeThinkingReplayModelFamily(auth, req.Model) == claudeThinkingReplayModelFamily(otherEndpoint, req.Model) ||
+	if claudeThinkingReplayModelFamily(
+		auth,
+		req.Model,
+	) == claudeThinkingReplayModelFamily(
+		otherEndpoint,
+		req.Model,
+	) ||
 		claudeThinkingReplayModelFamily(auth, req.Model) == claudeThinkingReplayModelFamily(
 			otherCredential, req.Model,
 		) ||
@@ -359,7 +404,8 @@ func TestRestoreClaudeThinkingReplayContentsRestoresMultipleTurns(t *testing.T) 
 		t.Fatalf("multi-turn restore failed: %s", updated)
 	}
 
-	existing := []byte(`{"messages":[{"role":"assistant","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"tool_use","id":"tool-one","name":"Read","input":{"path":"one"}}]}]}`)
+	existing := []byte((`{"messages":[{"role":"assistant","content":[{"type":"redacted_thinking","data":"` +
+		`opaque"},{"type":"tool_use","id":"tool-one","name":"Read","input":{"path":"one"}}]}]}`))
 	unchanged, restored := restoreClaudeThinkingReplayContents(existing, [][]byte{first})
 	if restored || !bytes.Equal(unchanged, existing) {
 		t.Fatalf("existing thinking was overwritten: %s", unchanged)
@@ -399,7 +445,9 @@ func TestClaudeExecutorThinkingReplayRestoresNativeResponse(t *testing.T) {
 
 	executor := NewClaudeExecutor(nil)
 	auth := claudeReplayTestAuth(server.URL)
-	firstPayload := []byte(`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`)
+	firstPayload := []byte(
+		`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`,
+	)
 	firstReq, firstOpts := claudeReplayTestRequest(firstPayload, "native-replay", true)
 	if _, errExecute := executor.Execute(ctx, auth, firstReq, firstOpts); errExecute != nil {
 		t.Fatalf("first Execute() error = %v", errExecute)
@@ -454,7 +502,9 @@ func TestClaudeExecutorThinkingReplayCachesExecuteSSE(t *testing.T) {
 
 	executor := NewClaudeExecutor(nil)
 	auth := claudeReplayTestAuth(server.URL)
-	firstPayload := []byte(`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`)
+	firstPayload := []byte(
+		`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`,
+	)
 	firstReq, firstOpts := claudeReplayTestRequest(firstPayload, "execute-sse-replay", true)
 	firstOpts.ResponseFormat = sdktranslator.FormatOpenAI
 	if _, errExecute := executor.Execute(ctx, auth, firstReq, firstOpts); errExecute != nil {
@@ -509,7 +559,9 @@ func TestClaudeExecutorThinkingReplayRestoresStreamResponse(t *testing.T) {
 
 	executor := NewClaudeExecutor(nil)
 	auth := claudeReplayTestAuth(server.URL)
-	firstPayload := []byte(`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`)
+	firstPayload := []byte(
+		`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`,
+	)
 	firstReq, firstOpts := claudeReplayTestRequest(firstPayload, "stream-replay", true)
 	firstResult, errExecute := executor.ExecuteStream(ctx, auth, firstReq, firstOpts)
 	if errExecute != nil || drainClaudeReplayStream(t, firstResult) {
@@ -562,7 +614,9 @@ func TestClaudeExecutorThinkingReplayHTTPRejectionClearsOnly400And422(t *testing
 							calls++
 							if calls == 1 {
 								w.Header().Set("Content-Type", "application/json")
-								_, _ = w.Write([]byte(claudeReplaySignedResponse("msg-1", "reject", "tool-reject")))
+								_, _ = w.Write(
+									[]byte(claudeReplaySignedResponse("msg-1", "reject", "tool-reject")),
+								)
 								return
 							}
 							secondBody, _ = io.ReadAll(r.Body)
@@ -576,7 +630,11 @@ func TestClaudeExecutorThinkingReplayHTTPRejectionClearsOnly400And422(t *testing
 
 				executor := NewClaudeExecutor(nil)
 				auth := claudeReplayTestAuth(server.URL)
-				firstPayload := []byte(`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`)
+				firstPayload := []byte(
+					`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":` +
+						`"user","content":` +
+						`"inspect"}]}`,
+				)
 				firstReq, firstOpts := claudeReplayTestRequest(firstPayload, "http-rejection", true)
 				if _, errExecute := executor.Execute(ctx, auth, firstReq, firstOpts); errExecute != nil {
 					t.Fatal(errExecute)
@@ -637,11 +695,18 @@ func TestClaudeExecutorThinkingReplayStreamHTTPRejection(t *testing.T) {
 				)
 				req, opts := claudeReplayTestRequest(payload, "stream-http-rejection", true)
 				scope := claudeThinkingReplayScopeFromRequest(ctx, auth, req, opts)
-				seedClaudeThinkingReplay(t, ctx, scope, claudeReplaySignedContent("stream-http", "tool-stream-http"))
+				seedClaudeThinkingReplay(
+					t,
+					ctx,
+					scope,
+					claudeReplaySignedContent("stream-http", "tool-stream-http"),
+				)
 				if _, errExecute := NewClaudeExecutor(nil).ExecuteStream(ctx, auth, req, opts); errExecute == nil {
 					t.Fatal("ExecuteStream() returned nil error")
 				}
-				if gjson.GetBytes(upstreamBody, "messages.1.content.0.signature").String() != "sig-stream-http" {
+				if gjson.GetBytes(upstreamBody, "messages.1.content.0.signature").
+					String() !=
+					"sig-stream-http" {
 					t.Fatalf("stream replay was not applied: %s", upstreamBody)
 				}
 				if found := claudeThinkingReplayFound(t, ctx, scope); found != testCase.wantFound {
@@ -657,7 +722,9 @@ func TestClaudeThinkingReplayCachesCitationStream(t *testing.T) {
 	t.Cleanup(internalcache.ClearClaudeThinkingReplayCache)
 	ctx := claudeReplayLocalContext(context.Background())
 	auth := claudeReplayTestAuth("https://provider.example")
-	initialPayload := []byte(`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`)
+	initialPayload := []byte(
+		`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`,
+	)
 	initialReq, initialOpts := claudeReplayTestRequest(initialPayload, "citation-stream", true)
 	_, scope := prepareClaudeThinkingReplayRequest(ctx, auth, initialReq, initialOpts)
 	if !scope.cacheReady {
@@ -666,13 +733,17 @@ func TestClaudeThinkingReplayCachesCitationStream(t *testing.T) {
 	stream := strings.Join(
 		[]string{
 			`data: {"type":"message_start","message":{"id":"msg","model":"claude-synthetic-4772"}}`,
-			`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"check","signature":"signed-citation"}}`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+				`"thinking","thinking":"check","signature":"signed-citation"}}`,
 			`data: {"type":"content_block_stop","index":0}`,
 			`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":"answer"}}`,
-			`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://example.com","title":"Example"}}}`,
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"` +
+				`type":"web_search_result_location","url":"https://example.com","title":"Example"}}}`,
 			`data: {"type":"content_block_stop","index":1}`,
-			`data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tool-citation","name":"Read","input":{}}}`,
-			`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"citation\"}"}}`,
+			`data: {"type":"content_block_start","index":2,"content_block":{"type":` +
+				`"tool_use","id":"tool-citation","name":"Read","input":{}}}`,
+			`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_j` +
+				`son_delta","partial_json":"{\"path\":\"citation\"}"}}`,
 			`data: {"type":"content_block_stop","index":2}`,
 			`data: {"type":"message_stop"}`,
 		}, "\n",
@@ -693,7 +764,8 @@ func TestClaudeThinkingReplayCachesCitationStream(t *testing.T) {
 	omittedPayload := []byte(`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[` +
 		`{"role":"user","content":"inspect"},` +
 		`{"role":"assistant","content":[` +
-		`{"type":"text","text":"answer","citations":[{"type":"web_search_result_location","url":"https://example.com","title":"Example"}]},` +
+		(`{"type":"text","text":"answer","citations":[{"type":"web_search_result` +
+			`_location","url":"https://example.com","title":"Example"}]},`) +
 		`{"type":"tool_use","id":"tool-citation","name":"Read","input":{"path":"citation"}}]},` +
 		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-citation","content":"ok"}]}]}`)
 	omittedReq, omittedOpts := claudeReplayTestRequest(omittedPayload, "citation-stream", true)
@@ -758,7 +830,12 @@ func TestClaudeExecutorThinkingReplayStreamClearsOnlyRawUpstreamError(t *testing
 				)
 				req, opts := claudeReplayTestRequest(payload, "stream-error", true)
 				scope := claudeThinkingReplayScopeFromRequest(ctx, auth, req, opts)
-				seedClaudeThinkingReplay(t, ctx, scope, claudeReplaySignedContent("stream-error", "tool-stream-error"))
+				seedClaudeThinkingReplay(
+					t,
+					ctx,
+					scope,
+					claudeReplaySignedContent("stream-error", "tool-stream-error"),
+				)
 				result, errExecute := NewClaudeExecutor(nil).ExecuteStream(ctx, auth, req, opts)
 				if errExecute != nil {
 					t.Fatal(errExecute)
@@ -831,7 +908,12 @@ func TestClaudeThinkingReplayStreamObserverOutcomeMatrix(t *testing.T) {
 				}
 				observer.FinishClaudeStream(testCase.outcome)
 				if found := claudeThinkingReplayFound(t, ctx, scope); found != testCase.wantFound {
-					t.Fatalf("cache after outcome %d = %v, want %v", testCase.outcome, found, testCase.wantFound)
+					t.Fatalf(
+						"cache after outcome %d = %v, want %v",
+						testCase.outcome,
+						found,
+						testCase.wantFound,
+					)
 				}
 			},
 		)
@@ -859,7 +941,9 @@ func TestClaudeExecutorThinkingReplayCacheReadFailureContinuesUpstream(t *testin
 		},
 	)
 	auth := claudeReplayTestAuth(server.URL)
-	payload := []byte(`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`)
+	payload := []byte(
+		`{"model":"claude-synthetic-4772","max_tokens":32,"messages":[{"role":"user","content":"inspect"}]}`,
+	)
 	req, opts := claudeReplayTestRequest(payload, "home-failure", true)
 	if _, errExecute := NewClaudeExecutor(nil).Execute(ctx, auth, req, opts); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)

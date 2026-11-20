@@ -41,7 +41,8 @@ func convertClaudeResponseToGeminiCLI(
 	return newOutputs
 }
 
-// convertClaudeResponseToGeminiCLINonStream converts a non-streaming Claude Code response to a non-streaming Gemini CLI response.
+// convertClaudeResponseToGeminiCLINonStream converts a non-streaming Claude Code response to a non-streaming
+// Gemini CLI response.
 // This function processes the complete Claude Code response and transforms it into a single Gemini-compatible
 // JSON response. It wraps the converted response in a "response" object to match the Gemini CLI API structure.
 //
@@ -62,6 +63,9 @@ func convertClaudeResponseToGeminiCLINonStream(
 	out := claudegemini.ConvertClaudeResponseToGeminiNonStream(
 		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
 	)
+	if len(out) == 0 {
+		return nil
+	}
 	// Wrap the converted response in a "response" object to match Gemini CLI API structure
 	return translatorcommon.WrapGeminiCLIResponse(out)
 }

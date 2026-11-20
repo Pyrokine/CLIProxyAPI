@@ -54,19 +54,13 @@ func TestConvertOpenAIRequestToClaudeGroupsConsecutiveParallelToolResults(t *tes
 }
 
 func TestConvertOpenAIRequestToClaudeGroupsToolResultContentArrays(t *testing.T) {
-	inputJSON := []byte(`{
-		"messages":[
-			{
-				"role":"assistant",
-				"tool_calls":[
-					{"id":"call_1","type":"function","function":{"name":"first","arguments":"{}"}},
-					{"id":"call_2","type":"function","function":{"name":"second","arguments":"{}"}}
-				]
-			},
-			{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"first result"}]},
-			{"role":"tool","tool_call_id":"call_2","content":[{"type":"image_url","image_url":{"url":"https://example.com/result.png"}}]}
-		]
-	}`)
+	inputJSON := []byte(("{\n\t\t\"messages\":[\n\t\t\t{\n\t\t\t\t\"role\":\"assistant\",\n\t\t\t\t\"" +
+		"tool_calls\":[\n\t\t\t\t\t{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"first\"," +
+		"\"arguments\":\"{}\"}},\n\t\t\t\t\t{\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":" +
+		"\"second\",\"arguments\":\"{}\"}}\n\t\t\t\t]\n\t\t\t},\n\t\t\t{\"role\":\"tool\",\"tool_call_id\":\"" +
+		"call_1\",\"content\":[{\"type\":\"text\",\"text\":\"first result\"}]},\n\t\t\t{\"role\":\"tool\",\"" +
+		"tool_call_id\":\"call_2\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://" +
+		"example.com/result.png\"}}]}\n\t\t]\n\t}"))
 
 	result := convertOpenAIRequestToClaudeDefault("claude-sonnet-5", inputJSON, false)
 	messages := gjson.GetBytes(result, "messages").Array()
@@ -89,15 +83,12 @@ func TestConvertOpenAIRequestToClaudeGroupsToolResultContentArrays(t *testing.T)
 }
 
 func TestConvertOpenAIRequestToClaudeKeepsToolResultTurnBoundaries(t *testing.T) {
-	inputJSON := []byte(`{
-		"messages":[
-			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"first","arguments":"{}"}}]},
-			{"role":"tool","tool_call_id":"call_1","content":"first result"},
-			{"role":"user","content":"Use that result."},
-			{"role":"assistant","tool_calls":[{"id":"call_2","type":"function","function":{"name":"second","arguments":"{}"}}]},
-			{"role":"tool","tool_call_id":"call_2","content":"second result"}
-		]
-	}`)
+	inputJSON := []byte(("{\n\t\t\"messages\":[\n\t\t\t{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"" +
+		"call_1\",\"type\":\"function\",\"function\":{\"name\":\"first\",\"arguments\":\"{}\"}}]},\n\t\t\t{\"" +
+		"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":\"first result\"},\n\t\t\t{\"role\":\"user\"" +
+		",\"content\":\"Use that result.\"},\n\t\t\t{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"" +
+		"call_2\",\"type\":\"function\",\"function\":{\"name\":\"second\",\"arguments\":\"{}\"}}]},\n\t\t\t{" +
+		"\"role\":\"tool\",\"tool_call_id\":\"call_2\",\"content\":\"second result\"}\n\t\t]\n\t}"))
 
 	result := convertOpenAIRequestToClaudeDefault("claude-sonnet-5", inputJSON, false)
 	messages := gjson.GetBytes(result, "messages").Array()

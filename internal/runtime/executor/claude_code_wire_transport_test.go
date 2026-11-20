@@ -27,9 +27,11 @@ func (f claudeWireRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, e
 func TestClaudeCodeTLSClientHelloSpecMatches220Capture(t *testing.T) {
 	fixture := claudeCodeTLSFingerprintFixture{
 		clientHelloLength: 508,
-		ja3:               "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-23-24,0",
-		ja3MD5:            "d871d02cecbde59abbf8f4806134addf",
-		alpn:              []string{"http/1.1"},
+		ja3: "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-491" +
+			"62-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-2" +
+			"3-24,0",
+		ja3MD5: "d871d02cecbde59abbf8f4806134addf",
+		alpn:   []string{"http/1.1"},
 		cipherSuites: []uint16{
 			4865, 4866, 4867, 49195, 49199, 49196, 49200, 52393, 52392, 49161, 49171, 49162, 49172, 156, 157, 47, 53,
 		},
@@ -157,6 +159,7 @@ func TestClaudeFallbackRoundTripperSelectsProviderFingerprint(t *testing.T) {
 		chrome:    route("chrome"),
 		fallback:  route("fallback"),
 	}
+	//goland:noinspection HttpUrlsUsage
 	tests := []struct {
 		name string
 		url  string
@@ -182,7 +185,7 @@ func TestClaudeFallbackRoundTripperSelectsProviderFingerprint(t *testing.T) {
 				if errRoundTrip != nil {
 					t.Fatal(errRoundTrip)
 				}
-					defer func() { _ = resp.Body.Close() }()
+				defer func() { _ = resp.Body.Close() }()
 				if got := resp.Header.Get("X-Test-Route"); got != test.want {
 					t.Fatalf("route = %q, want %q", got, test.want)
 				}

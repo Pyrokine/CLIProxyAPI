@@ -9,6 +9,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	cliproxysession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
@@ -23,38 +24,44 @@ func (e *ClaudeExecutor) prepareClaudeCompaction(
 	auth *cliproxyauth.Auth,
 	req *cliproxyexecutor.Request,
 	opts *cliproxyexecutor.Options,
-) (helps.AntigravityCompactionScope, bool, error) {
+) (antigravityCompactionRequestContext, bool, error) {
 	if opts.SourceFormat != sdktranslator.FormatOpenAIResponse {
 		if opts.Alt == "responses/compact" {
-			return helps.AntigravityCompactionScope{}, false, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact requires Responses format"}
+			return antigravityCompactionRequestContext{}, false, statusErr{
+				code: http.StatusNotImplemented, msg: "/responses/compact requires Responses format",
+			}
 		}
-		return helps.AntigravityCompactionScope{}, false, nil
+		return antigravityCompactionRequestContext{}, false, nil
 	}
 	requested := opts.Alt == "responses/compact" ||
 		helps.HasResponsesCompactionTrigger(req.Payload) ||
 		helps.HasResponsesCompactionTrigger(opts.OriginalRequest)
 	if !requested && !helps.HasResponsesCompactionItem(req.Payload) &&
 		!helps.HasResponsesCompactionItem(opts.OriginalRequest) {
-		return helps.AntigravityCompactionScope{}, false, nil
+		return antigravityCompactionRequestContext{}, false, nil
 	}
 
 	scope, err := e.claudeCompactionScope(auth, *req, *opts)
 	if err != nil {
-		return scope, false, statusErr{code: http.StatusBadRequest, msg: err.Error()}
+		return antigravityCompactionRequestContext{}, false, statusErr{code: http.StatusBadRequest, msg: err.Error()}
+	}
+	compaction := antigravityCompactionRequestContext{scope: &scope}
+	if helps.HasResponsesCompactionItem(req.Payload) || helps.HasResponsesCompactionItem(opts.OriginalRequest) {
+		compaction.replayModel = scope.Model
 	}
 	if helps.HasResponsesCompactionItem(req.Payload) {
 		req.Payload, err = helps.ExpandAntigravityCompactionCapsules(req.Payload, scope)
 		if err != nil {
-			return scope, false, statusErr{code: http.StatusBadRequest, msg: err.Error()}
+			return compaction, false, statusErr{code: http.StatusBadRequest, msg: err.Error()}
 		}
 	}
 	if helps.HasResponsesCompactionItem(opts.OriginalRequest) {
 		opts.OriginalRequest, err = helps.ExpandAntigravityCompactionCapsules(opts.OriginalRequest, scope)
 		if err != nil {
-			return scope, false, statusErr{code: http.StatusBadRequest, msg: err.Error()}
+			return compaction, false, statusErr{code: http.StatusBadRequest, msg: err.Error()}
 		}
 	}
-	return scope, requested, nil
+	return compaction, requested, nil
 }
 
 func (e *ClaudeExecutor) claudeCompactionScope(
@@ -85,7 +92,13 @@ func (e *ClaudeExecutor) claudeCompactionScope(
 	if auth != nil {
 		key = strings.TrimSpace(auth.Attributes["api_key"])
 		if key == "" {
-			key = strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token"))
+			value, _ := util.ReadClaudeMetadataValue(&auth.Metadata, "refresh_token")
+			switch typed := value.(type) {
+			case string:
+				key = strings.TrimSpace(typed)
+			case []byte:
+				key = strings.TrimSpace(string(typed))
+			}
 		}
 	}
 	if key == "" && e != nil && e.cfg != nil {
@@ -120,7 +133,7 @@ func (e *ClaudeExecutor) executeClaudeCompaction(
 	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
-	scope helps.AntigravityCompactionScope,
+	scope *helps.AntigravityCompactionScope,
 ) (cliproxyexecutor.Response, error) {
 	payload := req.Payload
 	if !helps.HasResponsesCompactionTrigger(payload) && helps.HasResponsesCompactionTrigger(opts.OriginalRequest) {
@@ -142,7 +155,11 @@ func (e *ClaudeExecutor) executeClaudeCompaction(
 	summaryOpts.SourceFormat = sdktranslator.FormatOpenAIResponse
 	summaryOpts.ResponseFormat = sdktranslator.FormatClaude
 
-	summary, err := e.Execute(context.WithValue(ctx, claudeCompactionSummaryContextKey{}, true), auth, summaryReq, summaryOpts)
+	compaction, _ := ctx.Value(claudeCompactionSummaryContextKey{}).(antigravityCompactionRequestContext)
+	compaction.scope = scope
+	compaction.summary = true
+	summaryCtx := context.WithValue(ctx, claudeCompactionSummaryContextKey{}, compaction)
+	summary, err := e.Execute(summaryCtx, auth, summaryReq, summaryOpts)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -150,15 +167,24 @@ func (e *ClaudeExecutor) executeClaudeCompaction(
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("extract compaction summary: %w", err)
 	}
-	capsule, err := helps.SealAntigravityCompaction(text, scope)
+	capsule, err := helps.SealAntigravityCompaction(text, *scope)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("seal compaction capsule: %w", err)
 	}
 	usage := gjson.GetBytes(summary.Payload, "usage")
-	inputTokens := int(usage.Get("input_tokens").Int() + usage.Get("cache_creation_input_tokens").Int() + usage.Get("cache_read_input_tokens").Int())
+	inputTokens := int(
+		usage.Get("input_tokens").
+			Int() +
+			usage.Get("cache_creation_input_tokens").
+				Int() +
+			usage.Get("cache_read_input_tokens").
+				Int(),
+	)
 	outputTokens := int(usage.Get("output_tokens").Int())
 	cachedTokens := int(usage.Get("cache_read_input_tokens").Int())
-	response := helps.BuildAntigravityCompactionResponse(scope.Model, capsule, inputTokens, outputTokens, inputTokens+outputTokens)
+	response := helps.BuildAntigravityCompactionResponse(
+		scope.Model, capsule, inputTokens, outputTokens, inputTokens+outputTokens,
+	)
 	response, _ = sjson.SetBytes(response, "usage.input_tokens_details.cached_tokens", cachedTokens)
 	return cliproxyexecutor.Response{Payload: response, Headers: summary.Headers}, nil
 }
@@ -168,7 +194,7 @@ func (e *ClaudeExecutor) executeClaudeCompactionStream(
 	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
-	scope helps.AntigravityCompactionScope,
+	scope *helps.AntigravityCompactionScope,
 ) (*cliproxyexecutor.StreamResult, error) {
 	summary, err := e.executeClaudeCompaction(ctx, auth, req, opts, scope)
 	if err != nil {
@@ -217,7 +243,11 @@ func claudeCompactionStreamCachedTokens(frame []byte, cachedTokens int) []byte {
 }
 
 func finalizeClaudeCompactionSummaryBody(ctx context.Context, body []byte) []byte {
-	if ctx == nil || ctx.Value(claudeCompactionSummaryContextKey{}) != true {
+	if ctx == nil {
+		return body
+	}
+	compaction, ok := ctx.Value(claudeCompactionSummaryContextKey{}).(antigravityCompactionRequestContext)
+	if !ok || !compaction.summary {
 		return body
 	}
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
@@ -238,7 +268,9 @@ func finalizeClaudeCompactionSummaryBody(ctx context.Context, body []byte) []byt
 			var text string
 			switch part.Get("type").String() {
 			case "tool_use":
-				text = fmt.Sprintf("Tool call %s (%s): %s", part.Get("name").String(), part.Get("id").String(), part.Get("input").Raw)
+				text = fmt.Sprintf(
+					"Tool call %s (%s): %s", part.Get("name").String(), part.Get("id").String(), part.Get("input").Raw,
+				)
 			case "tool_result":
 				text = fmt.Sprintf("Tool result %s: %s", part.Get("tool_use_id").String(), part.Get("content").Raw)
 			default:

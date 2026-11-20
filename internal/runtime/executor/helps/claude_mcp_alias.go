@@ -63,7 +63,7 @@ func AllocateClaudeMCPToolAlias(secret, original string, reserved map[string]boo
 	server := claudeMCPAliasServerComponent(secret)
 	toolDigest := claudeMCPAliasDigest(secret, "tool", original)
 	baseIndex := int(binary.BigEndian.Uint16(toolDigest[0:2])) % totalWords
-	for attempt := 0; attempt < totalWords; attempt++ {
+	for attempt := range totalWords {
 		alias := claudeMCPAliasFor(server, words[(baseIndex+attempt)%totalWords], original)
 		if reserved != nil && reserved[alias] {
 			continue
@@ -75,10 +75,7 @@ func AllocateClaudeMCPToolAlias(secret, original string, reserved map[string]boo
 
 func claudeMCPAliasFor(server, toolID, original string) string {
 	prefix := "mcp__" + server + "__" + toolID + "_"
-	maxSemanticLen := 64 - len(prefix)
-	if maxSemanticLen < 1 {
-		maxSemanticLen = 1
-	}
+	maxSemanticLen := max(64-len(prefix), 1)
 	return prefix + claudeMCPToolSemanticSuffix(original, maxSemanticLen)
 }
 

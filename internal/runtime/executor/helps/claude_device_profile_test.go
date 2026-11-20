@@ -14,19 +14,20 @@ import (
 )
 
 type fakeClaudeDeviceProfileKVClient struct {
-	values        map[string][]byte
-	getErr        error
-	setErr        error
-	setNXErr      error
-	expireErr     error
-	setNXResult   bool
-	getCount      int
-	setCount      int
-	setNXCount    int
-	expireCount   int
-	lastSetTTL    time.Duration
-	lastSetNXTTL  time.Duration
-	lastExpireTTL time.Duration
+	values         map[string][]byte
+	getErr         error
+	setErr         error
+	setNXErr       error
+	expireErr      error
+	setNXResult    bool
+	setNXNoPersist bool
+	getCount       int
+	setCount       int
+	setNXCount     int
+	expireCount    int
+	lastSetTTL     time.Duration
+	lastSetNXTTL   time.Duration
+	lastExpireTTL  time.Duration
 }
 
 func newFakeClaudeDeviceProfileKVClient() *fakeClaudeDeviceProfileKVClient {
@@ -76,7 +77,9 @@ func (c *fakeClaudeDeviceProfileKVClient) KVSetNX(_ context.Context, key string,
 		return false, nil
 	}
 	if c.setNXResult {
-		c.values[key] = append([]byte(nil), value...)
+		if !c.setNXNoPersist {
+			c.values[key] = append([]byte(nil), value...)
+		}
 		return true, nil
 	}
 	return false, nil
@@ -99,7 +102,7 @@ func useFakeClaudeDeviceProfileKVClient(
 ) {
 	t.Helper()
 	previous := currentClaudeDeviceProfileKVClient
-	currentClaudeDeviceProfileKVClient = func() (claudeDeviceProfileKVClient, bool, error) {
+	currentClaudeDeviceProfileKVClient = func(context.Context) (claudeDeviceProfileKVClient, bool, error) {
 		return client, homeMode, errClient
 	}
 	t.Cleanup(
@@ -135,9 +138,10 @@ func TestResolveClaudeDeviceProfileLocalUsesBaselineForInvalidSignals(t *testing
 	headers.Set("X-Stainless-Package-Version", "999.0.0")
 	headers.Set("X-Stainless-Runtime-Version", "v999.0.0")
 
-	profile := resolveClaudeDeviceProfileLocal(auth, "api-key", headers, nil)
+	profile := resolveClaudeDeviceProfileLocal(t.Context(), auth, "api-key", headers, nil)
 	baseline := defaultClaudeDeviceProfile(nil)
-	if profile.UserAgent != baseline.UserAgent || profile.PackageVersion != baseline.PackageVersion || profile.RuntimeVersion != baseline.RuntimeVersion {
+	if profile.UserAgent != baseline.UserAgent || profile.PackageVersion != baseline.PackageVersion ||
+		profile.RuntimeVersion != baseline.RuntimeVersion {
 		t.Fatalf("invalid profile = %#v, want local baseline %#v", profile, baseline)
 	}
 }
@@ -417,7 +421,10 @@ func TestPlausibleClaudeCLIVersionPatchFloor(t *testing.T) {
 	} {
 		candidate, valid := parseClaudeCLIVersion(test.userAgent)
 		if !valid || plausibleClaudeCLIVersion(candidate, baseline) != test.want {
-			t.Fatalf("plausibleClaudeCLIVersion(%q) = %t, want %t", test.userAgent, plausibleClaudeCLIVersion(candidate, baseline), test.want)
+			t.Fatalf(
+				"plausibleClaudeCLIVersion(%q) = %t, want %t", test.userAgent,
+				plausibleClaudeCLIVersion(candidate, baseline), test.want,
+			)
 		}
 	}
 	measured := defaultClaudeDeviceProfile(nil)

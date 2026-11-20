@@ -7,7 +7,8 @@ import (
 )
 
 func TestNormalizeClaudeToolSchemaPreservesCanonicalSchema(t *testing.T) {
-	input := []byte(`{"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":false,"$schema":"http://json-schema.org/draft-07/schema#"}`)
+	input := []byte((`{"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":false,"` +
+		`$schema":"http://json-schema.org/draft-07/schema#"}`))
 
 	output := normalizeClaudeToolSchema(gjson.ParseBytes(input))
 

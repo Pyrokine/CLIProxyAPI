@@ -207,6 +207,12 @@ func isClaudeHaikuModel(model string) bool {
 	return strings.Contains(strings.ToLower(model), "haiku")
 }
 
+func isClaudeHaiku55Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	return model == "claude-haiku-5-5" || strings.HasPrefix(model, "claude-haiku-5-5[") ||
+		strings.HasPrefix(model, "claude-haiku-5-5-")
+}
+
 func claudeCanonicalModel(model string) string {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if slash := strings.LastIndexByte(model, '/'); slash >= 0 {
@@ -217,7 +223,9 @@ func claudeCanonicalModel(model string) string {
 
 func isClaudeSonnet55Model(model string) bool {
 	model = claudeCanonicalModel(model)
-	return model == "claude-sonnet-5-5" || strings.HasPrefix(model, "claude-sonnet-5-5-") || strings.HasPrefix(model, "claude-sonnet-5-5[")
+	return model == "claude-sonnet-5-5" || strings.HasPrefix(model, "claude-sonnet-5-5-") || strings.HasPrefix(
+		model, "claude-sonnet-5-5[",
+	)
 }
 
 func isClaudeSonnet5Model(model string) bool {
@@ -225,7 +233,9 @@ func isClaudeSonnet5Model(model string) bool {
 	if isClaudeSonnet55Model(model) {
 		return false
 	}
-	return model == "claude-sonnet-5" || strings.HasPrefix(model, "claude-sonnet-5-") || strings.HasPrefix(model, "claude-sonnet-5[")
+	return model == "claude-sonnet-5" || strings.HasPrefix(model, "claude-sonnet-5-") || strings.HasPrefix(
+		model, "claude-sonnet-5[",
+	)
 }
 
 func isClaudeOpus55Model(model string) bool {
@@ -234,13 +244,13 @@ func isClaudeOpus55Model(model string) bool {
 }
 
 func claudeModelUsesProgressDisplay(model string) bool {
-	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) ||
+	return isClaudeOpus55Model(model) || isClaudeFableModel(model) ||
 		isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model)
 }
 
 func claudeModelHasPerTurnEffort(model string) bool {
 	model = claudeCanonicalModel(model)
-	return isClaudeOpus55Model(model) || strings.HasPrefix(model, "claude-fable-5-1")
+	return isClaudeOpus55Model(model) || isClaudeFableModel(model) || isClaudeHaiku55Model(model)
 }
 
 func claudeIncludePerTurnControl(body []byte, requested map[string]bool) bool {
@@ -259,13 +269,15 @@ func claudeIncludePerTurnTiming(body []byte, requested map[string]bool) bool {
 		return true
 	}
 	found := false
-	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
-		if message.Get("output_config.timing").Exists() {
-			found = true
-			return false
-		}
-		return true
-	})
+	gjson.GetBytes(body, "messages").ForEach(
+		func(_, message gjson.Result) bool {
+			if message.Get("output_config.timing").Exists() {
+				found = true
+				return false
+			}
+			return true
+		},
+	)
 	return found
 }
 
@@ -274,17 +286,21 @@ func claudeIncludeInlineTools(body []byte, requested map[string]bool) bool {
 		return true
 	}
 	found := false
-	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
-		message.Get("content").ForEach(func(_, block gjson.Result) bool {
-			if strings.EqualFold(strings.TrimSpace(block.Get("type").String()), "tool_addition") &&
-				block.Get("tool.definition").Exists() {
-				found = true
-				return false
-			}
-			return true
-		})
-		return !found
-	})
+	gjson.GetBytes(body, "messages").ForEach(
+		func(_, message gjson.Result) bool {
+			message.Get("content").ForEach(
+				func(_, block gjson.Result) bool {
+					if strings.EqualFold(strings.TrimSpace(block.Get("type").String()), "tool_addition") &&
+						block.Get("tool.definition").Exists() {
+						found = true
+						return false
+					}
+					return true
+				},
+			)
+			return !found
+		},
+	)
 	return found
 }
 
@@ -294,22 +310,24 @@ func claudeIncludeMidConvClearAt(body []byte, requested map[string]bool) bool {
 		return true
 	}
 	found := false
-	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
-		if message.Get("clear_at").Exists() {
-			found = true
-			return false
-		}
-		return true
-	})
+	gjson.GetBytes(body, "messages").ForEach(
+		func(_, message gjson.Result) bool {
+			if message.Get("clear_at").Exists() {
+				found = true
+				return false
+			}
+			return true
+		},
+	)
 	return found
 }
 
-func claudeRequestSupportsEffort(body []byte, requested map[string]bool) bool {
+func claudeRequestSupportsEffort(body []byte, _ map[string]bool) bool {
 	if len(body) > 0 {
 		if helps.IsClaudeProbeOrHelperRequest(body) {
 			return false
 		}
-		if isClaudeHaikuModel(gjson.GetBytes(body, "model").String()) {
+		if model := gjson.GetBytes(body, "model").String(); isClaudeHaikuModel(model) && !isClaudeHaiku55Model(model) {
 			return false
 		}
 		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()), "disabled") {
@@ -507,6 +525,7 @@ func (e *claudeRateLimitError) IsRequestScoped() bool {
 	return false
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *claudeRateLimitError) IsCredentialScoped() bool {
 	return e != nil && e.effectScope == cliproxyexecutor.StateEffectScopeCredential
 }
@@ -529,18 +548,23 @@ func classifyClaudeUpstreamError(statusCode int, body []byte, modelLevelCooling 
 	if len(headers) > 0 {
 		responseHeaders = headers[0]
 		err = err.withUpstreamResponse(responseHeaders)
-		err.retryAfter = helps.ParseClaudeRateLimitReset(responseHeaders, time.Now())
+		err.retryAfter = helps.ParseClaudeRateLimitReset(responseHeaders, time.Now(), statusCode)
 	}
 	if statusCode != http.StatusTooManyRequests {
 		return err
 	}
-	if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(responseHeaders) {
+	if helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(responseHeaders) {
+		scope := cliproxyexecutor.StateEffectScopeCredential
+		if modelLevelCooling {
+			scope = cliproxyexecutor.StateEffectScopeExactModel
+		}
 		return &claudeRateLimitError{
 			statusErr:   err,
-			effectScope: cliproxyexecutor.StateEffectScopeCredential,
+			effectScope: scope,
 		}
 	}
 	if claudeBodyIndicatesFastModeCredits(body) {
+		err.retryAfter = nil
 		return claudeEntitlementError{err}
 	}
 	return &claudeRateLimitError{

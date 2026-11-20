@@ -40,7 +40,11 @@ func TestClaudeBillingFingerprintMultiTurnUsesFirstUserText(t *testing.T) {
 	want := "initial conversation turn"
 	got := claudeBillingFingerprintMessageText(payload)
 	if got != want {
-		t.Fatalf("claudeBillingFingerprintMessageText() = %q, want first user text %q (latest user text busts prompt cache prefix across turns)", got, want)
+		t.Fatalf(
+			"claudeBillingFingerprintMessageText() = %q, want first user text %q (latest user text busts "+
+				"prompt cache prefix across turns)",
+			got, want,
+		)
 	}
 }
 
@@ -53,17 +57,27 @@ func TestClaudeBillingFingerprintEdgeCases(t *testing.T) {
 	}
 
 	// 2. Only assistant message
-	if got := claudeBillingFingerprintMessageText([]byte(`{"messages":[{"role":"assistant","content":"hi"}]}`)); got != "" {
+	if got := claudeBillingFingerprintMessageText([]byte(`{"messages":[{"role":"assistant","content":"hi"}]}`)); got !=
+		"" {
 		t.Fatalf("only assistant message: got %q, want empty", got)
 	}
 
 	// 3. User message without text
-	if got := claudeBillingFingerprintMessageText([]byte(`{"messages":[{"role":"user","content":[{"type":"image"}]}]}`)); got != "" {
+	if got := claudeBillingFingerprintMessageText(
+		[]byte(`{"messages":[{"role":"user","content":[{"type":` +
+			`"image"}]}]}`),
+	); got !=
+		"" {
 		t.Fatalf("user message with no text: got %q, want empty", got)
 	}
 
 	// 4. User message with only system reminder
-	if got := claudeBillingFingerprintMessageText([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>date</system-reminder>"}]}]}`)); got != "" {
+	if got := claudeBillingFingerprintMessageText(
+		[]byte(`{"messages":[{"role":"user","content":[{"type":` +
+			`"text","text":"<system-reminder>date</` +
+			`system-reminder>"}]}]}`),
+	); got !=
+		"" {
 		t.Fatalf("user message with only reminder: got %q, want empty", got)
 	}
 
@@ -84,24 +98,31 @@ func TestClaudeBillingFingerprintEdgeCases(t *testing.T) {
 func TestClaudeCloakedSingleTurnPrefixStability(t *testing.T) {
 	var capturedBodies [][]byte
 	call := 0
-	transport := protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, errRead := io.ReadAll(req.Body)
-		if errRead != nil {
-			t.Fatal(errRead)
-		}
-		capturedBodies = append(capturedBodies, body)
-		call++
-		response := fmt.Sprintf(`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":10,"output_tokens":2}}`, call)
-		header := make(http.Header)
-		header.Set("Content-Type", "application/json")
-		header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     header,
-			Body:       io.NopCloser(strings.NewReader(response)),
-			Request:    req,
-		}, nil
-	})
+	transport := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			capturedBodies = append(capturedBodies, body)
+			call++
+			response := fmt.Sprintf(
+				`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assist`+
+					`ant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":1`+
+					`0,"output_tokens":2}}`,
+				call,
+			)
+			header := make(http.Header)
+			header.Set("Content-Type", "application/json")
+			header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(response)),
+				Request:    req,
+			}, nil
+		},
+	)
 
 	ctx := util.WithRoundTripper(context.Background(), transport)
 	auth := &cliproxyauth.Auth{
@@ -120,12 +141,14 @@ func TestClaudeCloakedSingleTurnPrefixStability(t *testing.T) {
 	}
 
 	systemPrompt := "You are an expert software engineer with deep knowledge of distributed systems..."
-	payload1 := fmt.Sprintf(`{
+	payload1 := fmt.Sprintf(
+		`{
 		"model": "claude-opus-5",
 		"system": [{"type": "text", "text": %q, "cache_control": {"type": "ephemeral"}}],
 		"messages": [{"role": "user", "content": "Say OK."}],
 		"max_tokens": 100
-	}`, systemPrompt)
+	}`, systemPrompt,
+	)
 
 	req1 := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(payload1)}
 	if _, err := exec.Execute(ctx, auth, req1, options); err != nil {
@@ -146,7 +169,10 @@ func TestClaudeCloakedSingleTurnPrefixStability(t *testing.T) {
 	body2 := capturedBodies[1]
 
 	if !bytes.Equal(body1, body2) {
-		t.Fatalf("upstream request body changed between identical single-turn requests:\nBody 1: %s\nBody 2: %s", string(body1), string(body2))
+		t.Fatalf(
+			"upstream request body changed between identical single-turn requests:\nBody 1: %s\nBody 2: %s",
+			string(body1), string(body2),
+		)
 	}
 }
 
@@ -156,24 +182,31 @@ func TestClaudeCloakedSingleTurnPrefixStability(t *testing.T) {
 func TestClaudeCloakedSingleTurnPrefixStabilityWithPinnedSession(t *testing.T) {
 	var capturedBodies [][]byte
 	call := 0
-	transport := protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, errRead := io.ReadAll(req.Body)
-		if errRead != nil {
-			t.Fatal(errRead)
-		}
-		capturedBodies = append(capturedBodies, body)
-		call++
-		response := fmt.Sprintf(`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":10,"output_tokens":2}}`, call)
-		header := make(http.Header)
-		header.Set("Content-Type", "application/json")
-		header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     header,
-			Body:       io.NopCloser(strings.NewReader(response)),
-			Request:    req,
-		}, nil
-	})
+	transport := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			capturedBodies = append(capturedBodies, body)
+			call++
+			response := fmt.Sprintf(
+				`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assist`+
+					`ant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":1`+
+					`0,"output_tokens":2}}`,
+				call,
+			)
+			header := make(http.Header)
+			header.Set("Content-Type", "application/json")
+			header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(response)),
+				Request:    req,
+			}, nil
+		},
+	)
 
 	ctx := util.WithRoundTripper(context.Background(), transport)
 	auth := &cliproxyauth.Auth{
@@ -193,12 +226,14 @@ func TestClaudeCloakedSingleTurnPrefixStabilityWithPinnedSession(t *testing.T) {
 	}
 
 	systemPrompt := "You are an expert software engineer with deep knowledge of distributed systems..."
-	payload1 := fmt.Sprintf(`{
+	payload1 := fmt.Sprintf(
+		`{
 		"model": "claude-opus-5",
 		"system": [{"type": "text", "text": %q, "cache_control": {"type": "ephemeral"}}],
 		"messages": [{"role": "user", "content": "Say OK."}],
 		"max_tokens": 100
-	}`, systemPrompt)
+	}`, systemPrompt,
+	)
 
 	req1 := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(payload1)}
 	if _, err := exec.Execute(ctx, auth, req1, options); err != nil {
@@ -218,7 +253,11 @@ func TestClaudeCloakedSingleTurnPrefixStabilityWithPinnedSession(t *testing.T) {
 	body2 := capturedBodies[1]
 
 	if !bytes.Equal(body1, body2) {
-		t.Fatalf("upstream request body changed between identical requests with pinned session:\nBody 1: %s\nBody 2: %s", string(body1), string(body2))
+		t.Fatalf(
+			"upstream request body changed between identical requests with pinned session:\nBody 1: %s\nBody 2: %s",
+			string(body1),
+			string(body2),
+		)
 	}
 }
 
@@ -230,29 +269,36 @@ func TestClaudeCloakedSingleTurnPrefixStabilityWithPinnedSession(t *testing.T) {
 func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	var capturedBodies [][]byte
 	call := 0
-	transport := protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, errRead := io.ReadAll(req.Body)
-		if errRead != nil {
-			t.Fatal(errRead)
-		}
-		capturedBodies = append(capturedBodies, body)
-		call++
-		response := fmt.Sprintf(`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"Understood."}],"usage":{"input_tokens":10,"output_tokens":2}}`, call)
-		header := make(http.Header)
-		header.Set("Content-Type", "application/json")
-		header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     header,
-			Body:       io.NopCloser(strings.NewReader(response)),
-			Request:    req,
-		}, nil
-	})
+	transport := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			capturedBodies = append(capturedBodies, body)
+			call++
+			response := fmt.Sprintf(
+				`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assist`+
+					`ant","content":[{"type":"text","text":"Understood."}],"usage":{"input_`+
+					`tokens":10,"output_tokens":2}}`,
+				call,
+			)
+			header := make(http.Header)
+			header.Set("Content-Type", "application/json")
+			header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(response)),
+				Request:    req,
+			}, nil
+		},
+	)
 
 	ctx := util.WithRoundTripper(context.Background(), transport)
 	auth := &cliproxyauth.Auth{
 		ID:         "test-cloaked-multiturn-oauth",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-multiturn"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-multiturn", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid": "11111111-2222-4333-8444-555555555555",
 			claudeauth.DeviceIDsMetadataKey: []string{
@@ -266,28 +312,42 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	}
 
 	systemPrompt := "You are an expert software engineer with deep knowledge of distributed systems..."
-	turn1Payload := fmt.Sprintf(`{
-		"model": "claude-opus-5",
-		"system": [{"type": "text", "text": %q, "cache_control": {"type": "ephemeral"}}],
-		"messages": [{"role": "user", "content": "turn 1 user prompt"}],
-		"max_tokens": 100
-	}`, systemPrompt)
-
-	turn2Payload := fmt.Sprintf(`{
+	turn1Payload := fmt.Sprintf(
+		`{
 		"model": "claude-opus-5",
 		"system": [{"type": "text", "text": %q, "cache_control": {"type": "ephemeral"}}],
 		"messages": [
+			{"role": "user", "content": "turn 0 user prompt"},
+			{"role": "assistant", "content": "Earlier response."},
+			{"role": "user", "content": "turn 1 user prompt"}
+		],
+		"max_tokens": 100
+	}`, systemPrompt,
+	)
+
+	turn2Payload := fmt.Sprintf(
+		`{
+		"model": "claude-opus-5",
+		"system": [{"type": "text", "text": %q, "cache_control": {"type": "ephemeral"}}],
+		"messages": [
+			{"role": "user", "content": "turn 0 user prompt"},
+			{"role": "assistant", "content": "Earlier response."},
 			{"role": "user", "content": "turn 1 user prompt"},
 			{"role": "assistant", "content": "Understood."},
 			{"role": "user", "content": "turn 2 user prompt with new question"}
 		],
 		"max_tokens": 100
-	}`, systemPrompt)
+	}`, systemPrompt,
+	)
 
-	if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn1Payload)}, options); err != nil {
+	if _, err := exec.Execute(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn1Payload)}, options,
+	); err != nil {
 		t.Fatalf("turn 1 failed: %v", err)
 	}
-	if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn2Payload)}, options); err != nil {
+	if _, err := exec.Execute(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn2Payload)}, options,
+	); err != nil {
 		t.Fatalf("turn 2 failed: %v", err)
 	}
 
@@ -304,7 +364,11 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	ver1 := extractTag(sys1, "cc_version=")
 	ver2 := extractTag(sys2, "cc_version=")
 	if ver1 != ver2 {
-		t.Fatalf("cc_version buildHash changed across turns: turn1=%q turn2=%q (busts prompt cache prefix)", ver1, ver2)
+		t.Fatalf(
+			"cc_version buildHash changed across turns: turn1=%q turn2=%q (busts prompt cache prefix)",
+			ver1,
+			ver2,
+		)
 	}
 
 	// 2. Verify system[1] CLI identity block matches across turns
@@ -341,21 +405,29 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	}
 
 	// 7. Verify repeated turn 2 produces 100% byte-identical request body
-	if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn2Payload)}, options); err != nil {
+	if _, err := exec.Execute(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn2Payload)}, options,
+	); err != nil {
 		t.Fatalf("turn 2 repeat failed: %v", err)
 	}
 	if len(capturedBodies) != 3 {
 		t.Fatalf("expected 3 captured bodies, got %d", len(capturedBodies))
 	}
 	if !bytes.Equal(capturedBodies[1], capturedBodies[2]) {
-		t.Fatalf("repeated multi-turn request body differs:\nTurn 2:        %s\nTurn 2 repeat: %s", string(capturedBodies[1]), string(capturedBodies[2]))
+		t.Fatalf(
+			"repeated multi-turn request body differs:\nTurn 2:        %s\nTurn 2 repeat: %s",
+			string(capturedBodies[1]), string(capturedBodies[2]),
+		)
 	}
 
 	// 8. Verify Turn 3 maintains identical prompt cache prefix and repeated Turn 3 is identical
-	turn3Payload := fmt.Sprintf(`{
+	turn3Payload := fmt.Sprintf(
+		`{
 		"model": "claude-opus-5",
 		"system": [{"type": "text", "text": %q, "cache_control": {"type": "ephemeral"}}],
 		"messages": [
+			{"role": "user", "content": "turn 0 user prompt"},
+			{"role": "assistant", "content": "Earlier response."},
 			{"role": "user", "content": "turn 1 user prompt"},
 			{"role": "assistant", "content": "Understood."},
 			{"role": "user", "content": "turn 2 user prompt with new question"},
@@ -363,12 +435,17 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 			{"role": "user", "content": "turn 3 user prompt asking for more"}
 		],
 		"max_tokens": 100
-	}`, systemPrompt)
+	}`, systemPrompt,
+	)
 
-	if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn3Payload)}, options); err != nil {
+	if _, err := exec.Execute(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn3Payload)}, options,
+	); err != nil {
 		t.Fatalf("turn 3 failed: %v", err)
 	}
-	if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn3Payload)}, options); err != nil {
+	if _, err := exec.Execute(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(turn3Payload)}, options,
+	); err != nil {
 		t.Fatalf("turn 3 repeat failed: %v", err)
 	}
 
@@ -392,7 +469,11 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 		t.Fatalf("turn 3 cc_prev_req unexpectedly present: %s", sys3)
 	}
 	if !bytes.Equal(body3, body3Repeat) {
-		t.Fatalf("repeated turn 3 body differs:\nTurn 3:        %s\nTurn 3 repeat: %s", string(body3), string(body3Repeat))
+		t.Fatalf(
+			"repeated turn 3 body differs:\nTurn 3:        %s\nTurn 3 repeat: %s",
+			string(body3),
+			string(body3Repeat),
+		)
 	}
 }
 
@@ -401,24 +482,32 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 func TestClaudeCloakedStreamingPrefixStability(t *testing.T) {
 	var capturedBodies [][]byte
 	call := 0
-	transport := protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, errRead := io.ReadAll(req.Body)
-		if errRead != nil {
-			t.Fatal(errRead)
-		}
-		capturedBodies = append(capturedBodies, body)
-		call++
-		sse := fmt.Sprintf("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_%d\",\"type\":\"message\",\"model\":\"claude-opus-5\",\"role\":\"assistant\",\"content\":[]}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", call)
-		header := make(http.Header)
-		header.Set("Content-Type", "text/event-stream")
-		header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     header,
-			Body:       io.NopCloser(strings.NewReader(sse)),
-			Request:    req,
-		}, nil
-	})
+	transport := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			capturedBodies = append(capturedBodies, body)
+			call++
+			sse := fmt.Sprintf(
+				"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{"+
+					"\"id\":\"msg_%d\",\"type\":\"message\",\"model\":\"claude-opus-5\",\"r"+
+					"ole\":\"assistant\",\"content\":[]}}\n\nevent: message_stop\ndata: {\""+
+					"type\":\"message_stop\"}\n\n",
+				call,
+			)
+			header := make(http.Header)
+			header.Set("Content-Type", "text/event-stream")
+			header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(sse)),
+				Request:    req,
+			}, nil
+		},
+	)
 
 	ctx := util.WithRoundTripper(context.Background(), transport)
 	auth := &cliproxyauth.Auth{
@@ -444,7 +533,9 @@ func TestClaudeCloakedStreamingPrefixStability(t *testing.T) {
 		"max_tokens": 100
 	}`
 
-	resp1, err1 := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(payload1)}, options)
+	resp1, err1 := exec.ExecuteStream(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(payload1)}, options,
+	)
 	if err1 != nil {
 		t.Fatalf("stream 1 failed: %v", err1)
 	}
@@ -454,7 +545,9 @@ func TestClaudeCloakedStreamingPrefixStability(t *testing.T) {
 		}
 	}
 
-	resp2, err2 := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(payload1)}, options)
+	resp2, err2 := exec.ExecuteStream(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(payload1)}, options,
+	)
 	if err2 != nil {
 		t.Fatalf("stream 2 failed: %v", err2)
 	}
@@ -468,7 +561,10 @@ func TestClaudeCloakedStreamingPrefixStability(t *testing.T) {
 	}
 
 	if !bytes.Equal(capturedBodies[0], capturedBodies[1]) {
-		t.Fatalf("streaming request bodies differ:\nBody 1: %s\nBody 2: %s", string(capturedBodies[0]), string(capturedBodies[1]))
+		t.Fatalf(
+			"streaming request bodies differ:\nBody 1: %s\nBody 2: %s", string(capturedBodies[0]),
+			string(capturedBodies[1]),
+		)
 	}
 }
 
@@ -478,24 +574,34 @@ func TestClaudeCloakedStreamingPrefixStability(t *testing.T) {
 func TestClaudeCloakedOpenAIFormatPrefixStability(t *testing.T) {
 	var capturedBodies [][]byte
 	call := 0
-	transport := protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, errRead := io.ReadAll(req.Body)
-		if errRead != nil {
-			t.Fatal(errRead)
-		}
-		capturedBodies = append(capturedBodies, body)
-		call++
-		sse := fmt.Sprintf("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_%d\",\"type\":\"message\",\"model\":\"claude-opus-5\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", call)
-		header := make(http.Header)
-		header.Set("Content-Type", "text/event-stream")
-		header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     header,
-			Body:       io.NopCloser(strings.NewReader(sse)),
-			Request:    req,
-		}, nil
-	})
+	transport := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			capturedBodies = append(capturedBodies, body)
+			call++
+			sse := fmt.Sprintf(
+				"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{"+
+					"\"id\":\"msg_%d\",\"type\":\"message\",\"model\":\"claude-opus-5\",\"r"+
+					"ole\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}"+
+					"}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\""+
+					":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nev"+
+					"ent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+				call,
+			)
+			header := make(http.Header)
+			header.Set("Content-Type", "text/event-stream")
+			header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(sse)),
+				Request:    req,
+			}, nil
+		},
+	)
 
 	ctx := util.WithRoundTripper(context.Background(), transport)
 	auth := &cliproxyauth.Auth{
@@ -536,7 +642,10 @@ func TestClaudeCloakedOpenAIFormatPrefixStability(t *testing.T) {
 	}
 
 	if !bytes.Equal(capturedBodies[0], capturedBodies[1]) {
-		t.Fatalf("openai format upstream bodies differ:\nBody 1: %s\nBody 2: %s", string(capturedBodies[0]), string(capturedBodies[1]))
+		t.Fatalf(
+			"openai format upstream bodies differ:\nBody 1: %s\nBody 2: %s", string(capturedBodies[0]),
+			string(capturedBodies[1]),
+		)
 	}
 }
 
@@ -546,29 +655,36 @@ func TestClaudeCloakedOpenAIFormatPrefixStability(t *testing.T) {
 func TestClaudeCloakedToolContinuationPreservesExplicitPromptID(t *testing.T) {
 	var capturedBodies [][]byte
 	call := 0
-	transport := protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, errRead := io.ReadAll(req.Body)
-		if errRead != nil {
-			t.Fatal(errRead)
-		}
-		capturedBodies = append(capturedBodies, body)
-		call++
-		response := fmt.Sprintf(`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":10,"output_tokens":2}}`, call)
-		header := make(http.Header)
-		header.Set("Content-Type", "application/json")
-		header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     header,
-			Body:       io.NopCloser(strings.NewReader(response)),
-			Request:    req,
-		}, nil
-	})
+	transport := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			capturedBodies = append(capturedBodies, body)
+			call++
+			response := fmt.Sprintf(
+				`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assist`+
+					`ant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":1`+
+					`0,"output_tokens":2}}`,
+				call,
+			)
+			header := make(http.Header)
+			header.Set("Content-Type", "application/json")
+			header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(response)),
+				Request:    req,
+			}, nil
+		},
+	)
 
 	ctx := util.WithRoundTripper(context.Background(), transport)
 	auth := &cliproxyauth.Auth{
 		ID:         "test-cloaked-explicit-prompt-oauth",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-explicit-prompt-key"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-explicit-prompt-key", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid": "11111111-2222-4333-8444-555555555555",
 			claudeauth.DeviceIDsMetadataKey: []string{
@@ -582,16 +698,18 @@ func TestClaudeCloakedToolContinuationPreservesExplicitPromptID(t *testing.T) {
 		Headers:      http.Header{"Session-Id": []string{"sess-explicit-tool-1"}},
 	}
 
+	//goland:noinspection SpellCheckingInspection
 	explicitUUID := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-	turn1Payload := []byte(`{
-		"model": "claude-opus-5",
-		"system": [
-			{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.258.000; cc_entrypoint=cli; cch=00000; cc_prompt_id=` + explicitUUID + `;"}
+	turn1Payload := []byte("{\n\t\t\"model\": \"claude-opus-5\",\n\t\t\"system\": [\n\t\t\t{\"type" +
+		`": "text", "text": "x-anthropic-billing-header: cc_version=2.1.258.000` +
+		`; cc_entrypoint=cli; cch=00000; cc_prompt_id=` + explicitUUID + `;"}
 		],
 		"messages": [{"role": "user", "content": "run tool"}]
 	}`)
 
-	if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: turn1Payload}, options); err != nil {
+	if _, err := exec.Execute(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: turn1Payload}, options,
+	); err != nil {
 		t.Fatalf("turn 1 failed: %v", err)
 	}
 
@@ -605,7 +723,9 @@ func TestClaudeCloakedToolContinuationPreservesExplicitPromptID(t *testing.T) {
 		]
 	}`)
 
-	if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: turn1ToolPayload}, options); err != nil {
+	if _, err := exec.Execute(
+		ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: turn1ToolPayload}, options,
+	); err != nil {
 		t.Fatalf("turn 1.1 failed: %v", err)
 	}
 
@@ -627,40 +747,49 @@ func TestClaudeCloakedToolContinuationPreservesExplicitPromptID(t *testing.T) {
 func TestClaudeCloakedColdStartToolContinuationUsesDeterministicPromptID(t *testing.T) {
 	var capturedBodies [][]byte
 	call := 0
-	transport := protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, errRead := io.ReadAll(req.Body)
-		if errRead != nil {
-			t.Fatal(errRead)
-		}
-		capturedBodies = append(capturedBodies, body)
-		call++
-		header := make(http.Header)
-		header.Set("Content-Type", "application/json")
-		header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
+	transport := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			capturedBodies = append(capturedBodies, body)
+			call++
+			header := make(http.Header)
+			header.Set("Content-Type", "application/json")
+			header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
 
-		// First call fails (e.g. 500 error, uncommitted state)
-		if call == 1 {
+			// First call fails (e.g. 500 error, uncommitted state)
+			if call == 1 {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Header:     header,
+					Body: io.NopCloser(
+						strings.NewReader(`{"error":{"type":"api_error","message":"temporary failure"}}`),
+					),
+					Request: req,
+				}, nil
+			}
+
+			response := fmt.Sprintf(
+				`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assist`+
+					`ant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":1`+
+					`0,"output_tokens":2}}`,
+				call,
+			)
 			return &http.Response{
-				StatusCode: http.StatusInternalServerError,
+				StatusCode: http.StatusOK,
 				Header:     header,
-				Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"api_error","message":"temporary failure"}}`)),
+				Body:       io.NopCloser(strings.NewReader(response)),
 				Request:    req,
 			}, nil
-		}
-
-		response := fmt.Sprintf(`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":10,"output_tokens":2}}`, call)
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     header,
-			Body:       io.NopCloser(strings.NewReader(response)),
-			Request:    req,
-		}, nil
-	})
+		},
+	)
 
 	ctx := util.WithRoundTripper(context.Background(), transport)
 	auth := &cliproxyauth.Auth{
 		ID:         "test-cloaked-cold-start-tool-oauth",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-cold-start-key"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-cold-start-key", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid": "11111111-2222-4333-8444-555555555555",
 			claudeauth.DeviceIDsMetadataKey: []string{
@@ -685,7 +814,10 @@ func TestClaudeCloakedColdStartToolContinuationUsesDeterministicPromptID(t *test
 
 	req1 := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: toolPayload}
 	// First execution fails (uncommitted)
-	_, _ = exec.Execute(ctx, auth, req1, options)
+	if _, err := exec.Execute(ctx, auth, req1, options); err == nil ||
+		statusErrCode(err) != http.StatusInternalServerError {
+		t.Fatalf("first cold start execution error = %v, want 500", err)
+	}
 
 	// Repeated cold start tool continuation retry
 	req2 := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: toolPayload}
@@ -720,23 +852,32 @@ func TestClaudeCloakedRequestKeepsPinnedDateAfterCalendarChange(t *testing.T) {
 			},
 		},
 	}
-	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}],"max_tokens":100}`)
+	payload := []byte(
+		`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}],"max_tokens":100}`,
+	)
 	options := cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatClaude,
 		Headers:      http.Header{"X-Session-ID": {"date-pin-session"}},
 	}
 	sessionID := helps.ClaudeAgentSessionUUIDForRequest(options.Headers, payload, payload, false)
-	key, _, _, _, _ := helps.BeginClaudeContinuity(claudeDiagnosticsCredentialIdentity(auth), sessionID, true, "")
+	key, _, _, _, _ := helps.BeginClaudeContinuity(
+		claudeDiagnosticsCredentialIdentity(auth),
+		sessionID,
+		true,
+		"",
+	)
 	const pinnedDate = "2020-01-02"
 	helps.PinClaudeSessionDate(key, pinnedDate)
 
 	executor := NewClaudeExecutor(&config.Config{})
-	prepared, err := executor.prepareClaudeRequest(context.Background(), auth,
-		cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}, options, false)
+	prepared, err := executor.prepareClaudeRequest(
+		context.Background(), auth,
+		cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}, options, false,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer prepared.httpReq.Body.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(prepared.httpReq.Body.Close)
 	body, err := io.ReadAll(prepared.httpReq.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -748,16 +889,19 @@ func TestClaudeCloakedRequestKeepsPinnedDateAfterCalendarChange(t *testing.T) {
 }
 
 func TestComputeFingerprintUsesNativeUTF16Indices(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	for _, tt := range []struct {
 		name, text, want string
 	}{
 		{name: "emoji before sampled positions", text: "😀abcdefghijklmnopqrstuvwxyz", want: "dac"},
 		{name: "sampled high surrogate", text: "abc😀abcdefghijklmnop", want: "695"},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := computeClaudeFingerprint(tt.text, "2.1.280"); got != tt.want {
-				t.Errorf("fingerprint = %q, want %q", got, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				if got := computeClaudeFingerprint(tt.text, "2.1.280"); got != tt.want {
+					t.Errorf("fingerprint = %q, want %q", got, tt.want)
+				}
+			},
+		)
 	}
 }

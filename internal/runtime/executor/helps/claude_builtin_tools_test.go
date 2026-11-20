@@ -37,7 +37,9 @@ func TestAugmentClaudeBuiltinToolRegistryIncludesTypedServerTools(t *testing.T) 
 	]}`)
 
 	registry := AugmentClaudeBuiltinToolRegistry(body, nil)
-	for _, name := range []string{"advisor", "agent_toolset", "web_search", "code_execution", "text_editor", "computer"} {
+	for _, name := range []string{
+		"advisor", "agent_toolset", "web_search", "code_execution", "text_editor", "computer",
+	} {
 		if !registry[name] {
 			t.Errorf("registry[%q] = false, want true", name)
 		}

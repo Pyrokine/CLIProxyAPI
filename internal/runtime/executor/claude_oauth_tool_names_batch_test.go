@@ -21,11 +21,21 @@ func TestRemapOAuthToolNamesWithBatchedEditsMatchesLegacyBytes(t *testing.T) {
 	}{
 		{
 			name: "all reference shapes and undeclared history",
-			body: []byte(`{"model":"claude-opus-4-7","tools":[{"name":"search_web","input_schema":{"type":"object"}},{"name":"Search_Web","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"search_web"},"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"search_web","input":{}},{"type":"tool_reference","tool_name":"Search_Web"},{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"search_web"}]},{"type":"tool_use","id":"toolu_unknown","name":"not_declared","input":{}}]}]}`),
+			body: []byte((`{"model":"claude-opus-4-7","tools":[{"name":"search_web","input_schema":{"type":"` +
+				`object"}},{"name":"Search_Web","input_schema":{"type":"object"}}],"tool_choice":{"type":"` +
+				`tool","name":"search_web"},"messages":[{"role":"assistant","content":[{"type":"tool_use","` +
+				`id":"toolu_1","name":"search_web","input":{}},{"type":"tool_reference","tool_name":"` +
+				`Search_Web"},{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"` +
+				`tool_reference","tool_name":"search_web"}]},{"type":"tool_use","id":"toolu_unknown","name":"` +
+				`not_declared","input":{}}]}]}`)),
 		},
 		{
 			name: "typed custom server existing MCP and duplicate declaration",
-			body: []byte(`{"tools":[{"type":"custom","name":"client_custom","input_schema":{"type":"object"}},{"type":"web_search_20250305","name":"web_search"},{"name":"mcp__context7__query-docs"},{"name":"client_custom"}],"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"client_custom","id":"toolu_1","input":{}},{"type":"tool_reference","tool_name":"web_search"},{"type":"tool_reference","tool_name":"mcp__context7__query-docs"}]}]}`),
+			body: []byte((`{"tools":[{"type":"custom","name":"client_custom","input_schema":{"type":"object"}}` +
+				`,{"type":"web_search_20250305","name":"web_search"},{"name":"mcp__context7__query-docs"},{"` +
+				`name":"client_custom"}],"messages":[{"role":"assistant","content":[{"type":"tool_use","name"` +
+				`:"client_custom","id":"toolu_1","input":{}},{"type":"tool_reference","tool_name":"` +
+				`web_search"},{"type":"tool_reference","tool_name":"mcp__context7__query-docs"}]}]}`)),
 		},
 		{
 			name: "alias collision",
@@ -37,21 +47,32 @@ func TestRemapOAuthToolNamesWithBatchedEditsMatchesLegacyBytes(t *testing.T) {
 		{
 			name: "unicode long and case distinct names",
 			body: []byte(fmt.Sprintf(
-				`{"messages":[{"content":[{"name":%q,"type":"tool_use"},{"tool_name":"read_file","type":"tool_reference"}]}],"tools":[{"name":%q},{"name":"read_file"}]}`,
+				`{"messages":[{"content":[{"name":%q,"type":"tool_use"},{"tool_name":"r`+
+					`ead_file","type":"tool_reference"}]}],"tools":[{"name":%q},{"name":"re`+
+					`ad_file"}]}`,
 				longName, longName,
 			)),
 		},
 		{
 			name: "whitespace key order and escaped original",
-			body: []byte("{\n  \"messages\" : [ { \"content\" : [ { \"name\" : \"fetch\\u005furl\", \"input\":{}, \"type\" : \"tool_use\" } ], \"role\" : \"assistant\" } ],\n  \"unknown\" : {\"number\":1.2300,\"escaped\":\"a\\/b\\n<>&\"},\n  \"tool_choice\" : { \"name\" : \"fetch\\u005furl\", \"type\" : \"tool\" },\n  \"tools\" : [ { \"description\" : \"keep \\\"bytes\\\"\", \"name\" : \"fetch\\u005furl\", \"input_schema\" : { \"type\" : \"object\" } } ]\n}"),
+			body: []byte("{\n  \"messages\" : [ { \"content\" : [ { \"name\" : \"fetch\\u005furl" +
+				"\", \"input\":{}, \"type\" : \"tool_use\" } ], \"role\" : \"assistant" +
+				"\" } ],\n  \"unknown\" : {\"number\":1.2300,\"escaped\":\"a\\/b\\n<>&" +
+				"\"},\n  \"tool_choice\" : { \"name\" : \"fetch\\u005furl\", \"type\" :" +
+				" \"tool\" },\n  \"tools\" : [ { \"description\" : \"keep \\\"bytes\\\"" +
+				"\", \"name\" : \"fetch\\u005furl\", \"input_schema\" : { \"type\" : \"" +
+				"object\" } } ]\n}"),
 		},
 		{
 			name: "non-string names follow legacy coercion",
-			body: []byte(`{"tools":[{"name":42}],"tool_choice":{"type":"tool","name":42},"messages":[{"content":[{"type":"tool_reference","tool_name":42}]}]}`),
+			body: []byte((`{"tools":[{"name":42}],"tool_choice":{"type":"tool","name":42},"messages":[{"` +
+				`content":[{"type":"tool_reference","tool_name":42}]}]}`)),
 		},
 		{
 			name: "no edits",
-			body: []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"mcp__server__existing"}],"messages":[{"content":[{"type":"tool_reference","tool_name":"unknown"}]}]}`),
+			body: []byte((`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"` +
+				`mcp__server__existing"}],"messages":[{"content":[{"type":"tool_reference","tool_name":"` +
+				`unknown"}]}]}`)),
 		},
 	}
 
@@ -131,8 +152,11 @@ func FuzzRemapOAuthToolNamesWithBatchedEditsMatchesLegacy(f *testing.F) {
 	seeds := [][]byte{
 		[]byte(`{}`),
 		[]byte(`{"tools":[{"name":"search_web"}]}`),
-		[]byte(`{"tools":[{"type":"custom","name":"读取文件"}],"tool_choice":{"type":"tool","name":"读取文件"},"messages":[{"content":[{"type":"tool_use","name":"读取文件"}]}]}`),
-		[]byte("{\n\"messages\":[{\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"a\\u005fb\"}]}],\"tools\":[{\"name\":\"a\\u005fb\"}]}"),
+		[]byte(`{"tools":[{"type":"custom","name":"读取文件"}],"tool_choice":{"type":"tool` +
+			`","name":"读取文件"},"messages":[{"content":[{"type":"tool_use","name":"读取` +
+			`文件"}]}]}`),
+		[]byte("{\n\"messages\":[{\"content\":[{\"type\":\"tool_reference\",\"tool_nam" +
+			"e\":\"a\\u005fb\"}]}],\"tools\":[{\"name\":\"a\\u005fb\"}]}"),
 	}
 	for _, seed := range seeds {
 		f.Add(seed, "fuzz-caller")

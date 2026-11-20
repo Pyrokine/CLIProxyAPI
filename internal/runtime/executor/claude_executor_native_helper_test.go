@@ -19,10 +19,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+//goland:noinspection SpellCheckingInspection
 const (
 	claudeNativeHelperSessionID = "11111111-2222-4333-8444-555555555555"
-	claudeNativeHelperUserID    = `{"device_id":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","account_uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","session_id":"11111111-2222-4333-8444-555555555555"}`
-	claudeNativeHelperCoreBetas = "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+	claudeNativeHelperUserID    = `{"device_id":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff` +
+		`ffffffff","account_uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","sessi` +
+		`on_id":"11111111-2222-4333-8444-555555555555"}`
+	claudeNativeHelperCoreBetas = "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-" +
+		"02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,pr" +
+		"ompt-caching-scope-2026-01-05"
 )
 
 func claudeNativeHelperHeaders(betas, compression string) http.Header {
@@ -77,59 +82,76 @@ func TestApplyClaudeHeadersPreservesCallerAsyncWithoutFingerprintOptIn(t *testin
 		{name: "unconfirmed caller default", wantAsync: "async"},
 		{name: "unconfirmed caller profile", profile: true},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", nil)
-			if errRequest != nil {
-				t.Fatal(errRequest)
-			}
-			incoming := http.Header{"X-Stainless-Async": {"async"}}
-			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-api-key"}}
-			if test.profile {
-				auth.Attributes["fingerprint_profile"] = "claude-code-cli"
-			}
-			if errHeaders := applyClaudeHeaders(
-				request,
-				auth,
-				"test-api-key",
-				true,
-				nil,
-				[]byte(`{"model":"claude-haiku-4-5-20251001"}`),
-				&config.Config{},
-				incoming,
-				test.confirmed,
-				claudeNativeHelperSessionID,
-			); errHeaders != nil {
-				t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
-			}
-			if got := request.Header.Get("X-Stainless-Async"); got != test.wantAsync {
-				t.Fatalf("X-Stainless-Async = %q, want %q", got, test.wantAsync)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				request, errRequest := http.NewRequest(
+					http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", nil,
+				)
+				if errRequest != nil {
+					t.Fatal(errRequest)
+				}
+				incoming := http.Header{"X-Stainless-Async": {"async"}}
+				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-api-key"}}
+				if test.profile {
+					auth.Attributes["fingerprint_profile"] = "claude-code-cli"
+				}
+				if errHeaders := applyClaudeHeaders(
+					request,
+					auth,
+					"test-api-key",
+					true,
+					nil,
+					[]byte(`{"model":"claude-haiku-4-5-20251001"}`),
+					&config.Config{},
+					incoming,
+					test.confirmed,
+					claudeNativeHelperSessionID,
+				); errHeaders != nil {
+					t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
+				}
+				if got := request.Header.Get("X-Stainless-Async"); got != test.wantAsync {
+					t.Fatalf("X-Stainless-Async = %q, want %q", got, test.wantAsync)
+				}
+			},
+		)
 	}
 }
 
 func TestClaudeExecutorMinimalNativeHelperPreservesMarkerlessWire(t *testing.T) {
 	var upstreamBody []byte
 	var upstreamHeaders http.Header
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamBody, _ = io.ReadAll(r.Body)
-		upstreamHeaders = r.Header.Clone()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				upstreamBody, _ = io.ReadAll(r.Body)
+				upstreamHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(
+					[]byte((`{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5-` +
+						`20251001","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"` +
+						`output_tokens":1}}`)),
+				)
+			},
+		),
+	)
 	defer server.Close()
 
-	payload := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"helper probe"}],"metadata":{"user_id":"` + strings.ReplaceAll(claudeNativeHelperUserID, `"`, `\"`) + `"}}`)
+	payload := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role` +
+		`":"user","content":"helper probe"}],"metadata":{"user_id":"` + strings.ReplaceAll(
+		claudeNativeHelperUserID, `"`, `\"`,
+	) + `"}}`)
 	headers := claudeNativeHelperHeaders(claudeNativeHelperCoreBetas, "gzip, deflate, br, zstd")
 	executor := NewClaudeExecutor(&config.Config{})
-	_, errExecute := executor.Execute(context.Background(), claudeNativeHelperOAuthAuth(server.URL), cliproxyexecutor.Request{
-		Model:   "claude-haiku-4-5-20251001",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat:    sdktranslator.FormatClaude,
-		OriginalRequest: payload,
-		Headers:         headers,
-	})
+	_, errExecute := executor.Execute(
+		context.Background(), claudeNativeHelperOAuthAuth(server.URL), cliproxyexecutor.Request{
+			Model:   "claude-haiku-4-5-20251001",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatClaude,
+			OriginalRequest: payload,
+			Headers:         headers,
+		},
+	)
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
@@ -145,7 +167,10 @@ func TestClaudeExecutorMinimalNativeHelperPreservesMarkerlessWire(t *testing.T) 
 	if got := gjson.GetBytes(upstreamBody, "messages.0.content").String(); got != "helper probe" {
 		t.Fatalf("messages.0.content = %q, want preserved string", got)
 	}
-	if !bytes.HasPrefix(upstreamBody, []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":`)) {
+	if !bytes.HasPrefix(
+		upstreamBody,
+		[]byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":`),
+	) {
 		t.Fatalf("helper top-level order changed: %s", upstreamBody)
 	}
 	assertClaudeNativeHelperHeaders(t, upstreamHeaders, headers)
@@ -154,26 +179,47 @@ func TestClaudeExecutorMinimalNativeHelperPreservesMarkerlessWire(t *testing.T) 
 func TestClaudeExecutorStructuredNativeHelperPreservesStreamProfile(t *testing.T) {
 	var upstreamBody []byte
 	var upstreamHeaders http.Header
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamBody, _ = io.ReadAll(r.Body)
-		upstreamHeaders = r.Header.Clone()
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-4-5-20251001\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				upstreamBody, _ = io.ReadAll(r.Body)
+				upstreamHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprint(
+					w,
+					"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{"+
+						"\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\""+
+						":\"claude-haiku-4-5-20251001\",\"content\":[],\"stop_reason\":null,\"u"+
+						"sage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_st"+
+						"op\ndata: {\"type\":\"message_stop\"}\n\n",
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	betas := claudeNativeHelperCoreBetas + ",structured-outputs-2025-12-15"
-	payload := []byte(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"helper probe"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.280; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Return a short title."}],"tools":[],"metadata":{"user_id":"` + strings.ReplaceAll(claudeNativeHelperUserID, `"`, `\"`) + `"},"max_tokens":32000,"thinking":{"type":"disabled"},"temperature":1,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}`)
+	payload := []byte((`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"` +
+		`text","text":"helper probe"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: ` +
+		`cc_version=2.1.280; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, ` +
+		`Anthropic's official CLI for Claude."},{"type":"text","text":"Return a short title."}],"tools":[],"` +
+		`metadata":{"user_id":"`) + strings.ReplaceAll(
+		claudeNativeHelperUserID, `"`, `\"`,
+	) + (`"},"max_tokens":32000,"thinking":{"type":"disabled"},"temperature":1,"output_config":{"format":{"` +
+		`type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["` +
+		`title"],"additionalProperties":false}}},"stream":true}`))
 	headers := claudeNativeHelperHeaders(betas, "gzip, deflate, br, zstd")
 	executor := NewClaudeExecutor(&config.Config{})
-	result, errStream := executor.ExecuteStream(context.Background(), claudeNativeHelperOAuthAuth(server.URL), cliproxyexecutor.Request{
-		Model:   "claude-haiku-4-5-20251001",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat:    sdktranslator.FormatClaude,
-		OriginalRequest: payload,
-		Headers:         headers,
-	})
+	result, errStream := executor.ExecuteStream(
+		context.Background(), claudeNativeHelperOAuthAuth(server.URL), cliproxyexecutor.Request{
+			Model:   "claude-haiku-4-5-20251001",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatClaude,
+			OriginalRequest: payload,
+			Headers:         headers,
+		},
+	)
 	if errStream != nil {
 		t.Fatalf("ExecuteStream() error = %v", errStream)
 	}
@@ -200,7 +246,9 @@ func TestClaudeExecutorStructuredNativeHelperPreservesStreamProfile(t *testing.T
 	if got := gjson.GetBytes(upstreamBody, "stream").Bool(); !got {
 		t.Fatalf("structured helper stream = false, want true: %s", upstreamBody)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.0.text").String(); strings.Contains(got, "cch=00000") || !strings.Contains(got, " cch=") {
+	if got := gjson.GetBytes(upstreamBody, "system.0.text").String(); strings.Contains(
+		got, "cch=00000",
+	) || !strings.Contains(got, " cch=") {
 		t.Fatalf("structured helper billing CCH was not re-signed: %q", got)
 	}
 	assertClaudeNativeHelperHeaders(t, upstreamHeaders, headers)
@@ -208,22 +256,36 @@ func TestClaudeExecutorStructuredNativeHelperPreservesStreamProfile(t *testing.T
 
 func TestClaudeExecutorNative280TitleHelperKeepsFallbackBeta(t *testing.T) {
 	var upstreamBetas string
-	ctx := util.WithRoundTripper(context.Background(), protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		upstreamBetas = headerValueCaseInsensitive(req.Header, "Anthropic-Beta")
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": {"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"id":"msg_helper","type":"message","model":"claude-haiku-4-5-20251001","role":"assistant","content":[{"type":"text","text":"ok"}]}`)),
-			Request:    req,
-		}, nil
-	}))
+	ctx := util.WithRoundTripper(
+		context.Background(), protectedUtlsRoundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				upstreamBetas = headerValueCaseInsensitive(req.Header, "Anthropic-Beta")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body: io.NopCloser(
+						strings.NewReader(
+							`{"id":"msg_helper","type":"message","model":"claude-haiku-4-5-20251001` +
+								`","role":"assistant","content":[{"type":"text","text":"ok"}]}`,
+						),
+					),
+					Request: req,
+				}, nil
+			},
+		),
+	)
 	betas := claudeNativeHelperCoreBetas + "," + claudeStructuredOutputsBeta + "," +
 		claudeServerSideFallbackBeta + "," + claudeFallbackCreditBeta + "," + claudeCacheDiagnosisBeta
 	headers := claudeNativeHelperHeaders(betas, "gzip, deflate, br, zstd")
-	payload := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":80,"messages":[{"role":"user","content":"generate title"}],"metadata":{"user_id":"` + strings.ReplaceAll(claudeNativeHelperUserID, `"`, `\"`) + `"},"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}}}`)
-	_, err := NewClaudeExecutor(&config.Config{}).Execute(ctx, claudeNativeHelperOAuthAuth("https://api.anthropic.com"),
+	payload := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":80,"messages":[{"rol` +
+		`e":"user","content":"generate title"}],"metadata":{"user_id":"` + strings.ReplaceAll(
+		claudeNativeHelperUserID, `"`, `\"`,
+	) + `"},"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}}}`)
+	_, err := NewClaudeExecutor(&config.Config{}).Execute(
+		ctx, claudeNativeHelperOAuthAuth("https://api.anthropic.com"),
 		cliproxyexecutor.Request{Model: "claude-haiku-4-5-20251001", Payload: payload},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: headers})
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: headers},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,9 +297,14 @@ func TestClaudeExecutorNative280TitleHelperKeepsFallbackBeta(t *testing.T) {
 func assertClaudeNativeHelperHeaders(t *testing.T, got, incoming http.Header) {
 	t.Helper()
 	if got.Get("Anthropic-Beta") != incoming.Get("Anthropic-Beta") {
-		t.Fatalf("Anthropic-Beta = %q, want exact native helper profile %q", got.Get("Anthropic-Beta"), incoming.Get("Anthropic-Beta"))
+		t.Fatalf(
+			"Anthropic-Beta = %q, want exact native helper profile %q", got.Get("Anthropic-Beta"),
+			incoming.Get("Anthropic-Beta"),
+		)
 	}
-	if strings.Contains(got.Get("Anthropic-Beta"), claudeExtendedCacheTTLBeta) || strings.Contains(got.Get("Anthropic-Beta"), claudeCodeBeta) {
+	if strings.Contains(
+		got.Get("Anthropic-Beta"), claudeExtendedCacheTTLBeta,
+	) || strings.Contains(got.Get("Anthropic-Beta"), claudeCodeBeta) {
 		t.Fatalf("Anthropic-Beta gained standard Claude Code cache betas: %q", got.Get("Anthropic-Beta"))
 	}
 	for _, name := range []string{
@@ -294,7 +361,9 @@ func TestClaudeBodyNeedsBillingFallbackTracksSystemPresence(t *testing.T) {
 		},
 		{
 			name: "structured helper carries its own billing header",
-			body: `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.258; cc_entrypoint=cli; cch=00000;"}]}`,
+			body: `{"system":[{"type":"text","text":"x-anthropic-billing-header: ` +
+				`cc_version=2.1.258; cc_entrypoint=cli; cch=00000;` +
+				`"}]}`,
 			want: true,
 		},
 		{
@@ -309,11 +378,13 @@ func TestClaudeBodyNeedsBillingFallbackTracksSystemPresence(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := claudeBodyNeedsBillingFallback([]byte(test.body)); got != test.want {
-				t.Fatalf("claudeBodyNeedsBillingFallback() = %v, want %v", got, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				if got := claudeBodyNeedsBillingFallback([]byte(test.body)); got != test.want {
+					t.Fatalf("claudeBodyNeedsBillingFallback() = %v, want %v", got, test.want)
+				}
+			},
+		)
 	}
 }
 
@@ -330,49 +401,57 @@ func TestApplyClaudeHeadersHelperRequestIDFollowsUpstreamBase(t *testing.T) {
 		wantGenerated bool
 		wantID        string
 	}{
-		{name: "first party base without caller id", url: "https://api.anthropic.com/v1/messages?beta=true", wantGenerated: true},
+		{
+			name: "first party base without caller id", url: "https://api.anthropic.com/v1/messages?beta=true",
+			wantGenerated: true,
+		},
 		{name: "custom base without caller id", url: "https://gateway.example.com/v1/messages"},
-		{name: "custom base keeps caller id", url: "https://gateway.example.com/v1/messages", incomingID: nativeRequestID, wantID: nativeRequestID},
+		{
+			name: "custom base keeps caller id", url: "https://gateway.example.com/v1/messages",
+			incomingID: nativeRequestID, wantID: nativeRequestID,
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			request, errRequest := http.NewRequest(http.MethodPost, test.url, nil)
-			if errRequest != nil {
-				t.Fatal(errRequest)
-			}
-			incoming := http.Header{}
-			if test.incomingID != "" {
-				incoming.Set("X-Client-Request-Id", test.incomingID)
-			}
-			if errHeaders := applyClaudeHeadersWithNativeProfile(
-				request,
-				&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-api-key"}},
-				"test-api-key",
-				false,
-				nil,
-				[]byte(`{"model":"claude-haiku-4-5-20251001"}`),
-				&config.Config{},
-				incoming,
-				true,
-				true,
-				claudeNativeHelperSessionID,
-			); errHeaders != nil {
-				t.Fatalf("applyClaudeHeadersWithNativeProfile() error = %v", errHeaders)
-			}
-			got := request.Header.Get("X-Client-Request-Id")
-			switch {
-			case test.wantID != "":
-				if got != test.wantID {
-					t.Fatalf("X-Client-Request-Id = %q, want caller value %q", got, test.wantID)
+		t.Run(
+			test.name, func(t *testing.T) {
+				request, errRequest := http.NewRequest(http.MethodPost, test.url, nil)
+				if errRequest != nil {
+					t.Fatal(errRequest)
 				}
-			case test.wantGenerated:
-				if _, errParse := uuid.Parse(got); errParse != nil {
-					t.Fatalf("X-Client-Request-Id = %q, want a generated UUID", got)
+				incoming := http.Header{}
+				if test.incomingID != "" {
+					incoming.Set("X-Client-Request-Id", test.incomingID)
 				}
-			default:
-				if got != "" {
-					t.Fatalf("X-Client-Request-Id = %q, want the header to stay absent", got)
+				if errHeaders := applyClaudeHeadersWithNativeProfile(
+					request,
+					&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-api-key"}},
+					"test-api-key",
+					false,
+					nil,
+					[]byte(`{"model":"claude-haiku-4-5-20251001"}`),
+					&config.Config{},
+					incoming,
+					true,
+					true,
+					claudeNativeHelperSessionID,
+				); errHeaders != nil {
+					t.Fatalf("applyClaudeHeadersWithNativeProfile() error = %v", errHeaders)
 				}
-			}
-		})
+				got := request.Header.Get("X-Client-Request-Id")
+				switch {
+				case test.wantID != "":
+					if got != test.wantID {
+						t.Fatalf("X-Client-Request-Id = %q, want caller value %q", got, test.wantID)
+					}
+				case test.wantGenerated:
+					if _, errParse := uuid.Parse(got); errParse != nil {
+						t.Fatalf("X-Client-Request-Id = %q, want a generated UUID", got)
+					}
+				default:
+					if got != "" {
+						t.Fatalf("X-Client-Request-Id = %q, want the header to stay absent", got)
+					}
+				}
+			},
+		)
 	}
 }

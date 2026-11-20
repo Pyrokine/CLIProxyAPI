@@ -22,18 +22,30 @@ import (
 func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested(t *testing.T) {
 	var seenHeaders http.Header
 	var seenBody []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenHeaders = r.Header.Clone()
-		seenBody, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				seenHeaders = r.Header.Clone()
+				seenBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(
+					[]byte(
+						`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":` +
+							`"assistant","content":[{"type":"text","text":` +
+							`"ok"}]}`,
+					),
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	cfg := &config.Config{
-		ClaudeKey: []config.ClaudeKey{{
-			APIKey: "sk-ant-oat-subagent-preserve-test",
-		}},
+		ClaudeKey: []config.ClaudeKey{
+			{
+				APIKey: "sk-ant-oat-subagent-preserve-test",
+			},
+		},
 	}
 	auth := &cliproxyauth.Auth{
 		ID:       "auth-subagent-preserve-test",
@@ -59,13 +71,15 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested(
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-123")
 	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20,extended-cache-ttl-2025-04-11")
 
-	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "claude-sonnet-5",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatClaude,
-		Headers:      incomingHeaders,
-	})
+	_, err := executor.Execute(
+		context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-sonnet-5",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Headers:      incomingHeaders,
+		},
+	)
 	if err != nil {
 		t.Fatalf("Execute error = %v", err)
 	}
@@ -89,7 +103,10 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested(
 	// 2. Verify extended-cache-ttl beta is preserved in Anthropic-Beta header
 	betas := seenHeaders.Get("Anthropic-Beta")
 	if !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
-		t.Fatalf("subagent Anthropic-Beta must preserve extended-cache-ttl-2025-04-11 when requested, got: %s", betas)
+		t.Fatalf(
+			"subagent Anthropic-Beta must preserve extended-cache-ttl-2025-04-11 when requested, got: %s",
+			betas,
+		)
 	}
 }
 
@@ -98,18 +115,28 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested(
 func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested_Stream(t *testing.T) {
 	var seenHeaders http.Header
 	var seenBody []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenHeaders = r.Header.Clone()
-		seenBody, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-5\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				seenHeaders = r.Header.Clone()
+				seenBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write(
+					[]byte(("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{" +
+						"\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-" +
+						"5\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")),
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	cfg := &config.Config{
-		ClaudeKey: []config.ClaudeKey{{
-			APIKey: "sk-ant-oat-subagent-preserve-stream-test",
-		}},
+		ClaudeKey: []config.ClaudeKey{
+			{
+				APIKey: "sk-ant-oat-subagent-preserve-stream-test",
+			},
+		},
 	}
 	auth := &cliproxyauth.Auth{
 		ID:       "auth-subagent-preserve-stream-test",
@@ -136,13 +163,15 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested_
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-stream-456")
 	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20,extended-cache-ttl-2025-04-11")
 
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "claude-sonnet-5",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatClaude,
-		Headers:      incomingHeaders,
-	})
+	result, err := executor.ExecuteStream(
+		context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-sonnet-5",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Headers:      incomingHeaders,
+		},
+	)
 	if err != nil {
 		t.Fatalf("ExecuteStream error = %v", err)
 	}
@@ -160,7 +189,10 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested_
 	// 2. Verify extended-cache-ttl beta is preserved in Anthropic-Beta header
 	betas := seenHeaders.Get("Anthropic-Beta")
 	if !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
-		t.Fatalf("subagent Anthropic-Beta must preserve extended-cache-ttl-2025-04-11 on stream when requested, got: %s", betas)
+		t.Fatalf(
+			"subagent Anthropic-Beta must preserve extended-cache-ttl-2025-04-11 on stream when requested, got: %s",
+			betas,
+		)
 	}
 }
 
@@ -169,18 +201,30 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested_
 func TestClaudeExecutor_SubagentWithout1hKeepsDefault5m(t *testing.T) {
 	var seenHeaders http.Header
 	var seenBody []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenHeaders = r.Header.Clone()
-		seenBody, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				seenHeaders = r.Header.Clone()
+				seenBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(
+					[]byte(
+						`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":` +
+							`"assistant","content":[{"type":"text","text":` +
+							`"ok"}]}`,
+					),
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	cfg := &config.Config{
-		ClaudeKey: []config.ClaudeKey{{
-			APIKey: "sk-ant-oat-subagent-5m-test",
-		}},
+		ClaudeKey: []config.ClaudeKey{
+			{
+				APIKey: "sk-ant-oat-subagent-5m-test",
+			},
+		},
 	}
 	auth := &cliproxyauth.Auth{
 		ID:       "auth-subagent-5m-test",
@@ -206,13 +250,15 @@ func TestClaudeExecutor_SubagentWithout1hKeepsDefault5m(t *testing.T) {
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-default-789")
 	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20")
 
-	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "claude-sonnet-5",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatClaude,
-		Headers:      incomingHeaders,
-	})
+	_, err := executor.Execute(
+		context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-sonnet-5",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Headers:      incomingHeaders,
+		},
+	)
 	if err != nil {
 		t.Fatalf("Execute error = %v", err)
 	}
@@ -236,18 +282,30 @@ func TestClaudeExecutor_SubagentWithout1hKeepsDefault5m(t *testing.T) {
 func TestClaudeExecutor_APIKeySubagentPreserves1hTTLAndInjectsBeta(t *testing.T) {
 	var seenHeaders http.Header
 	var seenBody []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenHeaders = r.Header.Clone()
-		seenBody, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				seenHeaders = r.Header.Clone()
+				seenBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(
+					[]byte(
+						`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":` +
+							`"assistant","content":[{"type":"text","text":` +
+							`"ok"}]}`,
+					),
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	cfg := &config.Config{
-		ClaudeKey: []config.ClaudeKey{{
-			APIKey: "sk-ant-api03-subagent-key-test",
-		}},
+		ClaudeKey: []config.ClaudeKey{
+			{
+				APIKey: "sk-ant-api03-subagent-key-test",
+			},
+		},
 	}
 	auth := &cliproxyauth.Auth{
 		ID: "auth-subagent-key-test",
@@ -270,15 +328,20 @@ func TestClaudeExecutor_APIKeySubagentPreserves1hTTLAndInjectsBeta(t *testing.T)
 	incomingHeaders := http.Header{}
 	incomingHeaders.Set("User-Agent", "claude-cli/2.1.281 (external, cli)")
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-apikey-101")
-	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219") // Note: NO extended-cache-ttl beta in incoming header
+	incomingHeaders.Set(
+		"Anthropic-Beta",
+		"claude-code-20250219",
+	) // Note: NO extended-cache-ttl beta in incoming header
 
-	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "claude-sonnet-5",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatClaude,
-		Headers:      incomingHeaders,
-	})
+	_, err := executor.Execute(
+		context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-sonnet-5",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Headers:      incomingHeaders,
+		},
+	)
 	if err != nil {
 		t.Fatalf("Execute error = %v", err)
 	}
@@ -292,7 +355,10 @@ func TestClaudeExecutor_APIKeySubagentPreserves1hTTLAndInjectsBeta(t *testing.T)
 	// 2. Verify extended-cache-ttl beta is added to Anthropic-Beta header
 	betas := seenHeaders.Get("Anthropic-Beta")
 	if !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
-		t.Fatalf("API key subagent Anthropic-Beta must include extended-cache-ttl-2025-04-11 when 1h is in payload, got: %s", betas)
+		t.Fatalf(
+			"API key subagent Anthropic-Beta must include extended-cache-ttl-2025-04-11 when 1h is in payload, got: %s",
+			betas,
+		)
 	}
 }
 
@@ -301,18 +367,28 @@ func TestClaudeExecutor_APIKeySubagentPreserves1hTTLAndInjectsBeta(t *testing.T)
 func TestClaudeExecutor_APIKeySubagentPreserves1hTTLAndInjectsBeta_Stream(t *testing.T) {
 	var seenHeaders http.Header
 	var seenBody []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenHeaders = r.Header.Clone()
-		seenBody, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-5\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				seenHeaders = r.Header.Clone()
+				seenBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write(
+					[]byte(("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{" +
+						"\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-" +
+						"5\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")),
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	cfg := &config.Config{
-		ClaudeKey: []config.ClaudeKey{{
-			APIKey: "sk-ant-api03-subagent-stream-key-test",
-		}},
+		ClaudeKey: []config.ClaudeKey{
+			{
+				APIKey: "sk-ant-api03-subagent-stream-key-test",
+			},
+		},
 	}
 	auth := &cliproxyauth.Auth{
 		ID: "auth-subagent-stream-key-test",
@@ -323,28 +399,27 @@ func TestClaudeExecutor_APIKeySubagentPreserves1hTTLAndInjectsBeta_Stream(t *tes
 	}
 
 	executor := NewClaudeExecutor(cfg)
-	payload := []byte(`{
-		"model": "claude-sonnet-5",
-		"stream": true,
-		"messages": [{
-			"role": "user",
-			"content": [
-				{"type": "text", "text": "apikey streaming subagent work", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
-			]
-		}]
-	}`)
+	payload := []byte(("{\n\t\t\"model\": \"claude-sonnet-5\",\n\t\t\"stream\": true,\n\t\t\"messages\": [{\n" +
+		"\t\t\t\"role\": \"user\",\n\t\t\t\"content\": [\n\t\t\t\t{\"type\": \"text\", \"text\": \"apikey " +
+		"streaming subagent work\", \"cache_control\": {\"type\": \"ephemeral\", \"ttl\": \"1h\"}}\n\t\t\t]\n" +
+		"\t\t}]\n\t}"))
 	incomingHeaders := http.Header{}
 	incomingHeaders.Set("User-Agent", "claude-cli/2.1.281 (external, cli)")
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-apikey-stream-202")
-	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219") // Note: NO extended-cache-ttl beta in incoming header
+	incomingHeaders.Set(
+		"Anthropic-Beta",
+		"claude-code-20250219",
+	) // Note: NO extended-cache-ttl beta in incoming header
 
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "claude-sonnet-5",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatClaude,
-		Headers:      incomingHeaders,
-	})
+	result, err := executor.ExecuteStream(
+		context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-sonnet-5",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Headers:      incomingHeaders,
+		},
+	)
 	if err != nil {
 		t.Fatalf("ExecuteStream error = %v", err)
 	}
@@ -362,6 +437,11 @@ func TestClaudeExecutor_APIKeySubagentPreserves1hTTLAndInjectsBeta_Stream(t *tes
 	// 2. Verify extended-cache-ttl beta is added to Anthropic-Beta header
 	betas := seenHeaders.Get("Anthropic-Beta")
 	if !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
-		t.Fatalf("API key subagent Anthropic-Beta must include extended-cache-ttl-2025-04-11 when 1h is in payload on stream, got: %s", betas)
+		t.Fatalf(
+			"API key subagent Anthropic-Beta must include "+
+				"extended-cache-ttl-2025-04-11 when 1h is in payload on stream, got: "+
+				"%s",
+			betas,
+		)
 	}
 }

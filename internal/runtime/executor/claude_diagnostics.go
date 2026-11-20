@@ -30,7 +30,9 @@ func injectClaudeDiagnostics(
 	if len(states) > 0 {
 		key, sequence, previousMessageID = states[0].key, states[0].sequence, states[0].previousMessageID
 	} else {
-		key, sequence, previousMessageID = helps.BeginClaudeDiagnostics(claudeDiagnosticsCredentialIdentity(auth), sessionID)
+		key, sequence, previousMessageID = helps.BeginClaudeDiagnostics(
+			claudeDiagnosticsCredentialIdentity(auth), sessionID,
+		)
 	}
 	if key == "" {
 		return body, claudeDiagnosticsRequestState{}
@@ -66,7 +68,12 @@ func injectClaudeDiagnostics(
 	return updated, claudeDiagnosticsRequestState{key: key, sequence: sequence}
 }
 
-func prepareClaudeContinuity(body, continuityBody []byte, auth *cliproxyauth.Auth, sessionID string, executionMetadata, signing, diagnosticsAllowed, diagnosticsTouched bool) ([]byte, claudeDiagnosticsRequestState) {
+func prepareClaudeContinuity(
+	body, continuityBody []byte,
+	auth *cliproxyauth.Auth,
+	sessionID string,
+	executionMetadata, signing, diagnosticsAllowed, diagnosticsTouched bool,
+) ([]byte, claudeDiagnosticsRequestState) {
 	if helps.IsClaudeProbeOrHelperRequest(body) {
 		return helps.StripClaudeBillingTags(body), claudeDiagnosticsRequestState{}
 	}
@@ -74,11 +81,15 @@ func prepareClaudeContinuity(body, continuityBody []byte, auth *cliproxyauth.Aut
 		continuityBody = body
 	}
 	previousRequest, explicitPrompt := helps.ExtractClaudeBillingTags(continuityBody)
-	key, sequence, previousMessage, storedRequest, prompt := helps.BeginClaudeContinuity(claudeDiagnosticsCredentialIdentity(auth), sessionID, helps.IsClaudeNewPromptTurn(continuityBody), explicitPrompt)
+	key, sequence, previousMessage, storedRequest, prompt := helps.BeginClaudeContinuity(
+		claudeDiagnosticsCredentialIdentity(auth), sessionID, helps.IsClaudeNewPromptTurn(continuityBody),
+		explicitPrompt,
+	)
 	if key == "" {
 		return body, claudeDiagnosticsRequestState{}
 	}
-	if explicitPrompt == "" && !executionMetadata && (previousMessage == "" || helps.IsClaudeNewPromptTurn(continuityBody)) {
+	if explicitPrompt == "" && !executionMetadata &&
+		(previousMessage == "" || helps.IsClaudeNewPromptTurn(continuityBody)) {
 		prompt = helps.ClaudeDeterministicPromptID("cpa:prompt:" + claudeBillingFingerprintMessageText(continuityBody))
 	}
 	if executionMetadata || previousRequest != "" {
@@ -88,7 +99,9 @@ func prepareClaudeContinuity(body, continuityBody []byte, auth *cliproxyauth.Aut
 	} else {
 		previousMessage = ""
 	}
-	state := claudeDiagnosticsRequestState{key: key, sequence: sequence, promptID: prompt, previousMessageID: previousMessage}
+	state := claudeDiagnosticsRequestState{
+		key: key, sequence: sequence, promptID: prompt, previousMessageID: previousMessage,
+	}
 	if signing {
 		body = helps.InjectClaudeBillingTags(body, previousRequest, prompt)
 	}

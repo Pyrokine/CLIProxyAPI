@@ -2,12 +2,14 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 )
 
@@ -24,6 +26,50 @@ func claudeInputTokenizer() (tokenizer.Codec, error) {
 		},
 	)
 	return claudeInputTokenizerCodec, claudeInputTokenizerErr
+}
+
+func estimateClaudeStreamInputTokens(
+	ctx context.Context, chunks [][]byte, originalRequest []byte, handled *bool,
+) [][]byte {
+	if *handled || ctx.Err() != nil {
+		return chunks
+	}
+	for index, chunk := range chunks {
+		offset := 0
+		for _, line := range bytes.SplitAfter(chunk, []byte{'\n'}) {
+			data := bytes.TrimSpace(line)
+			if bytes.HasPrefix(data, []byte("data:")) {
+				payload := bytes.TrimSpace(data[len("data:"):])
+				if gjson.GetBytes(payload, "type").String() == "message_start" {
+					*handled = true
+					if gjson.GetBytes(payload, "message.usage.input_tokens").Int() != 0 {
+						return chunks
+					}
+					count, err := countClaudeInputTokens(originalRequest)
+					if err != nil {
+						logWithRequestID(ctx).WithError(err).Warn("failed to estimate Claude input tokens")
+						return chunks
+					}
+					if count == 0 {
+						return chunks
+					}
+					updated, err := sjson.SetBytes(payload, "message.usage.input_tokens", count)
+					if err != nil {
+						logWithRequestID(ctx).WithError(err).Warn("failed to write Claude stream input token estimate")
+						return chunks
+					}
+					start := offset + bytes.Index(line, payload)
+					out := make([]byte, 0, len(chunk)+len(updated)-len(payload))
+					out = append(out, chunk[:start]...)
+					out = append(out, updated...)
+					chunks[index] = append(out, chunk[start+len(payload):]...)
+					return chunks
+				}
+			}
+			offset += len(line)
+		}
+	}
+	return chunks
 }
 
 func countClaudeInputTokens(payload []byte) (int64, error) {
@@ -138,7 +184,13 @@ func collectClaudeContentTokenSegments(content gjson.Result, segments *[]string)
 		appendClaudeTokenString(segments, content.Get("id").String())
 		appendClaudeTokenString(segments, content.Get("name").String())
 		appendClaudeTokenJSON(segments, content.Get("input"))
-	case "tool_result", "mcp_tool_result", "web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result", "bash_code_execution_tool_result", "text_editor_code_execution_tool_result":
+	case "tool_result",
+		"mcp_tool_result",
+		"web_search_tool_result",
+		"web_fetch_tool_result",
+		"code_execution_tool_result",
+		"bash_code_execution_tool_result",
+		"text_editor_code_execution_tool_result":
 		appendClaudeTokenString(segments, content.Get("tool_use_id").String())
 		appendClaudeTokenString(segments, content.Get("tool_call_id").String())
 		collectClaudeContentTokenSegments(content.Get("content"), segments)

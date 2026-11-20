@@ -55,20 +55,22 @@ func (b *closeConnectionBody) Close() error {
 	if b == nil {
 		return nil
 	}
-	b.once.Do(func() {
-		if b.stopContext != nil {
-			b.stopContext()
-		}
-		var errConnection error
-		if b.closeConnection != nil {
-			errConnection = b.closeConnection()
-		}
-		var errBody error
-		if b.ReadCloser != nil {
-			errBody = b.ReadCloser.Close()
-		}
-		b.err = errors.Join(errBody, errConnection)
-	})
+	b.once.Do(
+		func() {
+			if b.stopContext != nil {
+				b.stopContext()
+			}
+			var errConnection error
+			if b.closeConnection != nil {
+				errConnection = b.closeConnection()
+			}
+			var errBody error
+			if b.ReadCloser != nil {
+				errBody = b.ReadCloser.Close()
+			}
+			b.err = errors.Join(errBody, errConnection)
+		},
+	)
 	return b.err
 }
 
@@ -84,10 +86,12 @@ func newCloseConnectionBody(
 	}
 	if ctx != nil {
 		initialized := make(chan struct{})
-		wrapped.stopContext = context.AfterFunc(ctx, func() {
-			<-initialized
-			_ = wrapped.Close()
-		})
+		wrapped.stopContext = context.AfterFunc(
+			ctx, func() {
+				<-initialized
+				_ = wrapped.Close()
+			},
+		)
 		close(initialized)
 	}
 	return wrapped
@@ -160,6 +164,7 @@ func (t *claudeUtlsRoundTripper) createConnection(
 		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
 
+	//noinspection GoResourceLeak
 	tlsConn := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloChrome_Auto)
 	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
 		// HandshakeContext closes the underlying connection when its context is
@@ -285,6 +290,7 @@ func newProtectedUtlsHTTPClient(
 	var chromeTransport http.RoundTripper = newClaudeUtlsRoundTripper(proxyURL)
 	var anthropicTransport = cachedClaudeCodeRoundTripper(proxyURL)
 	var fallback http.RoundTripper = &http.Transport{
+		Proxy:       http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 	}
 	if proxyURL != "" {

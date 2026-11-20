@@ -15,11 +15,10 @@ import (
 func TestCPA09ResponsesRequestIdentityAgentMessageAndStructuredOutput(t *testing.T) {
 	out := convertOpenAIResponsesRequestToClaudeDefault(
 		"claude-test",
-		[]byte(`{
-			"metadata":{"user_id":"caller-user"},
-			"text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"object","properties":{"ok":{"type":"boolean"}}}}},
-			"input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"delegated task"}]}]
-		}`),
+		[]byte(("{\n\t\t\t\"metadata\":{\"user_id\":\"caller-user\"},\n\t\t\t\"text\":{\"format\":{\"type\":\"" +
+			"json_schema\",\"name\":\"answer\",\"schema\":{\"type\":\"object\",\"properties\":{\"ok\":{\"" +
+			"type\":\"boolean\"}}}}},\n\t\t\t\"input\":[{\"type\":\"agent_message\",\"content\":[{\"type\":\"" +
+			"encrypted_content\",\"encrypted_content\":\"delegated task\"}]}]\n\t\t}")),
 		false,
 	)
 	root := gjson.ParseBytes(out)
@@ -74,12 +73,12 @@ func TestCPA09ResponsesRequestDeduplicatesToolOutputsByRawID(t *testing.T) {
 func TestCPA09ResponsesRequestReplaysWebSearchAndCitations(t *testing.T) {
 	out := convertOpenAIResponsesRequestToClaudeDefault(
 		"claude-test",
-		[]byte(`{
-			"input":[
-				{"id":"ws_native-1","type":"web_search_call","action":{"type":"search","query":"Qwen"},"results":[{"type":"computer_initialize_state","url":"https://example.com","encrypted_content":"cipher"}]},
-				{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer","annotations":[{"type":"web_search_result_location","encrypted_index":"idx"}]}]}
-			]
-		}`),
+		[]byte(("{\n\t\t\t\"input\":[\n\t\t\t\t{\"id\":\"ws_native-1\",\"type\":\"web_search_call\",\"action\"" +
+			":{\"type\":\"search\",\"query\":\"Qwen\"},\"results\":[{\"type\":\"computer_initialize_state\"," +
+			"\"url\":\"https://example.com\",\"encrypted_content\":\"cipher\"}]},\n\t\t\t\t{\"type\":\"" +
+			"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\",\"" +
+			"annotations\":[{\"type\":\"web_search_result_location\",\"encrypted_index\":\"idx\"}]}]}\n\t\t\t" +
+			"]\n\t\t}")),
 		false,
 	)
 	root := gjson.ParseBytes(out)
@@ -119,11 +118,25 @@ func TestCPA09ResponsesRequestAssistantPrefillBoundary(t *testing.T) {
 }
 
 func TestCPA09ResponsesRequestIdentityIsStableAndRequestScoped(t *testing.T) {
-	requestA := []byte(`{"prompt_cache_key":"a","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
-	requestB := []byte(`{"prompt_cache_key":"b","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
-	first := gjson.GetBytes(convertOpenAIResponsesRequestToClaudeDefault("claude-test", requestA, false), "metadata.user_id").String()
-	retry := gjson.GetBytes(convertOpenAIResponsesRequestToClaudeDefault("claude-test", requestA, false), "metadata.user_id").String()
-	second := gjson.GetBytes(convertOpenAIResponsesRequestToClaudeDefault("claude-test", requestB, false), "metadata.user_id").String()
+	requestA := []byte(
+		`{"prompt_cache_key":"a","input":[{"type":"message","role":"user",` +
+			`"content":[{"type":"input_text","text":` +
+			`"hello"}]}]}`,
+	)
+	requestB := []byte(
+		`{"prompt_cache_key":"b","input":[{"type":"message","role":"user",` +
+			`"content":[{"type":"input_text","text":` +
+			`"hello"}]}]}`,
+	)
+	first := gjson.GetBytes(
+		convertOpenAIResponsesRequestToClaudeDefault("claude-test", requestA, false), "metadata.user_id",
+	).String()
+	retry := gjson.GetBytes(
+		convertOpenAIResponsesRequestToClaudeDefault("claude-test", requestA, false), "metadata.user_id",
+	).String()
+	second := gjson.GetBytes(
+		convertOpenAIResponsesRequestToClaudeDefault("claude-test", requestB, false), "metadata.user_id",
+	).String()
 	if first == "" || first != retry {
 		t.Fatalf("identity is not stable: first=%q retry=%q", first, retry)
 	}
@@ -141,18 +154,90 @@ func TestCPA09ResponsesRequestContractToolPairing(t *testing.T) {
 		wantText    string
 		wantResult  string
 	}{
-		{name: "standalone", input: `[{"type":"function_call_output","call_id":"orphan","output":"context"}]`, wantText: "context"},
-		{name: "empty standalone", input: `[{"type":"custom_tool_call_output","call_id":"orphan","output":[{"type":"input_text","text":""}]}]`, wantText: "Tool result was empty."},
-		{name: "trailing", input: `[{"role":"user","content":"Run"},{"type":"function_call","call_id":"tail","name":"exec","arguments":"{}"}]`, wantResults: 1, wantErrors: 1},
-		{name: "late", input: `[{"role":"user","content":"Run"},{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},{"role":"user","content":"Wait"},{"role":"assistant","content":"Interlude"},{"type":"function_call_output","call_id":"a","output":"late result"}]`, wantResults: 1, wantErrors: 1, wantText: "late result"},
-		{name: "late empty", input: `[{"role":"user","content":"Run"},{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},{"role":"user","content":"Wait"},{"role":"assistant","content":"Interlude"},{"type":"function_call_output","call_id":"a","output":""}]`, wantResults: 1, wantErrors: 1, wantText: "Tool result was empty."},
-		{name: "raw ID collision", input: `[{"type":"function_call","call_id":"call.a","name":"exec","arguments":"{}"},{"type":"function_call_output","call_id":"call_a","output":"unrelated"},{"type":"function_call_output","call_id":"call.a","output":"real result"}]`, wantResults: 1, wantText: "unrelated", wantResult: "real result"},
-		{name: "two raw calls collide", input: `[{"type":"function_call","call_id":"call.a","name":"first","arguments":"{}"},{"type":"function_call","call_id":"call_a","name":"second","arguments":"{}"},{"type":"function_call_output","call_id":"call.a","output":"one"},{"type":"function_call_output","call_id":"call_a","output":"two"}]`, wantResults: 2},
-		{name: "duplicate final payload", input: `[{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":"first"},{"role":"user","content":"between"},{"type":"function_call_output","call_id":"a","output":"last"}]`, wantResults: 1, wantResult: "last"},
-		{name: "paired whitespace", input: `[{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":"\n  "}]`, wantResults: 1, wantResult: "\n  "},
-		{name: "paired whitespace array", input: `[{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":[{"type":"input_text","text":"  "}]}]`, wantResults: 1, wantResult: "  "},
-		{name: "unknown result at tail", input: `[{"type":"custom_tool_call","call_id":"a","name":"exec","input":"pwd"},{"type":"custom_tool_call_output","call_id":"other","output":"unknown result"}]`, wantResults: 1, wantErrors: 1, wantText: "unknown result"},
-		{name: "heartbeat before result", input: `[{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},{"type":"function_call_output","id":"fco_seed","name":"heartbeat","output":"tick"},{"type":"function_call_output","call_id":"a","output":"real result"}]`, wantResults: 1, wantText: "tick", wantResult: "real result"},
+		{
+			name: "standalone", input: `[{"type":"function_call_output","call_id":"orphan","output":"context"}]`,
+			wantText: "context",
+		},
+		{
+			name: "empty standalone",
+			input: `[{"type":"custom_tool_call_output","call_id":"orphan","output":` +
+				`[{"type":"input_text","text":` +
+				`""}]}]`,
+			wantText: "Tool result was empty.",
+		},
+		{
+			name: "trailing",
+			input: `[{"role":"user","content":"Run"},{"type":"function_call","call_id":` +
+				`"tail","name":"exec","arguments":` +
+				`"{}"}]`,
+			wantResults: 1, wantErrors: 1,
+		},
+		{
+			name: "late",
+			input: `[{"role":"user","content":"Run"},{"type":"function_call","call_id":"a"` +
+				`,"name":"exec","arguments":"{}"},{"role":"user","content":"Wait"},{"ro` +
+				`le":"assistant","content":"Interlude"},{"type":"function_call_output",` +
+				`"call_id":"a","output":"late result"}]`,
+			wantResults: 1, wantErrors: 1, wantText: "late result",
+		},
+		{
+			name: "late empty",
+			input: `[{"role":"user","content":"Run"},{"type":"function_call","call_id":"a"` +
+				`,"name":"exec","arguments":"{}"},{"role":"user","content":"Wait"},{"ro` +
+				`le":"assistant","content":"Interlude"},{"type":"function_call_output",` +
+				`"call_id":"a","output":""}]`,
+			wantResults: 1, wantErrors: 1, wantText: "Tool result was empty.",
+		},
+		{
+			name: "raw ID collision",
+			input: `[{"type":"function_call","call_id":"call.a","name":"exec","arguments":"{}"},{"type":"` +
+				`function_call_output","call_id":"call_a","output":"unrelated"},{"type":"` +
+				`function_call_output","call_id":"call.a","output":"real result"}]`,
+			wantResults: 1, wantText: "unrelated", wantResult: "real result",
+		},
+		{
+			name: "two raw calls collide",
+			input: `[{"type":"function_call","call_id":"call.a","name":"first","arguments":"{}"},{"type":"` +
+				`function_call","call_id":"call_a","name":"second","arguments":"{}"},{"type":"` +
+				`function_call_output","call_id":"call.a","output":"one"},{"type":"function_call_output","` +
+				`call_id":"call_a","output":"two"}]`,
+			wantResults: 2,
+		},
+		{
+			name: "duplicate final payload",
+			input: `[{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"}` +
+				`,{"type":"function_call_output","call_id":"a","output":"first"},{"role` +
+				`":"user","content":"between"},{"type":"function_call_output","call_id"` +
+				`:"a","output":"last"}]`,
+			wantResults: 1, wantResult: "last",
+		},
+		{
+			name: "paired whitespace",
+			input: `[{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"}` +
+				`,{"type":"function_call_output","call_id":"a","output":"\n  "}]`,
+			wantResults: 1, wantResult: "\n  ",
+		},
+		{
+			name: "paired whitespace array",
+			input: `[{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"}` +
+				`,{"type":"function_call_output","call_id":"a","output":[{"type":"input` +
+				`_text","text":"  "}]}]`,
+			wantResults: 1, wantResult: "  ",
+		},
+		{
+			name: "unknown result at tail",
+			input: `[{"type":"custom_tool_call","call_id":"a","name":"exec","input":"pwd"}` +
+				`,{"type":"custom_tool_call_output","call_id":"other","output":"unknown` +
+				` result"}]`,
+			wantResults: 1, wantErrors: 1, wantText: "unknown result",
+		},
+		{
+			name: "heartbeat before result",
+			input: `[{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},{"type":"` +
+				`function_call_output","id":"fco_seed","name":"heartbeat","output":"tick"},{"type":"` +
+				`function_call_output","call_id":"a","output":"real result"}]`,
+			wantResults: 1, wantText: "tick", wantResult: "real result",
+		},
 	}
 	for _, tc := range tests {
 		for _, compat := range []bool{false, true} {
@@ -160,46 +245,55 @@ func TestCPA09ResponsesRequestContractToolPairing(t *testing.T) {
 			if compat {
 				name = tc.name + "/compat"
 			}
-			t.Run(name, func(t *testing.T) {
-				input := []byte(`{"input":` + tc.input + `}`)
-				var out []byte
-				var err error
-				if compat {
-					out, err = ConvertOpenAIResponsesRequestToClaudeWithCompatReturningError("claude-fable-5-1", input, false)
-				} else {
-					out, err = sdktranslator.TranslateRequestChecked(t.Context(), sdktranslator.FormatOpenAIResponse,
-						sdktranslator.FormatClaude, "claude-fable-5-1", input, false)
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				assertCPA09ClaudeToolPairing(t, out)
-				results, errors := 0, 0
-				textFound, resultFound := tc.wantText == "", tc.wantResult == ""
-				for _, message := range gjson.GetBytes(out, "messages").Array() {
-					content := message.Get("content")
-					if content.Type == gjson.String && content.String() == tc.wantText {
-						textFound = true
+			t.Run(
+				name, func(t *testing.T) {
+					input := []byte(`{"input":` + tc.input + `}`)
+					var out []byte
+					var err error
+					if compat {
+						out, err = ConvertOpenAIResponsesRequestToClaudeWithCompatReturningError(
+							"claude-fable-5-1", input, false,
+						)
+					} else {
+						out, err = sdktranslator.TranslateRequestChecked(
+							t.Context(), sdktranslator.FormatOpenAIResponse,
+							sdktranslator.FormatClaude, "claude-fable-5-1", input, false,
+						)
 					}
-					for _, part := range content.Array() {
-						if part.Get("type").String() == "tool_result" {
-							results++
-							if part.Get("is_error").Bool() {
-								errors++
-							}
-							if part.Get("content").String() == tc.wantResult {
-								resultFound = true
-							}
-						}
-						if part.Get("type").String() == "text" && part.Get("text").String() == tc.wantText {
+					if err != nil {
+						t.Fatal(err)
+					}
+					assertCPA09ClaudeToolPairing(t, out)
+					results, errors := 0, 0
+					textFound, resultFound := tc.wantText == "", tc.wantResult == ""
+					for _, message := range gjson.GetBytes(out, "messages").Array() {
+						content := message.Get("content")
+						if content.Type == gjson.String && content.String() == tc.wantText {
 							textFound = true
 						}
+						for _, part := range content.Array() {
+							if part.Get("type").String() == "tool_result" {
+								results++
+								if part.Get("is_error").Bool() {
+									errors++
+								}
+								if part.Get("content").String() == tc.wantResult {
+									resultFound = true
+								}
+							}
+							if part.Get("type").String() == "text" && part.Get("text").String() == tc.wantText {
+								textFound = true
+							}
+						}
 					}
-				}
-				if results != tc.wantResults || errors != tc.wantErrors || !textFound || !resultFound {
-					t.Fatalf("results=%d errors=%d text=%v result=%v; output=%s", results, errors, textFound, resultFound, out)
-				}
-			})
+					if results != tc.wantResults || errors != tc.wantErrors || !textFound || !resultFound {
+						t.Fatalf(
+							"results=%d errors=%d text=%v result=%v; output=%s", results, errors, textFound,
+							resultFound, out,
+						)
+					}
+				},
+			)
 		}
 	}
 }
@@ -252,73 +346,128 @@ func TestCPA09ResponsesRequestContractReasoningReplay(t *testing.T) {
 		kind    string
 		payload string
 	}{
-		{name: "redacted", item: `{"type":"reasoning","encrypted_content":"claude-redacted-thinking:opaque"}`, kind: "redacted_thinking", payload: "opaque"},
-		{name: "content text", item: `{"type":"reasoning","encrypted_content":"` + signature + `","summary":[],"content":[{"type":"reasoning_text","text":"restored"}]}`, kind: "thinking", payload: "restored"},
-		{name: "summary priority", item: `{"type":"reasoning","encrypted_content":"` + signature + `","summary":[{"text":"summary"}],"content":[{"type":"reasoning_text","text":"duplicate"}]}`, kind: "thinking", payload: "summary"},
+		{
+			name: "redacted", item: `{"type":"reasoning","encrypted_content":"claude-redacted-thinking:opaque"}`,
+			kind: "redacted_thinking", payload: "opaque",
+		},
+		{
+			name: "content text",
+			item: `{"type":"reasoning","encrypted_content":` +
+				`"` +
+				signature +
+				(`","summary":[],"content":` +
+					`[{"type":"reasoning_text",` +
+					`"text":"restored"}]}`),
+			kind: "thinking", payload: "restored",
+		},
+		{
+			name: "summary priority",
+			item: `{"type":"reasoning","encrypted_content":` +
+				`"` +
+				signature +
+				(`","summary":[{"text":` +
+					`"summary"}],"content":[{"type":` +
+					`"reasoning_text","text":` +
+					`"duplicate"}]}`),
+			kind: "thinking", payload: "summary",
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			input := []byte(`{"input":[` + tc.item + `,{"role":"assistant","content":"answer"},{"role":"user","content":"continue"}]}`)
-			out, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatOpenAIResponse,
-				sdktranslator.FormatClaude, "claude-test", input, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			part := gjson.GetBytes(out, "messages.0.content.0")
-			if part.Get("type").String() != tc.kind {
-				t.Fatalf("reasoning kind = %q, want %q; output=%s", part.Get("type").String(), tc.kind, out)
-			}
-			if tc.kind == "redacted_thinking" {
-				if part.Get("data").String() != tc.payload || part.Get("signature").Exists() {
-					t.Fatalf("invalid redacted replay: %s", part.Raw)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				input := []byte(
+					`{"input":` +
+						`[` +
+						tc.item +
+						(`,{"role":"assistant","content":"answer"},{"role":"user",` +
+							`"content":"continue"}]}`),
+				)
+				out, err := sdktranslator.TranslateRequestChecked(
+					context.Background(), sdktranslator.FormatOpenAIResponse,
+					sdktranslator.FormatClaude, "claude-test", input, false,
+				)
+				if err != nil {
+					t.Fatal(err)
 				}
-			} else if part.Get("thinking").String() != tc.payload || part.Get("signature").String() != signature {
-				t.Fatalf("invalid signed replay: %s", part.Raw)
-			}
-		})
+				part := gjson.GetBytes(out, "messages.0.content.0")
+				if part.Get("type").String() != tc.kind {
+					t.Fatalf("reasoning kind = %q, want %q; output=%s", part.Get("type").String(), tc.kind, out)
+				}
+				if tc.kind == "redacted_thinking" {
+					if part.Get("data").String() != tc.payload || part.Get("signature").Exists() {
+						t.Fatalf("invalid redacted replay: %s", part.Raw)
+					}
+				} else if part.Get("thinking").String() != tc.payload || part.Get("signature").String() != signature {
+					t.Fatalf("invalid signed replay: %s", part.Raw)
+				}
+			},
+		)
 	}
 }
 
 func TestCPA09ResponsesRequestContractToolResultImage(t *testing.T) {
 	for _, url := range []string{"data:image/png;base64,iVBORw0KGgo=", "https://example.com/image.png"} {
-		t.Run(url, func(t *testing.T) {
-			input := []byte(`{"input":[{"type":"function_call","call_id":"image","name":"view","arguments":"{}"},{"type":"function_call_output","call_id":"image","cache_control":{"type":"ephemeral"},"output":[{"type":"input_text","text":"image result"},{"type":"input_image","image_url":"` + url + `"}]}]}`)
-			out, err := sdktranslator.TranslateRequestChecked(t.Context(), sdktranslator.FormatOpenAIResponse,
-				sdktranslator.FormatClaude, "claude-test", input, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertCPA09ClaudeToolPairing(t, out)
-			result := gjson.GetBytes(out, "messages.1.content.0")
-			if result.Get("content.0.text").String() != "image result" || result.Get("content.1.type").String() != "image" || result.Get("cache_control.type").String() != "ephemeral" {
-				t.Fatalf("image or cache was lost: %s", out)
-			}
-			image := result.Get("content.1.source")
-			if strings.HasPrefix(url, "data:") {
-				if image.Get("type").String() != "base64" || image.Get("media_type").String() != "image/png" || image.Get("data").String() != "iVBORw0KGgo=" {
-					t.Fatalf("base64 image changed: %s", image.Raw)
+		t.Run(
+			url, func(t *testing.T) {
+				input := []byte((`{"input":[{"type":"function_call","call_id":"image","name":"view","` +
+					`arguments":"{}"},{"type":"function_call_output","call_id":"image","cache_control":{"` +
+					`type":"ephemeral"},"output":[{"type":"input_text","text":"image result"},{"type":"` +
+					`input_image","image_url":"`) + url + `"}]}]}`)
+				out, err := sdktranslator.TranslateRequestChecked(
+					t.Context(), sdktranslator.FormatOpenAIResponse,
+					sdktranslator.FormatClaude, "claude-test", input, false,
+				)
+				if err != nil {
+					t.Fatal(err)
 				}
-			} else if image.Get("type").String() != "url" || image.Get("url").String() != url {
-				t.Fatalf("URL image changed: %s", image.Raw)
-			}
-		})
+				assertCPA09ClaudeToolPairing(t, out)
+				result := gjson.GetBytes(out, "messages.1.content.0")
+				if result.Get("content.0.text").String() != "image result" ||
+					result.Get("content.1.type").String() != "image" ||
+					result.Get("cache_control.type").String() != "ephemeral" {
+					t.Fatalf("image or cache was lost: %s", out)
+				}
+				image := result.Get("content.1.source")
+				if strings.HasPrefix(url, "data:") {
+					//goland:noinspection SpellCheckingInspection
+					if image.Get("type").String() != "base64" ||
+						image.Get("media_type").String() != "image/png" ||
+						image.Get("data").String() != "iVBORw0KGgo=" {
+						t.Fatalf("base64 image changed: %s", image.Raw)
+					}
+				} else if image.Get("type").String() != "url" || image.Get("url").String() != url {
+					t.Fatalf("URL image changed: %s", image.Raw)
+				}
+			},
+		)
 	}
 }
 
 func TestCPA09ResponsesRequestContractToolDeclarationCache(t *testing.T) {
-	input := []byte(`{"input":"hi","tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch","description":"Edit files.","format":{"type":"grammar","definition":"start: patch"},"cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"function","name":"lookup","cache_control":{"type":"ephemeral"}}]}]}`)
-	out, err := sdktranslator.TranslateRequestChecked(t.Context(), sdktranslator.FormatOpenAIResponse,
-		sdktranslator.FormatClaude, "claude-test", input, false)
+	input := []byte((`{"input":"hi","tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","` +
+		`name":"apply_patch","description":"Edit files.","format":{"type":"grammar","definition":"start: ` +
+		`patch"},"cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"function","name":"lookup","` +
+		`cache_control":{"type":"ephemeral"}}]}]}`))
+	out, err := sdktranslator.TranslateRequestChecked(
+		t.Context(), sdktranslator.FormatOpenAIResponse,
+		sdktranslator.FormatClaude, "claude-test", input, false,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	patch := gjson.GetBytes(out, `tools.#(name=="editor__apply_patch")`)
-	if patch.Get("cache_control.ttl").String() != "1h" || patch.Get("input_schema.additionalProperties").Bool() || !patch.Get("input_schema.additionalProperties").Exists() {
+	if patch.Get("cache_control.ttl").String() != "1h" ||
+		patch.Get("input_schema.additionalProperties").Bool() ||
+		!patch.Get("input_schema.additionalProperties").Exists() {
 		t.Fatalf("patch cache or schema was lost: %s", patch.Raw)
 	}
 	if gjson.GetBytes(out, `tools.#(name=="editor__lookup").cache_control.type`).String() != "ephemeral" {
 		t.Fatalf("function cache was lost: %s", out)
 	}
-	for _, token := range []string{"*** Add File:", "*** Delete File:", "*** Update File:", "*** Move to:", "*** End of File", "@@", "start: patch"} {
+	for _, token := range []string{
+		"*** Add File:", "*** Delete File:", "*** Update File:", "*** Move to:", "*** End of " +
+			"File", "@@", "start: " +
+			"patch",
+	} {
 		if !strings.Contains(patch.Get("description").String(), token) {
 			t.Errorf("patch instruction %q was lost", token)
 		}
@@ -351,33 +500,43 @@ func TestCPA09ResponsesRequestContractPrefillModelNames(t *testing.T) {
 		{model: "claude-sonnet-4-6foo", count: 2},
 		{model: "fable/gpt-4o", count: 2},
 	} {
-		t.Run(tc.model, func(t *testing.T) {
-			out, err := sdktranslator.TranslateRequestChecked(t.Context(), sdktranslator.FormatOpenAIResponse,
-				sdktranslator.FormatClaude, tc.model, request, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := gjson.GetBytes(out, "messages.#").Int(); got != tc.count {
-				t.Fatalf("message count = %d, want %d; output=%s", got, tc.count, out)
-			}
-		})
+		t.Run(
+			tc.model, func(t *testing.T) {
+				out, err := sdktranslator.TranslateRequestChecked(
+					t.Context(), sdktranslator.FormatOpenAIResponse,
+					sdktranslator.FormatClaude, tc.model, request, false,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := gjson.GetBytes(out, "messages.#").Int(); got != tc.count {
+					t.Fatalf("message count = %d, want %d; output=%s", got, tc.count, out)
+				}
+			},
+		)
 	}
 }
 
 func TestCPA09ResponsesRequestContractByteEntryRejectsUnsupportedAttachments(t *testing.T) {
-	input := []byte(`{"input":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`)
+	input := []byte(
+		`{"input":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`,
+	)
 	for name, convert := range map[string]func(string, []byte, bool) []byte{
 		"default": convertOpenAIResponsesRequestToClaudeDefault,
-		"compat":  ConvertOpenAIResponsesRequestToClaudeWithCompat,
+		"compat":  convertOpenAIResponsesRequestToClaudeWithCompat,
 	} {
-		t.Run(name, func(t *testing.T) {
-			if out := convert("claude-test", input, false); len(out) != 0 {
-				t.Fatalf("byte entry returned a body for unsupported attachment: %s", out)
-			}
-		})
+		t.Run(
+			name, func(t *testing.T) {
+				if out := convert("claude-test", input, false); len(out) != 0 {
+					t.Fatalf("byte entry returned a body for unsupported attachment: %s", out)
+				}
+			},
+		)
 	}
-	out, err := sdktranslator.TranslateRequestChecked(t.Context(), sdktranslator.FormatOpenAIResponse,
-		sdktranslator.FormatClaude, "claude-test", input, false)
+	out, err := sdktranslator.TranslateRequestChecked(
+		t.Context(), sdktranslator.FormatOpenAIResponse,
+		sdktranslator.FormatClaude, "claude-test", input, false,
+	)
 	if err == nil || len(out) != 0 {
 		t.Fatalf("checked entry did not preserve rejection: error=%v body=%s", err, out)
 	}
@@ -394,38 +553,82 @@ func TestCPA09ResponsesRequestContractWarnings(t *testing.T) {
 		input    string
 		fragment string
 	}{
-		{name: "unmapped item", input: `[{"type":"future_item","payload":"do-not-log-raw-payload"},{"role":"user","content":"hi"}]`, fragment: "future_item"},
-		{name: "additional tools consumed", input: `[{"type":"additional_tools","tools":[{"type":"function","name":"lookup"}]},{"role":"user","content":"hi"}]`},
-		{name: "partial unsupported attachment", input: `[{"role":"user","content":[{"type":"input_text","text":"hi"},{"type":"input_audio","input_audio":{"data":"do-not-log-raw-payload","format":"wav"}}]}]`, fragment: "input_audio"},
-		{name: "first assistant", input: `[{"role":"assistant","content":"do-not-log-raw-payload"}]`, fragment: "first message is not user"},
-		{name: "valid tool turn", input: `[{"role":"user","content":"Run"},{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":"done"}]`},
+		{
+			name:     "unmapped item",
+			input:    `[{"type":"future_item","payload":"do-not-log-raw-payload"},{"role":"user","content":"hi"}]`,
+			fragment: "future_item",
+		},
+		{
+			name: "additional tools consumed",
+			input: `[{"type":"additional_tools","tools":[{"type":"function","name":` +
+				`"lookup"}]},{"role":"user","content":` +
+				`"hi"}]`,
+		},
+		{
+			name: "partial unsupported attachment",
+			input: `[{"role":"user","content":[{"type":"input_text","text":"hi"},{"type":"` +
+				`input_audio","input_audio":{"data":"do-not-log-raw-payload","format":"` +
+				`wav"}}]}]`,
+			fragment: "input_audio",
+		},
+		{
+			name: "first assistant", input: `[{"role":"assistant","content":"do-not-log-raw-payload"}]`,
+			fragment: "first message is not user",
+		},
+		{
+			name: "valid tool turn",
+			input: `[{"role":"user","content":"Run"},{"type":"function_call","call_id":"a"` +
+				`,"name":"exec","arguments":"{}"},{"type":"function_call_output","call_` +
+				`id":"a","output":"done"}]`,
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			hook.Reset()
-			out, err := sdktranslator.TranslateRequestChecked(t.Context(), sdktranslator.FormatOpenAIResponse,
-				sdktranslator.FormatClaude, "claude-test", []byte(`{"input":`+tc.input+`}`), false)
-			if err != nil || !gjson.ValidBytes(out) {
-				t.Fatalf("request failed: %v; output=%s", err, out)
-			}
-			entries := hook.AllEntries()
-			if tc.fragment == "" {
-				if len(entries) != 0 {
-					t.Fatalf("unexpected warnings: %v", entries)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				hook.Reset()
+				out, err := sdktranslator.TranslateRequestChecked(
+					t.Context(), sdktranslator.FormatOpenAIResponse,
+					sdktranslator.FormatClaude, "claude-test", []byte(`{"input":`+tc.input+`}`), false,
+				)
+				if err != nil || !gjson.ValidBytes(out) {
+					t.Fatalf("request failed: %v; output=%s", err, out)
 				}
-				return
-			}
-			if len(entries) != 1 || entries[0].Level != log.WarnLevel || !strings.Contains(entries[0].Message, tc.fragment) || strings.Contains(entries[0].Message, "do-not-log-raw-payload") {
-				t.Fatalf("missing or unsafe warning: %v", entries)
-			}
-		})
+				entries := hook.AllEntries()
+				if tc.fragment == "" {
+					if len(entries) != 0 {
+						t.Fatalf("unexpected warnings: %v", entries)
+					}
+					return
+				}
+				if len(entries) != 1 || entries[0].Level != log.WarnLevel || !strings.Contains(
+					entries[0].Message, tc.fragment,
+				) || strings.Contains(entries[0].Message, "do-not-log-raw-payload") {
+					t.Fatalf("missing or unsafe warning: %v", entries)
+				}
+			},
+		)
 	}
 }
 
 func TestCPA09ResponsesRequestContractThinkingAfterServerSearch(t *testing.T) {
 	signature := validClaudeThinkingSignature()
-	input := []byte(`{"input":[{"type":"reasoning","encrypted_content":"` + signature + `","summary":[{"type":"summary_text","text":"reason"}]},{"type":"web_search_call","id":"ws_search","action":{"type":"search","query":"example"},"results":[{"type":"computer_initialize_state","url":"https://example.com","encrypted_content":"synthetic-search"}]},{"type":"function_call","call_id":"tail","name":"exec","arguments":"{}"},{"type":"function_call_output","call_id":"tail","output":"done"}]}`)
-	out, err := sdktranslator.TranslateRequestChecked(t.Context(), sdktranslator.FormatOpenAIResponse,
-		sdktranslator.FormatClaude, "claude-test", input, false)
+	input := []byte(
+		`{"input":[{"type":"reasoning","encrypted_content":` +
+			`"` +
+			signature +
+			(`","summary":[{"type":` +
+				`"summary_text","text":` +
+				`"reason"}]},{"type":` +
+				`"web_se` +
+				`arch_call","id":"ws_search","action":{"type":"search","query":"example` +
+				`"},"results":[{"type":"computer_initialize_state","url":"https://examp` +
+				`le.com","encrypted_content":"synthetic-search"}]},{"type":"function_ca` +
+				`ll","call_id":"tail","name":"exec","arguments":"{}"},{"type":"function` +
+				`_call_output","call_id":"tail","output":"done"}]}`),
+	)
+	out, err := sdktranslator.TranslateRequestChecked(
+		t.Context(), sdktranslator.FormatOpenAIResponse,
+		sdktranslator.FormatClaude, "claude-test", input, false,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +654,8 @@ func TestCPA09ResponsesRequestContractFormalHistory(t *testing.T) {
 		input string
 		want  []string
 	}{
-		{name: "LateOrphanToolResultFoldsToText", input: `{
+		{
+			name: "LateOrphanToolResultFoldsToText", input: `{
 		"model":"claude-test",
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run ls."}]},
@@ -460,8 +664,13 @@ func TestCPA09ResponsesRequestContractFormalHistory(t *testing.T) {
 			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"interlude"}]},
 			{"type":"function_call_output","call_id":"call_a","output":"a.txt"}
 		]
-	}`, want: []string{"M:user", "T:Run ls.", "M:assistant", "C:call_a:exec:{}", "M:user", "R:call_a:true", "T:wait", "M:assistant", "T:interlude", "M:user", "T:a.txt"}},
-		{name: "EmptyLateOrphanToolResultKeepsNonEmptyUserMessage", input: `{
+	}`, want: []string{
+				"M:user", "T:Run ls.", "M:assistant", "C:call_a:exec:{}", "M:user", "R:call_a:true", "T:wait",
+				"M:assistant", "T:interlude", "M:user", "T:a.txt",
+			},
+		},
+		{
+			name: "EmptyLateOrphanToolResultKeepsNonEmptyUserMessage", input: `{
 		"model":"claude-fable-5-1",
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run the tool."}]},
@@ -470,68 +679,95 @@ func TestCPA09ResponsesRequestContractFormalHistory(t *testing.T) {
 			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Interlude."}]},
 			{"type":"function_call_output","call_id":"call_a","output":""}
 		]
-	}`, want: []string{"M:user", "T:Run the tool.", "M:assistant", "C:call_a:exec:{}", "M:user", "R:call_a:true", "T:Wait.", "M:assistant", "T:Interlude.", "M:user", "T:Tool result was empty."}},
-		{name: "LateOrphanToolResultArrayOfEmptyTextKeepsMarker", input: `{
-		"model":"claude-fable-5-1",
-		"input":[
-			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run."}]},
-			{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},
-			{"type":"message","role":"user","content":[{"type":"input_text","text":"Wait."}]},
-			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Interlude."}]},
-			{"type":"function_call_output","call_id":"a","output":[{"type":"input_text","text":""},{"type":"input_text","text":""}]}
-		]
-	}`, want: []string{"M:user", "T:Run.", "M:assistant", "C:a:exec:{}", "M:user", "R:a:true", "T:Wait.", "M:assistant", "T:Interlude.", "M:user", "T:Tool result was empty."}},
-		{name: "SanitizationCollisions", input: `{
-		"model": "claude-sonnet-5-5",
-		"input": "test",
-		"stream": false,
-		"tools": [
-			{"type": "function", "name": "a_b", "description": "ab", "parameters": {"type": "object", "properties": {}}},
-			{"type": "function", "name": "a.b", "description": "a.b", "parameters": {"type": "object", "properties": {}}}
-		]
-	}`, want: []string{"M:user", "T:test"}},
+	}`, want: []string{
+				"M:user", "T:Run the tool.", "M:assistant", "C:call_a:exec:{}", "M:user", "R:call_a:true", "T:Wait.",
+				"M:assistant", "T:Interlude.", "M:user", "T:Tool result was empty.",
+			},
+		},
+		{
+			name: "LateOrphanToolResultArrayOfEmptyTextKeepsMarker", input: ("{\n\t\t\"model\":\"claude-fable" +
+				"-5-1\",\n\t\t\"input\":[\n\t\t" +
+				"\t{\"type") +
+				`":"message","role":"user","content":[{"type":"input_text","text":"Run.` +
+				"\"}]},\n\t\t\t{\"type\":\"function_call\",\"call_id\":\"a\",\"name\":" +
+				"\"exec\",\"arguments\":\"{}\"},\n\t\t\t{\"type\":\"message\",\"role\":" +
+				`"user","content":[{"type":"input_text","text":"Wait."}]},` +
+				"\n\t\t\t{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"t" +
+				"ype\":\"output_text\",\"text\":\"Interlude.\"}]},\n\t\t\t{\"type\":\"f" +
+				`unction_call_output","call_id":"a","output":[{"type":"input_text","tex` +
+				"t\":\"\"},{\"type\":\"input_text\",\"text\":\"\"}]}\n\t\t]\n\t}", want: []string{
+				"M:user", "T:Run.", "M:assistant", "C:a:exec:{}", "M:user", "R:a:true", "T:Wait.", "M:assistant",
+				"T:Interlude.", "M:user", "T:Tool result was empty.",
+			},
+		},
+		{
+			name: "SanitizationCollisions", input: ("{\n\t\t\"model\": \"claude-sonnet-5-5\",\n\t\t\"input\":" +
+				" \"test\",\n\t") +
+				"\t\"stream\": false,\n\t\t\"tools\": [\n\t\t\t{\"type\": \"function\"," +
+				` "name": "a_b", "description": "ab", "parameters": {"type": "object", ` +
+				"\"properties\": {}}},\n\t\t\t{\"type\": \"function\", \"name\": \"a.b" +
+				`", "description": "a.b", "parameters": {"type": "object", "properties"` +
+				": {}}}\n\t\t]\n\t}", want: []string{"M:user", "T:test"},
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out, err := sdktranslator.TranslateRequestChecked(t.Context(), sdktranslator.FormatOpenAIResponse,
-				sdktranslator.FormatClaude, gjson.Get(tc.input, "model").String(), []byte(tc.input), false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertCPA09ClaudeToolPairing(t, out)
-			var events []string
-			for _, message := range gjson.GetBytes(out, "messages").Array() {
-				events = append(events, "M:"+message.Get("role").String())
-				content := message.Get("content")
-				if content.Type == gjson.String {
-					events = append(events, "T:"+content.String())
-					continue
+		t.Run(
+			tc.name, func(t *testing.T) {
+				out, err := sdktranslator.TranslateRequestChecked(
+					t.Context(), sdktranslator.FormatOpenAIResponse,
+					sdktranslator.FormatClaude, gjson.Get(tc.input, "model").String(), []byte(tc.input), false,
+				)
+				if err != nil {
+					t.Fatal(err)
 				}
-				for _, part := range content.Array() {
-					switch part.Get("type").String() {
-					case "text":
-						events = append(events, "T:"+part.Get("text").String())
-					case "tool_use":
-						events = append(events, "C:"+part.Get("id").String()+":"+part.Get("name").String()+":"+part.Get("input").Raw)
-					case "tool_result":
-						if part.Get("content").String() == "" {
-							t.Fatalf("empty interrupted result: %s", part.Raw)
+				assertCPA09ClaudeToolPairing(t, out)
+				var events []string
+				for _, message := range gjson.GetBytes(out, "messages").Array() {
+					events = append(events, "M:"+message.Get("role").String())
+					content := message.Get("content")
+					if content.Type == gjson.String {
+						events = append(events, "T:"+content.String())
+						continue
+					}
+					for _, part := range content.Array() {
+						switch part.Get("type").String() {
+						case "text":
+							events = append(events, "T:"+part.Get("text").String())
+						case "tool_use":
+							events = append(
+								events,
+								"C:"+part.Get("id").
+									String()+
+									":"+part.Get("name").
+									String()+
+									":"+part.Get(
+									"input",
+								).Raw,
+							)
+						case "tool_result":
+							if part.Get("content").String() == "" {
+								t.Fatalf("empty interrupted result: %s", part.Raw)
+							}
+							events = append(
+								events, "R:"+part.Get("tool_use_id").String()+":"+part.Get("is_error").String(),
+							)
+						default:
+							t.Fatalf("unexpected history block: %s", part.Raw)
 						}
-						events = append(events, "R:"+part.Get("tool_use_id").String()+":"+part.Get("is_error").String())
-					default:
-						t.Fatalf("unexpected history block: %s", part.Raw)
 					}
 				}
-			}
-			if strings.Join(events, "\x00") != strings.Join(tc.want, "\x00") {
-				t.Fatalf("history events=%q, want %q; output=%s", events, tc.want, out)
-			}
-			if tc.name == "SanitizationCollisions" {
-				mapping := util.ChatFunctionNameMap([]string{"a_b", "a.b"})
-				tools := gjson.GetBytes(out, "tools").Array()
-				if len(tools) != 2 || tools[0].Get("name").String() != mapping["a_b"] || tools[1].Get("name").String() != mapping["a.b"] || mapping["a_b"] == mapping["a.b"] {
-					t.Fatalf("shared name mapping changed: %s", out)
+				if strings.Join(events, "\x00") != strings.Join(tc.want, "\x00") {
+					t.Fatalf("history events=%q, want %q; output=%s", events, tc.want, out)
 				}
-			}
-		})
+				if tc.name == "SanitizationCollisions" {
+					mapping := util.ChatFunctionNameMap([]string{"a_b", "a.b"})
+					tools := gjson.GetBytes(out, "tools").Array()
+					if len(tools) != 2 || tools[0].Get("name").String() != mapping["a_b"] ||
+						tools[1].Get("name").String() != mapping["a.b"] ||
+						mapping["a_b"] == mapping["a.b"] {
+						t.Fatalf("shared name mapping changed: %s", out)
+					}
+				}
+			},
+		)
 	}
 }

@@ -42,6 +42,7 @@ func claudeThinkingReplayScopeFromRequest(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) claudeThinkingReplayScope {
+	req.Payload = originalRequestPayload(req, opts)
 	sessionKey := codexReasoningReplaySessionKey(
 		ctx,
 		sdktranslator.FormatClaude,
@@ -51,6 +52,7 @@ func claudeThinkingReplayScopeFromRequest(
 	)
 	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	return claudeThinkingReplayScope{
+		provider:    "claude",
 		modelFamily: claudeThinkingReplayModelFamily(auth, req.Model),
 		sessionKey:  sessionKey,
 	}
@@ -128,6 +130,10 @@ func cacheClaudeThinkingReplayResponse(
 	scope claudeThinkingReplayScope,
 	response []byte,
 ) {
+	if scope.provider == "kimi" {
+		cacheKimiThinkingReplayResponse(ctx, scope, response)
+		return
+	}
 	if !scope.valid() || !scope.cacheReady {
 		return
 	}
@@ -172,6 +178,10 @@ func cacheClaudeThinkingReplayContent(
 }
 
 func clearClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingReplayScope) {
+	if scope.provider == "kimi" {
+		clearKimiThinkingReplayContent(ctx, scope)
+		return
+	}
 	if !scope.valid() || !scope.cacheReady {
 		return
 	}
@@ -210,6 +220,9 @@ func newClaudeThinkingReplayStreamObserver(
 ) claudeStreamObserver {
 	if !scope.valid() || !scope.cacheReady {
 		return nil
+	}
+	if scope.provider == "kimi" {
+		return newKimiThinkingReplayStreamObserver(ctx, scope)
 	}
 	return &claudeThinkingReplayStreamObserver{
 		ctx:         ctx,

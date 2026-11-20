@@ -139,16 +139,27 @@ func injectClaudeSubagentBillingTag(body []byte) []byte {
 
 const claudeCodeCLIIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
 
-const claudeCodeFableReportingOutcomes = `# Reporting outcomes
+const claudeCodeFableReportingOutcomes = "# Reporting outcomes\n\nReport what actually happened, not what " +
+	"you intended. When you say something is done, sent, saved, fixed, or verified, that claim must rest on " +
+	"a result you observed in this session — tool output, the file as it now reads, the page as it now loads " +
+	"— not on what the step should have produced. If you did not check, say you did not check. If any step " +
+	"failed, was skipped, or came back different from what you expected, say so in the first sentence of " +
+	"your report, before anything else, even when the rest of the work succeeded. Never quietly work around " +
+	"a failure in a way that makes it look resolved; a problem the user can see is recoverable, one your " +
+	"summary hides is not. When you stop before the task is complete, your first line says so plainly and " +
+	"names what is left. Do not describe partial work as done, and do not let a summary read as more certain " +
+	"than the evidence behind it."
 
-Report what actually happened, not what you intended. When you say something is done, sent, saved, fixed, or verified, that claim must rest on a result you observed in this session — tool output, the file as it now reads, the page as it now loads — not on what the step should have produced. If you did not check, say you did not check. If any step failed, was skipped, or came back different from what you expected, say so in the first sentence of your report, before anything else, even when the rest of the work succeeded. Never quietly work around a failure in a way that makes it look resolved; a problem the user can see is recoverable, one your summary hides is not. When you stop before the task is complete, your first line says so plainly and names what is left. Do not describe partial work as done, and do not let a summary read as more certain than the evidence behind it.`
-
-func isClaudeFable51Model(model string) bool {
+func isClaudeFableModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	for _, target := range []string{
 		"fable-5-1",
+		"fable-5-2",
+		"fable-5.2",
 		"fable-5.1",
 		"mythos-5-1",
+		"mythos-5-2",
+		"mythos-5.2",
 		"mythos-5.1",
 	} {
 		index := strings.Index(model, target)
@@ -197,7 +208,7 @@ func checkClaudeSystemInstructionsWithSigningModeAt(
 	}
 	agentBlock := buildClaudeTextBlock(claudeCodeCLIIdentity, cacheControl)
 	systemBlocks := []string{billingBlock, agentBlock}
-	if isClaudeFable51Model(gjson.GetBytes(payload, "model").String()) &&
+	if isClaudeFableModel(gjson.GetBytes(payload, "model").String()) &&
 		!helps.IsClaudeProbeOrHelperRequest(payload) {
 		systemBlocks = append(
 			systemBlocks,
@@ -242,7 +253,11 @@ func checkClaudeSystemInstructionsWithSigningModeAt(
 	return injectClaudeCodeCurrentDate(payload, now, explicitCacheMode)
 }
 
-func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode, explicitCacheMode bool, keepCallerSystemTopLevel ...bool) []byte {
+func relocateClaudeSystemPromptForCountTokens(
+	payload []byte,
+	strictMode, explicitCacheMode bool,
+	keepCallerSystemTopLevel ...bool,
+) []byte {
 	system := gjson.GetBytes(payload, "system")
 	explicitCacheMode = explicitCacheMode || isExplicitPromptCacheMode(payload)
 	if !system.Exists() {
@@ -438,7 +453,10 @@ func (block claudeForwardedSystemBlock) textBlock(text string, cacheControl map[
 	return `{"type":"text","text":` + marshalClaudeJSONString(text) + `,"cache_control":` + block.cacheControl + "}"
 }
 
-func collectForwardedClaudeSystemPromptBlocks(system gjson.Result, explicitCacheMode ...bool) []claudeForwardedSystemBlock {
+func collectForwardedClaudeSystemPromptBlocks(
+	system gjson.Result,
+	explicitCacheMode ...bool,
+) []claudeForwardedSystemBlock {
 	var blocks []claudeForwardedSystemBlock
 	appendText := func(text string, injectedIdentity bool, cacheControl string) {
 		if strings.TrimSpace(text) == "" || util.IsClaudeCodeAttributionSystemText(text) || injectedIdentity {
@@ -626,7 +644,11 @@ func claudeMidConversationSystemMessagesAtEnd(payload []byte) bool {
 	return insertAt == len(items) || insertAt > firstUser+1
 }
 
-func insertClaudeMidConversationSystemMessages(payload []byte, texts []claudeForwardedSystemBlock, explicitCacheMode ...bool) []byte {
+func insertClaudeMidConversationSystemMessages(
+	payload []byte,
+	texts []claudeForwardedSystemBlock,
+	explicitCacheMode ...bool,
+) []byte {
 	firstUserIdx := firstClaudeUserMessageIndex(payload)
 	if firstUserIdx < 0 || len(texts) == 0 {
 		return payload
@@ -641,7 +663,8 @@ func insertClaudeMidConversationSystemMessages(payload []byte, texts []claudeFor
 		matches := true
 		for index, block := range texts {
 			message := messageBlocks[insertAt+index]
-			if message.Get("role").String() != "system" || claudeMessageContentText(message.Get("content")) != block.text ||
+			if message.Get("role").String() != "system" ||
+				claudeMessageContentText(message.Get("content")) != block.text ||
 				(block.cacheControl != "" && message.Get("content.0.cache_control").Raw != block.cacheControl) {
 				matches = false
 				break
@@ -895,7 +918,7 @@ func reconcileClaudeCodeFableModelAfterPayload(
 	model := gjson.GetBytes(body, "model").String()
 	fallback := ""
 	switch {
-	case isClaudeFable51Model(model):
+	case isClaudeFableModel(model):
 		fallback = "claude-opus-5"
 	case isClaudeOpus55Model(model):
 		fallback = "claude-opus-4-8"
@@ -908,7 +931,7 @@ func reconcileClaudeCodeFableModelAfterPayload(
 			body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"`+fallback+`"}]`))
 		}
 	}
-	if isClaudeFable51Model(model) {
+	if isClaudeFableModel(model) {
 		thinkingType := gjson.GetBytes(body, "thinking.type").String()
 		if thinkingType != "adaptive" && thinkingType != "enabled" &&
 			state.injectedDisplay && !payloadTouchedPaths["thinking.display"] {
@@ -975,15 +998,10 @@ func claudeCredentialTimezone(auth *cliproxyauth.Auth) string {
 func claudeCodeCurrentDateReminder(now time.Time) string {
 	year, month, day := now.Date()
 	return fmt.Sprintf(
-		`<system-reminder>
-As you answer the user's questions, you can use the following context:
-# currentDate
-Today's date is %04d-%02d-%02d.
-
-      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
-</system-reminder>
-
-`, year, int(month), day,
+		"<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# "+
+			"currentDate\nToday's date is %04d-%02d-%02d.\n\n      IMPORTANT: this context may or may not be "+
+			"relevant to your tasks. You should not respond to this context unless it is highly relevant to "+
+			"your task.\n</system-reminder>\n\n", year, int(month), day,
 	)
 }
 
@@ -1012,7 +1030,8 @@ func isClaudeCodeContextReminder(text string) bool {
 func isClaudeCodeCurrentDateReminder(text string) bool {
 	return strings.HasPrefix(
 		text,
-		"<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ",
+		"<system-reminder>\nAs you answer the user's questions, you can use the"+
+			" following context:\n# currentDate\nToday's date is ",
 	)
 }
 
@@ -1204,7 +1223,9 @@ func resolveClaudeWirePolicy(
 	case "never":
 		policy.Cloak = false
 	case "auto":
-		policy.Cloak = policy.Cloak || attrMode != "" || cloakCfg != nil
+		policy.Cloak = policy.Cloak || attrMode != "" || cloakCfg != nil || settings.strictMode ||
+			len(settings.sensitiveWords) > 0 ||
+			settings.cacheUserID
 	}
 	return policy, settings
 }

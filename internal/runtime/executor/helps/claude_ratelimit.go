@@ -42,14 +42,21 @@ func isClaudeRateLimitWindowAllowed(status string) bool {
 	return status == "allowed" || status == "allowed_warning"
 }
 
-func isClaudeOverageOnlyRejection(headers http.Header, unifiedStatus, status5h, status7d, status7dOI string) bool {
+func isClaudeOverageOnlyRejection(
+	headers http.Header,
+	unifiedStatus, status5h, status7d, status7dOI string,
+) bool {
 	if status5h == "rejected" || status7d == "rejected" {
 		return false
 	}
 	overageStatus := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-Overage-Status")
-	disabledReason := strings.TrimSpace(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-Overage-Disabled-Reason"))
+	disabledReason := strings.TrimSpace(
+		getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-Overage-Disabled-Reason"),
+	)
 	claim := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-Representative-Claim")
-	if status7dOI != "rejected" && overageStatus != "rejected" && disabledReason == "" && !strings.Contains(claim, "overage") {
+	if status7dOI != "rejected" && overageStatus != "rejected" && disabledReason == "" && !strings.Contains(
+		claim, "overage",
+	) {
 		return false
 	}
 	if isClaudeRateLimitWindowAllowed(status5h) && isClaudeRateLimitWindowAllowed(status7d) {
@@ -58,7 +65,11 @@ func isClaudeOverageOnlyRejection(headers http.Header, unifiedStatus, status5h, 
 	if (status5h == "" && isClaudeRateLimitWindowAllowed(status7d) &&
 		isClaudeRateLimitUtilizationHealthy(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-5h-Utilization"))) ||
 		(status7d == "" && isClaudeRateLimitWindowAllowed(status5h) &&
-			isClaudeRateLimitUtilizationHealthy(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-7d-Utilization"))) {
+			isClaudeRateLimitUtilizationHealthy(
+				getClaudeHeader(
+					headers, "Anthropic-Ratelimit-Unified-7d-Utilization",
+				),
+			)) {
 		return true
 	}
 	if unifiedStatus == "rejected" && status5h == "" && status7d == "" && strings.Contains(claim, "overage") {
@@ -76,14 +87,16 @@ func isClaudeRateLimitUtilizationHealthy(raw string) bool {
 }
 
 // ParseClaudeRateLimitReset returns the latest applicable future reset plus a
-// bounded grace period. It ignores reset headers for windows that are not
-// rejected and avoids shared cooldowns for overage-only limits.
-func ParseClaudeRateLimitReset(headers http.Header, now time.Time) *time.Duration {
+// bounded grace period. Missing statuses retain reset hints; explicitly allowed
+// windows and overage-only limits do not contribute. When an HTTP status is
+// supplied, missing-status inference applies only to 429 responses.
+func ParseClaudeRateLimitReset(headers http.Header, now time.Time, httpStatus ...int) *time.Duration {
 	return parseClaudeRateLimitResetWithFuzz(
 		headers,
 		now,
 		defaultClaudeRateLimitFuzzMinSeconds,
 		defaultClaudeRateLimitFuzzMaxSeconds,
+		httpStatus...,
 	)
 }
 
@@ -92,11 +105,13 @@ func parseClaudeRateLimitResetWithFuzz(
 	now time.Time,
 	minFuzzSeconds,
 	maxFuzzSeconds int,
+	httpStatus ...int,
 ) *time.Duration {
 	if headers == nil {
 		return nil
 	}
 
+	acceptMissingStatus := len(httpStatus) == 0 || httpStatus[0] == http.StatusTooManyRequests
 	unifiedStatus := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-Status")
 	status5h := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-5h-Status")
 	status7d := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-7d-Status")
@@ -105,32 +120,59 @@ func parseClaudeRateLimitResetWithFuzz(
 
 	deadlines := make([]time.Time, 0, 5)
 	if !overageOnly {
-		if deadline, ok := parseClaudeRetryAfter(getClaudeHeader(headers, "Retry-After"), now); ok && deadline.After(now) {
+		if deadline, ok := parseClaudeRetryAfter(
+			getClaudeHeader(headers, "Retry-After"), now,
+		); ok && deadline.After(now) {
 			deadlines = append(deadlines, deadline)
 		}
 	}
-	if status5h == "rejected" {
-		if deadline, ok := parseClaudeReset(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-5h-Reset")); ok && deadline.After(now) {
+	if !overageOnly && (status5h == "rejected" || (acceptMissingStatus && status5h == "")) {
+		if deadline, ok := parseClaudeReset(
+			getClaudeHeader(
+				headers, "Anthropic-Ratelimit-Unified-5h-Reset",
+			),
+		); ok && deadline.After(now) {
 			deadlines = append(deadlines, deadline)
 		}
 	}
-	if status7d == "rejected" {
-		if deadline, ok := parseClaudeReset(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-7d-Reset")); ok && deadline.After(now) {
+	if !overageOnly && (status7d == "rejected" || (acceptMissingStatus && status7d == "")) {
+		if deadline, ok := parseClaudeReset(
+			getClaudeHeader(
+				headers, "Anthropic-Ratelimit-Unified-7d-Reset",
+			),
+		); ok && deadline.After(now) {
 			deadlines = append(deadlines, deadline)
 		}
 	}
-	if status7dOI == "rejected" && !overageOnly {
-		if deadline, ok := parseClaudeReset(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-7d_oi-Reset")); ok && deadline.After(now) {
+	if !overageOnly && (status7dOI == "rejected" || (acceptMissingStatus && status7dOI == "")) {
+		if deadline, ok := parseClaudeReset(
+			getClaudeHeader(
+				headers, "Anthropic-Ratelimit-Unified-7d_oi-Reset",
+			),
+		); ok && deadline.After(now) {
 			deadlines = append(deadlines, deadline)
 		}
 	}
 	sharedRejected := !overageOnly &&
-		(unifiedStatus == "rejected" || status5h == "rejected" || status7d == "rejected")
+		(unifiedStatus == "rejected" || status5h == "rejected" || status7d == "rejected" || status7dOI == "rejected" ||
+			(acceptMissingStatus &&
+				unifiedStatus ==
+					"" &&
+				!isClaudeRateLimitWindowAllowed(status5h) &&
+				!isClaudeRateLimitWindowAllowed(status7d)))
 	if sharedRejected {
 		unifiedReset := getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-Reset")
 		deadline, valid := parseClaudeReset(unifiedReset)
-		overageReset, validOverage := parseClaudeReset(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-Overage-Reset"))
-		billingBoundary := strings.Contains(claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-Representative-Claim"), "overage") &&
+		overageReset, validOverage := parseClaudeReset(
+			getClaudeHeader(
+				headers, "Anthropic-Ratelimit-Unified-Overage-Reset",
+			),
+		)
+		billingBoundary := strings.Contains(
+			claudeRateLimitHeaderStatus(
+				headers, "Anthropic-Ratelimit-Unified-Representative-Claim",
+			), "overage",
+		) &&
 			valid && validOverage && deadline.Equal(overageReset)
 		if valid && deadline.After(now) && !billingBoundary {
 			deadlines = append(deadlines, deadline)

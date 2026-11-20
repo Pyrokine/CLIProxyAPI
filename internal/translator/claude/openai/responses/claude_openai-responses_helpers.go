@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -37,8 +38,17 @@ func deriveClaudeResponsesUserID(root gjson.Result, modelName string) string {
 		}
 	}
 	if seed == "" {
+		if input := root.Get("input"); input.Type == gjson.String {
+			if text := stableResponsesMessageText(input); text != "" {
+				seed = "content\x00" + text
+			}
+		}
 		for _, item := range root.Get("input").Array() {
-			if !strings.EqualFold(strings.TrimSpace(item.Get("role").String()), "user") {
+			role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+			if role == "" && (item.Get("type").String() == "message" || item.Get("type").String() == "") {
+				role = "user"
+			}
+			if role != "user" {
 				continue
 			}
 			if text := stableResponsesMessageText(item.Get("content")); text != "" {
@@ -70,15 +80,17 @@ func stableResponsesMessageText(content gjson.Result) string {
 		return ""
 	}
 	var texts []string
-	content.ForEach(func(_, part gjson.Result) bool {
-		switch part.Get("type").String() {
-		case "text", "input_text", "output_text":
-			if text := strings.TrimSpace(part.Get("text").String()); text != "" {
-				texts = append(texts, text)
+	content.ForEach(
+		func(_, part gjson.Result) bool {
+			switch part.Get("type").String() {
+			case "text", "input_text", "output_text":
+				if text := strings.TrimSpace(part.Get("text").String()); text != "" {
+					texts = append(texts, text)
+				}
 			}
-		}
-		return true
-	})
+			return true
+		},
+	)
 	return strings.Join(texts, "\n")
 }
 
@@ -86,7 +98,8 @@ func claudeResponsesStructuredOutputInstruction(format gjson.Result) string {
 	if !format.Exists() {
 		return ""
 	}
-	jsonObjectInstruction := "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object."
+	jsonObjectInstruction := "You must format your entire response as a valid JSON object. Do not include " +
+		"any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object."
 	switch strings.ToLower(strings.TrimSpace(format.Get("type").String())) {
 	case "json_object":
 		return jsonObjectInstruction
@@ -100,7 +113,9 @@ func claudeResponsesStructuredOutputInstruction(format gjson.Result) string {
 			return jsonObjectInstruction
 		}
 		var instruction strings.Builder
-		instruction.WriteString("You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n")
+		instruction.WriteString(
+			"You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n",
+		)
 		name := strings.TrimSpace(jsonSchema.Get("name").String())
 		if name == "" {
 			name = strings.TrimSpace(format.Get("name").String())
@@ -121,7 +136,11 @@ func claudeResponsesStructuredOutputInstruction(format gjson.Result) string {
 		}
 		instruction.WriteString("JSON Schema:\n")
 		instruction.WriteString(schema.Raw)
-		instruction.WriteString("\nDo not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.")
+		instruction.WriteString(
+			"\nDo not include any explanations, markdown code blocks (such as " +
+				"```json), or any text outside of the JSON " +
+				"object.",
+		)
 		return instruction.String()
 	default:
 		return ""
@@ -182,7 +201,9 @@ func stripTrailingClaudeThinkingBlocks(messages [][]byte) [][]byte {
 	return messages
 }
 
-var claudeResponsesModelID = regexp.MustCompile(`^(?:claude-)?(fable|opus|sonnet)(?:-([0-9]{1,2})(?:[-.]([0-9]{1,2}))?(?:-[0-9]{8})?(?:-thinking)?)?$`)
+var claudeResponsesModelID = regexp.MustCompile(
+	`^(?:claude-)?(fable|opus|sonnet)(?:-([0-9]{1,2})(?:[-.]([0-9]{1,2}))?(?:-[0-9]{8})?(?:-thinking)?)?$`,
+)
 
 func claudeModelRejectsAssistantPrefill(modelName string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
@@ -197,7 +218,10 @@ func claudeModelRejectsAssistantPrefill(modelName string) bool {
 		model[1] == "sonnet" && (major > 4 || major == 4 && minor >= 6)
 }
 
-func claudeResponsesFunctionNameMap(identity *translatorcommon.ResponsesToolIdentity, root gjson.Result) map[string]string {
+func claudeResponsesFunctionNameMap(
+	identity *translatorcommon.ResponsesToolIdentity,
+	root gjson.Result,
+) map[string]string {
 	declarations := identity.Declarations()
 	names := make([]string, 0, len(declarations))
 	for _, declaration := range declarations {
@@ -207,7 +231,9 @@ func claudeResponsesFunctionNameMap(identity *translatorcommon.ResponsesToolIden
 	for _, item := range root.Get("input").Array() {
 		switch item.Get("type").String() {
 		case "function_call", "custom_tool_call":
-			historyNames = append(historyNames, identity.ResolveName(item.Get("name").String(), item.Get("namespace").String()))
+			historyNames = append(
+				historyNames, identity.ResolveName(item.Get("name").String(), item.Get("namespace").String()),
+			)
 		}
 	}
 	return util.ChatFunctionNameMap(names, historyNames...)
@@ -276,9 +302,9 @@ func claudeThinkingSeparatorForToolUse(parts [][]byte) []byte {
 	if len(parts) == 0 || gjson.GetBytes(parts[len(parts)-1], "type").String() != "web_search_tool_result" {
 		return nil
 	}
-	for index := len(parts) - 1; index >= 0; index-- {
-		if gjson.GetBytes(parts[index], "type").String() == "thinking" {
-			return parts[index]
+	for _, part := range slices.Backward(parts) {
+		if gjson.GetBytes(part, "type").String() == "thinking" {
+			return part
 		}
 	}
 	return nil
@@ -313,7 +339,9 @@ func claudeMessageInvariantProblems(messages [][]byte) []string {
 				}
 				id := block.Get("tool_use_id").String()
 				if !leading {
-					problems = append(problems, "messages["+strconv.Itoa(index)+"] tool_result after non-tool_result block")
+					problems = append(
+						problems, "messages["+strconv.Itoa(index)+"] tool_result after non-tool_result block",
+					)
 				}
 				if _, exists := pending[id]; !exists {
 					problems = append(problems, "tool_result "+id+" has no tool_use in the previous message")
@@ -321,7 +349,10 @@ func claudeMessageInvariantProblems(messages [][]byte) []string {
 				delete(pending, id)
 			}
 			for id := range pending {
-				problems = append(problems, "tool_use "+id+" has no tool_result in messages["+strconv.Itoa(index)+"]")
+				problems = append(
+					problems,
+					"tool_use "+id+" has no tool_result in messages["+strconv.Itoa(index)+"]",
+				)
 			}
 			clear(pending)
 		}
