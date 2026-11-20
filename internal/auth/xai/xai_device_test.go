@@ -80,6 +80,7 @@ func TestRequestDeviceCodeRejectsUntrustedEndpoints(t *testing.T) {
 	); err == nil {
 		t.Fatal("untrusted device endpoint was accepted")
 	}
+	//goland:noinspection HttpUrlsUsage
 	if _, err := auth.requestDeviceCode(
 		context.Background(),
 		"https://auth.x.ai/oauth2/device",
@@ -211,43 +212,54 @@ func TestPollForTokenCancelsInFlightRequestAtDeviceExpiry(t *testing.T) {
 
 func TestPollForTokenRetriesOAuthPendingStatesWithoutPhysicalDelay(t *testing.T) {
 	for _, oauthState := range []string{"authorization_pending", "slow_down"} {
-		t.Run(oauthState, func(t *testing.T) {
-			requests := 0
-			auth := &Auth{
-				httpClient: &http.Client{Transport: xaiRoundTripFunc(
-					func(req *http.Request) (*http.Response, error) {
-						requests++
-						if requests == 1 {
-							return xaiJSONResponse(req, http.StatusBadRequest, map[string]any{"error": oauthState}), nil
-						}
-						return xaiJSONResponse(req, http.StatusOK, map[string]any{
-							"access_token": "access-1",
-							"token_type":   "Bearer",
-							"expires_in":   3600,
-						}), nil
+		t.Run(
+			oauthState, func(t *testing.T) {
+				requests := 0
+				auth := &Auth{
+					httpClient: &http.Client{
+						Transport: xaiRoundTripFunc(
+							func(req *http.Request) (*http.Response, error) {
+								requests++
+								if requests == 1 {
+									return xaiJSONResponse(
+										req, http.StatusBadRequest, map[string]any{"error": oauthState},
+									), nil
+								}
+								return xaiJSONResponse(
+									req, http.StatusOK, map[string]any{
+										"access_token": "access-1",
+										"token_type":   "Bearer",
+										"expires_in":   3600,
+									},
+								), nil
+							},
+						),
 					},
-				)},
-				minPollInterval: time.Millisecond,
-			}
-			started := time.Now()
-			token, err := auth.pollForToken(context.Background(), &DeviceCodeResponse{
-				DeviceCode:    "device-abc",
-				ExpiresIn:     60,
-				TokenEndpoint: "https://auth.x.ai/oauth2/token",
-			})
-			if err != nil {
-				t.Fatalf("pollForToken() error = %v", err)
-			}
-			if token.AccessToken != "access-1" || requests != 2 {
-				t.Fatalf("pollForToken() = token %#v after %d requests", token, requests)
-			}
-			if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-				t.Fatalf("pollForToken() elapsed = %s, want injected short interval", elapsed)
-			}
-		})
+					minPollInterval: time.Millisecond,
+				}
+				started := time.Now()
+				token, err := auth.pollForToken(
+					context.Background(), &DeviceCodeResponse{
+						DeviceCode:    "device-abc",
+						ExpiresIn:     60,
+						TokenEndpoint: "https://auth.x.ai/oauth2/token",
+					},
+				)
+				if err != nil {
+					t.Fatalf("pollForToken() error = %v", err)
+				}
+				if token.AccessToken != "access-1" || requests != 2 {
+					t.Fatalf("pollForToken() = token %#v after %d requests", token, requests)
+				}
+				if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+					t.Fatalf("pollForToken() elapsed = %s, want injected short interval", elapsed)
+				}
+			},
+		)
 	}
 }
 
+// noinspection GoBoolExpressions
 func TestXAIAuthProductionPollingDefaultsRemainUnchanged(t *testing.T) {
 	auth := NewXAIAuth(nil)
 	if auth.minPollInterval != 0 || auth.maxPollDuration != 0 {

@@ -56,7 +56,9 @@ func (h *Handler) RequestDevinToken(c *gin.Context) {
 	}
 	service := newDevinOAuthService(flowCfg)
 	authURL := service.BuildAuthorizationURL(redirectURI, pkce.CodeChallenge, state)
-	registerOAuthSessionForAuthDir(state, "devin", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, "devin", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 
 	flowContext := populateAuthContext(context.Background(), c)
 	go h.completeDevinOAuth(
@@ -72,6 +74,7 @@ func (h *Handler) RequestDevinToken(c *gin.Context) {
 	if forwarder != nil {
 		response["callback_port"] = forwarder.port
 	}
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusOK, response)
 }
 
@@ -129,6 +132,9 @@ func (h *Handler) completeDevinOAuth(
 		return
 	}
 
+	if !oauthSessions.setPhase(state, "devin", "exchanging") {
+		return
+	}
 	token, err := service.ExchangeCodeForToken(pollContext, code, codeVerifier)
 	if err != nil || strings.TrimSpace(token) == "" {
 		if isOAuthSessionPending(state, "devin") {

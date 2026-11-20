@@ -31,6 +31,8 @@ const (
 )
 
 // OAuthTokenData represents the OAuth credentials, including access and refresh tokens.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type OAuthTokenData struct {
 	AccessToken string `json:"access_token"`
 	// RefreshToken is used to obtain a new access token when the current one expires.
@@ -44,6 +46,8 @@ type OAuthTokenData struct {
 }
 
 // DeviceFlow represents the response from the device authorization endpoint.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type DeviceFlow struct {
 	// DeviceCode is the code that the client uses to poll for an access token.
 	DeviceCode string `json:"device_code"`
@@ -154,6 +158,9 @@ func (a *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*OAuthTo
 	var tokenData tokenResponse
 	if err = json.Unmarshal(body, &tokenData); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	}
+	if strings.TrimSpace(tokenData.AccessToken) == "" {
+		return nil, fmt.Errorf("token refresh response is missing access_token")
 	}
 
 	return &OAuthTokenData{
@@ -313,6 +320,9 @@ func (a *Auth) PollForToken(ctx context.Context, deviceCode, codeVerifier string
 		var response tokenResponse
 		if err = json.Unmarshal(body, &response); err != nil {
 			return nil, fmt.Errorf("failed to parse token response: %w", err)
+		}
+		if strings.TrimSpace(response.AccessToken) == "" {
+			return nil, fmt.Errorf("device token response is missing access_token")
 		}
 
 		return &OAuthTokenData{

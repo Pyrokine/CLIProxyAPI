@@ -166,7 +166,8 @@ func TestAccountInspectionClassifiesProbeFailures(t *testing.T) {
 					t.Fatalf("inspection results = %+v", results)
 				}
 				result := results[0]
-				if result.ProbeStatus != test.probeStatus || result.Status != test.healthStatus || result.Reason != test.reason {
+				if result.ProbeStatus != test.probeStatus || result.Status != test.healthStatus ||
+					result.Reason != test.reason {
 					t.Fatalf("inspection result = %+v", result)
 				}
 			},

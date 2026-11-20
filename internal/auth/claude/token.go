@@ -59,6 +59,8 @@ func (ts *TokenStorage) CloneForPersistence() coreauth.TokenStorage {
 }
 
 // SetMetadata injects metadata before the token is persisted.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }

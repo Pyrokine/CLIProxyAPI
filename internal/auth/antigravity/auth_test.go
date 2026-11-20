@@ -16,15 +16,21 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestUpstreamHTTPErrorPreservesStatusCode(t *testing.T) {
-	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusForbidden,
-			Header:     make(http.Header),
-			Body: io.NopCloser(strings.NewReader(
-				`{"error":{"code":403,"message":"permission denied"}}`,
-			)),
-		}, nil
-	})}
+	client := &http.Client{
+		Transport: roundTripperFunc(
+			func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Header:     make(http.Header),
+					Body: io.NopCloser(
+						strings.NewReader(
+							`{"error":{"code":403,"message":"permission denied"}}`,
+						),
+					),
+				}, nil
+			},
+		),
+	}
 	auth := NewAuth(nil, client)
 
 	tests := map[string]func() error{
@@ -46,18 +52,20 @@ func TestUpstreamHTTPErrorPreservesStatusCode(t *testing.T) {
 		},
 	}
 	for name, call := range tests {
-		t.Run(name, func(t *testing.T) {
-			err := call()
-			if err == nil {
-				t.Fatal("expected upstream HTTP error")
-			}
-			var statusError interface{ StatusCode() int }
-			if !errors.As(err, &statusError) {
-				t.Fatalf("error type = %T, want status-coded error", err)
-			}
-			if statusError.StatusCode() != http.StatusForbidden {
-				t.Fatalf("status code = %d, want %d", statusError.StatusCode(), http.StatusForbidden)
-			}
-		})
+		t.Run(
+			name, func(t *testing.T) {
+				err := call()
+				if err == nil {
+					t.Fatal("expected upstream HTTP error")
+				}
+				var statusError interface{ StatusCode() int }
+				if !errors.As(err, &statusError) {
+					t.Fatalf("error type = %T, want status-coded error", err)
+				}
+				if statusError.StatusCode() != http.StatusForbidden {
+					t.Fatalf("status code = %d, want %d", statusError.StatusCode(), http.StatusForbidden)
+				}
+			},
+		)
 	}
 }

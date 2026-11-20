@@ -27,26 +27,28 @@ func TestCodexTokenStoragePersistsPlanType(t *testing.T) {
 		{"missing", "", "free"},
 		{"specified", "plus", "plus"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			storage := (&Auth{}).CreateTokenStorage(&AuthBundle{TokenData: TokenData{PlanType: tc.plan}})
-			if storage.PlanType != tc.want {
-				t.Fatalf("storage plan = %q, want %q", storage.PlanType, tc.want)
-			}
-			path := filepath.Join(t.TempDir(), "codex.json")
-			if err := storage.SaveTokenToFile(path); err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var record map[string]any
-			if err := json.Unmarshal(data, &record); err != nil {
-				t.Fatal(err)
-			}
-			if got := record["plan_type"]; got != tc.want {
-				t.Fatalf("persisted plan = %v, want %q", got, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				storage := (&Auth{}).CreateTokenStorage(&AuthBundle{TokenData: TokenData{PlanType: tc.plan}})
+				if storage.PlanType != tc.want {
+					t.Fatalf("storage plan = %q, want %q", storage.PlanType, tc.want)
+				}
+				path := filepath.Join(t.TempDir(), "codex.json")
+				if err := storage.SaveTokenToFile(path); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var record map[string]any
+				if err := json.Unmarshal(data, &record); err != nil {
+					t.Fatal(err)
+				}
+				if got := record["plan_type"]; got != tc.want {
+					t.Fatalf("persisted plan = %v, want %q", got, tc.want)
+				}
+			},
+		)
 	}
 }

@@ -14,11 +14,13 @@ func TestSaveTokenToFilePreservesCustomMetadata(t *testing.T) {
 		RefreshToken: "new-refresh-token",
 		Email:        "user@example.com",
 	}
-	storage.SetMetadata(map[string]any{
-		"disabled":    true,
-		"weight":      5,
-		"custom_note": "preserved",
-	})
+	storage.SetMetadata(
+		map[string]any{
+			"disabled":    true,
+			"weight":      5,
+			"custom_note": "preserved",
+		},
+	)
 
 	if errSave := storage.SaveTokenToFile(path); errSave != nil {
 		t.Fatalf("SaveTokenToFile() error = %v", errSave)

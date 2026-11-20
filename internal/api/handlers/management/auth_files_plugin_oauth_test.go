@@ -45,7 +45,9 @@ func (h *managementPluginOAuthHost) UnloadPluginWithError(string) (bool, error) 
 	return false, nil
 }
 
-func (h *managementPluginOAuthHost) UnloadPluginIfCurrentWithError(pluginhost.PluginRuntimeIdentity) (bool, error) {
+func (h *managementPluginOAuthHost) UnloadPluginIfCurrentWithError(
+	pluginhost.PluginRuntimeIdentity,
+) (bool, error) {
 	return false, nil
 }
 
@@ -157,7 +159,7 @@ func (s *pluginOAuthFileStore) Delete(_ context.Context, id string) error {
 func TestServePluginAuthURLPreservesQueryMetadataAndSessionNonce(t *testing.T) {
 	previousSessions := oauthSessions
 	oauthSessions = newOAuthSessionStore(time.Minute)
-	t.Cleanup(func() { oauthSessions = previousSessions })
+	t.Cleanup(func() { cancelOAuthSession("custom-state"); oauthSessions = previousSessions })
 
 	authDir := t.TempDir()
 	host := &managementPluginOAuthHost{provider: "custom-sso"}
@@ -208,7 +210,8 @@ func TestServePluginAuthURLPreservesQueryMetadataAndSessionNonce(t *testing.T) {
 	if got := host.startMetadata["single"]; got != "one" {
 		t.Fatalf("caller metadata single mutated: %#v", got)
 	}
-	if got, ok := host.startMetadata["scopes"].([]string); !ok || len(got) != 2 || got[0] != "read" || got[1] != "write" {
+	if got, ok := host.startMetadata["scopes"].([]string); !ok || len(got) != 2 || got[0] != "read" ||
+		got[1] != "write" {
 		t.Fatalf("caller metadata scopes = %#v", host.startMetadata["scopes"])
 	}
 	session, okSession := getOAuthSessionIntegrationDetails("custom-state")
@@ -283,6 +286,9 @@ func TestPluginOAuthPollPersistsMultipleRecordsOnce(t *testing.T) {
 		t.Fatalf("wrong nonce status=%d pollCalls=%d", wrongNonce.Code, pollCalls)
 	}
 
+	session, _ := getOAuthSessionIntegrationDetails("custom-state")
+	workerCtx := withOAuthSessionContext(context.Background(), "custom-state", "custom-sso")
+	handler.pollPluginOAuthSession(workerCtx, "custom-state", session, oauthSessions)
 	response := performOAuthSessionRequest(
 		t,
 		http.MethodGet,
@@ -308,6 +314,92 @@ func TestPluginOAuthPollPersistsMultipleRecordsOnce(t *testing.T) {
 	payload = decodeOAuthSessionResponse(t, response)
 	if payload["status"] != "ok" || pollCalls != 1 {
 		t.Fatalf("completed response=%#v pollCalls=%d", payload, pollCalls)
+	}
+}
+
+func TestPluginLoginPollAuthsExpandsMultipleAuths(t *testing.T) {
+	host := &managementPluginOAuthHost{provider: "gemini-cli"}
+	auths := []pluginapi.AuthData{
+		{
+			Provider: "gemini-cli", ID: "geminicli.json", FileName: "geminicli.json",
+			StorageJSON: []byte(`{"type":"gemini-cli"}`),
+		},
+		{
+			Provider: "gemini-cli", ID: "geminicli-project-a.json", FileName: "geminicli-project-a.json",
+			StorageJSON: []byte(`{"type":"gemini-cli","project_id":"project-a"}`),
+			Metadata:    map[string]any{"project_id": "project-a"},
+		},
+	}
+	for _, tc := range []struct {
+		name     string
+		response pluginapi.AuthLoginPollResponse
+		want     int
+	}{
+		{"multiple", pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess, Auths: auths}, 2},
+		{
+			"plural overrides legacy", pluginapi.AuthLoginPollResponse{
+				Status: pluginapi.AuthLoginStatusSuccess, Auth: pluginapi.AuthData{ID: "must-not-fallback"},
+				Auths: auths,
+			}, 2,
+		},
+		{"legacy single", pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess, Auth: auths[0]}, 1},
+		{
+			"explicit empty", pluginapi.AuthLoginPollResponse{
+				Status: pluginapi.AuthLoginStatusSuccess, Auth: auths[0], Auths: []pluginapi.AuthData{},
+			}, 0,
+		},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				records, err := pluginLoginPollRecords(host, "gemini-cli", tc.response)
+				if tc.want == 0 {
+					if err == nil || len(records) != 0 {
+						t.Fatalf("empty login records = %#v, error = %v", records, err)
+					}
+					return
+				}
+				if err != nil || len(records) != tc.want {
+					t.Fatalf("login records = %#v, error = %v", records, err)
+				}
+				for index, record := range records {
+					if record.ID != auths[index].ID || record.FileName != auths[index].FileName {
+						t.Fatalf("record %d identity = %q/%q", index, record.ID, record.FileName)
+					}
+				}
+				if len(records) == 2 && records[1].Metadata["project_id"] != "project-a" {
+					t.Fatalf("project metadata = %#v", records[1].Metadata)
+				}
+			},
+		)
+	}
+}
+
+func TestSavePluginLoginRecordsRollsBackSavedAuthsOnFailure(t *testing.T) {
+	authDir := t.TempDir()
+	store := &pluginOAuthFileStore{failAt: 2, persisted: make(map[string][]byte)}
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	t.Cleanup(func() { _ = handler.Close() })
+	handler.tokenStore = store
+	records := []*coreauth.Auth{
+		{
+			ID: "geminicli.json", FileName: "geminicli.json", Provider: "gemini-cli",
+			Metadata: map[string]any{"type": "gemini-cli"},
+		},
+		{
+			ID: "geminicli-project-a.json", FileName: "geminicli-project-a.json", Provider: "gemini-cli",
+			Metadata: map[string]any{"type": "gemini-cli", "project_id": "project-a"},
+		},
+	}
+	if err := handler.saveClaimedPluginLoginRecords(t.Context(), authDir, records); err == nil {
+		t.Fatal("expected the second save to fail after writing")
+	}
+	if store.saves != 2 || len(store.persisted) != 0 {
+		t.Fatalf("save attempts = %d, remaining durable records = %d", store.saves, len(store.persisted))
+	}
+	for _, record := range records {
+		if _, err := os.Stat(filepath.Join(authDir, record.FileName)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rolled back record %s: %v", record.FileName, err)
+		}
 	}
 }
 
@@ -378,17 +470,28 @@ func TestPluginOAuthSaveFailureRestoresRuntimeAndDurableStore(t *testing.T) {
 	if errLoad != nil {
 		t.Fatal(errLoad)
 	}
-	if _, errRegister := manager.Register(coreauth.WithSkipPersist(context.Background()), previous); errRegister != nil {
+	if _, errRegister := manager.Register(
+		coreauth.WithSkipPersist(context.Background()), previous,
+	); errRegister != nil {
 		t.Fatal(errRegister)
 	}
 	handler := NewHandler(&config.Config{AuthDir: authDir}, "", manager, withTokenStore(store))
 	t.Cleanup(func() { _ = handler.Close() })
 	records := []*coreauth.Auth{
-		{Provider: "custom-sso", FileName: "first.json", Metadata: map[string]any{"type": "custom-sso", "value": "new"}},
-		{Provider: "custom-sso", FileName: "second.json", Metadata: map[string]any{"type": "custom-sso", "value": "new"}},
+		{
+			Provider: "custom-sso", FileName: "first.json",
+			Metadata: map[string]any{"type": "custom-sso", "value": "new"},
+		},
+		{
+			Provider: "custom-sso", FileName: "second.json",
+			Metadata: map[string]any{"type": "custom-sso", "value": "new"},
+		},
 	}
 	if errSave := handler.saveClaimedPluginLoginRecords(context.Background(), authDir, records); errSave == nil ||
-		!strings.Contains(errSave.Error(), "injected save failure") || strings.Contains(errSave.Error(), "runtime auth") ||
+		!strings.Contains(errSave.Error(), "injected save failure") ||
+		strings.Contains(
+			errSave.Error(), "runtime auth",
+		) ||
 		strings.Contains(errSave.Error(), "ignored watcher mutation") {
 		t.Fatalf("saveClaimedPluginLoginRecords() error = %v", errSave)
 	}
@@ -427,23 +530,36 @@ func TestPluginOAuthRuntimeFailureRemovesNewCredential(t *testing.T) {
 	if errLoad != nil {
 		t.Fatal(errLoad)
 	}
-	if _, errRegister := manager.Register(coreauth.WithSkipPersist(context.Background()), previous); errRegister != nil {
+	if _, errRegister := manager.Register(
+		coreauth.WithSkipPersist(context.Background()), previous,
+	); errRegister != nil {
 		t.Fatal(errRegister)
 	}
 	handler := NewHandler(&config.Config{AuthDir: authDir}, "", manager, withTokenStore(store))
 	t.Cleanup(func() { _ = handler.Close() })
-	handler.SetPostAuthPersistHook(func(_ context.Context, auth *coreauth.Auth) error {
-		if auth.FileName == "second.json" {
-			return errors.New("injected runtime failure")
-		}
-		return nil
-	})
+	handler.SetPostAuthPersistHook(
+		func(_ context.Context, auth *coreauth.Auth) error {
+			if auth.FileName == "second.json" {
+				return errors.New("injected runtime failure")
+			}
+			return nil
+		},
+	)
 	records := []*coreauth.Auth{
-		{Provider: "custom-sso", FileName: "first.json", Metadata: map[string]any{"type": "custom-sso", "value": "new"}},
-		{Provider: "custom-sso", FileName: "second.json", Metadata: map[string]any{"type": "custom-sso", "value": "new"}},
+		{
+			Provider: "custom-sso", FileName: "first.json",
+			Metadata: map[string]any{"type": "custom-sso", "value": "new"},
+		},
+		{
+			Provider: "custom-sso", FileName: "second.json",
+			Metadata: map[string]any{"type": "custom-sso", "value": "new"},
+		},
 	}
 	if errSave := handler.saveClaimedPluginLoginRecords(context.Background(), authDir, records); errSave == nil ||
-		!strings.Contains(errSave.Error(), "injected runtime failure") || strings.Contains(errSave.Error(), "runtime auth") {
+		!strings.Contains(errSave.Error(), "injected runtime failure") ||
+		strings.Contains(
+			errSave.Error(), "runtime auth",
+		) {
 		t.Fatalf("saveClaimedPluginLoginRecords() error = %v", errSave)
 	}
 	current, exists := manager.GetByID(previous.ID)

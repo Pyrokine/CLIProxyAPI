@@ -98,8 +98,10 @@ func TestCodexQuotaAvailability(t *testing.T) {
 			known:     true,
 		},
 		{
-			name:      "available quoted production payload",
-			data:      `"{\"rate_limit\":{\"allowed\":true,\"limit_reached\":false,\"primary_window\":{\"used_percent\":0}},\"additional_rate_limits\":[{\"rate_limit\":{\"allowed\":true,\"primary_window\":{\"used_percent\":0},\"secondary_window\":{\"used_percent\":0}}}]}"`,
+			name: "available quoted production payload",
+			data: `"{\"rate_limit\":{\"allowed\":true,\"limit_reached\":false,\"primary_window\":{\"` +
+				`used_percent\":0}},\"additional_rate_limits\":[{\"rate_limit\":{\"allowed\":true,\"` +
+				`primary_window\":{\"used_percent\":0},\"secondary_window\":{\"used_percent\":0}}}]}"`,
 			available: true,
 			known:     true,
 		},
@@ -123,12 +125,17 @@ func TestCodexQuotaAvailability(t *testing.T) {
 			data: `{"rate_limit":{"allowed":true},"code_review_rate_limit":{"limit_reached":true}}`, known: true,
 		},
 		{
-			name:  "exhausted additional limit",
-			data:  `{"rate_limit":{"allowed":true},"additional_rate_limits":[{"rate_limit":{"primary_window":{"used_percent":100}}}]}`,
+			name: "exhausted additional limit",
+			data: `{"rate_limit":{"allowed":true},"additional_rate_limits":` +
+				`[{"rate_limit":{"primary_window":{"used_percent":` +
+				`100}}}]}`,
 			known: true,
 		},
 		{name: "unknown", data: `{"rate_limit":{}}`},
-		{name: "unknown non numeric percent", data: `{"rate_limit":{"primary_window":{"used_percent":"unknown"}}}`},
+		{
+			name: "unknown non numeric percent",
+			data: `{"rate_limit":{"primary_window":{"used_percent":"unknown"}}}`,
+		},
 		{name: "malformed", data: `{`},
 	}
 	for _, tt := range tests {
@@ -303,14 +310,21 @@ func TestCodexQuotaRefreshRestoresCredentialAndFamilyQuota(t *testing.T) {
 	next := time.Now().Add(time.Hour)
 	registered, errRegister := manager.Register(
 		context.Background(), &coreauth.Auth{
-			ID:               "codex-recovered",
-			Provider:         "codex",
-			Status:           coreauth.StatusError,
-			StatusMessage:    "credential quota",
-			Unavailable:      true,
-			NextRetryAfter:   next,
-			Quota:            coreauth.QuotaState{Exceeded: true, Reason: "credential quota", NextRecoverAt: next},
-			LastError:        &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Message: "credential quota"},
+			ID:             "codex-recovered",
+			Provider:       "codex",
+			Status:         coreauth.StatusError,
+			StatusMessage:  "credential quota",
+			Unavailable:    true,
+			NextRetryAfter: next,
+			Quota: coreauth.QuotaState{
+				Exceeded:      true,
+				Reason:        "credential quota",
+				NextRecoverAt: next,
+			},
+			LastError: &coreauth.Error{
+				HTTPStatus: http.StatusTooManyRequests,
+				Message:    "credential quota",
+			},
 			StateEffectScope: cliproxyexecutor.StateEffectScopeCredential,
 			ModelStates: map[string]*coreauth.ModelState{
 				"gpt-5.6-sol": {
@@ -465,8 +479,11 @@ func TestCodexQuotaRefreshPreservesLegacyModel429Cooldown(t *testing.T) {
 					StatusMessage:  "rate limited",
 					Unavailable:    true,
 					NextRetryAfter: next,
-					LastError:      &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
-					QuotaEpoch:     2,
+					LastError: &coreauth.Error{
+						HTTPStatus: http.StatusTooManyRequests,
+						Message:    "rate limited",
+					},
+					QuotaEpoch: 2,
 				},
 			},
 		},
@@ -512,9 +529,12 @@ func TestCodexQuotaRefreshRestoresLegacyModel429Cooldown(t *testing.T) {
 					StatusMessage:  "rate limited",
 					Unavailable:    true,
 					NextRetryAfter: next,
-					LastError:      &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
-					UpdatedAt:      startedAt.Add(-time.Minute),
-					QuotaEpoch:     2,
+					LastError: &coreauth.Error{
+						HTTPStatus: http.StatusTooManyRequests,
+						Message:    "rate limited",
+					},
+					UpdatedAt:  startedAt.Add(-time.Minute),
+					QuotaEpoch: 2,
 				},
 			},
 		},
@@ -758,7 +778,9 @@ func TestQuotaRefreshRecoveryConditions(t *testing.T) {
 		},
 		{
 			name: "available root with exhausted additional meter", entryType: quota.TypeCodex, provider: "codex",
-			data:            `{"rate_limit":{"allowed":true},"additional_rate_limits":[{"rate_limit":{"allowed":false}}]}`,
+			data: `{"rate_limit":{"allowed":true},"additional_rate_limits":` +
+				`[{"rate_limit":{"allowed":` +
+				`false}}]}`,
 			credentialQuota: true, effectScope: cliproxyexecutor.StateEffectScopeCredential, wantCredentialClear: true,
 		},
 		{
@@ -813,7 +835,10 @@ func TestQuotaRefreshRecoveryConditions(t *testing.T) {
 				if tt.modelQuota {
 					auth.ModelStates["model"] = &coreauth.ModelState{
 						Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: next,
-						LastError:   &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Message: "model quota"},
+						LastError: &coreauth.Error{
+							HTTPStatus: http.StatusTooManyRequests,
+							Message:    "model quota",
+						},
 						Quota:       coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
 						EffectScope: cliproxyexecutor.StateEffectScopeQuotaFamily,
 						EffectKey:   "family",
@@ -840,14 +865,20 @@ func TestQuotaRefreshRecoveryConditions(t *testing.T) {
 				}
 				cleared := current.Generation != registered.Generation
 				if cleared != tt.wantCredentialClear {
-					t.Fatalf("credential cleared = %v, want %v; auth = %#v", cleared, tt.wantCredentialClear, current)
+					t.Fatalf(
+						"credential cleared = %v, want %v; auth = %#v",
+						cleared,
+						tt.wantCredentialClear,
+						current,
+					)
 				}
 				state := current.ModelStates["model"]
 				if state == nil || state.QuotaEpoch != 4 {
 					t.Fatalf("model state changed = %#v", state)
 				}
 				if tt.wantCredentialClear {
-					if current.Status != coreauth.StatusActive || current.Unavailable || current.LastError != nil ||
+					if current.Status != coreauth.StatusActive || current.Unavailable ||
+						current.LastError != nil ||
 						current.Quota.Exceeded {
 						t.Fatalf("credential quota was not cleared = %#v", current)
 					}
@@ -894,8 +925,11 @@ func TestAuthFilesAggregateReflectsAutomaticFamilyRecovery(t *testing.T) {
 		context.Background(), &coreauth.Auth{
 			ID: "codex-aggregate", Provider: "codex", FileName: "codex.json", Status: coreauth.StatusError,
 			StatusMessage: "credential quota", Unavailable: true,
-			Attributes:       map[string]string{"runtime_only": "true"},
-			LastError:        &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Message: "credential quota"},
+			Attributes: map[string]string{"runtime_only": "true"},
+			LastError: &coreauth.Error{
+				HTTPStatus: http.StatusTooManyRequests,
+				Message:    "credential quota",
+			},
 			Quota:            coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
 			StateEffectScope: cliproxyexecutor.StateEffectScopeCredential,
 			ModelStates: map[string]*coreauth.ModelState{
@@ -1009,7 +1043,12 @@ func TestPutQuotaConfigSaveFailureKeepsMemoryConfig(t *testing.T) {
 	h.PutQuotaConfig(ginCtx)
 
 	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+		t.Fatalf(
+			"status = %d, want %d body=%s",
+			recorder.Code,
+			http.StatusInternalServerError,
+			recorder.Body.String(),
+		)
 	}
 	if cfg.QuotaRefresh != previousConfig {
 		t.Fatalf("cfg.QuotaRefresh = %+v, want %+v", cfg.QuotaRefresh, previousConfig)

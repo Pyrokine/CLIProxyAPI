@@ -60,23 +60,25 @@ func TestBuildAuthFileEntryNeverProjectsDevinAPIKeyAsAccount(t *testing.T) {
 			wantSecretOut: true,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			entry := (&Handler{}).buildAuthFileEntry(test.auth)
-			if entry == nil {
-				t.Fatal("buildAuthFileEntry() = nil")
-			}
-			account, _ := entry["account"].(string)
-			accountType, _ := entry["account_type"].(string)
-			if account != test.wantAccount || accountType != test.wantType {
-				t.Fatalf("account = (%q, %q), want (%q, %q)", accountType, account, test.wantType, test.wantAccount)
-			}
-			encoded, errMarshal := json.Marshal(entry)
-			if errMarshal != nil {
-				t.Fatalf("marshal entry: %v", errMarshal)
-			}
-			if got := strings.Contains(string(encoded), secret); got != test.wantSecretOut {
-				t.Fatalf("secret visible = %t, want %t: %s", got, test.wantSecretOut, encoded)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				entry := (&Handler{}).buildAuthFileEntry(test.auth)
+				if entry == nil {
+					t.Fatal("buildAuthFileEntry() = nil")
+				}
+				account, _ := entry["account"].(string)
+				accountType, _ := entry["account_type"].(string)
+				if account != test.wantAccount || accountType != test.wantType {
+					t.Fatalf("account = (%q, %q), want (%q, %q)", accountType, account, test.wantType, test.wantAccount)
+				}
+				encoded, errMarshal := json.Marshal(entry)
+				if errMarshal != nil {
+					t.Fatalf("marshal entry: %v", errMarshal)
+				}
+				if got := strings.Contains(string(encoded), secret); got != test.wantSecretOut {
+					t.Fatalf("secret visible = %t, want %t: %s", got, test.wantSecretOut, encoded)
+				}
+			},
+		)
 	}
 }

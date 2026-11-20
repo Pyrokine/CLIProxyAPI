@@ -25,17 +25,17 @@ import (
 
 const (
 	// kimiClientID is Kimi Code's OAuth client ID.
-	kimiClientID      = "17e5f671-d194-4dfb-9706-5516cb48c098"
-	KimiDefaultDomain = "kimi.com"
-	KimiAIDomain      = "kimi.ai"
+	kimiClientID  = "17e5f671-d194-4dfb-9706-5516cb48c098"
+	DefaultDomain = "kimi.com"
+	AIDomain      = "kimi.ai"
 
 	kimiOAuthHost   = "https://auth.kimi.com"
 	kimiAIOAuthHost = "https://auth.kimi.ai"
 
 	// APIBaseURL is the base URL for Kimi Code requests.
 	APIBaseURL = "https://api.kimi.com/coding"
-	// KimiAIAPIBaseURL is the base URL for Kimi.ai requests.
-	KimiAIAPIBaseURL = "https://api.kimi.ai/coding"
+	// AIAPIBaseURL is the base URL for Kimi.ai requests.
+	AIAPIBaseURL = "https://api.kimi.ai/coding"
 	// defaultPollInterval is the default interval for polling token endpoint.
 	defaultPollInterval = 5 * time.Second
 	// maxPollDuration is the maximum time to wait for user authorization.
@@ -47,10 +47,10 @@ var kimiRefreshGroup singleflight.Group
 func knownKimiDomain(domain string) string {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	switch {
-	case domain == KimiAIDomain, domain == "kimi-ai", domain == "ai", strings.HasSuffix(domain, ".kimi.ai"):
-		return KimiAIDomain
-	case domain == KimiDefaultDomain, domain == "kimi", domain == "com", strings.HasSuffix(domain, ".kimi.com"):
-		return KimiDefaultDomain
+	case domain == AIDomain, domain == "kimi-ai", domain == "ai", strings.HasSuffix(domain, ".kimi.ai"):
+		return AIDomain
+	case domain == DefaultDomain, domain == "kimi", domain == "com", strings.HasSuffix(domain, ".kimi.com"):
+		return DefaultDomain
 	default:
 		return ""
 	}
@@ -58,7 +58,7 @@ func knownKimiDomain(domain string) string {
 
 // IsKimiAIDomain reports whether the domain identifies the Kimi.ai service.
 func IsKimiAIDomain(domain string) bool {
-	return knownKimiDomain(domain) == KimiAIDomain
+	return knownKimiDomain(domain) == AIDomain
 }
 
 func kimiDomainFromURL(rawURL string) string {
@@ -72,7 +72,7 @@ func kimiDomainFromURL(rawURL string) string {
 // ResolveKimiDomainFromAuth determines the OAuth service from an auth record.
 func ResolveKimiDomainFromAuth(auth *coreauth.Auth) string {
 	if auth == nil {
-		return KimiDefaultDomain
+		return DefaultDomain
 	}
 	if auth.Attributes != nil {
 		if domain := knownKimiDomain(auth.Attributes["domain"]); domain != "" {
@@ -116,21 +116,21 @@ func ResolveKimiDomainFromAuth(auth *coreauth.Auth) string {
 	for _, name := range []string{auth.ID, auth.FileName} {
 		name = strings.ToLower(name)
 		if strings.HasPrefix(name, "kimi-ai-") || strings.HasPrefix(name, "kimi.ai-") {
-			return KimiAIDomain
+			return AIDomain
 		}
 	}
-	return KimiDefaultDomain
+	return DefaultDomain
 }
 
 // IsKimiAIAuth reports whether an auth record belongs to Kimi.ai.
 func IsKimiAIAuth(auth *coreauth.Auth) bool {
-	return ResolveKimiDomainFromAuth(auth) == KimiAIDomain
+	return ResolveKimiDomainFromAuth(auth) == AIDomain
 }
 
 // ResolveKimiAPIBaseURL returns the API endpoint for the specified Kimi service.
 func ResolveKimiAPIBaseURL(domain string) string {
 	if IsKimiAIDomain(domain) {
-		return KimiAIAPIBaseURL
+		return AIAPIBaseURL
 	}
 	return APIBaseURL
 }
@@ -139,7 +139,7 @@ func kimiDomain(domain string) string {
 	if resolved := knownKimiDomain(domain); resolved != "" {
 		return resolved
 	}
-	return KimiDefaultDomain
+	return DefaultDomain
 }
 
 func kimiOAuthHostForDomain(domain string) string {
@@ -158,7 +158,7 @@ type Auth struct {
 
 // NewAuth creates a new Kimi Code authentication service.
 func NewAuth(cfg *config.Config) *Auth {
-	return NewAuthWithDomain(cfg, KimiDefaultDomain)
+	return NewAuthWithDomain(cfg, DefaultDomain)
 }
 
 // NewAuthWithDomain creates an authentication service for Kimi Code or Kimi.ai.
@@ -220,13 +220,17 @@ type DeviceFlowClient struct {
 	domain     string
 }
 
-// NewDeviceFlowClientWithDeviceID creates a Kimi Code client with the specified device ID.
-func NewDeviceFlowClientWithDeviceID(cfg *config.Config, deviceID string) *DeviceFlowClient {
-	return NewDeviceFlowClientWithDomainAndDeviceID(cfg, KimiDefaultDomain, deviceID)
+// newDeviceFlowClientWithDeviceID creates a Kimi Code client with the specified device ID.
+func newDeviceFlowClientWithDeviceID(cfg *config.Config, deviceID string) *DeviceFlowClient {
+	return NewDeviceFlowClientWithDomainAndDeviceID(cfg, DefaultDomain, deviceID)
 }
 
 // NewDeviceFlowClientWithDomainAndDeviceID creates a domain-specific client with the specified device ID.
-func NewDeviceFlowClientWithDomainAndDeviceID(cfg *config.Config, domain, deviceID string, httpClients ...*http.Client) *DeviceFlowClient {
+func NewDeviceFlowClientWithDomainAndDeviceID(
+	cfg *config.Config,
+	domain, deviceID string,
+	httpClients ...*http.Client,
+) *DeviceFlowClient {
 	client := &http.Client{Timeout: 30 * time.Second}
 	if len(httpClients) > 0 && httpClients[0] != nil {
 		client = httpClients[0]
@@ -465,6 +469,9 @@ func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("kimi: refresh cancelled: %w", err)
 	}
 
 	result, err, _ := kimiRefreshGroup.Do(

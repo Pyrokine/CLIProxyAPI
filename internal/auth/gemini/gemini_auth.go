@@ -2,6 +2,8 @@
 // for Google's Gemini AI services. It handles OAuth2 authentication flows,
 // including obtaining tokens via web-based authorization, storing tokens,
 // and refreshing them when they expire.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (

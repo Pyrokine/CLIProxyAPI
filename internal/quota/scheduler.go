@@ -102,12 +102,32 @@ func NewSchedulerWithContext(cfg Config, fetchFn ContextFetchFunc) *Scheduler {
 	return NewSchedulerWithResult(cfg, resultFetchFn)
 }
 
+func normalizeConfig(cfg Config) Config {
+	limit := MaxRefreshIntervalSeconds
+	if int64(cfg.Interval) > limit || int64(cfg.MaxInterval) > limit {
+		log.WithFields(
+			log.Fields{
+				"interval_seconds":     cfg.Interval,
+				"max_interval_seconds": cfg.MaxInterval,
+				"maximum_seconds":      limit,
+			},
+		).Warn("配额刷新间隔超出支持范围，已限制为最大秒数")
+		if int64(cfg.Interval) > limit {
+			cfg.Interval = int(limit)
+		}
+		if int64(cfg.MaxInterval) > limit {
+			cfg.MaxInterval = int(limit)
+		}
+	}
+	return cfg
+}
+
 // NewSchedulerWithResult creates a quota scheduler with explicit freshness semantics.
 func NewSchedulerWithResult(cfg Config, fetchFn ResultFetchFunc) *Scheduler {
 	return &Scheduler{
 		entries: make(map[string]*Entry),
 		history: make(map[string]EntryState),
-		cfg:     cfg,
+		cfg:     normalizeConfig(cfg),
 		fetchFn: fetchFn,
 		wake:    make(chan struct{}, 1),
 		flights: make(map[string]*refreshFlight),
@@ -327,7 +347,7 @@ func (s *Scheduler) RegisterBinding(
 		return
 	}
 
-	entry := newEntryForBinding(fileName, credType, authIndex, credentialRevision, now)
+	entry := newEntryForBinding(fileName, credType, authIndex, credentialRevision)
 	if previous, exists := s.history[key]; exists {
 		matches := bindingMatches(previous, authIndex, credentialRevision)
 		if len(equivalentRevisions) > 0 {
@@ -864,11 +884,13 @@ func summarizeEntriesByProvider(entries map[string]*Entry) map[string]ProviderSt
 		case StatusQuotaExceeded:
 			summary.QuotaExceeded++
 		}
-		if entry.LastRefresh != nil && (summary.LatestRefreshAt == nil || entry.LastRefresh.After(*summary.LatestRefreshAt)) {
+		if entry.LastRefresh != nil &&
+			(summary.LatestRefreshAt == nil || entry.LastRefresh.After(*summary.LatestRefreshAt)) {
 			latest := *entry.LastRefresh
 			summary.LatestRefreshAt = &latest
 		}
-		if entry.NextRefresh != nil && (summary.NextRefreshAt == nil || entry.NextRefresh.Before(*summary.NextRefreshAt)) {
+		if entry.NextRefresh != nil &&
+			(summary.NextRefreshAt == nil || entry.NextRefresh.Before(*summary.NextRefreshAt)) {
 			next := *entry.NextRefresh
 			summary.NextRefreshAt = &next
 		}
@@ -886,6 +908,7 @@ func (s *Scheduler) GetConfig() Config {
 
 // UpdateConfig updates the scheduler configuration.
 func (s *Scheduler) UpdateConfig(cfg Config) {
+	cfg = normalizeConfig(cfg)
 	s.mu.Lock()
 	wasEnabled := s.cfg.Enabled
 	s.cfg = cfg
@@ -1138,6 +1161,7 @@ func (s *Scheduler) executeRefresh(
 	state := entry.snapshotLocked()
 	s.history[target.EntryKey] = cloneEntryState(state)
 	entry.mu.Unlock()
+	s.poke()
 	s.mu.Unlock()
 	s.persist(state)
 	result.Freshness = state.Freshness
@@ -1262,14 +1286,16 @@ func applyRefreshFailureLocked(entry *Entry, err error, now time.Time, cfg Confi
 	if interval <= 0 {
 		interval = DefaultConfig().Interval
 	}
-	backoff := time.Duration(interval) * time.Second *
-		time.Duration(backoffMultiplier) * (1 << min(entry.FailureCount, 5))
-	maxInterval := time.Duration(cfg.MaxInterval) * time.Second
-	if maxInterval <= 0 {
-		maxInterval = time.Duration(DefaultConfig().MaxInterval) * time.Second
+	maximum := cfg.MaxInterval
+	if maximum <= 0 {
+		maximum = DefaultConfig().MaxInterval
 	}
-	if backoff > maxInterval {
-		backoff = maxInterval
+	maxInterval := time.Duration(maximum) * time.Second
+	base := time.Duration(interval) * time.Second
+	multiplier := time.Duration(backoffMultiplier) * (1 << min(entry.FailureCount, 5))
+	backoff := maxInterval
+	if base <= maxInterval/multiplier {
+		backoff = base * multiplier
 	}
 	retryAt := now.Add(backoff)
 	entry.RetryAt = cloneTime(&retryAt)
@@ -1358,7 +1384,6 @@ func newEntryForBinding(
 	credType CredentialType,
 	authIndex,
 	credentialRevision string,
-	now time.Time,
 ) *Entry {
 	return &Entry{
 		credentialRevision: credentialRevision,
@@ -1370,7 +1395,6 @@ func newEntryForBinding(
 		Status:             StatusIdle,
 		Freshness:          FreshnessOutdated,
 		LastRefresh:        nil,
-		NextRefresh:        cloneTime(&now),
 	}
 }
 

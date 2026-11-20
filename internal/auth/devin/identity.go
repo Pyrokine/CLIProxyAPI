@@ -58,34 +58,36 @@ func FindMatchingCredential(
 	targetDigest := sha256.Sum256([]byte(targetToken))
 
 	var matches []*coreauth.Auth
-	errWalk := filepath.WalkDir(authDir, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if errContext := ctx.Err(); errContext != nil {
-			return errContext
-		}
-		if entry.IsDir() || !strings.HasPrefix(strings.ToLower(entry.Name()), "devin-") ||
-			!strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+	errWalk := filepath.WalkDir(
+		authDir, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if errContext := ctx.Err(); errContext != nil {
+				return errContext
+			}
+			if entry.IsDir() || !strings.HasPrefix(strings.ToLower(entry.Name()), "devin-") ||
+				!strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+				return nil
+			}
+			candidate, errRead := readDevinCredential(path)
+			if errRead != nil {
+				return errRead
+			}
+			if candidate == nil {
+				return nil
+			}
+			candidateToken := credentialToken(candidate.Metadata)
+			if candidateToken == "" {
+				return nil
+			}
+			candidateDigest := sha256.Sum256([]byte(candidateToken))
+			if subtle.ConstantTimeCompare(targetDigest[:], candidateDigest[:]) == 1 {
+				matches = append(matches, candidate)
+			}
 			return nil
-		}
-		candidate, errRead := readDevinCredential(path)
-		if errRead != nil {
-			return errRead
-		}
-		if candidate == nil {
-			return nil
-		}
-		candidateToken := credentialToken(candidate.Metadata)
-		if candidateToken == "" {
-			return nil
-		}
-		candidateDigest := sha256.Sum256([]byte(candidateToken))
-		if subtle.ConstantTimeCompare(targetDigest[:], candidateDigest[:]) == 1 {
-			matches = append(matches, candidate)
-		}
-		return nil
-	})
+		},
+	)
 	if errors.Is(errWalk, os.ErrNotExist) {
 		return nil, nil
 	}

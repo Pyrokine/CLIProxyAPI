@@ -110,19 +110,27 @@ func TestRefreshTokensWithRetryDoesNotReplayAmbiguousFailure(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			resetClaudeRefreshState()
-			defer resetClaudeRefreshState()
-			var calls int
-			auth := &Auth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				calls++
-				return tt.transport(req)
-			})}}
-			_, err := auth.RefreshTokensWithRetry(context.Background(), "single-use-token", 3)
-			if err == nil || !strings.Contains(err.Error(), "after 1 attempts") || calls != 1 {
-				t.Fatalf("RefreshTokensWithRetry() = %v, calls = %d; want one attempt", err, calls)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				resetClaudeRefreshState()
+				defer resetClaudeRefreshState()
+				var calls int
+				auth := &Auth{
+					httpClient: &http.Client{
+						Transport: roundTripFunc(
+							func(req *http.Request) (*http.Response, error) {
+								calls++
+								return tt.transport(req)
+							},
+						),
+					},
+				}
+				_, err := auth.RefreshTokensWithRetry(context.Background(), "single-use-token", 3)
+				if err == nil || !strings.Contains(err.Error(), "after 1 attempts") || calls != 1 {
+					t.Fatalf("RefreshTokensWithRetry() = %v, calls = %d; want one attempt", err, calls)
+				}
+			},
+		)
 	}
 	if !isClaudeRefreshRetryable(&refreshHTTPError{status: http.StatusServiceUnavailable, retryable: true}) {
 		t.Fatal("explicit retryable HTTP response must remain retryable")
@@ -166,14 +174,15 @@ func TestRefreshTokensDeduplicatesConcurrentRefresh(t *testing.T) {
 						}, nil
 					case profileURL:
 						profileCalls.Add(1)
+						//goland:noinspection SpellCheckingInspection
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body: io.NopCloser(
 								strings.NewReader(
-									`{
-							"account":{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","email":"shared@example.com"},
-							"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Shared Org"}
-						}`,
+									"{\n\t\t\t\t\t\t\t\"account\":{\"uuid\":\"aaaaaaaa-aaaa-4aaa-8aaa-" +
+										"aaaaaaaaaaaa\",\"email\":\"shared@example.com\"},\n\t\t\t\t\t\t\t\"" +
+										"organization\":{\"uuid\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"" +
+										"name\":\"Shared Org\"}\n\t\t\t\t\t\t}",
 								),
 							),
 							Header:  make(http.Header),
@@ -220,9 +229,11 @@ func TestRefreshTokensDeduplicatesConcurrentRefresh(t *testing.T) {
 		if td == nil || td.AccessToken != "new-access" {
 			t.Fatalf("expected refreshed access token, got %#v", td)
 		}
+		//goland:noinspection SpellCheckingInspection
 		if td.AccountUUID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 			t.Fatalf("account UUID = %q, want OAuth profile account", td.AccountUUID)
 		}
+		//goland:noinspection SpellCheckingInspection
 		if td.OrganizationUUID != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" || td.OrganizationName != "Shared Org" {
 			t.Fatalf("organization = %q/%q, want OAuth profile organization", td.OrganizationUUID, td.OrganizationName)
 		}

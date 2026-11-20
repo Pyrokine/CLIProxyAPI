@@ -148,13 +148,15 @@ func TestDevinRemoteOAuthFlow(t *testing.T) {
 		withTokenStore(sdkAuth.NewFileTokenStore()),
 	)
 	t.Cleanup(func() { _ = handler.Close() })
-	handler.SetPostAuthPersistHook(func(ctx context.Context, auth *coreauth.Auth) error {
-		if err := ctx.Err(); err != nil {
-			t.Fatalf("runtime publication received cancelled context: %v", err)
-		}
-		published <- auth.Clone()
-		return nil
-	})
+	handler.SetPostAuthPersistHook(
+		func(ctx context.Context, auth *coreauth.Auth) error {
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("runtime publication received cancelled context: %v", err)
+			}
+			published <- auth.Clone()
+			return nil
+		},
+	)
 	router := newDevinOAuthTestRouter(handler)
 
 	requestContext, cancelRequest := context.WithCancel(context.Background())
@@ -169,7 +171,9 @@ func TestDevinRemoteOAuthFlow(t *testing.T) {
 	if startRecorder.Code != http.StatusOK {
 		t.Fatalf("start status = %d, body = %s", startRecorder.Code, startRecorder.Body.String())
 	}
-	if strings.Contains(startRecorder.Body.String(), "test-token") || strings.Contains(startRecorder.Body.String(), "api_key") {
+	if strings.Contains(startRecorder.Body.String(), "test-token") || strings.Contains(
+		startRecorder.Body.String(), "api_key",
+	) {
 		t.Fatalf("start response exposed credential material: %s", startRecorder.Body.String())
 	}
 	start := decodeDevinOAuthResponse(t, startRecorder)
@@ -201,11 +205,13 @@ func TestDevinRemoteOAuthFlow(t *testing.T) {
 	}
 
 	handler.SetConfig(&config.Config{AuthDir: otherAuthDir, Port: 8317})
-	callbackBody, err := json.Marshal(map[string]string{
-		"provider": "cognition",
-		"state":    state,
-		"code":     "remote-code",
-	})
+	callbackBody, err := json.Marshal(
+		map[string]string{
+			"provider": "cognition",
+			"state":    state,
+			"code":     "remote-code",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +262,9 @@ func TestDevinRemoteOAuthFlow(t *testing.T) {
 	statusRecorder := httptest.NewRecorder()
 	router.ServeHTTP(
 		statusRecorder,
-		httptest.NewRequest(http.MethodGet, "/get-auth-status?state="+url.QueryEscape(state)+"&nonce=browser-nonce", nil),
+		httptest.NewRequest(
+			http.MethodGet, "/get-auth-status?state="+url.QueryEscape(state)+"&nonce=browser-nonce", nil,
+		),
 	)
 	if payload := decodeDevinOAuthResponse(t, statusRecorder); payload["status"] != "ok" {
 		t.Fatalf("completed status = %#v", payload)
@@ -425,61 +433,63 @@ func TestCompleteDevinOAuthFailures(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			isolateDevinOAuthSessions(t)
-			authDir := t.TempDir()
-			registerOAuthSessionForAuthDir("test-state", "devin", "", authDir)
-			data, err := json.Marshal(test.payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			callbackPath := filepath.Join(authDir, ".oauth-devin-test-state.oauth")
-			if err = os.WriteFile(callbackPath, data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			service := &fakeDevinOAuthService{exchange: test.exchange, create: test.create}
-			store := test.store
-			if store == nil {
-				store = sdkAuth.NewFileTokenStore()
-			}
-			handler := NewHandlerWithoutConfigFilePath(
-				&config.Config{AuthDir: authDir},
-				nil,
-				withTokenStore(store),
-			)
-			t.Cleanup(func() { _ = handler.Close() })
-			handler.completeDevinOAuth(
-				context.Background(),
-				authDir,
-				"test-state",
-				"verifier",
-				service,
-				nil,
-			)
+		t.Run(
+			test.name, func(t *testing.T) {
+				isolateDevinOAuthSessions(t)
+				authDir := t.TempDir()
+				registerOAuthSessionForAuthDir("test-state", "devin", "", authDir)
+				data, err := json.Marshal(test.payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				callbackPath := filepath.Join(authDir, ".oauth-devin-test-state.oauth")
+				if err = os.WriteFile(callbackPath, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				service := &fakeDevinOAuthService{exchange: test.exchange, create: test.create}
+				store := test.store
+				if store == nil {
+					store = sdkAuth.NewFileTokenStore()
+				}
+				handler := NewHandlerWithoutConfigFilePath(
+					&config.Config{AuthDir: authDir},
+					nil,
+					withTokenStore(store),
+				)
+				t.Cleanup(func() { _ = handler.Close() })
+				handler.completeDevinOAuth(
+					context.Background(),
+					authDir,
+					"test-state",
+					"verifier",
+					service,
+					nil,
+				)
 
-			_, status, _, ok := getOAuthSessionDetails("test-state")
-			if test.wantMissing {
-				if ok {
-					t.Fatalf("cancelled session still exists with status %q", status)
+				_, status, _, ok := getOAuthSessionDetails("test-state")
+				if test.wantMissing {
+					if ok {
+						t.Fatalf("cancelled session still exists with status %q", status)
+					}
+				} else if !ok || status != test.wantStatus {
+					t.Fatalf("status = %q, exists = %v; want %q", status, ok, test.wantStatus)
 				}
-			} else if !ok || status != test.wantStatus {
-				t.Fatalf("status = %q, exists = %v; want %q", status, ok, test.wantStatus)
-			}
-			if strings.Contains(status, "secret-upstream-response") {
-				t.Fatalf("session status exposed upstream response: %q", status)
-			}
-			_, statErr := os.Stat(callbackPath)
-			if test.preserveFile {
-				if statErr != nil {
-					t.Fatalf("invalid callback evidence was removed: %v", statErr)
+				if strings.Contains(status, "secret-upstream-response") {
+					t.Fatalf("session status exposed upstream response: %q", status)
 				}
-			} else if !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("consumed callback file remains: %v", statErr)
-			}
-			if _, err = os.Stat(filepath.Join(authDir, "devin-test.json")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("credential saved for failed flow: %v", err)
-			}
-		})
+				_, statErr := os.Stat(callbackPath)
+				if test.preserveFile {
+					if statErr != nil {
+						t.Fatalf("invalid callback evidence was removed: %v", statErr)
+					}
+				} else if !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("consumed callback file remains: %v", statErr)
+				}
+				if _, err = os.Stat(filepath.Join(authDir, "devin-test.json")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("credential saved for failed flow: %v", err)
+				}
+			},
+		)
 	}
 }
 
@@ -507,9 +517,11 @@ func TestDevinManagementCallbackModes(t *testing.T) {
 		t.Fatalf("TLS callback URI = %q", tlsURI)
 	}
 
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	response, err := client.Get(tlsURI + "?code=code&state=state")
 	if err != nil {
 		t.Fatal(err)
@@ -575,11 +587,13 @@ func TestDevinOAuthSuccessDoesNotSaveWithCancelledClaimContext(t *testing.T) {
 
 	var mu sync.Mutex
 	savedWithCancelledContext := false
-	store := &contextRecordingDevinStore{onSave: func(ctx context.Context) {
-		mu.Lock()
-		savedWithCancelledContext = ctx.Err() != nil
-		mu.Unlock()
-	}}
+	store := &contextRecordingDevinStore{
+		onSave: func(ctx context.Context) {
+			mu.Lock()
+			savedWithCancelledContext = ctx.Err() != nil
+			mu.Unlock()
+		},
+	}
 	handler := NewHandlerWithoutConfigFilePath(
 		&config.Config{AuthDir: authDir},
 		nil,

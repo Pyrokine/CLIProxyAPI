@@ -25,10 +25,12 @@ func TestAuthFilesPaginationPreservesLegacyListAndFilters(t *testing.T) {
 		if err := os.WriteFile(path, []byte(`{"type":"codex"}`), 0o600); err != nil {
 			t.Fatalf("create credential fixture: %v", err)
 		}
-		if _, err := manager.Register(context.Background(), &coreauth.Auth{
-			ID: fmt.Sprintf("auth-%d", i), Provider: "codex", FileName: name,
-			Attributes: map[string]string{"path": path}, Metadata: map[string]any{"type": "codex"},
-		}); err != nil {
+		if _, err := manager.Register(
+			context.Background(), &coreauth.Auth{
+				ID: fmt.Sprintf("auth-%d", i), Provider: "codex", FileName: name,
+				Attributes: map[string]string{"path": path}, Metadata: map[string]any{"type": "codex"},
+			},
+		); err != nil {
 			t.Fatalf("register credential fixture: %v", err)
 		}
 	}
@@ -70,35 +72,39 @@ func testAuthFileListPages(t *testing.T, h *Handler, manager bool) {
 		{query: "?page_size=no", code: http.StatusBadRequest},
 		{query: "?page=9223372036854775808", code: http.StatusBadRequest},
 	} {
-		t.Run(fmt.Sprintf("manager=%t,%s", manager, tc.query), func(t *testing.T) {
-			code, response := get(tc.query)
-			if code != tc.code {
-				t.Fatalf("status %d, response %s", code, response)
-			}
-			if code != http.StatusOK {
-				return
-			}
-			var files []struct {
-				Name string `json:"name"`
-			}
-			if err := json.Unmarshal(response["files"], &files); err != nil {
-				t.Fatalf("decode files: %v", err)
-			}
-			if tc.allFiles {
-				if len(files) != 3 || response["total"] != nil || response["page"] != nil {
-					t.Fatalf("legacy response changed: %s", response)
+		t.Run(
+			fmt.Sprintf("manager=%t,%s", manager, tc.query), func(t *testing.T) {
+				code, response := get(tc.query)
+				if code != tc.code {
+					t.Fatalf("status %d, response %s", code, response)
 				}
-				return
-			}
-			if len(files) != 0 && (len(files) != 1 || files[0].Name != tc.name) ||
-				(tc.name != "" && len(files) != 1) || string(response["total"]) != "3" ||
-				string(response["has_more"]) != fmt.Sprint(tc.hasMore) {
-				t.Fatalf("page %q = %s", tc.query, response)
-			}
-		})
+				if code != http.StatusOK {
+					return
+				}
+				var files []struct {
+					Name string `json:"name"`
+				}
+				if err := json.Unmarshal(response["files"], &files); err != nil {
+					t.Fatalf("decode files: %v", err)
+				}
+				if tc.allFiles {
+					if len(files) != 3 || response["total"] != nil || response["page"] != nil {
+						t.Fatalf("legacy response changed: %s", response)
+					}
+					return
+				}
+				if len(files) != 0 && (len(files) != 1 || files[0].Name != tc.name) ||
+					(tc.name != "" && len(files) != 1) || string(response["total"]) != "3" ||
+					string(response["has_more"]) != fmt.Sprint(tc.hasMore) {
+					t.Fatalf("page %q = %s", tc.query, response)
+				}
+			},
+		)
 	}
 	code, filtered := get("?page=1&page_size=1&name=beta.json")
-	if code != http.StatusOK || string(filtered["total"]) != "1" || !strings.Contains(string(filtered["files"]), "beta.json") {
+	if code != http.StatusOK || string(filtered["total"]) != "1" || !strings.Contains(
+		string(filtered["files"]), "beta.json",
+	) {
 		t.Fatalf("pagination filter response = %d, %s", code, filtered)
 	}
 	if !manager {
@@ -115,7 +121,9 @@ func testAuthFileListPages(t *testing.T, h *Handler, manager bool) {
 		t.Fatalf("missing auth_index in filtered response: %s, %v", filtered, err)
 	}
 	code, indexed := get("?page=1&page_size=1&auth_index=" + url.QueryEscape(files[0].Index))
-	if code != http.StatusOK || string(indexed["total"]) != "1" || !strings.Contains(string(indexed["files"]), "beta.json") {
+	if code != http.StatusOK || string(indexed["total"]) != "1" || !strings.Contains(
+		string(indexed["files"]), "beta.json",
+	) {
 		t.Fatalf("auth_index response = %d, %s", code, indexed)
 	}
 }

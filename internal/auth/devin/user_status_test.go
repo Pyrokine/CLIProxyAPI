@@ -14,9 +14,9 @@ import (
 
 func TestParseGetUserStatusResponsePreservesQuotaPresence(t *testing.T) {
 	response := testDevinUserStatusResponse(0, 75)
-	status, err := ParseGetUserStatusResponse(response)
-	if err != nil {
-		t.Fatalf("ParseGetUserStatusResponse(): %v", err)
+	status, err := parseGetUserStatusResponse(response)
+	if err != nil || status == nil {
+		t.Fatalf("ParseGetUserStatusResponse(): status=%+v error=%v", status, err)
 	}
 	if status.UserName != "alice" || status.UserID != "user-1" || status.TeamID != "team-1" ||
 		status.Email != "alice@example.test" || status.OrgID != "org-1" || status.OrgName != "Example Org" ||
@@ -48,7 +48,7 @@ func TestParseGetUserStatusResponseRejectsMalformedProtobuf(t *testing.T) {
 	missingTimestamp := testDevinBytesField(nil, 1, missingTimestampUser)
 
 	for _, payload := range [][]byte{nil, wrongRootWire, badPercent, missingTimestamp, {0x80}} {
-		if _, err := ParseGetUserStatusResponse(payload); err == nil {
+		if _, err := parseGetUserStatusResponse(payload); err == nil {
 			t.Fatalf("ParseGetUserStatusResponse(%x) error = nil", payload)
 		}
 	}
@@ -56,31 +56,35 @@ func TestParseGetUserStatusResponseRejectsMalformedProtobuf(t *testing.T) {
 
 func TestFetchUserStatusUsesUnaryConnectHeaders(t *testing.T) {
 	responsePayload := testDevinUserStatusResponse(10, 20)
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != DevinGetUserStatusPath || request.Method != http.MethodPost {
-			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
-		}
-		token := devinTokenPrefix + "token"
-		if request.Header.Get("Authorization") != "Basic "+token+"-"+token ||
-			request.Header.Get("Connect-Protocol-Version") != "1" ||
-			request.Header.Get("Content-Type") != "application/proto" {
-			t.Fatalf("request headers = %v", request.Header)
-		}
-		if request.Header.Get("Sentry-Trace") != "" {
-			t.Fatalf("unary status request included Sentry-Trace: %q", request.Header.Get("Sentry-Trace"))
-		}
-		if request.Header.Get("User-Agent") != "" {
-			t.Fatalf("User-Agent = %q, want empty", request.Header.Get("User-Agent"))
-		}
-		body, err := io.ReadAll(request.Body)
-		if err != nil {
-			t.Fatalf("read request body: %v", err)
-		}
-		if !strings.Contains(string(body), token) {
-			t.Fatal("request metadata is missing session token")
-		}
-		_, _ = response.Write(responsePayload)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != GetUserStatusPath || request.Method != http.MethodPost {
+					t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+				}
+				token := devinTokenPrefix + "token"
+				if request.Header.Get("Authorization") != "Basic "+token+"-"+token ||
+					request.Header.Get("Connect-Protocol-Version") != "1" ||
+					request.Header.Get("Content-Type") != "application/proto" {
+					t.Fatalf("request headers = %v", request.Header)
+				}
+				if request.Header.Get("Sentry-Trace") != "" {
+					t.Fatalf("unary status request included Sentry-Trace: %q", request.Header.Get("Sentry-Trace"))
+				}
+				if request.Header.Get("User-Agent") != "" {
+					t.Fatalf("User-Agent = %q, want empty", request.Header.Get("User-Agent"))
+				}
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Fatalf("read request body: %v", err)
+				}
+				if !strings.Contains(string(body), token) {
+					t.Fatal("request metadata is missing session token")
+				}
+				_, _ = response.Write(responsePayload)
+			},
+		),
+	)
 	defer server.Close()
 
 	service := NewDevinAuthService(server.Client())
@@ -95,8 +99,8 @@ func TestFetchUserStatusUsesUnaryConnectHeaders(t *testing.T) {
 }
 
 func TestGenerateDeviceFingerprint(t *testing.T) {
-	first := GenerateDeviceFingerprint("seed")
-	second := GenerateDeviceFingerprint("seed")
+	first := generateDeviceFingerprint("seed")
+	second := generateDeviceFingerprint("seed")
 	if first != second || len(first) != devinFingerprintHexLen {
 		t.Fatalf("fingerprint equality/length = %t/%d", first == second, len(first))
 	}

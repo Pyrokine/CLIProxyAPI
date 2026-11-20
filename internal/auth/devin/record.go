@@ -56,6 +56,7 @@ func (service *DevinAuthService) CreateAuthRecord(ctx context.Context, token str
 	}
 
 	attributes := map[string]string{
+		"api_key":       sessionToken,
 		"session_token": sessionToken,
 		"base_url":      DefaultServerURL,
 		"auth_kind":     "oauth",

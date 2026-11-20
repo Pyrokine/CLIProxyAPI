@@ -104,30 +104,30 @@ type quotaRefreshTaskRuntime struct {
 }
 
 type quotaRefreshTaskService struct {
-	handler          *Handler
-	mu               sync.Mutex
-	persistMu        sync.Mutex
-	tasks            map[string]*quotaRefreshTask
-	order            []string
-	runtimes         map[string]*quotaRefreshTaskRuntime
-	globalSemaphore        chan struct{}
-	providerSemaphores     map[string]chan struct{}
-	globalLimit      int
-	providerLimit    int
-	closed           bool
-	loadError        error
-	persistenceError string
-	wg               sync.WaitGroup
+	handler            *Handler
+	mu                 sync.Mutex
+	persistMu          sync.Mutex
+	tasks              map[string]*quotaRefreshTask
+	order              []string
+	runtimes           map[string]*quotaRefreshTaskRuntime
+	globalSemaphore    chan struct{}
+	providerSemaphores map[string]chan struct{}
+	globalLimit        int
+	providerLimit      int
+	closed             bool
+	loadError          error
+	persistenceError   string
+	wg                 sync.WaitGroup
 }
 
 func newQuotaRefreshTaskService(handler *Handler) *quotaRefreshTaskService {
 	service := &quotaRefreshTaskService{
-		handler:       handler,
-		tasks:         make(map[string]*quotaRefreshTask),
-		runtimes:      make(map[string]*quotaRefreshTaskRuntime),
-		globalLimit:   quotaRefreshTaskGlobalConcurrency,
-		providerLimit: quotaRefreshTaskProviderConcurrency,
-		providerSemaphores:  make(map[string]chan struct{}),
+		handler:            handler,
+		tasks:              make(map[string]*quotaRefreshTask),
+		runtimes:           make(map[string]*quotaRefreshTaskRuntime),
+		globalLimit:        quotaRefreshTaskGlobalConcurrency,
+		providerLimit:      quotaRefreshTaskProviderConcurrency,
+		providerSemaphores: make(map[string]chan struct{}),
 	}
 	service.globalSemaphore = make(chan struct{}, service.globalLimit)
 	service.loadPersistedState()
@@ -228,7 +228,7 @@ func interruptPersistedQuotaRefreshTask(task *quotaRefreshTask, now time.Time) {
 	}
 }
 
-func (s *quotaRefreshTaskService) createTask(identifiers []string) (*quotaRefreshTask, error) {
+func (s *quotaRefreshTaskService) createTask(allowRecovery bool, identifiers []string) (*quotaRefreshTask, error) {
 	scheduler := s.scheduler()
 	if scheduler == nil {
 		return nil, fmt.Errorf("quota scheduler not configured")
@@ -246,7 +246,7 @@ func (s *quotaRefreshTaskService) createTask(identifiers []string) (*quotaRefres
 	s.mu.Unlock()
 
 	targets, unresolved := scheduler.ResolveRefreshTargets(identifiers)
-	explicit := len(identifiers) > 0
+	explicit := allowRecovery && len(identifiers) > 0 && len(targets) == 1 && len(unresolved) == 0
 	taskTargets := make([]quotaRefreshTaskTarget, 0, len(targets)+len(unresolved))
 	runtimeTargets := make(map[string]quota.RefreshTarget, len(targets))
 	now := time.Now().UTC()
@@ -539,7 +539,9 @@ func (s *quotaRefreshTaskService) markTargetRunning(taskID string, targetID stri
 	runtime := s.runtimes[taskID]
 	target := findQuotaRefreshTaskTarget(task, targetID)
 	if task == nil || runtime == nil || target == nil || target.Status != quotaRefreshTargetStatusQueued ||
-		quotaRefreshTaskTerminal(task.Status) || runtime.ctx.Err() != nil || task.Status == quotaRefreshTaskStatusPaused {
+		quotaRefreshTaskTerminal(
+			task.Status,
+		) || runtime.ctx.Err() != nil || task.Status == quotaRefreshTaskStatusPaused {
 		return false
 	}
 	now := time.Now().UTC()
@@ -1009,6 +1011,8 @@ func (h *Handler) PostQuotaRefreshTaskPause(c *gin.Context) {
 		writeQuotaRefreshTaskError(c, err)
 		return
 	}
+	RecordMutationEffect(c.Request.Context(), "task.persisted", "task")
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusOK, task)
 }
 
@@ -1018,6 +1022,8 @@ func (h *Handler) PostQuotaRefreshTaskResume(c *gin.Context) {
 		writeQuotaRefreshTaskError(c, err)
 		return
 	}
+	RecordMutationEffect(c.Request.Context(), "task.persisted", "task")
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusOK, task)
 }
 
@@ -1027,6 +1033,8 @@ func (h *Handler) PostQuotaRefreshTaskCancel(c *gin.Context) {
 		writeQuotaRefreshTaskError(c, err)
 		return
 	}
+	RecordMutationEffect(c.Request.Context(), "task.persisted", "task")
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusAccepted, task)
 }
 

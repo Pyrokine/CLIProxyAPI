@@ -36,10 +36,12 @@ type managementQuotaHost struct {
 }
 
 func (h *managementQuotaHost) RegisteredPlugins() []pluginhost.RegisteredPluginInfo {
-	return []pluginhost.RegisteredPluginInfo{{
-		ID:       h.pluginID,
-		Metadata: pluginapi.Metadata{Name: "Quota test plugin"},
-	}}
+	return []pluginhost.RegisteredPluginInfo{
+		{
+			ID:       h.pluginID,
+			Metadata: pluginapi.Metadata{Name: "Quota test plugin"},
+		},
+	}
 }
 
 func (*managementQuotaHost) PluginBusy(string) bool { return false }
@@ -58,13 +60,15 @@ func (h *managementQuotaHost) QuotaProviders(context.Context) []pluginhost.Regis
 	if h.pluginID == "" || h.provider == "" {
 		return nil
 	}
-	return []pluginhost.RegisteredQuotaProviderInfo{{
-		PluginID:           h.pluginID,
-		Provider:           h.provider,
-		DisplayName:        "Quota test plugin",
-		SupportedProviders: []string{h.provider},
-		SupportsReset:      h.supportsReset,
-	}}
+	return []pluginhost.RegisteredQuotaProviderInfo{
+		{
+			PluginID:           h.pluginID,
+			Provider:           h.provider,
+			DisplayName:        "Quota test plugin",
+			SupportedProviders: []string{h.provider},
+			SupportsReset:      h.supportsReset,
+		},
+	}
 }
 
 func (h *managementQuotaHost) HasQuotaProviderContext(_ context.Context, provider string) bool {
@@ -162,13 +166,17 @@ func newManagementQuotaHandler(
 func validQuotaResponse() pluginapi.QuotaFetchResponse {
 	return pluginapi.QuotaFetchResponse{
 		Subscription: &pluginapi.QuotaSubscription{Plan: "Pro", TierName: "Tier Pro"},
-		Groups: []pluginapi.QuotaGroup{{
-			DisplayName: "Daily",
-			Buckets: []pluginapi.QuotaBucket{{
-				Window:            "day",
-				RemainingFraction: 0.25,
-			}},
-		}},
+		Groups: []pluginapi.QuotaGroup{
+			{
+				DisplayName: "Daily",
+				Buckets: []pluginapi.QuotaBucket{
+					{
+						Window:            "day",
+						RemainingFraction: 0.25,
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -185,34 +193,36 @@ func quotaTestContext(method, path, body string) (*gin.Context, *httptest.Respon
 func TestFetchCredentialQuotaAcceptsAuthIndexAliasesAndUsesPluginFirst(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, field := range []string{"auth_index", "authIndex", "AuthIndex"} {
-		t.Run(field, func(t *testing.T) {
-			host := &managementQuotaHost{
-				pluginID:      "quota-plugin",
-				provider:      "quota-provider",
-				fetchResponse: validQuotaResponse(),
-				fetchHandled:  true,
-			}
-			handler, _, auth := newManagementQuotaHandler(t, host)
-			auth.Metadata[pluginapi.QuotaProbeMetadataKey] = map[string]any{
-				"url": "http://127.0.0.1/probe-must-not-run",
-			}
-			body := `{"` + field + `":"` + auth.Index + `"}`
-			ctx, recorder := quotaTestContext(http.MethodPost, "/quota/fetch", body)
-			handler.FetchCredentialQuota(ctx)
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-			}
-			if host.fetchCalls != 1 {
-				t.Fatalf("fetch calls = %d, want 1", host.fetchCalls)
-			}
-			if host.lastFetch.AuthIndex != auth.Index || host.lastFetch.AuthID != auth.ID ||
-				host.lastFetch.Provider != auth.Provider {
-				t.Fatalf("fetch request = %#v", host.lastFetch)
-			}
-			if !strings.Contains(string(host.lastFetch.StorageJSON), `"account":"one"`) {
-				t.Fatalf("storage JSON = %s", host.lastFetch.StorageJSON)
-			}
-		})
+		t.Run(
+			field, func(t *testing.T) {
+				host := &managementQuotaHost{
+					pluginID:      "quota-plugin",
+					provider:      "quota-provider",
+					fetchResponse: validQuotaResponse(),
+					fetchHandled:  true,
+				}
+				handler, _, auth := newManagementQuotaHandler(t, host)
+				auth.Metadata[pluginapi.QuotaProbeMetadataKey] = map[string]any{
+					"url": "http://127.0.0.1/probe-must-not-run",
+				}
+				body := `{"` + field + `":"` + auth.Index + `"}`
+				ctx, recorder := quotaTestContext(http.MethodPost, "/quota/fetch", body)
+				handler.FetchCredentialQuota(ctx)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+				}
+				if host.fetchCalls != 1 {
+					t.Fatalf("fetch calls = %d, want 1", host.fetchCalls)
+				}
+				if host.lastFetch.AuthIndex != auth.Index || host.lastFetch.AuthID != auth.ID ||
+					host.lastFetch.Provider != auth.Provider {
+					t.Fatalf("fetch request = %#v", host.lastFetch)
+				}
+				if !strings.Contains(string(host.lastFetch.StorageJSON), `"account":"one"`) {
+					t.Fatalf("storage JSON = %s", host.lastFetch.StorageJSON)
+				}
+			},
+		)
 	}
 }
 
@@ -246,7 +256,12 @@ func TestResetCredentialQuotaRequiresDeclaredResetAndUsesOnlyFakeProvider(t *tes
 	ctxRejected, rejected := quotaTestContext(http.MethodPost, "/quota/reset", body)
 	handler.ResetCredentialQuota(ctxRejected)
 	if rejected.Code != http.StatusMethodNotAllowed || host.resetCalls != 0 {
-		t.Fatalf("unsupported reset status=%d calls=%d body=%s", rejected.Code, host.resetCalls, rejected.Body.String())
+		t.Fatalf(
+			"unsupported reset status=%d calls=%d body=%s",
+			rejected.Code,
+			host.resetCalls,
+			rejected.Body.String(),
+		)
 	}
 	stillUnavailable, _ := manager.GetByID(auth.ID)
 	if !stillUnavailable.Unavailable || !stillUnavailable.Quota.Exceeded {
@@ -257,7 +272,12 @@ func TestResetCredentialQuotaRequiresDeclaredResetAndUsesOnlyFakeProvider(t *tes
 	ctxAccepted, accepted := quotaTestContext(http.MethodPost, "/quota/reset", body)
 	handler.ResetCredentialQuota(ctxAccepted)
 	if accepted.Code != http.StatusOK || host.resetCalls != 1 {
-		t.Fatalf("accepted reset status=%d calls=%d body=%s", accepted.Code, host.resetCalls, accepted.Body.String())
+		t.Fatalf(
+			"accepted reset status=%d calls=%d body=%s",
+			accepted.Code,
+			host.resetCalls,
+			accepted.Body.String(),
+		)
 	}
 	if host.lastReset.AuthIndex != auth.Index || host.lastReset.Provider != auth.Provider {
 		t.Fatalf("reset request = %#v", host.lastReset)
@@ -340,12 +360,19 @@ func TestPluginQuotaEndpointsAndPluginListExposeCapability(t *testing.T) {
 	deleteCtx.Params = gin.Params{{Key: "id", Value: "quota-plugin"}}
 	handler.ResetPluginQuota(deleteCtx)
 	if deleteRecorder.Code != http.StatusOK || host.resetCalls != 1 {
-		t.Fatalf("DELETE status=%d calls=%d body=%s", deleteRecorder.Code, host.resetCalls, deleteRecorder.Body.String())
+		t.Fatalf(
+			"DELETE status=%d calls=%d body=%s",
+			deleteRecorder.Code,
+			host.resetCalls,
+			deleteRecorder.Body.String(),
+		)
 	}
 
 	providersCtx, providersRecorder := quotaTestContext(http.MethodGet, "/quota/providers", "")
 	handler.GetQuotaProviders(providersCtx)
-	if providersRecorder.Code != http.StatusOK || !strings.Contains(providersRecorder.Body.String(), `"supports_reset":true`) {
+	if providersRecorder.Code != http.StatusOK || !strings.Contains(
+		providersRecorder.Body.String(), `"supports_reset":true`,
+	) {
 		t.Fatalf("providers status=%d body=%s", providersRecorder.Code, providersRecorder.Body.String())
 	}
 
@@ -370,10 +397,25 @@ func TestListAuthFilesAdvertisesQuotaWithoutExposingProbeConfiguration(t *testin
 	host := &managementQuotaHost{pluginID: "quota-plugin", provider: "quota-provider"}
 	manager := coreauth.NewManager(nil, nil, nil)
 	for _, auth := range []*coreauth.Auth{
-		{ID: "plugin", FileName: "plugin.json", Provider: "quota-provider", Attributes: map[string]string{"runtime_only": "true"}},
-		{ID: "probe", FileName: "probe.json", Provider: "probe-provider", Attributes: map[string]string{"runtime_only": "true"},
-			Metadata: map[string]any{pluginapi.QuotaProbeMetadataKey: map[string]any{"url": "https://quota.example.test/usage"}}},
-		{ID: "plain", FileName: "plain.json", Provider: "plain-provider", Attributes: map[string]string{"runtime_only": "true"}},
+		{
+			ID: "plugin", FileName: "plugin.json", Provider: "quota-provider",
+			Attributes: map[string]string{"runtime_only": "true"},
+		},
+		{
+			ID: "probe", FileName: "probe.json", Provider: "probe-provider",
+			Attributes: map[string]string{"runtime_only": "true"},
+			Metadata: map[string]any{
+				pluginapi.QuotaProbeMetadataKey: map[string]any{
+					"url": "https://" +
+						"quota.example." +
+						"test/usage",
+				},
+			},
+		},
+		{
+			ID: "plain", FileName: "plain.json", Provider: "plain-provider",
+			Attributes: map[string]string{"runtime_only": "true"},
+		},
 	} {
 		if _, err := manager.Register(context.Background(), auth); err != nil {
 			t.Fatalf("register %s: %v", auth.ID, err)
@@ -403,7 +445,8 @@ func TestListAuthFilesAdvertisesQuotaWithoutExposingProbeConfiguration(t *testin
 			t.Fatalf("%s exposed quota probe configuration", name)
 		}
 	}
-	if byName["plugin.json"]["supports_quota"] != true || byName["plugin.json"]["quota_provider"] != "quota-provider" {
+	if byName["plugin.json"]["supports_quota"] != true ||
+		byName["plugin.json"]["quota_provider"] != "quota-provider" {
 		t.Fatalf("plugin file = %#v", byName["plugin.json"])
 	}
 	if byName["probe.json"]["supports_quota"] != true || byName["probe.json"]["quota_provider"] != nil {
@@ -415,7 +458,8 @@ func TestListAuthFilesAdvertisesQuotaWithoutExposingProbeConfiguration(t *testin
 }
 
 func TestNormalizeQuotaProbeResponsePreservesUnknownNumericFields(t *testing.T) {
-	response, errNormalize := normalizeQuotaProbeResponse([]byte(`{
+	response, errNormalize := normalizeQuotaProbeResponse(
+		[]byte(`{
 		"subscription":{"tier_name":"Team"},
 		"groups":[{"display_name":"Limits","buckets":[
 			{"window":"missing"},
@@ -423,7 +467,8 @@ func TestNormalizeQuotaProbeResponsePreservesUnknownNumericFields(t *testing.T) 
 			{"window":"zero","remaining_fraction":0},
 			{"window":"valid","remainingFraction":"0.5"}
 		]}]
-	}`))
+	}`),
+	)
 	if errNormalize != nil {
 		t.Fatalf("normalize response: %v", errNormalize)
 	}
@@ -448,20 +493,23 @@ func TestMapQuotaProbeResponseSupportsCamelSnakeAndAmountRatios(t *testing.T) {
 	mapping := map[string]any{
 		"plan":     "account.plan",
 		"tierName": "account.tier",
-		"groups": []any{map[string]any{
-			"displayName":          "Daily limits",
-			"buckets_path":         "limits",
-			"window_key":           "name",
-			"remaining_amount_key": "remaining",
-			"total_amount_key":     "total",
-			"reset_time_key":       "reset",
-		}},
+		"groups": []any{
+			map[string]any{
+				"displayName":          "Daily limits",
+				"buckets_path":         "limits",
+				"window_key":           "name",
+				"remaining_amount_key": "remaining",
+				"total_amount_key":     "total",
+				"reset_time_key":       "reset",
+			},
+		},
 	}
 	response, errMap := mapQuotaProbeResponse(data, mapping)
 	if errMap != nil {
 		t.Fatalf("map response: %v", errMap)
 	}
-	if response.Subscription == nil || response.Subscription.Plan != "Pro" || response.Subscription.TierName != "Team" {
+	if response.Subscription == nil || response.Subscription.Plan != "Pro" ||
+		response.Subscription.TierName != "Team" {
 		t.Fatalf("subscription = %#v", response.Subscription)
 	}
 	if len(response.Groups) != 1 || len(response.Groups[0].Buckets) != 1 {
@@ -485,12 +533,14 @@ func TestDeclarativeQuotaProbeUsesInjectedHTTPAndMapsDateOffset(t *testing.T) {
 		"data": map[string]any{"scope": "account"},
 		"mapping": map[string]any{
 			"plan": "account.plan",
-			"groups": []any{map[string]any{
-				"display_name":           "Daily",
-				"buckets_path":           "limits",
-				"window_key":             "name",
-				"remaining_fraction_key": "remaining",
-			}},
+			"groups": []any{
+				map[string]any{
+					"display_name":           "Daily",
+					"buckets_path":           "limits",
+					"window_key":             "name",
+					"remaining_fraction_key": "remaining",
+				},
+			},
 		},
 	}
 	serverTime := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
@@ -512,9 +562,11 @@ func TestDeclarativeQuotaProbeUsesInjectedHTTPAndMapsDateOffset(t *testing.T) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Date": {serverTime.Format(http.TimeFormat)}},
-				Body: io.NopCloser(strings.NewReader(
-					`{"account":{"plan":"Pro"},"limits":[{"name":"daily","remaining":0.4}]}`,
-				)),
+				Body: io.NopCloser(
+					strings.NewReader(
+						`{"account":{"plan":"Pro"},"limits":[{"name":"daily","remaining":0.4}]}`,
+					),
+				),
 			}, nil
 		},
 	)
@@ -550,12 +602,14 @@ func TestDeclarativeQuotaProbeRejectsPrivateAndUntrustedTokenTargetsBeforeNetwor
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, handled, errProbe := handler.executeQuotaProbe(context.Background(), auth, test.probe)
-			if !handled || errProbe == nil {
-				t.Fatalf("handled=%t error=%v", handled, errProbe)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				_, handled, errProbe := handler.executeQuotaProbe(context.Background(), auth, test.probe)
+				if !handled || errProbe == nil {
+					t.Fatalf("handled=%t error=%v", handled, errProbe)
+				}
+			},
+		)
 	}
 }
 
@@ -578,7 +632,9 @@ func TestCredentialQuotaRequestAliasPrecedence(t *testing.T) {
 	if got := request.resolveAuthIndex(); got != "snake" {
 		t.Fatalf("resolveAuthIndex() = %q", got)
 	}
-	if got := (credentialQuotaRequest{AuthIndexCamel: &camel, AuthIndexPascal: &pascal}).resolveAuthIndex(); got != "camel" {
+	if got := (credentialQuotaRequest{
+		AuthIndexCamel: &camel, AuthIndexPascal: &pascal,
+	}).resolveAuthIndex(); got != "camel" {
 		t.Fatalf("camel resolveAuthIndex() = %q", got)
 	}
 	if got := (credentialQuotaRequest{AuthIndexPascal: &pascal}).resolveAuthIndex(); got != "pascal" {
@@ -587,16 +643,20 @@ func TestCredentialQuotaRequestAliasPrecedence(t *testing.T) {
 }
 
 func TestQuotaProbeHeadersCopyAndValidateStringValues(t *testing.T) {
-	headers, errHeaders := quotaProbeHeaders(map[string]any{
-		"header": map[string]any{"Authorization": "Bearer $TOKEN$", "Accept": "application/json"},
-	})
+	headers, errHeaders := quotaProbeHeaders(
+		map[string]any{
+			"header": map[string]any{"Authorization": "Bearer $TOKEN$", "Accept": "application/json"},
+		},
+	)
 	if errHeaders != nil {
 		t.Fatalf("headers error: %v", errHeaders)
 	}
-	if !reflect.DeepEqual(headers, map[string]string{
-		"Authorization": "Bearer $TOKEN$",
-		"Accept":        "application/json",
-	}) {
+	if !reflect.DeepEqual(
+		headers, map[string]string{
+			"Authorization": "Bearer $TOKEN$",
+			"Accept":        "application/json",
+		},
+	) {
 		t.Fatalf("headers = %#v", headers)
 	}
 	if _, errInvalid := quotaProbeHeaders(map[string]any{"headers": map[string]any{"X": 1}}); errInvalid == nil {

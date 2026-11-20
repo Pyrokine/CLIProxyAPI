@@ -39,8 +39,11 @@ type oauthSession struct {
 	Status           string
 	Source           string
 	Metadata         map[string]any
+	Message          string
 	NonceHash        string
 	CallbackAccepted bool
+	Phase            string
+	Polling          bool
 	Saving           bool
 	Completed        bool
 	CreatedAt        time.Time
@@ -113,6 +116,7 @@ func (s *oauthSessionStore) registerPlugin(
 	nonce,
 	authDir string,
 	metadata map[string]any,
+	registered ...*oauthSession,
 ) error {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -132,7 +136,7 @@ func (s *oauthSessionStore) registerPlugin(
 	if _, exists := s.sessions[state]; exists {
 		return errOAuthSessionExists
 	}
-	s.sessions[state] = oauthSession{
+	session := oauthSession{
 		Provider:  provider,
 		AuthDir:   authDir,
 		Source:    oauthSessionSourcePlugin,
@@ -141,10 +145,15 @@ func (s *oauthSessionStore) registerPlugin(
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
+	s.sessions[state] = session
+	if len(registered) > 0 && registered[0] != nil {
+		session.Metadata = cloneOAuthSessionMetadata(session.Metadata)
+		*registered[0] = session
+	}
 	return nil
 }
 
-func (s *oauthSessionStore) setErrorIfPending(state, provider, message string) bool {
+func (s *oauthSessionStore) setErrorIfPending(state, provider, message string, createdAt ...time.Time) bool {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	message = strings.TrimSpace(message)
@@ -159,7 +168,8 @@ func (s *oauthSessionStore) setErrorIfPending(state, provider, message string) b
 	s.mu.Lock()
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Saving || session.Status != "" ||
+	if !ok || len(createdAt) > 0 && !session.CreatedAt.Equal(createdAt[0]) || session.Completed || session.Saving ||
+		session.Status != "" ||
 		(provider != "" && !strings.EqualFold(session.Provider, provider)) {
 		s.mu.Unlock()
 		return false
@@ -177,7 +187,7 @@ func (s *oauthSessionStore) setErrorIfPending(state, provider, message string) b
 	return true
 }
 
-func (s *oauthSessionStore) setError(state, message string) {
+func (s *oauthSessionStore) setError(state, message string, createdAt ...time.Time) {
 	state = strings.TrimSpace(state)
 	message = strings.TrimSpace(message)
 	if state == "" {
@@ -191,7 +201,7 @@ func (s *oauthSessionStore) setError(state, message string) {
 	s.mu.Lock()
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed {
+	if !ok || len(createdAt) > 0 && !session.CreatedAt.Equal(createdAt[0]) || session.Completed {
 		s.mu.Unlock()
 		return
 	}
@@ -199,6 +209,8 @@ func (s *oauthSessionStore) setError(state, message string) {
 	session.cancel = nil
 	session.Status = message
 	session.Saving = false
+	session.Phase = ""
+	session.Polling = false
 	session.ExpiresAt = now.Add(s.ttl)
 	s.sessions[state] = session
 	s.mu.Unlock()
@@ -208,7 +220,7 @@ func (s *oauthSessionStore) setError(state, message string) {
 	}
 }
 
-func (s *oauthSessionStore) complete(state string) {
+func (s *oauthSessionStore) complete(state string, createdAt ...time.Time) {
 	state = strings.TrimSpace(state)
 	if state == "" {
 		return
@@ -218,7 +230,7 @@ func (s *oauthSessionStore) complete(state string) {
 	s.mu.Lock()
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed {
+	if !ok || len(createdAt) > 0 && !session.CreatedAt.Equal(createdAt[0]) || session.Completed {
 		s.mu.Unlock()
 		return
 	}
@@ -227,6 +239,8 @@ func (s *oauthSessionStore) complete(state string) {
 	session.Status = ""
 	session.Metadata = nil
 	session.Saving = false
+	session.Phase = ""
+	session.Polling = false
 	session.Completed = true
 	session.ExpiresAt = now.Add(s.completedTTL)
 	s.sessions[state] = session
@@ -235,6 +249,42 @@ func (s *oauthSessionStore) complete(state string) {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func (s *oauthSessionStore) completeProvider(provider string) int {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return 0
+	}
+	var cancellations []context.CancelFunc
+	now := time.Now()
+	completed := 0
+	s.mu.Lock()
+	s.purgeExpiredLocked(now)
+	for state, session := range s.sessions {
+		if session.Completed || session.Source != oauthSessionSourceBuiltin ||
+			!strings.EqualFold(session.Provider, provider) {
+			continue
+		}
+		if session.cancel != nil {
+			cancellations = append(cancellations, session.cancel)
+		}
+		session.cancel = nil
+		session.Status = ""
+		session.Metadata = nil
+		session.Saving = false
+		session.Phase = ""
+		session.Polling = false
+		session.Completed = true
+		session.ExpiresAt = now.Add(s.completedTTL)
+		s.sessions[state] = session
+		completed++
+	}
+	s.mu.Unlock()
+	for _, cancel := range cancellations {
+		cancel()
+	}
+	return completed
 }
 
 func (s *oauthSessionStore) get(state string) (oauthSession, bool) {
@@ -270,7 +320,11 @@ func (s *oauthSessionStore) isPending(state, provider string) bool {
 	return strings.EqualFold(session.Provider, provider)
 }
 
-func (s *oauthSessionStore) attachCancel(state, provider string, cancel context.CancelFunc) bool {
+func (s *oauthSessionStore) attachCancel(
+	state, provider string,
+	cancel context.CancelFunc,
+	createdAt ...time.Time,
+) bool {
 	if cancel == nil {
 		return false
 	}
@@ -281,7 +335,8 @@ func (s *oauthSessionStore) attachCancel(state, provider string, cancel context.
 	s.mu.Lock()
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Saving || session.Status != "" ||
+	if !ok || len(createdAt) > 0 && !session.CreatedAt.Equal(createdAt[0]) || session.Completed || session.Saving ||
+		session.Status != "" ||
 		(provider != "" && !strings.EqualFold(session.Provider, provider)) {
 		s.mu.Unlock()
 		cancel()
@@ -298,7 +353,7 @@ func (s *oauthSessionStore) attachCancel(state, provider string, cancel context.
 	return true
 }
 
-func (s *oauthSessionStore) claimCallback(state, provider string) (string, bool) {
+func (s *oauthSessionStore) claimCallback(state, provider string, authDir ...string) (string, bool, bool) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	now := time.Now()
@@ -309,15 +364,32 @@ func (s *oauthSessionStore) claimCallback(state, provider string) (string, bool)
 	session, ok := s.sessions[state]
 	if !ok || session.CallbackAccepted || session.Completed || session.Saving || session.Status != "" ||
 		(provider != "" && !strings.EqualFold(session.Provider, provider)) {
-		return "", false
+		return "", false, false
+	}
+	directoryBound := false
+	if len(authDir) > 0 {
+		requestedDir := strings.TrimSpace(authDir[0])
+		if requestedDir == "" {
+			return "", false, false
+		}
+		if session.AuthDir != "" {
+			captured, errCaptured := filepath.Abs(session.AuthDir)
+			requested, errRequested := filepath.Abs(requestedDir)
+			if errCaptured != nil || errRequested != nil || captured != requested {
+				return "", false, false
+			}
+		} else {
+			session.AuthDir = requestedDir
+			directoryBound = true
+		}
 	}
 	session.CallbackAccepted = true
 	session.ExpiresAt = now.Add(s.ttl)
 	s.sessions[state] = session
-	return session.AuthDir, true
+	return session.AuthDir, directoryBound, true
 }
 
-func (s *oauthSessionStore) releaseCallback(state, provider string) {
+func (s *oauthSessionStore) releaseCallback(state, provider string, releaseDirectory ...bool) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" {
@@ -332,6 +404,9 @@ func (s *oauthSessionStore) releaseCallback(state, provider string) {
 		return
 	}
 	session.CallbackAccepted = false
+	if len(releaseDirectory) > 0 && releaseDirectory[0] {
+		session.AuthDir = ""
+	}
 	s.sessions[state] = session
 }
 
@@ -344,11 +419,11 @@ func (s *oauthSessionStore) callbackClaimActive(state, provider string) bool {
 	defer s.mu.Unlock()
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	return ok && session.CallbackAccepted &&
+	return ok && session.CallbackAccepted && !session.Completed && !session.Saving && session.Status == "" &&
 		(provider == "" || strings.EqualFold(session.Provider, provider))
 }
 
-func (s *oauthSessionStore) claimForSave(state, provider string) bool {
+func (s *oauthSessionStore) claimForSave(state, provider string, createdAt ...time.Time) bool {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	now := time.Now()
@@ -356,7 +431,8 @@ func (s *oauthSessionStore) claimForSave(state, provider string) bool {
 	s.mu.Lock()
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Saving || session.Status != "" ||
+	if !ok || len(createdAt) > 0 && !session.CreatedAt.Equal(createdAt[0]) || session.Completed || session.Saving ||
+		session.Status != "" ||
 		(provider != "" && !strings.EqualFold(session.Provider, provider)) {
 		s.mu.Unlock()
 		return false
@@ -440,12 +516,19 @@ func registerOAuthSession(state, provider, nonce string) {
 	oauthSessions.register(state, provider, nonce)
 }
 
-func registerOAuthSessionForAuthDir(state, provider, nonce, authDir string) {
+func registerOAuthSessionForAuthDir(state, provider, nonce, authDir string, mutationContext ...context.Context) {
 	oauthSessions.register(state, provider, nonce, authDir)
+	if len(mutationContext) > 0 && isOAuthSessionPending(state, provider) {
+		RecordMutationEffect(mutationContext[0], "task.created", "task")
+	}
 }
 
-func registerPluginOAuthSession(state, provider, nonce, authDir string, metadata map[string]any) error {
-	return oauthSessions.registerPlugin(state, provider, nonce, authDir, metadata)
+func registerPluginOAuthSession(
+	state, provider, nonce, authDir string,
+	metadata map[string]any,
+	registered ...*oauthSession,
+) error {
+	return oauthSessions.registerPlugin(state, provider, nonce, authDir, metadata, registered...)
 }
 
 func setOAuthSessionError(state, message string) { oauthSessions.setError(state, message) }
@@ -488,6 +571,8 @@ func oauthSessionPhase(session oauthSession) string {
 	switch {
 	case session.Completed:
 		return "success"
+	case session.Phase != "":
+		return session.Phase
 	case session.Saving:
 		return "saving"
 	case session.CallbackAccepted:
@@ -658,6 +743,10 @@ func writeOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 		return "", err
 	}
 
+	if strings.TrimSpace(code) == "" && strings.TrimSpace(errorMessage) == "" {
+		return "", fmt.Errorf("oauth callback requires a code or error")
+	}
+
 	fileName := fmt.Sprintf(".oauth-%s-%s.oauth", canonicalProvider, state)
 	filePath := filepath.Join(authDir, fileName)
 	payload := oauthCallbackFilePayload{
@@ -668,6 +757,9 @@ func writeOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal oauth callback payload: %w", err)
+	}
+	if errMkdir := os.MkdirAll(authDir, 0o700); errMkdir != nil {
+		return "", fmt.Errorf("create oauth callback directory: %w", errMkdir)
 	}
 	tmp, errCreate := os.CreateTemp(authDir, ".oauth-callback-*.tmp")
 	if errCreate != nil {
@@ -706,22 +798,23 @@ func WriteOAuthCallbackFileForPendingSession(
 	state string,
 	code string,
 	errorMessage string,
+	authDir ...string,
 ) (string, error) {
 	canonicalProvider, err := normalizeOAuthCallbackProviderForPendingSession(provider, state)
 	if err != nil {
 		return "", err
 	}
-	authDir, claimed := oauthSessions.claimCallback(state, canonicalProvider)
+	sessionAuthDir, directoryBound, claimed := oauthSessions.claimCallback(state, canonicalProvider, authDir...)
 	if !claimed {
 		return "", errOAuthSessionNotPending
 	}
-	if strings.TrimSpace(authDir) == "" {
-		oauthSessions.releaseCallback(state, canonicalProvider)
+	if strings.TrimSpace(sessionAuthDir) == "" {
+		oauthSessions.releaseCallback(state, canonicalProvider, directoryBound)
 		return "", fmt.Errorf("oauth session auth dir is empty")
 	}
-	filePath, errWrite := writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+	filePath, errWrite := writeOAuthCallbackFile(sessionAuthDir, canonicalProvider, state, code, errorMessage)
 	if errWrite != nil {
-		oauthSessions.releaseCallback(state, canonicalProvider)
+		oauthSessions.releaseCallback(state, canonicalProvider, directoryBound)
 		return "", errWrite
 	}
 	if !oauthSessions.callbackClaimActive(state, canonicalProvider) {
@@ -731,4 +824,68 @@ func WriteOAuthCallbackFileForPendingSession(
 		return "", errOAuthSessionNotPending
 	}
 	return filePath, nil
+}
+
+func (s *oauthSessionStore) setPhase(state, provider, phase string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeExpiredLocked(time.Now())
+	session, ok := s.sessions[state]
+	if !ok || session.Completed || session.Status != "" || !strings.EqualFold(session.Provider, provider) ||
+		phase == "exchanging" && session.Saving {
+		return false
+	}
+	session.Phase = phase
+	s.sessions[state] = session
+	return true
+}
+
+func (s *oauthSessionStore) claimPoll(state, provider string, createdAt time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeExpiredLocked(time.Now())
+	session, ok := s.sessions[state]
+	if !ok || !session.CreatedAt.Equal(createdAt) || session.Completed || session.Saving || session.Polling ||
+		session.Status != "" ||
+		!strings.EqualFold(session.Provider, provider) {
+		return false
+	}
+	session.Polling = true
+	session.Phase = "exchanging"
+	s.sessions[state] = session
+	return true
+}
+
+func (s *oauthSessionStore) releasePoll(state, provider, message string, createdAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[state]
+	if !ok || !session.CreatedAt.Equal(createdAt) || !strings.EqualFold(session.Provider, provider) {
+		return
+	}
+	session.Polling = false
+	session.Message = message
+	if !session.Saving && session.Phase == "exchanging" {
+		session.Phase = ""
+	}
+	s.sessions[state] = session
+}
+
+type oauthSessionContextKey struct{}
+type oauthSessionBinding struct {
+	state, provider string
+	store           *oauthSessionStore
+}
+
+func withOAuthSessionContext(ctx context.Context, state, provider string) context.Context {
+	return context.WithValue(
+		ctx,
+		oauthSessionContextKey{},
+		oauthSessionBinding{state: state, provider: provider, store: oauthSessions},
+	)
+}
+func setOAuthSessionPhaseFromContext(ctx context.Context, phase string) {
+	if binding, ok := ctx.Value(oauthSessionContextKey{}).(oauthSessionBinding); ok {
+		binding.store.setPhase(binding.state, binding.provider, phase)
+	}
 }

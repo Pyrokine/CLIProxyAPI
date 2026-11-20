@@ -16,11 +16,13 @@ func DoMetaLogin(cfg *config.Config, options *LoginOptions) {
 	}
 
 	manager := newAuthManager()
-	record, savedPath, err := manager.Login(context.Background(), "meta", cfg, &sdkAuth.LoginOptions{
-		NoBrowser: options.NoBrowser,
-		Metadata:  map[string]string{},
-		Prompt:    options.Prompt,
-	})
+	record, savedPath, err := manager.Login(
+		context.Background(), "meta", cfg, &sdkAuth.LoginOptions{
+			NoBrowser: options.NoBrowser,
+			Metadata:  map[string]string{},
+			Prompt:    options.Prompt,
+		},
+	)
 	if err != nil {
 		log.Errorf("Meta authentication failed: %v", err)
 		return

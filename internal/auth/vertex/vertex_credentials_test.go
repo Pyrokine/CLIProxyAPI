@@ -46,11 +46,13 @@ func TestSaveTokenToFilePersistsInjectedMetadata(t *testing.T) {
 		Email:     "svc@example.test",
 		Location:  "us-central1",
 	}
-	storage.SetMetadata(map[string]any{
-		"disabled":    true,
-		"weight":      7,
-		"custom_note": "preserved",
-	})
+	storage.SetMetadata(
+		map[string]any{
+			"disabled":    true,
+			"weight":      7,
+			"custom_note": "preserved",
+		},
+	)
 
 	if err := storage.SaveTokenToFile(path); err != nil {
 		t.Fatalf("SaveTokenToFile() error = %v", err)

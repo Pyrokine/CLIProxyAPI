@@ -12,6 +12,8 @@ import (
 )
 
 // MetaTokenStorage persists the OAuth device token separately from its minted API key.
+//
+//goland:noinspection GoNameStartsWithPackageName
 type MetaTokenStorage struct {
 	Type         string `json:"type"`
 	AuthKind     string `json:"auth_kind"`
@@ -45,6 +47,7 @@ func (storage *MetaTokenStorage) CloneForPersistence() coreauth.TokenStorage {
 	return &copyStorage
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (storage *MetaTokenStorage) SetMetadata(metadata map[string]any) {
 	if storage == nil {
 		return

@@ -207,7 +207,8 @@ func (t *utlsRoundTripper) dialTLSContext(ctx context.Context, network, addr str
 		return nil, fmt.Errorf("claude oauth tls: apply ClientHello: %w", errPreset)
 	}
 	handshakeCtx := ctx
-	if handshakeTimeout, _ := ctx.Value(claudeRefreshHandshakeTimeoutContextKey{}).(time.Duration); handshakeTimeout > 0 {
+	if handshakeTimeout, _ := ctx.Value(claudeRefreshHandshakeTimeoutContextKey{}).(time.Duration); handshakeTimeout >
+		0 {
 		var cancelHandshake context.CancelFunc
 		handshakeCtx, cancelHandshake = context.WithTimeout(ctx, handshakeTimeout)
 		defer cancelHandshake()

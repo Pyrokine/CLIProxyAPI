@@ -25,86 +25,99 @@ func TestPatchAuthFileStatusInvokesPersistHook(t *testing.T) {
 		{name: "success", wantStatus: http.StatusOK},
 		{name: "failure", hookErr: errors.New("runtime sync failed"), wantStatus: http.StatusInternalServerError},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			store := &memoryAuthStore{}
-			manager := coreauth.NewManager(store, nil, nil)
-			auth := &coreauth.Auth{
-				ID:         "status.json",
-				FileName:   "status.json",
-				Provider:   "qwen",
-				Status:     coreauth.StatusActive,
-				Metadata:   map[string]any{"type": "qwen"},
-				Attributes: map[string]string{coreauth.AttributePath: filepath.Join(t.TempDir(), "status.json")},
-			}
-			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
-				t.Fatal(errRegister)
-			}
-			handler := NewHandler(&config.Config{}, "", manager, withTokenStore(store))
-			var hooked *coreauth.Auth
-			handler.SetPostAuthPersistHook(func(_ context.Context, updated *coreauth.Auth) error {
-				hooked = updated.Clone()
-				return testCase.hookErr
-			})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				store := &memoryAuthStore{}
+				manager := coreauth.NewManager(store, nil, nil)
+				auth := &coreauth.Auth{
+					ID:         "status.json",
+					FileName:   "status.json",
+					Provider:   "qwen",
+					Status:     coreauth.StatusActive,
+					Metadata:   map[string]any{"type": "qwen"},
+					Attributes: map[string]string{coreauth.AttributePath: filepath.Join(t.TempDir(), "status.json")},
+				}
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatal(errRegister)
+				}
+				handler := NewHandler(&config.Config{}, "", manager, withTokenStore(store))
+				var hooked *coreauth.Auth
+				handler.SetPostAuthPersistHook(
+					func(_ context.Context, updated *coreauth.Auth) error {
+						hooked = updated.Clone()
+						return testCase.hookErr
+					},
+				)
 
-			recorder := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(recorder)
-			ctx.Request = httptest.NewRequest(
-				http.MethodPatch,
-				"/auth-files/status",
-				strings.NewReader(`{"name":"status.json","disabled":true}`),
-			)
-			ctx.Request.Header.Set("Content-Type", "application/json")
-			handler.PatchAuthFileStatus(ctx)
+				recorder := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(recorder)
+				ctx.Request = httptest.NewRequest(
+					http.MethodPatch,
+					"/auth-files/status",
+					strings.NewReader(`{"name":"status.json","disabled":true}`),
+				)
+				ctx.Request.Header.Set("Content-Type", "application/json")
+				handler.PatchAuthFileStatus(ctx)
 
-			if recorder.Code != testCase.wantStatus {
-				t.Fatalf("status = %d, want %d body=%s", recorder.Code, testCase.wantStatus, recorder.Body.String())
-			}
-			if hooked == nil || !hooked.Disabled || hooked.Status != coreauth.StatusDisabled {
-				t.Fatalf("persist hook auth = %#v, want disabled", hooked)
-			}
-			current, ok := manager.GetByID(auth.ID)
-			if !ok || current == nil || !current.Disabled {
-				t.Fatalf("persisted runtime auth = %#v, want disabled", current)
-			}
-			if testCase.hookErr != nil && !strings.Contains(recorder.Body.String(), testCase.hookErr.Error()) {
-				t.Fatalf("response body = %s, want hook error", recorder.Body.String())
-			}
-		})
+				if recorder.Code != testCase.wantStatus {
+					t.Fatalf("status = %d, want %d body=%s", recorder.Code, testCase.wantStatus, recorder.Body.String())
+				}
+				if hooked == nil || !hooked.Disabled || hooked.Status != coreauth.StatusDisabled {
+					t.Fatalf("persist hook auth = %#v, want disabled", hooked)
+				}
+				current, ok := manager.GetByID(auth.ID)
+				if !ok || current == nil || !current.Disabled {
+					t.Fatalf("persisted runtime auth = %#v, want disabled", current)
+				}
+				if testCase.hookErr != nil && !strings.Contains(recorder.Body.String(), testCase.hookErr.Error()) {
+					t.Fatalf("response body = %s, want hook error", recorder.Body.String())
+				}
+			},
+		)
 	}
 }
 
 func TestPatchAuthFileStatusDoesNotHoldLockDuringPersistHook(t *testing.T) {
 	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
 	for _, id := range []string{"status-a.json", "status-b.json"} {
-		if _, err := manager.Register(t.Context(), &coreauth.Auth{
-			ID: id, FileName: id, Provider: "qwen", Status: coreauth.StatusActive,
-			Metadata: map[string]any{"type": "qwen"},
-		}); err != nil {
+		if _, err := manager.Register(
+			t.Context(), &coreauth.Auth{
+				ID: id, FileName: id, Provider: "qwen", Status: coreauth.StatusActive,
+				Metadata: map[string]any{"type": "qwen"},
+			},
+		); err != nil {
 			t.Fatal(err)
 		}
 	}
 	handler := NewHandler(&config.Config{}, "", manager)
 	hookStarted := make(chan struct{})
 	releaseHook := make(chan struct{})
-	handler.SetPostAuthPersistHook(func(_ context.Context, auth *coreauth.Auth) error {
-		if auth.ID == "status-a.json" {
-			close(hookStarted)
-			<-releaseHook
-		}
-		return nil
-	})
+	handler.SetPostAuthPersistHook(
+		func(_ context.Context, auth *coreauth.Auth) error {
+			if auth.ID == "status-a.json" {
+				close(hookStarted)
+				<-releaseHook
+			}
+			return nil
+		},
+	)
 	doneA := make(chan int, 1)
 	go func() {
-		response := runConfigListRequest(handler.PatchAuthFileStatus, http.MethodPatch, "/auth-files/status", `{"name":"status-a.json","disabled":true}`)
+		response := runConfigListRequest(
+			handler.PatchAuthFileStatus, http.MethodPatch, "/auth-files/status",
+			`{"name":"status-a.json","disabled":true}`,
+		)
 		doneA <- response.Code
 	}()
-	t.Cleanup(func() {
-		close(releaseHook)
-		select {
-		case <-doneA:
-		case <-time.After(2 * time.Second):
-		}
-	})
+	t.Cleanup(
+		func() {
+			close(releaseHook)
+			select {
+			case <-doneA:
+			case <-time.After(2 * time.Second):
+			}
+		},
+	)
 	select {
 	case <-hookStarted:
 	case <-time.After(2 * time.Second):
@@ -112,7 +125,10 @@ func TestPatchAuthFileStatusDoesNotHoldLockDuringPersistHook(t *testing.T) {
 	}
 	doneB := make(chan int, 1)
 	go func() {
-		response := runConfigListRequest(handler.PatchAuthFileStatus, http.MethodPatch, "/auth-files/status", `{"name":"status-b.json","disabled":true}`)
+		response := runConfigListRequest(
+			handler.PatchAuthFileStatus, http.MethodPatch, "/auth-files/status",
+			`{"name":"status-b.json","disabled":true}`,
+		)
 		doneB <- response.Code
 	}()
 	select {
@@ -153,10 +169,12 @@ func TestPatchAuthFileStatusPublishesAfterPersistenceCancelsRequest(t *testing.T
 	}
 	handler := NewHandler(&config.Config{}, "", manager, withTokenStore(store))
 	hookCalled := false
-	handler.SetPostAuthPersistHook(func(_ context.Context, updated *coreauth.Auth) error {
-		hookCalled = updated != nil && updated.Disabled
-		return nil
-	})
+	handler.SetPostAuthPersistHook(
+		func(_ context.Context, updated *coreauth.Auth) error {
+			hookCalled = updated != nil && updated.Disabled
+			return nil
+		},
+	)
 
 	requestCtx, cancel := context.WithCancel(context.Background())
 	store.cancel = cancel
@@ -198,50 +216,54 @@ func TestBulkAuthFileStatusInvokesPersistHook(t *testing.T) {
 			wantStatus: http.StatusUnprocessableEntity,
 		},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			store := &memoryAuthStore{}
-			manager := coreauth.NewManager(store, nil, nil)
-			auth := &coreauth.Auth{
-				ID:       "bulk-status.json",
-				FileName: "bulk-status.json",
-				Provider: "qwen",
-				Status:   coreauth.StatusActive,
-				Metadata: map[string]any{"type": "qwen"},
-			}
-			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
-				t.Fatal(errRegister)
-			}
-			handler := NewHandler(&config.Config{}, "", manager, withTokenStore(store))
-			var hooked *coreauth.Auth
-			handler.SetPostAuthPersistHook(func(_ context.Context, updated *coreauth.Auth) error {
-				hooked = updated.Clone()
-				return testCase.hookErr
-			})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				store := &memoryAuthStore{}
+				manager := coreauth.NewManager(store, nil, nil)
+				auth := &coreauth.Auth{
+					ID:       "bulk-status.json",
+					FileName: "bulk-status.json",
+					Provider: "qwen",
+					Status:   coreauth.StatusActive,
+					Metadata: map[string]any{"type": "qwen"},
+				}
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatal(errRegister)
+				}
+				handler := NewHandler(&config.Config{}, "", manager, withTokenStore(store))
+				var hooked *coreauth.Auth
+				handler.SetPostAuthPersistHook(
+					func(_ context.Context, updated *coreauth.Auth) error {
+						hooked = updated.Clone()
+						return testCase.hookErr
+					},
+				)
 
-			recorder := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(recorder)
-			ctx.Request = httptest.NewRequest(
-				http.MethodPatch,
-				"/auth-files/bulk/disable",
-				strings.NewReader(`{"names":["bulk-status.json"]}`),
-			)
-			ctx.Request.Header.Set("Content-Type", "application/json")
-			handler.PatchAuthFilesBulkDisable(ctx)
+				recorder := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(recorder)
+				ctx.Request = httptest.NewRequest(
+					http.MethodPatch,
+					"/auth-files/bulk/disable",
+					strings.NewReader(`{"names":["bulk-status.json"]}`),
+				)
+				ctx.Request.Header.Set("Content-Type", "application/json")
+				handler.PatchAuthFilesBulkDisable(ctx)
 
-			if recorder.Code != testCase.wantStatus {
-				t.Fatalf("status = %d, want %d body=%s", recorder.Code, testCase.wantStatus, recorder.Body.String())
-			}
-			if hooked == nil || !hooked.Disabled || hooked.Status != coreauth.StatusDisabled {
-				t.Fatalf("persist hook auth = %#v, want disabled", hooked)
-			}
-			current, ok := manager.GetByID(auth.ID)
-			if !ok || current == nil || !current.Disabled {
-				t.Fatalf("persisted runtime auth = %#v, want disabled", current)
-			}
-			if testCase.hookErr != nil && !strings.Contains(recorder.Body.String(), testCase.hookErr.Error()) {
-				t.Fatalf("response body = %s, want hook error", recorder.Body.String())
-			}
-		})
+				if recorder.Code != testCase.wantStatus {
+					t.Fatalf("status = %d, want %d body=%s", recorder.Code, testCase.wantStatus, recorder.Body.String())
+				}
+				if hooked == nil || !hooked.Disabled || hooked.Status != coreauth.StatusDisabled {
+					t.Fatalf("persist hook auth = %#v, want disabled", hooked)
+				}
+				current, ok := manager.GetByID(auth.ID)
+				if !ok || current == nil || !current.Disabled {
+					t.Fatalf("persisted runtime auth = %#v, want disabled", current)
+				}
+				if testCase.hookErr != nil && !strings.Contains(recorder.Body.String(), testCase.hookErr.Error()) {
+					t.Fatalf("response body = %s, want hook error", recorder.Body.String())
+				}
+			},
+		)
 	}
 }
 
@@ -274,10 +296,12 @@ func TestBulkAuthFileStatusUpdatesEveryIdentityBackedByTheFile(t *testing.T) {
 
 	handler := NewHandler(&config.Config{}, "", manager, withTokenStore(store))
 	hooked := make(map[string]bool)
-	handler.SetPostAuthPersistHook(func(_ context.Context, updated *coreauth.Auth) error {
-		hooked[updated.ID] = updated.Disabled
-		return nil
-	})
+	handler.SetPostAuthPersistHook(
+		func(_ context.Context, updated *coreauth.Auth) error {
+			hooked[updated.ID] = updated.Disabled
+			return nil
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -318,10 +342,12 @@ func TestBulkAuthFileStatusPublishesAfterPersistenceCancelsRequest(t *testing.T)
 	}
 	handler := NewHandler(&config.Config{}, "", manager, withTokenStore(store))
 	hookCalled := false
-	handler.SetPostAuthPersistHook(func(_ context.Context, updated *coreauth.Auth) error {
-		hookCalled = updated != nil && updated.Disabled
-		return nil
-	})
+	handler.SetPostAuthPersistHook(
+		func(_ context.Context, updated *coreauth.Auth) error {
+			hookCalled = updated != nil && updated.Disabled
+			return nil
+		},
+	)
 
 	requestCtx, cancel := context.WithCancel(context.Background())
 	store.cancel = cancel
@@ -365,10 +391,12 @@ func TestPatchAuthFileFieldsInvokesPersistHook(t *testing.T) {
 	}
 	handler := NewHandler(&config.Config{}, "", manager, withTokenStore(store))
 	var hooked *coreauth.Auth
-	handler.SetPostAuthPersistHook(func(_ context.Context, updated *coreauth.Auth) error {
-		hooked = updated.Clone()
-		return nil
-	})
+	handler.SetPostAuthPersistHook(
+		func(_ context.Context, updated *coreauth.Auth) error {
+			hooked = updated.Clone()
+			return nil
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -463,60 +491,64 @@ func TestSavedAuthRecordsInvokePersistHook(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			authDir := t.TempDir()
-			store := sdkAuth.NewFileTokenStore()
-			store.SetBaseDir(authDir)
-			manager := coreauth.NewManager(store, nil, nil)
-			handler := NewHandler(
-				&config.Config{AuthDir: authDir},
-				"",
-				manager,
-				withTokenStore(store),
-			)
-			targetPath := filepath.Join(authDir, "saved.json")
-			oldAuth := &coreauth.Auth{
-				ID:         "old-saved.json",
-				FileName:   "saved.json",
-				Provider:   "qwen",
-				Status:     coreauth.StatusActive,
-				Metadata:   map[string]any{"type": "qwen"},
-				Attributes: map[string]string{coreauth.AttributePath: targetPath},
-			}
-			if _, errRegister := manager.Register(
-				coreauth.WithSkipPersist(context.Background()),
-				oldAuth,
-			); errRegister != nil {
-				t.Fatal(errRegister)
-			}
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				authDir := t.TempDir()
+				store := sdkAuth.NewFileTokenStore()
+				store.SetBaseDir(authDir)
+				manager := coreauth.NewManager(store, nil, nil)
+				handler := NewHandler(
+					&config.Config{AuthDir: authDir},
+					"",
+					manager,
+					withTokenStore(store),
+				)
+				targetPath := filepath.Join(authDir, "saved.json")
+				oldAuth := &coreauth.Auth{
+					ID:         "old-saved.json",
+					FileName:   "saved.json",
+					Provider:   "qwen",
+					Status:     coreauth.StatusActive,
+					Metadata:   map[string]any{"type": "qwen"},
+					Attributes: map[string]string{coreauth.AttributePath: targetPath},
+				}
+				if _, errRegister := manager.Register(
+					coreauth.WithSkipPersist(context.Background()),
+					oldAuth,
+				); errRegister != nil {
+					t.Fatal(errRegister)
+				}
 
-			hooked := make(map[string]*coreauth.Auth)
-			handler.SetPostAuthPersistHook(func(_ context.Context, updated *coreauth.Auth) error {
-				hooked[updated.ID] = updated.Clone()
-				return nil
-			})
-			auth := &coreauth.Auth{
-				ID:       "saved.json",
-				FileName: "saved.json",
-				Provider: "qwen",
-				Metadata: map[string]any{"type": "qwen"},
-			}
+				hooked := make(map[string]*coreauth.Auth)
+				handler.SetPostAuthPersistHook(
+					func(_ context.Context, updated *coreauth.Auth) error {
+						hooked[updated.ID] = updated.Clone()
+						return nil
+					},
+				)
+				auth := &coreauth.Auth{
+					ID:       "saved.json",
+					FileName: "saved.json",
+					Provider: "qwen",
+					Metadata: map[string]any{"type": "qwen"},
+				}
 
-			if errSave := testCase.save(context.Background(), handler, authDir, auth); errSave != nil {
-				t.Fatal(errSave)
-			}
-			saved := hooked[auth.ID]
-			if saved == nil || saved.Attributes[coreauth.AttributePath] == "" {
-				t.Fatalf("persist hook auth = %#v, want saved auth", saved)
-			}
-			disabled := hooked[oldAuth.ID]
-			if disabled == nil || !disabled.Disabled || disabled.Status != coreauth.StatusDisabled {
-				t.Fatalf("superseded hook auth = %#v, want disabled", disabled)
-			}
-			currentOld, ok := manager.GetByID(oldAuth.ID)
-			if !ok || currentOld == nil || !currentOld.Disabled {
-				t.Fatalf("superseded manager auth = %#v, want disabled", currentOld)
-			}
-		})
+				if errSave := testCase.save(context.Background(), handler, authDir, auth); errSave != nil {
+					t.Fatal(errSave)
+				}
+				saved := hooked[auth.ID]
+				if saved == nil || saved.Attributes[coreauth.AttributePath] == "" {
+					t.Fatalf("persist hook auth = %#v, want saved auth", saved)
+				}
+				disabled := hooked[oldAuth.ID]
+				if disabled == nil || !disabled.Disabled || disabled.Status != coreauth.StatusDisabled {
+					t.Fatalf("superseded hook auth = %#v, want disabled", disabled)
+				}
+				currentOld, ok := manager.GetByID(oldAuth.ID)
+				if !ok || currentOld == nil || !currentOld.Disabled {
+					t.Fatalf("superseded manager auth = %#v, want disabled", currentOld)
+				}
+			},
+		)
 	}
 }

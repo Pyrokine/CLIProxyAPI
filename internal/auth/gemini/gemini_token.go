@@ -1,6 +1,8 @@
 // Package gemini provides authentication and token management functionality
 // for Google's Gemini AI services. It handles OAuth2 token storage, serialization,
 // and retrieval for maintaining authenticated sessions with the Gemini API.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (
@@ -47,6 +49,8 @@ func (ts *TokenStorage) CloneForPersistence() coreauth.TokenStorage {
 }
 
 // SetMetadata injects metadata before the token is persisted.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }

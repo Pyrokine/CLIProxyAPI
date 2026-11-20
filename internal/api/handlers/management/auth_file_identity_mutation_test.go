@@ -49,7 +49,13 @@ func TestAuthFromFileQuotaMaterialIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "codex-material.json")
 	var previousRevision, previousDigest string
 	for _, serial := range []string{"7", "9007199254740992", "9007199254740993"} {
-		raw := []byte(`{"type":"codex","access_token":"synthetic","priority":7,"request-retry":1,"credential_serial":` + serial + `,"disabled":false}`)
+		raw := []byte(
+			(`{"type":"codex","access_token":"synthetic","priority":7,` +
+				`"request-retry":1,"credential_serial":`) +
+				serial +
+				(`,"disabled":` +
+					`false}`),
+		)
 		auth, _, err := authFromFile(filepath.Dir(path), path, raw)
 		if err != nil {
 			t.Fatal(err)
@@ -65,7 +71,8 @@ func TestAuthFromFileQuotaMaterialIdentity(t *testing.T) {
 		if auth.Attributes["priority"] != "7" {
 			t.Fatal("lossless metadata decoding changed the file priority")
 		}
-		if previousRevision != "" && (revision == previousRevision || slices.Contains(equivalent, previousDigest)) {
+		if previousRevision != "" &&
+			(revision == previousRevision || slices.Contains(equivalent, previousDigest)) {
 			t.Fatal("adjacent large integers share quota material or legacy candidates")
 		}
 		updated := auth.Clone()
@@ -114,12 +121,21 @@ func TestPatchAuthFileStatusPreservesQuotaAcrossWatcherDigests(t *testing.T) {
 	handler := NewHandler(&config.Config{}, "", manager, withTokenStore(store))
 	t.Cleanup(func() { _ = handler.Close() })
 	observedAt := time.Now().UTC().Add(-time.Minute)
-	scheduler := quota.NewSchedulerWithResult(quota.DefaultConfig(), func(_ context.Context, entry *quota.Entry) (quota.FetchResult, error) {
-		return quota.FetchResult{
-			Data:   []byte(`{"owner":"` + entry.AuthIndex + `","credits":{"balance":"7.5"},"reset_count":2,"expires_at":"2026-11-01T00:00:00Z"}`),
-			Source: "synthetic", ObservedAt: observedAt, Completeness: quota.FetchComplete,
-		}, nil
-	})
+	scheduler := quota.NewSchedulerWithResult(
+		quota.DefaultConfig(), func(_ context.Context, entry *quota.Entry) (quota.FetchResult, error) {
+			return quota.FetchResult{
+				Data: []byte(
+					(`{"owner":` +
+						`"`) +
+						entry.AuthIndex +
+						(`","credits":{"balance":"7.5"},"reset_count":2,` +
+							`"expires_at":"2026-11-01T00:00:` +
+							`00Z"}`),
+				),
+				Source: "synthetic", ObservedAt: observedAt, Completeness: quota.FetchComplete,
+			}, nil
+		},
+	)
 	handler.SetQuotaScheduler(scheduler)
 	for _, auth := range manager.List() {
 		handler.syncQuotaSchedulerForAuth(auth)
@@ -127,7 +143,11 @@ func TestPatchAuthFileStatusPreservesQuotaAcrossWatcherDigests(t *testing.T) {
 	scheduler.RefreshNow([]string{"devin-shared.json"})
 	before := scheduler.GetStatus().Credentials
 	for _, disabled := range []bool{true, false, true, false} {
-		body, err := json.Marshal(map[string]any{"name": "devin-shared.json", "auth_index": indexes["devin-a"], "disabled": disabled})
+		body, err := json.Marshal(
+			map[string]any{
+				"name": "devin-shared.json", "auth_index": indexes["devin-a"], "disabled": disabled,
+			},
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -156,12 +176,27 @@ func TestPatchAuthFileStatusPreservesQuotaAcrossWatcherDigests(t *testing.T) {
 		for id, index := range indexes {
 			key := quota.BindingEntryKey(quota.TypeDevin, "devin-shared.json", index)
 			previous, current := before[key], after[key]
-			if previous == nil || current == nil || len(previous.Data) == 0 || string(current.Data) != string(previous.Data) ||
+			if previous ==
+				nil ||
+				current ==
+					nil ||
+				len(previous.Data) ==
+					0 ||
+				string(current.Data) !=
+					string(previous.Data) ||
 				current.Generation != previous.Generation || current.Freshness != previous.Freshness ||
-				current.ObservedAt == nil || !current.ObservedAt.Equal(observedAt) ||
-				current.LastSuccessAt == nil || !current.LastSuccessAt.Equal(*previous.LastSuccessAt) ||
+				current.ObservedAt == nil ||
+				!current.ObservedAt.Equal(observedAt) ||
+				current.LastSuccessAt == nil ||
+				!current.LastSuccessAt.Equal(*previous.LastSuccessAt) ||
 				current.Disabled != (id == "devin-a" && disabled) {
-				t.Fatalf("disabled=%v discarded quota for %s: before=%#v after=%#v", disabled, id, previous, current)
+				t.Fatalf(
+					"disabled=%v discarded quota for %s: before=%#v after=%#v",
+					disabled,
+					id,
+					previous,
+					current,
+				)
 			}
 			if id == "devin-b" && current.StateRevision != previous.StateRevision {
 				t.Fatal("status update changed the same-file sibling")

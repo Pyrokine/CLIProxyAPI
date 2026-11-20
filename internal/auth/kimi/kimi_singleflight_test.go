@@ -32,7 +32,11 @@ func TestRefreshTokenSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body: io.NopCloser(
-							strings.NewReader(`{"access_token":"access","refresh_token":"refresh-next","token_type":"Bearer","expires_in":3600}`),
+							strings.NewReader(
+								`{"access_token":"access","refresh_token":"refresh-next","token_type":` +
+									`"Bearer","expires_in":` +
+									`3600}`,
+							),
 						),
 						Header:  make(http.Header),
 						Request: req,

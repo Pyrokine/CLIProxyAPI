@@ -53,9 +53,11 @@ func TestParseSchedulingWindowNormalizesProviders(t *testing.T) {
 			wantReset:    time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC),
 		},
 		{
-			name:         "kimi amount window",
-			credType:     TypeKimi,
-			data:         `{"limits":[{"detail":{"limit":100,"used":25,"reset_in":3600}},{"detail":{"limit":10,"remaining":2}}]}`,
+			name:     "kimi amount window",
+			credType: TypeKimi,
+			data: `{"limits":[{"detail":{"limit":100,"used":25,"reset_in":3600}},` +
+				`{"detail":{"limit":10,"remaining":` +
+				`2}}]}`,
 			wantHeadroom: 0.20,
 		},
 		{

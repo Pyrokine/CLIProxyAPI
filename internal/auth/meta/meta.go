@@ -20,13 +20,14 @@ const (
 	DefaultAPIBaseURL           = "https://api.meta.ai/v1"
 	DeviceAuthorizationEndpoint = "https://auth.meta.com/oidc/device/authorization/"
 	TokenEndpoint               = "https://auth.meta.com/oidc/device/token/"
-	ClientID                    = "1031625952748946"
+	clientID                    = "1031625952748946"
 	MaxPollDuration             = 15 * time.Minute
 	metaMintEndpoint            = "https://api.meta.ai/muse-code/key"
 	metaDeviceGrantType         = "urn:ietf:params:oauth:grant-type:device_code"
 	metaMaxResponseBytes        = 1 << 20
 )
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type DeviceCodeResponse struct {
 	DeviceCode              string `json:"device_code"`
 	UserCode                string `json:"user_code"`
@@ -55,12 +56,15 @@ type MintedKeyResponse struct {
 	HasPaymentMethod bool   `json:"has_payment_method"`
 }
 
+//goland:noinspection GoNameStartsWithPackageName
 type MetaAuthBundle struct {
 	TokenData *TokenData
 	MintedKey *MintedKeyResponse
 }
 
 // MetaAuth owns the device flow and keeps the DCA token on the server.
+//
+//goland:noinspection GoNameStartsWithPackageName
 type MetaAuth struct {
 	httpClient *http.Client
 	mintURL    string
@@ -83,10 +87,12 @@ func NewMetaAuthWithProxyURL(cfg *config.Config, proxyURL string) *MetaAuth {
 	return &MetaAuth{httpClient: client, mintURL: metaMintEndpoint}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (auth *MetaAuth) SetMintURL(mintURL string) {
 	auth.mintURL = mintURL
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (auth *MetaAuth) SetHTTPClient(client *http.Client) {
 	auth.httpClient = client
 }
@@ -106,11 +112,12 @@ func (auth *MetaAuth) StartDeviceFlow(ctx context.Context) (*DeviceCodeResponse,
 	return auth.StartDeviceFlowWithEndpoint(ctx, DeviceAuthorizationEndpoint)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (auth *MetaAuth) StartDeviceFlowWithEndpoint(ctx context.Context, endpoint string) (*DeviceCodeResponse, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("meta device authorization requires a context")
 	}
-	form := url.Values{"client_id": {ClientID}}
+	form := url.Values{"client_id": {clientID}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("create Meta device request: %w", err)
@@ -122,7 +129,7 @@ func (auth *MetaAuth) StartDeviceFlowWithEndpoint(ctx context.Context, endpoint 
 	if err != nil {
 		return nil, fmt.Errorf("meta device request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := readMetaResponse(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read Meta device response: %w", err)
@@ -168,7 +175,7 @@ func (auth *MetaAuth) WaitForAuthorization(ctx context.Context, device *DeviceCo
 			return nil, fmt.Errorf("meta authorization ended: %w", ctx.Err())
 		case <-ticker.C:
 			form := url.Values{
-				"client_id":   {ClientID},
+				"client_id":   {clientID},
 				"device_code": {device.DeviceCode},
 				"grant_type":  {metaDeviceGrantType},
 			}
@@ -184,7 +191,7 @@ func (auth *MetaAuth) WaitForAuthorization(ctx context.Context, device *DeviceCo
 				return nil, fmt.Errorf("meta token polling failed: %w", err)
 			}
 			body, err := readMetaResponse(resp.Body)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if err != nil {
 				return nil, fmt.Errorf("read Meta token response: %w", err)
 			}
@@ -232,9 +239,11 @@ func (auth *MetaAuth) MintAPIKey(ctx context.Context, dcaToken string) (*MintedK
 	if ctx == nil || strings.TrimSpace(dcaToken) == "" {
 		return nil, fmt.Errorf("meta API key mint requires a DCA token and context")
 	}
-	body, err := json.Marshal(struct {
-		DCAToken string `json:"dca_token"`
-	}{DCAToken: strings.TrimSpace(dcaToken)})
+	body, err := json.Marshal(
+		struct {
+			DCAToken string `json:"dca_token"`
+		}{DCAToken: strings.TrimSpace(dcaToken)},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("encode Meta key request: %w", err)
 	}
@@ -250,7 +259,7 @@ func (auth *MetaAuth) MintAPIKey(ctx context.Context, dcaToken string) (*MintedK
 	if err != nil {
 		return nil, fmt.Errorf("meta key request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	response, err := readMetaResponse(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read Meta key response: %w", err)
@@ -262,7 +271,9 @@ func (auth *MetaAuth) MintAPIKey(ctx context.Context, dcaToken string) (*MintedK
 	if err := json.Unmarshal(response, &minted); err != nil {
 		return nil, fmt.Errorf("parse Meta key response: %w", err)
 	}
-	if strings.TrimSpace(minted.APIKey) == "" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(minted.APIKey)), "dca:") {
+	if strings.TrimSpace(minted.APIKey) == "" || strings.HasPrefix(
+		strings.ToLower(strings.TrimSpace(minted.APIKey)), "dca:",
+	) {
 		return nil, fmt.Errorf("meta key response did not contain a usable API key")
 	}
 	return &minted, nil

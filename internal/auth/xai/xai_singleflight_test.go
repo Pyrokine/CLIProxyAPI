@@ -33,7 +33,11 @@ func TestRefreshTokensSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body: io.NopCloser(
-							strings.NewReader(`{"access_token":"access","refresh_token":"refresh-next","id_token":"","token_type":"Bearer","expires_in":3600}`),
+							strings.NewReader(
+								`{"access_token":"access","refresh_token":"refresh-next","id_token":"",` +
+									`"token_type":"Bearer","expires_in":` +
+									`3600}`,
+							),
 						),
 						Header:  make(http.Header),
 						Request: req,
@@ -52,7 +56,11 @@ func TestRefreshTokensSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := auth.RefreshTokens(context.Background(), " shared_xai_refresh_token ", "https://x.ai/oauth/token")
+			_, err := auth.RefreshTokens(
+				context.Background(),
+				" shared_xai_refresh_token ",
+				"https://x.ai/oauth/token",
+			)
 			errs <- err
 		}()
 	}
@@ -366,7 +374,11 @@ func TestRefreshTokensSingleflightDoesNotShareDiscoveryFailureWithExplicitEndpoi
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body: io.NopCloser(
-							strings.NewReader(`{"access_token":"access","refresh_token":"refresh-next","id_token":"","token_type":"Bearer","expires_in":3600}`),
+							strings.NewReader(
+								`{"access_token":"access","refresh_token":"refresh-next","id_token":"",` +
+									`"token_type":"Bearer","expires_in":` +
+									`3600}`,
+							),
 						),
 						Header:  make(http.Header),
 						Request: req,

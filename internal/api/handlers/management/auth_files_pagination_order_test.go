@@ -17,11 +17,19 @@ func TestSortedPaginatedAuthsFiltersHiddenEntriesAndBreaksNameTies(t *testing.T)
 	auths := []*coreauth.Auth{
 		{ID: "auth-b", FileName: "shared.json", Attributes: map[string]string{"path": sharedPath}},
 		{ID: "auth-a", FileName: "shared.json", Attributes: map[string]string{"path": sharedPath}},
-		{ID: "removed", FileName: "removed.json", Disabled: true, Attributes: map[string]string{"path": filepath.Join(dir, "removed.json")}},
+		{
+			ID: "removed", FileName: "removed.json", Disabled: true,
+			Attributes: map[string]string{"path": filepath.Join(dir, "removed.json")},
+		},
 		{ID: "missing-path", FileName: "missing-path.json"},
-		{ID: "disabled-runtime", FileName: "disabled-runtime.json", Disabled: true, Attributes: map[string]string{"runtime_only": "true"}},
+		{
+			ID: "disabled-runtime", FileName: "disabled-runtime.json", Disabled: true,
+			Attributes: map[string]string{"runtime_only": "true"},
+		},
 	}
-	page, total, end := sortedPaginatedAuths(auths, "shared.json", "", authFilesPagination{enabled: true, page: 2, pageSize: 1})
+	page, total, end := sortedPaginatedAuths(
+		auths, "shared.json", "", authFilesPagination{enabled: true, page: 2, pageSize: 1},
+	)
 	if total != 2 || end != 2 || len(page) != 1 || page[0].ID != "auth-b" {
 		t.Fatalf("second shared credential page = %#v, total=%d, end=%d", page, total, end)
 	}

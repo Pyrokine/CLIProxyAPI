@@ -432,6 +432,9 @@ func (o *Auth) ExchangeCodeForTokens(ctx context.Context, code, state string, pk
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
+	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+		return nil, fmt.Errorf("token response is missing access_token")
+	}
 
 	deviceIDs, errDeviceIDs := GenerateDeviceIDPool()
 	if errDeviceIDs != nil {
@@ -581,6 +584,9 @@ func (o *Auth) refreshTokensSingleFlight(ctx context.Context, refreshToken strin
 	var tokenResp tokenResponse
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	}
+	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+		return nil, fmt.Errorf("token response is missing access_token")
 	}
 
 	clearClaudeRefreshBlockedUntil(refreshToken)

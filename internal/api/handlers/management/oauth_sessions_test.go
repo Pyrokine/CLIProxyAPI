@@ -525,7 +525,9 @@ func TestOAuthSessionCancellationAfterCallbackRemovesPublishedFile(t *testing.T)
 	if _, errStat := os.Stat(filePath); !errors.Is(errStat, os.ErrNotExist) {
 		t.Fatalf("cancelled callback file remains: %v", errStat)
 	}
-	if errClaim := guardOAuthSessionPendingForSave("state-1", "devin"); !errors.Is(errClaim, errOAuthSessionNotPending) {
+	if errClaim := guardOAuthSessionPendingForSave("state-1", "devin"); !errors.Is(
+		errClaim, errOAuthSessionNotPending,
+	) {
 		t.Fatalf("guardOAuthSessionPendingForSave() error = %v", errClaim)
 	}
 }

@@ -109,6 +109,8 @@ type RefreshResult struct {
 }
 
 // ProbeOutcome describes a read-only provider probe result.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ProbeOutcome string
 
 const (
@@ -119,6 +121,8 @@ const (
 )
 
 // ProbeResult is returned by the read-only single-target probe primitive.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ProbeResult struct {
 	Target      RefreshTarget   `json:"target"`
 	Outcome     ProbeOutcome    `json:"outcome"`
@@ -224,7 +228,8 @@ func (e *Entry) snapshotLocked() EntryState {
 		LastErrorAt:   cloneEntryTime(e.LastErrorAt),
 		RetryAt:       cloneEntryTime(e.RetryAt),
 		LastRefresh:   cloneEntryTime(e.LastRefresh),
-		NextRefresh:   cloneEntryTime(e.NextRefresh)}
+		NextRefresh:   cloneEntryTime(e.NextRefresh),
+	}
 	if e.Data != nil {
 		state.Data = append(json.RawMessage(nil), e.Data...)
 	}
@@ -255,9 +260,11 @@ type Config struct {
 	MaxInterval int  `yaml:"max-interval" json:"max-interval"` // seconds, default 1800
 }
 
-// DefaultConfig returns the default quota refresh configuration.
-// Enabled defaults to false (R-095): auto-polling provider endpoints risks triggering anti-abuse detection.
-// Frontend shows a confirmation dialog on opt-in (GlobalSettings.tsx:67).
+// MaxRefreshIntervalSeconds 是 time.Duration 能表示的最大整秒数
+const MaxRefreshIntervalSeconds = int64((1<<63 - 1) / time.Second)
+
+// DefaultConfig 返回默认关闭的配额刷新配置
+// 账号巡检页面在每次开启自动轮询前要求确认
 func DefaultConfig() Config {
 	return Config{
 		Enabled:     false,

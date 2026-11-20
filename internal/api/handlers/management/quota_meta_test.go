@@ -15,24 +15,26 @@ import (
 
 func TestMetaQuotaStatusUsesAuthIndexWithoutExposingCredentials(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
-	record, err := manager.Register(context.Background(), &coreauth.Auth{
-		ID:       "meta-account.json",
-		FileName: "meta-private@example.com.json",
-		Provider: "meta",
-		Attributes: map[string]string{
-			"auth_kind": "oauth",
-			"path":      "/tmp/meta-private@example.com.json",
-			"api_key":   "api-secret-marker",
-			"dca_token": "dca:secret-marker",
+	record, err := manager.Register(
+		context.Background(), &coreauth.Auth{
+			ID:       "meta-account.json",
+			FileName: "meta-private@example.com.json",
+			Provider: "meta",
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"path":      "/tmp/meta-private@example.com.json",
+				"api_key":   "api-secret-marker",
+				"dca_token": "dca:secret-marker",
+			},
+			Metadata: map[string]any{
+				"subs_tier_name": "Muse Pro",
+				"is_subs_active": true,
+				"email":          "private@example.com",
+				"api_key":        "api-secret-marker",
+				"dca_token":      "dca:secret-marker",
+			},
 		},
-		Metadata: map[string]any{
-			"subs_tier_name": "Muse Pro",
-			"is_subs_active": true,
-			"email":          "private@example.com",
-			"api_key":        "api-secret-marker",
-			"dca_token":      "dca:secret-marker",
-		},
-	})
+	)
 	if err != nil {
 		t.Fatalf("register Meta credential: %v", err)
 	}
@@ -96,15 +98,17 @@ func TestMetaQuotaStatusUsesAuthIndexWithoutExposingCredentials(t *testing.T) {
 
 func TestMetaQuotaStatusDoesNotInventPlanOrUsage(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
-	if _, err := manager.Register(context.Background(), &coreauth.Auth{
-		ID:       "meta-unknown.json",
-		Provider: "meta",
-		Attributes: map[string]string{
-			"auth_kind": "oauth",
-			"dca_token": "dca:secret-marker",
+	if _, err := manager.Register(
+		context.Background(), &coreauth.Auth{
+			ID:       "meta-unknown.json",
+			Provider: "meta",
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"dca_token": "dca:secret-marker",
+			},
+			Metadata: map[string]any{"subs_tier_name": "secret@example.com"},
 		},
-		Metadata: map[string]any{"subs_tier_name": "secret@example.com"},
-	}); err != nil {
+	); err != nil {
 		t.Fatalf("register Meta credential: %v", err)
 	}
 	recorder := httptest.NewRecorder()
@@ -112,7 +116,9 @@ func TestMetaQuotaStatusDoesNotInventPlanOrUsage(t *testing.T) {
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/quota/status", nil)
 	(&Handler{authManager: manager}).GetQuotaStatus(ctx)
 	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "secret@example.com") ||
-		strings.Contains(recorder.Body.String(), "usedPercent") || strings.Contains(recorder.Body.String(), "planName") {
+		strings.Contains(recorder.Body.String(), "usedPercent") || strings.Contains(
+		recorder.Body.String(), "planName",
+	) {
 		t.Fatalf("Meta status invented or leaked quota data: %d, %s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -122,11 +128,13 @@ func TestMetaQuotaStatusVersionsAdvanceAcrossObservationsAndUpdates(t *testing.T
 	const id = "meta-version.json"
 	register := func(plan string) *coreauth.Auth {
 		t.Helper()
-		result, err := manager.Register(context.Background(), &coreauth.Auth{
-			ID: id, Provider: "meta",
-			Attributes: map[string]string{"auth_kind": "oauth"},
-			Metadata:   map[string]any{"subs_tier_name": plan},
-		})
+		result, err := manager.Register(
+			context.Background(), &coreauth.Auth{
+				ID: id, Provider: "meta",
+				Attributes: map[string]string{"auth_kind": "oauth"},
+				Metadata:   map[string]any{"subs_tier_name": plan},
+			},
+		)
 		if err != nil {
 			t.Fatalf("register Meta credential: %v", err)
 		}
@@ -162,12 +170,18 @@ func TestMetaQuotaStatusVersionsAdvanceAcrossObservationsAndUpdates(t *testing.T
 	secondGeneration, secondRevision := status()
 	if firstGeneration == 0 || secondGeneration <= firstGeneration ||
 		firstRevision != record.Generation || secondRevision != firstRevision {
-		t.Fatalf("unchanged record versions = %d/%d then %d/%d", firstGeneration, firstRevision, secondGeneration, secondRevision)
+		t.Fatalf(
+			"unchanged record versions = %d/%d then %d/%d", firstGeneration, firstRevision, secondGeneration,
+			secondRevision,
+		)
 	}
 	record = register("Muse Pro")
 	thirdGeneration, thirdRevision := status()
 	if thirdGeneration <= secondGeneration || thirdRevision != record.Generation || thirdRevision <= secondRevision {
-		t.Fatalf("updated record versions = %d/%d after %d/%d", thirdGeneration, thirdRevision, secondGeneration, secondRevision)
+		t.Fatalf(
+			"updated record versions = %d/%d after %d/%d", thirdGeneration, thirdRevision, secondGeneration,
+			secondRevision,
+		)
 	}
 	// A new handler (as after a restart) derives its first generation from UTC microseconds.
 	// Its generation is newer while the system clock has advanced beyond the last observation.

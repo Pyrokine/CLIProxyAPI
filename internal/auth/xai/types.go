@@ -42,6 +42,8 @@ type discovery struct {
 }
 
 // DeviceCodeResponse represents an xAI device authorization response.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type DeviceCodeResponse struct {
 	DeviceCode              string `json:"device_code"`
 	UserCode                string `json:"user_code"`
@@ -65,6 +67,8 @@ type TokenData struct {
 }
 
 // AuthBundle aggregates token data and OAuth metadata for persistence.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type AuthBundle struct {
 	TokenData     TokenData
 	LastRefresh   string

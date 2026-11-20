@@ -8,6 +8,8 @@ import (
 )
 
 // PKCECodes contains an OAuth PKCE verifier and S256 challenge.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PKCECodes struct {
 	CodeVerifier  string
 	CodeChallenge string

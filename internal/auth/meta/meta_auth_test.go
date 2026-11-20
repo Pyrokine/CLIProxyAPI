@@ -13,26 +13,42 @@ import (
 
 func TestMetaDeviceFlowMintsAPIKeyOnServer(t *testing.T) {
 	dcaToken := "dca:server-only-marker"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/device":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"device_code":"device-code","user_code":"CODE","verification_uri":"https://www.meta.com/device","expires_in":30,"interval":1}`))
-		case "/token":
-			_, _ = w.Write([]byte(`{"access_token":"dca:server-only-marker","expires_in":3600}`))
-		case "/mint":
-			if r.Header.Get("Authorization") != "Bearer "+dcaToken {
-				t.Error("Meta DCA token was not sent in server-side Authorization")
-			}
-			var payload struct{ DCAToken string `json:"dca_token"` }
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.DCAToken != dcaToken {
-				t.Errorf("Meta server-side DCA exchange failed: %v", err)
-			}
-			_, _ = w.Write([]byte(`{"api_key":"meta-test-key","base_url":"https://api.meta.ai/v1","subs_tier_name":"Muse Pro","is_subs_active":true}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/device":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(
+						[]byte((`{"device_code":"device-code","user_code":"CODE","verification_uri":"ht` +
+							`tps://www.meta.com/device","expires_in":30,"interval":1}`)),
+					)
+				case "/token":
+					_, _ = w.Write([]byte(`{"access_token":"dca:server-only-marker","expires_in":3600}`))
+				case "/mint":
+					if r.Header.Get("Authorization") != "Bearer "+dcaToken {
+						t.Error("Meta DCA token was not sent in server-side Authorization")
+					}
+					var payload struct {
+						DCAToken string `json:"dca_token"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil ||
+						payload.DCAToken != dcaToken {
+						t.Errorf("Meta server-side DCA exchange failed: %v", err)
+					}
+					_, _ = w.Write(
+						[]byte(
+							(`{"api_key":"meta-test-key","base_url":"https://api.meta.ai/v1",` +
+								`"subs_tier_name":"Muse Pro","is_subs_active":` +
+								`true}`),
+						),
+					)
+				default:
+					http.NotFound(w, r)
+				}
+			},
+		),
+	)
 	defer server.Close()
 	auth := NewMetaAuth(nil)
 	auth.SetMintURL(server.URL + "/mint")
@@ -53,16 +69,23 @@ func TestMetaDeviceFlowMintsAPIKeyOnServer(t *testing.T) {
 }
 
 func TestMetaMintErrorNeverIncludesProviderSecret(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"secret@example.com","token":"dca:provider-secret"}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"secret@example.com","token":"dca:provider-secret"}`))
+			},
+		),
+	)
 	defer server.Close()
 	auth := NewMetaAuth(nil)
 	auth.SetMintURL(server.URL)
 	_, err := auth.MintAPIKey(context.Background(), "dca:provider-secret")
 	if err == nil || !strings.Contains(err.Error(), "401") ||
-		strings.Contains(err.Error(), "secret@example.com") || strings.Contains(err.Error(), "dca:provider-secret") {
+		strings.Contains(
+			err.Error(),
+			"secret@example.com",
+		) || strings.Contains(err.Error(), "dca:provider-secret") {
 		t.Fatalf("Meta mint error disclosed provider response: %v", err)
 	}
 }
@@ -90,7 +113,10 @@ func TestMetaStorageRejectsStaleCredentialMetadata(t *testing.T) {
 		t.Fatalf("Meta credential save lost current token or settings")
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("Meta credential file permission = %v, err=%v", info.Mode(), err)
 	}
 }

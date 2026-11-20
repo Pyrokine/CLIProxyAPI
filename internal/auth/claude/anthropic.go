@@ -1,6 +1,8 @@
 package claude
 
 // TokenData holds OAuth token information from Anthropic.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type TokenData struct {
 	// AccessToken is the OAuth2 access token for API access
 	AccessToken string `json:"access_token"`
@@ -19,6 +21,8 @@ type TokenData struct {
 }
 
 // AuthBundle aggregates authentication data after OAuth flow completion.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type AuthBundle struct {
 	// APIKey is the Anthropic API key obtained from token exchange
 	APIKey string `json:"api_key"`

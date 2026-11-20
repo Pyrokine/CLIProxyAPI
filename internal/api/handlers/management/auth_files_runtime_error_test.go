@@ -14,7 +14,9 @@ import (
 func TestBuildAuthFileEntryProjectsLatestModelRuntimeError(t *testing.T) {
 	observedAt := time.Date(2026, time.September, 10, 8, 30, 0, 0, time.UTC)
 	nextRetryAfter := observedAt.Add(2 * time.Hour)
-	rawMessage := `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"prolite","token":"provider-secret","resets_at":1789371604,"resets_in_seconds":578762}}`
+	rawMessage := `{"error":{"type":"usage_limit_reached","message":"The usage limit has ` +
+		`been reached","plan_type":"prolite","token":"provider-secret","resets_` +
+		`at":1789371604,"resets_in_seconds":578762}}`
 	auth := &coreauth.Auth{
 		ID:               "codex-runtime-error",
 		Provider:         "codex",
@@ -34,14 +36,17 @@ func TestBuildAuthFileEntryProjectsLatestModelRuntimeError(t *testing.T) {
 				StatusMessage:  rawMessage,
 				Unavailable:    true,
 				NextRetryAfter: nextRetryAfter,
-				LastError: &coreauth.Error{
-					Code:            "quota_exhausted",
-					Message:         rawMessage,
-					HTTPStatus:      http.StatusTooManyRequests,
-					EffectScope:     cliproxyexecutor.StateEffectScopeQuotaFamily,
-					EffectKey:       "codex-sol",
-					StateGeneration: 9,
-				},
+				LastError: (&coreauth.Error{
+					Code:       "quota_exhausted",
+					Message:    rawMessage,
+					HTTPStatus: http.StatusTooManyRequests,
+				}).WithExecutionDisposition(
+					cliproxyexecutor.ExecutionDisposition{
+						EffectScope: cliproxyexecutor.StateEffectScopeQuotaFamily,
+						EffectKey:   "codex-sol",
+					}, 9,
+				),
+
 				EffectScope: cliproxyexecutor.StateEffectScopeQuotaFamily,
 				EffectKey:   "codex-sol",
 				Generation:  7,
@@ -70,9 +75,13 @@ func TestBuildAuthFileEntryProjectsLatestModelRuntimeError(t *testing.T) {
 	if !ok {
 		t.Fatalf("runtime_error = %#v", entry["runtime_error"])
 	}
-	if runtimeError["code"] != "quota_exhausted" || runtimeError["http_status"] != float64(http.StatusTooManyRequests) ||
+	if runtimeError["code"] !=
+		"quota_exhausted" ||
+		runtimeError["http_status"] !=
+			float64(http.StatusTooManyRequests) ||
 		runtimeError["model"] != "gpt-5.6-sol" || runtimeError["effect_scope"] != "quota_family" ||
-		runtimeError["effect_key"] != "codex-sol" || runtimeError["state_generation"] != float64(9) {
+		runtimeError["effect_key"] != "codex-sol" ||
+		runtimeError["state_generation"] != float64(9) {
 		t.Fatalf("runtime_error = %#v", runtimeError)
 	}
 	if runtimeError["next_retry_after"] != nextRetryAfter.Format(time.RFC3339) ||
@@ -95,26 +104,32 @@ func TestBuildAuthFileRuntimeErrorUsesModelObservationForAggregatedModelError(t 
 		UpdatedAt:        observedAt.Add(time.Minute),
 		StateEffectScope: cliproxyexecutor.StateEffectScopeQuotaFamily,
 		StateEffectKey:   "codex-sol",
-		LastError: &coreauth.Error{
-			Code:            "quota_exhausted",
-			Message:         "quota exhausted",
-			HTTPStatus:      http.StatusTooManyRequests,
-			EffectScope:     cliproxyexecutor.StateEffectScopeQuotaFamily,
-			EffectKey:       "codex-sol",
-			StateGeneration: 4,
-		},
+		LastError: (&coreauth.Error{
+			Code:       "quota_exhausted",
+			Message:    "quota exhausted",
+			HTTPStatus: http.StatusTooManyRequests,
+		}).WithExecutionDisposition(
+			cliproxyexecutor.ExecutionDisposition{
+				EffectScope: cliproxyexecutor.StateEffectScopeQuotaFamily,
+				EffectKey:   "codex-sol",
+			}, 4,
+		),
+
 		ModelStates: map[string]*coreauth.ModelState{
 			"gpt-5.6-sol": {
 				Status:        coreauth.StatusError,
 				StatusMessage: "quota exhausted",
-				LastError: &coreauth.Error{
-					Code:            "quota_exhausted",
-					Message:         "quota exhausted",
-					HTTPStatus:      http.StatusTooManyRequests,
-					EffectScope:     cliproxyexecutor.StateEffectScopeQuotaFamily,
-					EffectKey:       "codex-sol",
-					StateGeneration: 4,
-				},
+				LastError: (&coreauth.Error{
+					Code:       "quota_exhausted",
+					Message:    "quota exhausted",
+					HTTPStatus: http.StatusTooManyRequests,
+				}).WithExecutionDisposition(
+					cliproxyexecutor.ExecutionDisposition{
+						EffectScope: cliproxyexecutor.StateEffectScopeQuotaFamily,
+						EffectKey:   "codex-sol",
+					}, 4,
+				),
+
 				EffectScope: cliproxyexecutor.StateEffectScopeQuotaFamily,
 				EffectKey:   "codex-sol",
 				Generation:  4,
@@ -145,14 +160,17 @@ func TestBuildAuthFileRuntimeErrorKeepsNewerCredentialScope(t *testing.T) {
 		StateEffectScope: cliproxyexecutor.StateEffectScopeCredential,
 		StateEffectKey:   "credential-error",
 		StateGeneration:  12,
-		LastError: &coreauth.Error{
-			Code:            "unauthorized",
-			Message:         "invalid grant",
-			HTTPStatus:      http.StatusUnauthorized,
-			EffectScope:     cliproxyexecutor.StateEffectScopeCredential,
-			EffectKey:       "credential-error",
-			StateGeneration: 12,
-		},
+		LastError: (&coreauth.Error{
+			Code:       "unauthorized",
+			Message:    "invalid grant",
+			HTTPStatus: http.StatusUnauthorized,
+		}).WithExecutionDisposition(
+			cliproxyexecutor.ExecutionDisposition{
+				EffectScope: cliproxyexecutor.StateEffectScopeCredential,
+				EffectKey:   "credential-error",
+			}, 12,
+		),
+
 		ModelStates: map[string]*coreauth.ModelState{
 			"old-model": {
 				Status:      coreauth.StatusError,

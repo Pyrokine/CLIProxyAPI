@@ -6,7 +6,9 @@ import (
 )
 
 func TestSanitizeIFlowResponseBodyMasksSecrets(t *testing.T) {
-	body := []byte(`{"apiKey":"sk-secret-value","accessToken":"access-secret-value","message":"token=message-secret-value"}`)
+	body := []byte(
+		`{"apiKey":"sk-secret-value","accessToken":"access-secret-value","message":"token=message-secret-value"}`,
+	)
 
 	got := sanitizeIFlowResponseBody(body)
 	for _, secret := range []string{"sk-secret-value", "access-secret-value", "message-secret-value"} {

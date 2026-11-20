@@ -28,17 +28,19 @@ func TestCodexResetCreditSharedContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, item := range fixture.Cases {
-		t.Run(item.Name, func(t *testing.T) {
-			actual, errCheck := CodexResetCreditAvailability(item.Data, now)
-			if item.Expected == "error" {
-				if errCheck == nil {
-					t.Fatalf("expected failed current credit query, got %s", actual)
+		t.Run(
+			item.Name, func(t *testing.T) {
+				actual, errCheck := CodexResetCreditAvailability(item.Data, now)
+				if item.Expected == "error" {
+					if errCheck == nil {
+						t.Fatalf("expected failed current credit query, got %s", actual)
+					}
+					return
 				}
-				return
-			}
-			if errCheck != nil || actual != item.Expected {
-				t.Fatalf("availability=%q error=%v, want %q", actual, errCheck, item.Expected)
-			}
-		})
+				if errCheck != nil || actual != item.Expected {
+					t.Fatalf("availability=%q error=%v, want %q", actual, errCheck, item.Expected)
+				}
+			},
+		)
 	}
 }

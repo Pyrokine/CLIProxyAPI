@@ -95,7 +95,9 @@ func StartServiceBackgroundWithPluginHost(
 func WaitForCloudDeploy() {
 	// Clarify that we are intentionally idle for configuration and not running the API server.
 	log.Info(
-		"Cloud deploy mode: No config found; standing by for configuration. API server is not started. Press Ctrl+C to exit.",
+		"Cloud deploy mode: No config found; standing by for configuration. " +
+			"API server is not started. Press Ctrl+C to " +
+			"exit.",
 	)
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -63,6 +63,22 @@ func SecureTokenFile(path string) error {
 	return file.Close()
 }
 
+// TokenFilePublicationError 表示文件已替换，但权限或目录同步未完成
+// Path 区分实际凭据与 Provider 内部的暂存文件，调用方应保留结果不确定的状态
+type TokenFilePublicationError struct {
+	Path string
+	Err  error
+}
+
+func (e *TokenFilePublicationError) Error() string {
+	return fmt.Sprintf("token file replaced but durability confirmation failed: %v", e.Err)
+}
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (e *TokenFilePublicationError) Unwrap() error {
+	return e.Err
+}
+
 // PublishTokenFile stages a provider-owned write and atomically replaces the live credential.
 func PublishTokenFile(path string, writeCandidate func(string) error) error {
 	if writeCandidate == nil {
@@ -138,19 +154,19 @@ func PublishTokenFile(path string, writeCandidate func(string) error) error {
 		return fmt.Errorf("publish token file: %w", errReplace)
 	}
 	if errSecure := SecureTokenFile(path); errSecure != nil {
-		return fmt.Errorf("secure published token file: %w", errSecure)
+		return &TokenFilePublicationError{Path: path, Err: fmt.Errorf("secure published token file: %w", errSecure)}
 	}
 	if runtime.GOOS != "windows" {
 		directory, errOpenDir := os.Open(dir)
 		if errOpenDir != nil {
-			return fmt.Errorf("open token directory: %w", errOpenDir)
+			return &TokenFilePublicationError{Path: path, Err: fmt.Errorf("open token directory: %w", errOpenDir)}
 		}
 		if errSyncDir := directory.Sync(); errSyncDir != nil {
 			_ = directory.Close()
-			return fmt.Errorf("sync token directory: %w", errSyncDir)
+			return &TokenFilePublicationError{Path: path, Err: fmt.Errorf("sync token directory: %w", errSyncDir)}
 		}
 		if errCloseDir := directory.Close(); errCloseDir != nil {
-			return fmt.Errorf("close token directory: %w", errCloseDir)
+			return &TokenFilePublicationError{Path: path, Err: fmt.Errorf("close token directory: %w", errCloseDir)}
 		}
 	}
 	return nil

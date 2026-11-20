@@ -40,6 +40,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	var req oauthCallbackRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
 		return
 	}
@@ -60,6 +61,7 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 	if rawRedirect := strings.TrimSpace(req.RedirectURL); rawRedirect != "" {
 		u, errParse := url.Parse(rawRedirect)
 		if errParse != nil {
+			rejectMutation(c.Request.Context())
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid redirect_url"})
 			return
 		}
@@ -79,33 +81,40 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 	}
 
 	if state == "" {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "state is required"})
 		return
 	}
 	if err := validateOAuthState(state); err != nil {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
 		return
 	}
 	if code == "" && errMsg == "" {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "code or error is required"})
 		return
 	}
 
 	sessionProvider, sessionStatus, _, ok := getOAuthSessionForCallback(state)
 	if !ok {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "unknown or expired state"})
 		return
 	}
 	if sessionStatus != "" {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 		return
 	}
 	canonicalProvider, err := normalizeOAuthCallbackProviderForPendingSession(req.Provider, state)
 	if err != nil {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "unsupported provider"})
 		return
 	}
 	if !strings.EqualFold(sessionProvider, canonicalProvider) {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "provider does not match state"})
 		return
 	}
@@ -113,12 +122,15 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 		canonicalProvider, state, code, errMsg,
 	); errWrite != nil {
 		if errors.Is(errWrite, errOAuthSessionNotPending) {
+			rejectMutation(c.Request.Context())
 			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to persist oauth callback"})
 		return
 	}
+	RecordMutationEffect(c.Request.Context(), "task.persisted", "task")
+	CompleteMutation(c.Request.Context())
 	log.WithField("provider", canonicalProvider).Info("OAuth callback accepted")
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "phase": "accepted"})

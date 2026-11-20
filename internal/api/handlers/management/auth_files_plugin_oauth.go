@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	authfile "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
@@ -18,6 +20,8 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
+
+const pluginOAuthMutationRoute = "/v0/management/:plugin_provider-auth-url"
 
 type pluginOAuthHost interface {
 	HasAuthProvider(string) bool
@@ -105,125 +109,161 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 	if host == nil || !host.HasAuthProvider(provider) {
 		return false
 	}
-	flowCfg, okConfig := h.authFlowConfig(c)
-	if !okConfig {
-		return true
-	}
-	baseURL, errBaseURL := managementCallbackURL(flowCfg, "/v0/management/oauth-callback")
-	if errBaseURL != nil {
-		log.WithError(errBaseURL).WithField("provider", provider).Error("failed to compute plugin OAuth callback URL")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return true
-	}
-	ctx := populateAuthContext(c.Request.Context(), c)
-	response, handled, errStart := host.StartLogin(
-		ctx,
-		provider,
-		baseURL,
-		queryValuesToMetadata(c.Request.URL.Query()),
-	)
-	if !handled {
-		return false
-	}
-	if errStart != nil {
-		log.WithError(errStart).WithField("provider", provider).Error("failed to start plugin OAuth login")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
-		return true
-	}
-	if responseProvider := strings.TrimSpace(response.Provider); responseProvider != "" {
-		canonicalResponseProvider, errProvider := normalizePluginOAuthProvider(responseProvider)
-		if errProvider != nil || canonicalResponseProvider != provider {
-			log.WithFields(log.Fields{"provider": provider, "response_provider": responseProvider}).Error(
-				"plugin OAuth login changed provider",
+	served := true
+	h.AuditMutation(
+		c, pluginOAuthMutationRoute, func() {
+			setManagementMutationTarget(c, "provider", provider)
+			flowCfg, okConfig := h.authFlowConfig(c)
+			if !okConfig {
+				return
+			}
+			baseURL, errBaseURL := managementCallbackURL(flowCfg, "/v0/management/oauth-callback")
+			if errBaseURL != nil {
+				log.WithError(errBaseURL).WithField(
+					"provider", provider,
+				).Error("failed to compute plugin OAuth callback URL")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+				return
+			}
+			response, handled, errStart := host.StartLogin(
+				populateAuthContext(c.Request.Context(), c), provider, baseURL,
+				queryValuesToMetadata(c.Request.URL.Query()),
 			)
-			c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth provider"})
-			return true
-		}
-	}
-	state := strings.TrimSpace(response.State)
-	if errState := validateOAuthState(state); errState != nil {
-		log.WithError(errState).WithField("provider", provider).Error("plugin OAuth provider returned invalid state")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth state"})
-		return true
-	}
-	if errRegister := registerPluginOAuthSession(
-		state,
-		provider,
-		strings.TrimSpace(c.Query("nonce")),
-		flowCfg.AuthDir,
-		response.Metadata,
-	); errRegister != nil {
-		log.WithError(errRegister).WithField("provider", provider).Error("failed to register plugin OAuth session")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
-		return true
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": response.URL, "state": state})
-	return true
+			if !handled {
+				served = false
+				return
+			}
+			if errStart != nil {
+				log.WithError(errStart).WithField("provider", provider).Error("failed to start plugin OAuth login")
+				c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
+				return
+			}
+			if responseProvider := strings.TrimSpace(response.Provider); responseProvider != "" {
+				canonicalResponseProvider, errProvider := normalizePluginOAuthProvider(responseProvider)
+				if errProvider != nil || canonicalResponseProvider != provider {
+					log.WithFields(
+						log.Fields{
+							"provider": provider, "response_provider": responseProvider,
+						},
+					).Error("plugin OAuth login changed provider")
+					c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth provider"})
+					return
+				}
+			}
+			state := strings.TrimSpace(response.State)
+			if errState := validateOAuthState(state); errState != nil {
+				log.WithError(errState).WithField(
+					"provider", provider,
+				).Error("plugin OAuth provider returned invalid state")
+				c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth state"})
+				return
+			}
+			var session oauthSession
+			if errRegister := registerPluginOAuthSession(
+				state, provider, strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, response.Metadata, &session,
+			); errRegister != nil {
+				log.WithError(errRegister).WithField(
+					"provider", provider,
+				).Error("failed to register plugin OAuth session")
+				c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
+				return
+			}
+			sessions := oauthSessions
+			// The creation receipt confirms the task, not its later credential writes.
+			workerCtx := coreauth.WithRequestInfo(
+				context.Background(), &coreauth.RequestInfo{
+					Query: c.Request.URL.Query(), Headers: c.Request.Header.Clone(),
+				},
+			)
+			workerCtx = withOAuthSessionContext(workerCtx, state, provider)
+			workerCtx, cancel := context.WithDeadline(workerCtx, session.ExpiresAt)
+			if sessions.attachCancel(state, provider, cancel, session.CreatedAt) {
+				go func() {
+					defer cancel()
+					ticker := time.NewTicker(time.Second)
+					defer ticker.Stop()
+					for h.pollPluginOAuthSession(workerCtx, state, session, sessions) {
+						select {
+						case <-workerCtx.Done():
+							return
+						case <-ticker.C:
+						}
+					}
+				}()
+			}
+			RecordMutationEffect(c.Request.Context(), "task.created", "task")
+			CompleteMutation(c.Request.Context())
+			c.JSON(http.StatusOK, gin.H{"status": "ok", "url": response.URL, "state": state})
+		},
+	)
+	return served
 }
 
-func (h *Handler) pollPluginOAuthSession(c *gin.Context, state string, session oauthSession) {
+func (h *Handler) pollPluginOAuthSession(
+	ctx context.Context,
+	state string,
+	session oauthSession,
+	sessions *oauthSessionStore,
+) bool {
+	if ctx.Err() != nil || !sessions.claimPoll(state, session.Provider, session.CreatedAt) {
+		return false
+	}
+	message := ""
+	defer func() { sessions.releasePoll(state, session.Provider, message, session.CreatedAt) }()
 	host := h.pluginOAuthHost()
 	if host == nil || !host.HasAuthProvider(session.Provider) {
-		const message = "Authentication provider unavailable"
-		setPendingOAuthSessionError(state, session.Provider, message)
-		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "error", "error": message})
-		return
+		sessions.setErrorIfPending(state, session.Provider, "Authentication provider unavailable", session.CreatedAt)
+		return false
 	}
-	ctx := populateAuthContext(c.Request.Context(), c)
 	response, handled, errPoll := host.PollLogin(ctx, session.Provider, state, session.Metadata)
+	if ctx.Err() != nil {
+		return false
+	}
 	if !handled {
-		const message = "Authentication provider unavailable"
-		setPendingOAuthSessionError(state, session.Provider, message)
-		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "error", "error": message})
-		return
+		sessions.setErrorIfPending(state, session.Provider, "Authentication provider unavailable", session.CreatedAt)
+		return false
 	}
 	if errPoll != nil {
-		message := pluginOAuthErrorMessage(errPoll.Error())
-		setPendingOAuthSessionError(state, session.Provider, message)
+		sessions.setErrorIfPending(state, session.Provider, pluginOAuthErrorMessage(errPoll.Error()), session.CreatedAt)
 		log.WithError(errPoll).WithField("provider", session.Provider).Warn("plugin OAuth poll failed")
-		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "error", "error": message})
-		return
+		return false
 	}
-
 	switch response.Status {
 	case "", pluginapi.AuthLoginStatusPending:
-		payload := gin.H{"status": "wait", "phase": oauthSessionPhase(session)}
-		if message := pluginOAuthErrorMessage(response.Message); message != "Authentication failed" {
-			payload["message"] = message
+		if pending := pluginOAuthErrorMessage(response.Message); pending != "Authentication failed" {
+			message = pending
 		}
-		c.JSON(http.StatusOK, payload)
+		return true
 	case pluginapi.AuthLoginStatusError:
-		message := pluginOAuthErrorMessage(response.Message)
-		setPendingOAuthSessionError(state, session.Provider, message)
-		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "error", "error": message})
+		sessions.setErrorIfPending(
+			state, session.Provider, pluginOAuthErrorMessage(response.Message), session.CreatedAt,
+		)
 	case pluginapi.AuthLoginStatusSuccess:
-		if errClaim := guardOAuthSessionPendingForSave(state, session.Provider); errClaim != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "error", "error": "oauth flow is not pending"})
-			return
+		if !sessions.claimForSave(state, session.Provider, session.CreatedAt) {
+			return false
 		}
 		records, errRecords := pluginLoginPollRecords(host, session.Provider, response)
 		if errRecords != nil {
-			setOAuthSessionError(state, "Authentication failed")
-			log.WithError(errRecords).WithField("provider", session.Provider).Warn("plugin OAuth returned invalid auth data")
-			c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "error", "error": "Authentication failed"})
-			return
+			sessions.setError(state, "Authentication failed", session.CreatedAt)
+			log.WithError(errRecords).WithField(
+				"provider", session.Provider,
+			).Warn("plugin OAuth returned invalid auth data")
+			return false
 		}
-		if errSave := h.saveClaimedPluginLoginRecords(ctx, session.AuthDir, records); errSave != nil {
-			setOAuthSessionError(state, "Failed to save authentication tokens")
-			log.WithError(errSave).WithField("provider", session.Provider).Error("failed to save plugin OAuth credentials")
-			c.JSON(
-				http.StatusOK,
-				gin.H{"status": "error", "phase": "error", "error": "Failed to save authentication tokens"},
-			)
-			return
+		saveCtx, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancelSave()
+		if errSave := h.saveClaimedPluginLoginRecords(saveCtx, session.AuthDir, records); errSave != nil {
+			sessions.setError(state, "Failed to save authentication tokens", session.CreatedAt)
+			log.WithError(errSave).WithField(
+				"provider", session.Provider,
+			).Error("failed to save plugin OAuth credentials")
+			return false
 		}
-		completeOAuthSession(state)
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "phase": "success"})
+		sessions.complete(state, session.CreatedAt)
 	default:
-		const message = "Authentication provider returned invalid status"
-		setOAuthSessionError(state, message)
-		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "error", "error": message})
+		sessions.setError(state, "Authentication provider returned invalid status", session.CreatedAt)
 	}
+	return false
 }
 
 func pluginOAuthErrorMessage(message string) string {
@@ -270,10 +310,13 @@ func pluginLoginPollRecords(
 }
 
 type pluginLoginTargetSnapshot struct {
-	path      string
-	existed   bool
-	persisted []byte
-	runtime   []*coreauth.Auth
+	path         string
+	existed      bool
+	persisted    []byte
+	runtime      []*coreauth.Auth
+	runtimeAfter []*coreauth.Auth
+	written      *coreauth.Auth
+	version      *coreauth.PersistedVersion
 }
 
 type pluginLoginPersistedStorage []byte
@@ -282,6 +325,7 @@ func (payload pluginLoginPersistedStorage) SaveTokenToFile(path string) error {
 	return authfile.WriteTokenFileAtomic(path, payload)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (payload pluginLoginPersistedStorage) RawJSON() []byte {
 	return payload
 }
@@ -314,9 +358,17 @@ func (h *Handler) saveClaimedPluginLoginRecords(
 	}
 
 	for index, record := range records {
-		if _, errSave := h.saveTokenRecord(ctx, authDir, record); errSave != nil {
+		_, errSave := h.saveTokenRecord(ctx, authDir, record, &snapshots[index].written)
+		if h.authManager != nil {
+			snapshots[index].runtimeAfter = findAuthsByPath(h.authManager.List(), snapshots[index].path)
+		}
+		version, errVersion := coreauth.PersistedVersionForAuth(snapshots[index].path, record)
+		if errVersion == nil {
+			snapshots[index].version = &version
+		}
+		if errSave != nil || errVersion != nil {
 			errRollback := h.rollbackPluginLoginTargets(ctx, authDir, snapshots[:index+1])
-			return errors.Join(errSave, errRollback)
+			return errors.Join(errSave, errVersion, errRollback)
 		}
 	}
 	return nil
@@ -405,21 +457,99 @@ func (h *Handler) rollbackPluginLoginTargets(
 	snapshots []pluginLoginTargetSnapshot,
 ) error {
 	var rollbackError error
-	for index := len(snapshots) - 1; index >= 0; index-- {
-		snapshot := snapshots[index]
-		if snapshot.existed {
-			if errRestore := h.restorePluginLoginPersisted(ctx, authDir, snapshot); errRestore != nil {
-				rollbackError = errors.Join(rollbackError, fmt.Errorf("restore %s: %w", filepath.Base(snapshot.path), errRestore))
-			}
-		} else if errDelete := h.deleteTokenRecord(context.WithoutCancel(ctx), snapshot.path); errDelete != nil {
-			rollbackError = errors.Join(rollbackError, fmt.Errorf("remove %s: %w", filepath.Base(snapshot.path), errDelete))
+	for _, snapshot := range slices.Backward(snapshots) {
+
+		if snapshot.version == nil {
+			rollbackError = errors.Join(
+				rollbackError, fmt.Errorf("rollback %s has no saved file version", filepath.Base(snapshot.path)),
+			)
+			continue
 		}
-		if errRuntime := h.restorePluginLoginRuntime(ctx, snapshot); errRuntime != nil {
-			rollbackError = errors.Join(rollbackError, errRuntime)
+		id := authIDForPath(snapshot.path, authDir)
+		var previous *coreauth.Auth
+		for _, auth := range snapshot.runtime {
+			if auth.ID == id {
+				previous = auth
+				break
+			}
+		}
+		expectedGeneration := uint64(0)
+		if previous != nil {
+			expectedGeneration = previous.Generation
+		}
+		if snapshot.written != nil {
+			expectedGeneration = snapshot.written.Generation
+		}
+		restore := func(context.Context) (*coreauth.Auth, error) {
+			unlockFile := authfile.LockFileMutation(snapshot.path)
+			defer unlockFile()
+			captured, matched, errCapture := coreauth.CaptureFileIfVersion(snapshot.path, *snapshot.version)
+			if errCapture != nil {
+				return nil, errCapture
+			}
+			if !matched {
+				return nil, fmt.Errorf(
+					"%w: credential file changed during plugin rollback", coreauth.ErrAuthGenerationConflict,
+				)
+			}
+			var errRestore error
+			if snapshot.existed {
+				errRestore = h.restorePluginLoginPersisted(ctx, authDir, snapshot)
+			} else {
+				errRestore = h.deleteTokenRecord(context.WithoutCancel(ctx), snapshot.path)
+			}
+			if errRestore != nil {
+				return nil, errors.Join(errRestore, captured.Rollback())
+			}
+			if errCommit := captured.Commit(); errCommit != nil {
+				return nil, errCommit
+			}
+			if previous == nil {
+				return nil, errPluginLoginRuntimeAbsent
+			}
+			return previous.Clone(), nil
+		}
+		runtimeCtx := coreauth.WithExpectedAuthGeneration(
+			coreauth.WithSkipPersist(context.WithoutCancel(ctx)), expectedGeneration,
+		)
+		var restored *coreauth.Auth
+		var errRestore error
+		if h.authManager == nil {
+			restored, errRestore = restore(runtimeCtx)
+		} else {
+			restored, errRestore = h.authManager.MutatePersistentAuth(runtimeCtx, id, restore)
+		}
+		if errors.Is(errRestore, errPluginLoginRuntimeAbsent) {
+			errRestore = nil
+			if h.authManager != nil && snapshot.written != nil {
+				removed, errRemove := h.authManager.RemoveIfGeneration(
+					coreauth.WithRuntimeOnlyRemove(runtimeCtx), id, expectedGeneration,
+				)
+				if errRemove != nil {
+					errRestore = errRemove
+				} else if !removed {
+					errRestore = coreauth.ErrAuthGenerationConflict
+				}
+			}
+		}
+		if errRestore != nil {
+			rollbackError = errors.Join(
+				rollbackError, fmt.Errorf("rollback %s: %w", filepath.Base(snapshot.path), errRestore),
+			)
+			continue
+		}
+		rollbackError = errors.Join(rollbackError, h.restorePluginLoginRuntime(runtimeCtx, snapshot))
+		if restored != nil {
+			h.syncQuotaSchedulerForAuth(restored)
+			if h.postAuthPersistHook != nil {
+				rollbackError = errors.Join(rollbackError, h.postAuthPersistHook(runtimeCtx, restored))
+			}
 		}
 	}
 	return rollbackError
 }
+
+var errPluginLoginRuntimeAbsent = errors.New("plugin OAuth rollback restores an absent runtime credential")
 
 func (h *Handler) restorePluginLoginRuntime(
 	ctx context.Context,
@@ -429,45 +559,50 @@ func (h *Handler) restorePluginLoginRuntime(
 		return nil
 	}
 	runtimeCtx := coreauth.WithSkipPersist(context.WithoutCancel(ctx))
-	previousByID := make(map[string]*coreauth.Auth, len(snapshot.runtime))
-	for _, previous := range snapshot.runtime {
-		previousByID[previous.ID] = previous
-	}
 	var restoreError error
-	for _, current := range findAuthsByPath(h.authManager.List(), snapshot.path) {
-		if _, existed := previousByID[current.ID]; existed {
-			continue
-		}
-		removed, errRemove := h.authManager.RemoveIfGeneration(
-			coreauth.WithRuntimeOnlyRemove(runtimeCtx), current.ID, current.Generation,
-		)
-		if errRemove != nil {
-			restoreError = errors.Join(restoreError, errRemove)
-			continue
-		}
-		if !removed {
-			restoreError = errors.Join(restoreError, fmt.Errorf("runtime auth %s changed during rollback", current.ID))
-		}
-	}
 	for _, previous := range snapshot.runtime {
-		current, exists := h.authManager.GetByID(previous.ID)
-		if !exists || current == nil || !authMatchesPath(current, snapshot.path) {
-			restoreError = errors.Join(restoreError, fmt.Errorf("runtime auth %s changed during rollback", previous.ID))
+		if previous.ID == filepath.Base(snapshot.path) {
 			continue
 		}
-		restored, errUpdate := h.authManager.Update(runtimeCtx, previous.Clone())
+		var expected *coreauth.Auth
+		for _, current := range snapshot.runtimeAfter {
+			if current.ID == previous.ID {
+				expected = current
+				break
+			}
+		}
+		if expected == nil {
+			restoreError = errors.Join(restoreError, coreauth.ErrAuthGenerationConflict)
+			continue
+		}
+		restored, errUpdate := h.authManager.MutatePersistentAuth(
+			coreauth.WithExpectedAuthGeneration(runtimeCtx, expected.Generation), previous.ID,
+			func(context.Context) (*coreauth.Auth, error) {
+				currentVersion, errRead := coreauth.ReadPersistedVersion(snapshot.path)
+				if !snapshot.existed && errors.Is(errRead, os.ErrNotExist) {
+					return previous.Clone(), nil
+				}
+				if errRead != nil {
+					return nil, errRead
+				}
+				oldDigest, errDigest := coreauth.DigestPersistedJSON(snapshot.persisted)
+				if errDigest != nil {
+					return nil, errDigest
+				}
+				if currentVersion.SHA256 != oldDigest {
+					return nil, coreauth.ErrAuthGenerationConflict
+				}
+				return previous.Clone(), nil
+			},
+		)
 		if errUpdate != nil {
 			restoreError = errors.Join(restoreError, errUpdate)
 			continue
 		}
-		if restored == nil {
-			restoreError = errors.Join(restoreError, fmt.Errorf("runtime auth %s was not restored", previous.ID))
-			continue
-		}
-		h.syncQuotaSchedulerForAuth(restored)
-		if h.postAuthPersistHook != nil {
-			if errHook := h.postAuthPersistHook(runtimeCtx, restored); errHook != nil {
-				restoreError = errors.Join(restoreError, errHook)
+		if restored != nil {
+			h.syncQuotaSchedulerForAuth(restored)
+			if h.postAuthPersistHook != nil {
+				restoreError = errors.Join(restoreError, h.postAuthPersistHook(runtimeCtx, restored))
 			}
 		}
 	}

@@ -49,7 +49,7 @@ func (s *Scheduler) SchedulingSnapshots(
 	credType CredentialType,
 	authIndexes []string,
 	model string,
-	now time.Time,
+	_ time.Time,
 ) map[string]schedulingSnapshot {
 	requested := make(map[string]struct{}, len(authIndexes))
 	for _, authIndex := range authIndexes {
@@ -62,10 +62,6 @@ func (s *Scheduler) SchedulingSnapshots(
 	if s == nil || len(requested) == 0 {
 		return out
 	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-
 	entries := make(map[string][]schedulingEntrySnapshot, len(requested))
 	s.mu.RLock()
 	for key, entry := range s.entries {
@@ -86,10 +82,14 @@ func (s *Scheduler) SchedulingSnapshots(
 			disabled:  entry.Disabled,
 			data:      append(json.RawMessage(nil), entry.Data...),
 		}
-		if entry.ObservedAt != nil {
-			observedAt := *entry.ObservedAt
-			snapshot.observedAt = &observedAt
+		observedAt := entry.ObservedAt
+		if observedAt == nil {
+			observedAt = entry.LastSuccessAt
 		}
+		if observedAt == nil {
+			observedAt = entry.LastRefresh
+		}
+		snapshot.observedAt = cloneTime(observedAt)
 		entry.mu.RUnlock()
 		entries[authIndex] = append(entries[authIndex], snapshot)
 	}
@@ -108,7 +108,11 @@ func (s *Scheduler) SchedulingSnapshots(
 				candidate.disabled || len(candidate.data) == 0 {
 				continue
 			}
-			window, errParse := parseSchedulingWindow(credType, candidate.data, model, now)
+			observedAt := time.Time{}
+			if candidate.observedAt != nil {
+				observedAt = *candidate.observedAt
+			}
+			window, errParse := parseSchedulingWindow(credType, candidate.data, model, observedAt)
 			if errParse != nil {
 				continue
 			}
@@ -318,7 +322,7 @@ func appendCodexRateLimitWindows(dst *[]quotaWindow, limit map[string]any, now t
 				firstQuotaValue(
 					window, "reset_after_seconds", "resetAfterSeconds",
 				),
-			); okSeconds && seconds >= 0 {
+			); okSeconds && seconds >= 0 && seconds <= float64(MaxRefreshIntervalSeconds) && !now.IsZero() {
 				reset := now.Add(time.Duration(seconds * float64(time.Second)))
 				resetAt = &reset
 			}
@@ -336,6 +340,9 @@ func parseGeminiSchedulingWindow(value any, model string) (quotaWindow, error) {
 	}
 	windows := make([]quotaWindow, 0)
 	buckets := quotaSlice(quota["buckets"])
+	for _, rawGroup := range quotaSlice(quota["groups"]) {
+		buckets = append(buckets, quotaSlice(quotaMap(rawGroup)["buckets"])...)
+	}
 	for _, raw := range buckets {
 		bucket := quotaMap(raw)
 		remaining, okRemaining := quotaNumber(firstQuotaValue(bucket, "remainingFraction", "remaining_fraction"))
@@ -434,7 +441,7 @@ func kimiQuotaWindow(value map[string]any, now time.Time) (quotaWindow, bool) {
 			firstQuotaValue(
 				value, "reset_in", "resetIn", "ttl",
 			),
-		); okSeconds && seconds >= 0 {
+		); okSeconds && seconds >= 0 && seconds <= float64(MaxRefreshIntervalSeconds) && !now.IsZero() {
 			reset := now.Add(time.Duration(seconds * float64(time.Second)))
 			resetAt = &reset
 		}
@@ -457,10 +464,12 @@ func parseDevinSchedulingWindow(value any) (quotaWindow, error) {
 		if !ok || remaining < 0 || remaining > 100 {
 			return
 		}
-		windows = append(windows, quotaWindow{
-			headroom: remaining / 100,
-			resetAt:  quotaAbsoluteTime(root[resetKey]),
-		})
+		windows = append(
+			windows, quotaWindow{
+				headroom: remaining / 100,
+				resetAt:  quotaAbsoluteTime(root[resetKey]),
+			},
+		)
 	}
 	appendWindow("daily_quota_present", "daily_quota_remaining_percent", "daily_quota_reset_at")
 	appendWindow("weekly_quota_present", "weekly_quota_remaining_percent", "weekly_quota_reset_at")
@@ -654,11 +663,17 @@ func quotaAbsoluteTime(value any) *time.Time {
 		}
 	}
 	if numeric, ok := quotaNumber(value); ok && numeric > 0 {
-		seconds := numeric
-		if seconds > 1e12 {
-			seconds /= 1000
+		seconds, fraction := math.Modf(numeric)
+		nanoseconds := fraction * float64(time.Second)
+		if numeric > 1e12 {
+			seconds = math.Floor(numeric / 1000)
+			nanoseconds = math.Mod(numeric, 1000) * float64(time.Millisecond)
 		}
-		parsed := time.Unix(int64(seconds), int64((seconds-math.Floor(seconds))*float64(time.Second))).UTC()
+		// 配额时间通过 JSON 传输，年份须保持在 RFC 3339 范围内
+		if seconds >= 253402300800 {
+			return nil
+		}
+		parsed := time.Unix(int64(seconds), int64(nanoseconds)).UTC()
 		return &parsed
 	}
 	return nil

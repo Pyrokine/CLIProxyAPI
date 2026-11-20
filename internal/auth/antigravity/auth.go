@@ -256,9 +256,7 @@ func (o *Auth) FetchProjectID(ctx context.Context, accessToken string) (string, 
 	userAgent := o.shortUserAgent()
 	loadReqBody := map[string]any{
 		"metadata": map[string]string{
-			"ide_type":    "ANTIGRAVITY",
-			"ide_version": misc.AntigravityVersionFromUserAgent(userAgent),
-			"ide_name":    "antigravity",
+			"ideType": "ANTIGRAVITY",
 		},
 	}
 
@@ -275,7 +273,7 @@ func (o *Auth) FetchProjectID(ctx context.Context, accessToken string) (string, 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
+	req.Header.Set("Accept", "*/*")
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -323,10 +321,13 @@ func (o *Auth) FetchProjectID(ctx context.Context, accessToken string) (string, 
 
 // onboardUser attempts to fetch the project ID via onboardUser by polling for completion
 func (o *Auth) onboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
 	userAgent := o.nodeUserAgent()
 	requestBody := map[string]any{
-		"tierId": tierID,
+		"tier_id": tierID,
 		"metadata": map[string]string{
 			"ide_type":    "ANTIGRAVITY",
 			"ide_version": misc.AntigravityVersionFromUserAgent(userAgent),
@@ -350,7 +351,7 @@ func (o *Auth) onboardUser(ctx context.Context, accessToken, tierID string) (str
 		}
 		reqCtx, cancel = context.WithTimeout(reqCtx, 30*time.Second)
 
-		endpointURL := fmt.Sprintf("%s/%s:onboardUser", aPIEndpoint, aPIVersion)
+		endpointURL := fmt.Sprintf("%s/%s:onboardUser", dailyAPIEndpoint, aPIVersion)
 		req, errRequest := http.NewRequestWithContext(
 			reqCtx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)),
 		)
@@ -359,6 +360,7 @@ func (o *Auth) onboardUser(ctx context.Context, accessToken, tierID string) (str
 			return "", fmt.Errorf("create request: %w", errRequest)
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
@@ -399,7 +401,15 @@ func (o *Auth) onboardUser(ctx context.Context, accessToken, tierID string) (str
 				return "", fmt.Errorf("no project_id in response")
 			}
 
-			time.Sleep(2 * time.Second)
+			if attempt < maxAttempts {
+				timer := time.NewTimer(2 * time.Second)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return "", ctx.Err()
+				case <-timer.C:
+				}
+			}
 			continue
 		}
 

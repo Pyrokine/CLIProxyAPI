@@ -27,7 +27,12 @@ func TestResetQuotaUsesAuthIndex(t *testing.T) {
 		StatusMessage:  "quota exhausted",
 		Unavailable:    true,
 		NextRetryAfter: next,
-		Quota:          coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next, BackoffLevel: 2},
+		Quota: coreauth.QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: next,
+			BackoffLevel:  2,
+		},
 		ModelStates: map[string]*coreauth.ModelState{
 			"claude-reset-model": {
 				Status:         coreauth.StatusError,
@@ -74,7 +79,8 @@ func TestResetQuotaUsesAuthIndex(t *testing.T) {
 	if !ok || updated == nil {
 		t.Fatalf("expected auth record to exist after reset")
 	}
-	if updated.Status != coreauth.StatusActive || updated.StatusMessage != "" || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+	if updated.Status != coreauth.StatusActive || updated.StatusMessage != "" || updated.Unavailable ||
+		!updated.NextRetryAfter.IsZero() {
 		t.Fatalf(
 			"updated auth state = status %q message %q unavailable %v next %v",
 			updated.Status,
@@ -83,14 +89,16 @@ func TestResetQuotaUsesAuthIndex(t *testing.T) {
 			updated.NextRetryAfter,
 		)
 	}
-	if updated.Quota.Exceeded || updated.Quota.Reason != "" || !updated.Quota.NextRecoverAt.IsZero() || updated.Quota.BackoffLevel != 0 {
+	if updated.Quota.Exceeded || updated.Quota.Reason != "" || !updated.Quota.NextRecoverAt.IsZero() ||
+		updated.Quota.BackoffLevel != 0 {
 		t.Fatalf("updated auth quota = %+v, want cleared", updated.Quota)
 	}
 	state := updated.ModelStates["claude-reset-model"]
 	if state == nil {
 		t.Fatalf("expected model state to remain")
 	}
-	if state.Status != coreauth.StatusActive || state.StatusMessage != "" || state.Unavailable || !state.NextRetryAfter.IsZero() {
+	if state.Status != coreauth.StatusActive || state.StatusMessage != "" || state.Unavailable ||
+		!state.NextRetryAfter.IsZero() {
 		t.Fatalf(
 			"updated model state = status %q message %q unavailable %v next %v",
 			state.Status,
@@ -99,7 +107,8 @@ func TestResetQuotaUsesAuthIndex(t *testing.T) {
 			state.NextRetryAfter,
 		)
 	}
-	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() ||
+		state.Quota.BackoffLevel != 0 {
 		t.Fatalf("updated model quota = %+v, want cleared", state.Quota)
 	}
 }
@@ -119,7 +128,10 @@ func TestResetQuotaConsumesCodexResetCredit(t *testing.T) {
 				if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
 					t.Fatalf("Authorization = %q", got)
 				}
-				if got := r.UserAgent(); got != "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)" {
+				if got := r.UserAgent(); got !=
+					("codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 " +
+						"(codex-tui; " +
+						"0.149.1)") {
 					t.Errorf("User-Agent = %q", got)
 				}
 				var body map[string]string
@@ -150,7 +162,12 @@ func TestResetQuotaConsumesCodexResetCredit(t *testing.T) {
 		StatusMessage:  "quota exhausted",
 		Unavailable:    true,
 		NextRetryAfter: next,
-		Quota:          coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next, BackoffLevel: 2},
+		Quota: coreauth.QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: next,
+			BackoffLevel:  2,
+		},
 	}
 	authIndex := auth.EnsureIndex()
 	if _, err := manager.Register(context.Background(), auth); err != nil {
@@ -181,10 +198,14 @@ func TestResetQuotaConsumesCodexResetCredit(t *testing.T) {
 	if !ok || updated == nil {
 		t.Fatalf("expected auth record to exist after reset")
 	}
-	if updated.Status != coreauth.StatusActive || updated.StatusMessage != "" || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+	if updated.Status != coreauth.StatusActive || updated.StatusMessage != "" || updated.Unavailable ||
+		!updated.NextRetryAfter.IsZero() {
 		t.Fatalf(
-			"updated auth state = status %q message %q unavailable %v next %v", updated.Status, updated.StatusMessage,
-			updated.Unavailable, updated.NextRetryAfter,
+			"updated auth state = status %q message %q unavailable %v next %v",
+			updated.Status,
+			updated.StatusMessage,
+			updated.Unavailable,
+			updated.NextRetryAfter,
 		)
 	}
 }
@@ -202,57 +223,77 @@ func TestCodexResetRequiresConfirmedResponse(t *testing.T) {
 		{name: "no credit", body: `{"code":"no_credit"}`, wantStatus: http.StatusBadGateway},
 		{name: "nothing to reset", body: `{"code":"nothing_to_reset"}`, wantStatus: http.StatusBadGateway},
 		{name: "unknown code", body: `{"code":"unknown"}`, wantStatus: http.StatusBadGateway},
-		{name: "upstream unavailable", body: `{"code":"reset"}`, upstreamStatus: http.StatusServiceUnavailable, wantStatus: http.StatusBadGateway},
+		{
+			name: "upstream unavailable", body: `{"code":"reset"}`, upstreamStatus: http.StatusServiceUnavailable,
+			wantStatus: http.StatusBadGateway,
+		},
 		{name: "missing code", body: `{}`, wantStatus: http.StatusBadGateway},
 		{name: "invalid response", body: `not-json`, wantStatus: http.StatusBadGateway},
 		{name: "trailing response data", body: `{"code":"reset"} invalid`, wantStatus: http.StatusBadGateway},
-		{name: "multiple response documents", body: `{"code":"reset"}{"code":"no_credit"}`, wantStatus: http.StatusBadGateway},
-		{name: "oversized response", body: `{"code":"reset","padding":"` + strings.Repeat("x", 16<<10) + `"}`, wantStatus: http.StatusBadGateway},
+		{
+			name: "multiple response documents", body: `{"code":"reset"}{"code":"no_credit"}`,
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name: "oversized response", body: `{"code":"reset","padding":"` + strings.Repeat("x", 16<<10) + `"}`,
+			wantStatus: http.StatusBadGateway,
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				if test.upstreamStatus != 0 {
-					w.WriteHeader(test.upstreamStatus)
-				}
-				_, _ = w.Write([]byte(test.body))
-			}))
-			defer server.Close()
-			previousURL := codexRateLimitResetCreditsConsumeURL
-			codexRateLimitResetCreditsConsumeURL = server.URL
-			defer func() { codexRateLimitResetCreditsConsumeURL = previousURL }()
+		t.Run(
+			test.name, func(t *testing.T) {
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, _ *http.Request) {
+							w.Header().Set("Content-Type", "application/json")
+							if test.upstreamStatus != 0 {
+								w.WriteHeader(test.upstreamStatus)
+							}
+							_, _ = w.Write([]byte(test.body))
+						},
+					),
+				)
+				defer server.Close()
+				previousURL := codexRateLimitResetCreditsConsumeURL
+				codexRateLimitResetCreditsConsumeURL = server.URL
+				defer func() { codexRateLimitResetCreditsConsumeURL = previousURL }()
 
-			manager := coreauth.NewManager(nil, nil, nil)
-			auth := &coreauth.Auth{
-				ID: "codex-confirmed-reset", Provider: "codex", Status: coreauth.StatusError,
-				Unavailable: true, NextRetryAfter: time.Now().Add(time.Hour),
-				Metadata: map[string]any{"access_token": "fixture-token"},
-				Quota:    coreauth.QuotaState{Exceeded: true, Reason: "quota"},
-			}
-			authIndex := auth.EnsureIndex()
-			if _, err := manager.Register(context.Background(), auth); err != nil {
-				t.Fatal(err)
-			}
-			h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
-			attachCodexResetProbe(t, h, auth, nil)
-			recorder := httptest.NewRecorder()
-			ginCtx, _ := gin.CreateTestContext(recorder)
-			ginCtx.Request = httptest.NewRequest(
-				http.MethodPost, "/v0/management/reset-quota", strings.NewReader(`{"auth_index":"`+authIndex+`"}`),
-			)
-			ginCtx.Request.Header.Set("Content-Type", "application/json")
-			h.ResetQuota(ginCtx)
-			if recorder.Code != test.wantStatus {
-				t.Fatalf("HTTP status = %d, want %d", recorder.Code, test.wantStatus)
-			}
-			current, ok := manager.GetByID(auth.ID)
-			if !ok || current == nil {
-				t.Fatal("credential disappeared")
-			}
-			if current.Quota.Exceeded != (test.wantStatus != http.StatusOK) {
-				t.Fatalf("local quota cleared without a confirmed reset: status=%d exceeded=%t", recorder.Code, current.Quota.Exceeded)
-			}
-		})
+				manager := coreauth.NewManager(nil, nil, nil)
+				auth := &coreauth.Auth{
+					ID: "codex-confirmed-reset", Provider: "codex", Status: coreauth.StatusError,
+					Unavailable: true, NextRetryAfter: time.Now().Add(time.Hour),
+					Metadata: map[string]any{"access_token": "fixture-token"},
+					Quota:    coreauth.QuotaState{Exceeded: true, Reason: "quota"},
+				}
+				authIndex := auth.EnsureIndex()
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+				h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+				attachCodexResetProbe(t, h, auth, nil)
+				recorder := httptest.NewRecorder()
+				ginCtx, _ := gin.CreateTestContext(recorder)
+				ginCtx.Request = httptest.NewRequest(
+					http.MethodPost,
+					"/v0/management/reset-quota",
+					strings.NewReader(`{"auth_index":"`+authIndex+`"}`),
+				)
+				ginCtx.Request.Header.Set("Content-Type", "application/json")
+				h.ResetQuota(ginCtx)
+				if recorder.Code != test.wantStatus {
+					t.Fatalf("HTTP status = %d, want %d", recorder.Code, test.wantStatus)
+				}
+				current, ok := manager.GetByID(auth.ID)
+				if !ok || current == nil {
+					t.Fatal("credential disappeared")
+				}
+				if current.Quota.Exceeded != (test.wantStatus != http.StatusOK) {
+					t.Fatalf(
+						"local quota cleared without a confirmed reset: status=%d exceeded=%t", recorder.Code,
+						current.Quota.Exceeded,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -266,58 +307,72 @@ func TestResetQuotaFailurePreservesCodexCooldown(t *testing.T) {
 		{name: "cancelled consume", cancelConsume: true, wantStatus: http.StatusBadGateway},
 		{name: "local persistence failure", wantStatus: http.StatusInternalServerError, wantConsumeCalls: 1},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			var consumeCalls atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				consumeCalls.Add(1)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"code":"reset"}`))
-			}))
-			defer server.Close()
-			previousURL := codexRateLimitResetCreditsConsumeURL
-			codexRateLimitResetCreditsConsumeURL = server.URL
-			t.Cleanup(func() { codexRateLimitResetCreditsConsumeURL = previousURL })
-			manager := coreauth.NewManager(nil, nil, nil)
-			next := time.Now().Add(time.Hour)
-			auth := &coreauth.Auth{
-				ID: "fixture-failed-reset", Provider: "codex", Status: coreauth.StatusError,
-				Unavailable: true, NextRetryAfter: next,
-				Metadata: map[string]any{"access_token": "fixture-token"},
-				Quota:    coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
-				ModelStates: map[string]*coreauth.ModelState{
-					"fixture-model": {Status: coreauth.StatusError, Unavailable: true,
-						Quota: coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next}},
-				},
-			}
-			authIndex := auth.EnsureIndex()
-			if _, err := manager.Register(context.Background(), auth); err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if test.cancelConsume {
-				cancel()
-			} else {
-				manager.SetStore(&failingDevinAuthStore{err: errors.New("fixture persistence failed")})
-			}
-			handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
-			attachCodexResetProbe(t, handler, auth, nil)
-			recorder := httptest.NewRecorder()
-			ginCtx, _ := gin.CreateTestContext(recorder)
-			ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/reset-quota",
-				strings.NewReader(`{"auth_index":"`+authIndex+`"}`)).WithContext(ctx)
-			ginCtx.Request.Header.Set("Content-Type", "application/json")
-			handler.ResetQuota(ginCtx)
-			if recorder.Code != test.wantStatus || consumeCalls.Load() != test.wantConsumeCalls {
-				t.Fatalf("status = %d, calls = %d, want %d/%d; body=%s", recorder.Code,
-					consumeCalls.Load(), test.wantStatus, test.wantConsumeCalls, recorder.Body.String())
-			}
-			current, exists := manager.GetByID(auth.ID)
-			if !exists || !current.Quota.Exceeded || !current.Unavailable || !current.NextRetryAfter.Equal(next) ||
-				!current.ModelStates["fixture-model"].Quota.Exceeded || !current.ModelStates["fixture-model"].Unavailable {
-				t.Fatalf("failed reset changed local cooldown: %#v", current)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				var consumeCalls atomic.Int32
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, _ *http.Request) {
+							consumeCalls.Add(1)
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = w.Write([]byte(`{"code":"reset"}`))
+						},
+					),
+				)
+				defer server.Close()
+				previousURL := codexRateLimitResetCreditsConsumeURL
+				codexRateLimitResetCreditsConsumeURL = server.URL
+				t.Cleanup(func() { codexRateLimitResetCreditsConsumeURL = previousURL })
+				manager := coreauth.NewManager(nil, nil, nil)
+				next := time.Now().Add(time.Hour)
+				auth := &coreauth.Auth{
+					ID: "fixture-failed-reset", Provider: "codex", Status: coreauth.StatusError,
+					Unavailable: true, NextRetryAfter: next,
+					Metadata: map[string]any{"access_token": "fixture-token"},
+					Quota:    coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
+					ModelStates: map[string]*coreauth.ModelState{
+						"fixture-model": {
+							Status: coreauth.StatusError, Unavailable: true,
+							Quota: coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
+						},
+					},
+				}
+				authIndex := auth.EnsureIndex()
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if test.cancelConsume {
+					cancel()
+				} else {
+					manager.SetStore(&failingDevinAuthStore{err: errors.New("fixture persistence failed")})
+				}
+				handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+				attachCodexResetProbe(t, handler, auth, nil)
+				recorder := httptest.NewRecorder()
+				ginCtx, _ := gin.CreateTestContext(recorder)
+				ginCtx.Request = httptest.NewRequest(
+					http.MethodPost, "/v0/management/reset-quota",
+					strings.NewReader(`{"auth_index":"`+authIndex+`"}`),
+				).WithContext(ctx)
+				ginCtx.Request.Header.Set("Content-Type", "application/json")
+				handler.ResetQuota(ginCtx)
+				if recorder.Code != test.wantStatus || consumeCalls.Load() != test.wantConsumeCalls {
+					t.Fatalf(
+						"status = %d, calls = %d, want %d/%d; body=%s", recorder.Code,
+						consumeCalls.Load(), test.wantStatus, test.wantConsumeCalls, recorder.Body.String(),
+					)
+				}
+				current, exists := manager.GetByID(auth.ID)
+				if !exists || !current.Quota.Exceeded || !current.Unavailable ||
+					!current.NextRetryAfter.Equal(next) ||
+					!current.ModelStates["fixture-model"].Quota.Exceeded ||
+					!current.ModelStates["fixture-model"].Unavailable {
+					t.Fatalf("failed reset changed local cooldown: %#v", current)
+				}
+			},
+		)
 	}
 }
 
@@ -347,8 +402,10 @@ func TestResetCooldownClearsLocalCodexStateWithoutConsumingCredits(t *testing.T)
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
-	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/routing/cooldown/reset",
-		strings.NewReader(`{"auth_index":"`+authIndex+`"}`))
+	ginCtx.Request = httptest.NewRequest(
+		http.MethodPost, "/v0/management/routing/cooldown/reset",
+		strings.NewReader(`{"auth_index":"`+authIndex+`"}`),
+	)
 	ginCtx.Request.Header.Set("Content-Type", "application/json")
 
 	h.ResetCooldown(ginCtx)
@@ -364,7 +421,8 @@ func TestResetCooldownClearsLocalCodexStateWithoutConsumingCredits(t *testing.T)
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Status != "ok" || response.AuthIndex != authIndex || len(response.Models) != 1 || response.Models[0] != "codex-model" {
+	if response.Status != "ok" || response.AuthIndex != authIndex || len(response.Models) != 1 ||
+		response.Models[0] != "codex-model" {
 		t.Fatalf("response = %+v", response)
 	}
 	updated, exists := manager.GetByID(auth.ID)
@@ -395,13 +453,21 @@ func TestResetQuotaDoesNotAcceptAuthIDOrFileName(t *testing.T) {
 		body     string
 		wantCode int
 	}{
-		{name: "auth id field ignored", body: `{"auth_id":"reset-auth-id-only"}`, wantCode: http.StatusBadRequest},
+		{
+			name:     "auth id field ignored",
+			body:     `{"auth_id":"reset-auth-id-only"}`,
+			wantCode: http.StatusBadRequest,
+		},
 		{name: "id field ignored", body: `{"id":"reset-auth-id-only"}`, wantCode: http.StatusBadRequest},
 		{
 			name: "file name is not an index", body: `{"auth_index":"reset-auth-file-only.json"}`,
 			wantCode: http.StatusNotFound,
 		},
-		{name: "auth id is not an index", body: `{"auth_index":"reset-auth-id-only"}`, wantCode: http.StatusNotFound},
+		{
+			name:     "auth id is not an index",
+			body:     `{"auth_index":"reset-auth-id-only"}`,
+			wantCode: http.StatusNotFound,
+		},
 	}
 
 	for _, tt := range tests {

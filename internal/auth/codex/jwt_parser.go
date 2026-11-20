@@ -14,6 +14,8 @@ const DefaultPlanType = "free"
 // JWTClaims represents the claims section of a JSON Web Token (JWT).
 // It includes standard claims like issuer, subject, and expiration time, as well as
 // custom claims specific to OpenAI's authentication.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type JWTClaims struct {
 	AtHash        string   `json:"at_hash"`
 	Aud           []string `json:"aud"`
@@ -33,6 +35,8 @@ type JWTClaims struct {
 
 // Organization defines the structure for organization details within the JWT claims.
 // It holds information about the user's organization, such as ID, role, and title.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Organization struct {
 	ID        string `json:"id"`
 	IsDefault bool   `json:"is_default"`
@@ -42,16 +46,18 @@ type Organization struct {
 
 // AuthInfo contains authentication-related details specific to Codex.
 // This includes ChatGPT account information, subscription status, and user/organization IDs.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type AuthInfo struct {
-	ChatgptAccountID               string          `json:"chatgpt_account_id"`
-	ChatgptPlanType                string          `json:"chatgpt_plan_type"`
-	ChatgptSubscriptionActiveStart any             `json:"chatgpt_subscription_active_start"`
-	ChatgptSubscriptionActiveUntil any             `json:"chatgpt_subscription_active_until"`
-	ChatgptSubscriptionLastChecked time.Time       `json:"chatgpt_subscription_last_checked"`
-	ChatgptUserID                  string          `json:"chatgpt_user_id"`
-	Groups                         []any           `json:"groups"`
-	Organizations                  []Organization `json:"Organization"`
-	UserID                         string          `json:"user_id"`
+	ChatgptAccountID               string         `json:"chatgpt_account_id"`
+	ChatgptPlanType                string         `json:"chatgpt_plan_type"`
+	ChatgptSubscriptionActiveStart any            `json:"chatgpt_subscription_active_start"`
+	ChatgptSubscriptionActiveUntil any            `json:"chatgpt_subscription_active_until"`
+	ChatgptSubscriptionLastChecked time.Time      `json:"chatgpt_subscription_last_checked"`
+	ChatgptUserID                  string         `json:"chatgpt_user_id"`
+	Groups                         []any          `json:"groups"`
+	Organizations                  []Organization `json:"organizations"`
+	UserID                         string         `json:"user_id"`
 }
 
 // ParseJWTToken parses a JWT token string and extracts its claims without performing

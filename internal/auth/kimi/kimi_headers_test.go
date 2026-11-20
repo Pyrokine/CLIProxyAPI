@@ -7,7 +7,7 @@ import (
 )
 
 func TestCommonHeadersUseBuildVersion(t *testing.T) {
-	client := NewDeviceFlowClientWithDeviceID(nil, "device-1")
+	client := newDeviceFlowClientWithDeviceID(nil, "device-1")
 	headers := client.commonHeaders()
 
 	if got := headers["X-Msh-Platform"]; got != "CLIProxyAPI" {

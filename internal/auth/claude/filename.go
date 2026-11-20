@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -91,13 +90,21 @@ func FindMatchingLegacyCredential(
 }
 
 func readCredential(path string) (*coreauth.Auth, error) {
+	path, errPath := filepath.Abs(path)
+	if errPath != nil {
+		return nil, fmt.Errorf("resolve Claude legacy credential path: %w", errPath)
+	}
 	raw, errRead := os.ReadFile(path)
 	if errRead != nil {
 		return nil, errRead
 	}
-	metadata := make(map[string]any)
-	if errJSON := json.Unmarshal(raw, &metadata); errJSON != nil {
+	metadata, errJSON := coreauth.DecodeCredentialMetadata(raw)
+	if errJSON != nil {
 		return nil, fmt.Errorf("read Claude legacy credential %s: %w", filepath.Base(path), errJSON)
+	}
+	digest, errDigest := coreauth.DigestPersistedJSON(raw)
+	if errDigest != nil {
+		return nil, fmt.Errorf("read Claude legacy credential version %s: %w", filepath.Base(path), errDigest)
 	}
 	coreauth.NormalizeCredentialMetadata(metadata)
 	provider, _ := metadata["type"].(string)
@@ -109,7 +116,8 @@ func readCredential(path string) (*coreauth.Auth, error) {
 		Provider: "claude",
 		FileName: filepath.Base(path),
 		Attributes: map[string]string{
-			coreauth.AttributePath: path,
+			coreauth.AttributePath:            path,
+			coreauth.PersistedSHA256Attribute: hex.EncodeToString(digest[:]),
 		},
 		Metadata: metadata,
 	}, nil

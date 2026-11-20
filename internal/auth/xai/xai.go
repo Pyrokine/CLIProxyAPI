@@ -394,7 +394,7 @@ func (a *Auth) exchangeDeviceCode(
 			return nil, interval, true, nil
 		case "slow_down":
 			step := defaultPollInterval
-			if a != nil && a.minPollInterval > 0 {
+			if a.minPollInterval > 0 {
 				step = a.minPollInterval
 			}
 			return nil, interval + step, true, nil

@@ -36,11 +36,16 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 		url = strings.TrimSpace(device.VerificationURI)
 	}
 	state = "meta-" + state
-	registerOAuthSessionForAuthDir(state, "meta", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, "meta", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 	go func() {
 		pollCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		if !setOAuthSessionCancel(state, "meta", cancel) {
+			return
+		}
+		if !oauthSessions.setPhase(state, "meta", "exchanging") {
 			return
 		}
 		bundle, err := authSvc.WaitForAuthorization(pollCtx, device)
@@ -68,8 +73,11 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 	if expiresIn <= 0 {
 		expiresIn = int(metaauth.MaxPollDuration / time.Second)
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"status": "ok", "url": url, "state": state, "flow": "device",
-		"user_code": strings.TrimSpace(device.UserCode), "expires_in": expiresIn,
-	})
+	CompleteMutation(c.Request.Context())
+	c.JSON(
+		http.StatusOK, gin.H{
+			"status": "ok", "url": url, "state": state, "flow": "device",
+			"user_code": strings.TrimSpace(device.UserCode), "expires_in": expiresIn,
+		},
+	)
 }

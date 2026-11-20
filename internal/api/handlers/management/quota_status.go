@@ -48,7 +48,9 @@ func (h *Handler) GetQuotaStatus(c *gin.Context) {
 			status.ByProvider = make(map[string]quota.ProviderStatusSummary)
 		}
 		for _, auth := range h.authManager.List() {
-			if auth == nil || !strings.EqualFold(auth.Provider, "meta") || !strings.EqualFold(auth.Attributes["auth_kind"], "oauth") {
+			if auth == nil || !strings.EqualFold(
+				auth.Provider, "meta",
+			) || !strings.EqualFold(auth.Attributes["auth_kind"], "oauth") {
 				continue
 			}
 			index := auth.EnsureIndex()
@@ -56,7 +58,9 @@ func (h *Handler) GetQuotaStatus(c *gin.Context) {
 				continue
 			}
 			if auth.Generation == 0 {
-				log.WithField("auth_index", index).Warn("Meta credential has no published version; omitting subscription status")
+				log.WithField(
+					"auth_index", index,
+				).Warn("Meta credential has no published version; omitting subscription status")
 				continue
 			}
 			data := struct {
@@ -74,11 +78,14 @@ func (h *Handler) GetQuotaStatus(c *gin.Context) {
 			}
 			encoded, err := json.Marshal(data)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode Meta subscription status"})
+				c.JSON(
+					http.StatusInternalServerError,
+					gin.H{"error": "failed to encode Meta subscription status"},
+				)
 				return
 			}
 			status.Credentials["meta::"+index] = &quota.Entry{
-				Type:          quota.CredentialType("meta"),
+				Type:          "meta",
 				AuthIndex:     index,
 				Generation:    generation,
 				StateRevision: auth.Generation,
@@ -127,17 +134,22 @@ func (h *Handler) PostQuotaRefresh(c *gin.Context) {
 	}
 
 	var body struct {
-		Credentials []string `json:"credentials"`
+		Credentials   []string `json:"credentials"`
+		AllowRecovery *bool    `json:"allow_recovery"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	task, err := h.quotaRefreshService().createTask(append([]string(nil), body.Credentials...))
+	// Omitted mode preserves legacy single-target recovery; resolved targets still bound it.
+	allowRecovery := body.AllowRecovery == nil || *body.AllowRecovery
+	task, err := h.quotaRefreshService().createTask(allowRecovery, append([]string(nil), body.Credentials...))
 	if err != nil {
 		writeQuotaRefreshTaskError(c, err)
 		return
 	}
+	RecordMutationEffect(c.Request.Context(), "task.created", "task")
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusAccepted, task)
 }
 
@@ -161,7 +173,9 @@ func (h *Handler) finalizeQuotaRefreshContext(ctx context.Context, attempt quota
 	if !known || !available {
 		if authHasQuotaState(auth) && !known {
 			log.WithField("auth_index", attempt.AuthIndex).Warn(
-				"Codex usage refresh did not include a conclusive availability signal; routing cooldown was left unchanged",
+				"Codex usage refresh did not include a conclusive availability signal; " +
+					"routing cooldown was left " +
+					"unchanged",
 			)
 		}
 		return nil
@@ -181,7 +195,11 @@ func (h *Handler) finalizeQuotaRefreshContext(ctx context.Context, attempt quota
 					"auth_index":   attempt.AuthIndex,
 					"quota_family": candidate.Family,
 				},
-			).Warn("Codex usage refresh did not include a conclusive family availability signal; family cooldown was left unchanged")
+			).Warn(
+				"Codex usage refresh did not include a conclusive family availability " +
+					"signal; family cooldown was left " +
+					"unchanged",
+			)
 		}
 	}
 	if ctx == nil {
@@ -508,6 +526,16 @@ func (h *Handler) PutQuotaConfig(c *gin.Context) {
 	}
 
 	// Validate interval bounds
+	if int64(cfg.Interval) > quota.MaxRefreshIntervalSeconds ||
+		int64(cfg.MaxInterval) > quota.MaxRefreshIntervalSeconds {
+		c.JSON(
+			http.StatusBadRequest, gin.H{
+				"error":           "quota refresh interval exceeds maximum supported seconds",
+				"maximum_seconds": quota.MaxRefreshIntervalSeconds,
+			},
+		)
+		return
+	}
 	if cfg.Enabled {
 		if cfg.Interval < 60 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "interval must be at least 60 seconds"})
@@ -538,5 +566,7 @@ func (h *Handler) PutQuotaConfig(c *gin.Context) {
 	}
 
 	h.quotaScheduler.UpdateConfig(cfg)
+	RecordMutationEffect(c.Request.Context(), "configuration.runtime_applied", "configuration")
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusOK, h.quotaScheduler.GetConfig())
 }

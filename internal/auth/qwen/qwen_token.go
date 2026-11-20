@@ -11,6 +11,8 @@ import (
 // TokenStorage stores OAuth2 token information for Alibaba Qwen API authentication.
 // It maintains compatibility with the existing auth system while adding Qwen-specific fields
 // for managing access tokens, refresh tokens, and user account information.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type TokenStorage struct {
 	// AccessToken is the OAuth2 access token used for authenticating API requests.
 	AccessToken string `json:"access_token"`
@@ -41,6 +43,8 @@ func (ts *TokenStorage) CloneForPersistence() coreauth.TokenStorage {
 }
 
 // SetMetadata injects metadata before the token is persisted.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }

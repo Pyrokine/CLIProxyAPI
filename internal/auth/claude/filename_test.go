@@ -24,13 +24,15 @@ func TestCredentialFileNameSeparatesOrganizations(t *testing.T) {
 func TestFindMatchingLegacyCredentialHonorsOrganization(t *testing.T) {
 	authDir := t.TempDir()
 	const email = "user@example.com"
-	writeClaudeCredential(t, filepath.Join(authDir, CredentialFileName(email, "", "")), map[string]any{
-		"type":              "claude",
-		"email":             email,
-		"organization_uuid": "organization-a",
-		"account_uuid":      "shared-account",
-		"prefix":            "team-a",
-	})
+	writeClaudeCredential(
+		t, filepath.Join(authDir, CredentialFileName(email, "", "")), map[string]any{
+			"type":              "claude",
+			"email":             email,
+			"organization_uuid": "organization-a",
+			"account_uuid":      "shared-account",
+			"prefix":            "team-a",
+		},
+	)
 	target := claudeTarget(email, "organization-b", "shared-account")
 	matched, errMatch := FindMatchingLegacyCredential(context.Background(), authDir, target)
 	if errMatch != nil {
@@ -51,12 +53,14 @@ func TestFindMatchingLegacyCredentialAcceptsAccountHashedPredecessor(t *testing.
 	authDir := t.TempDir()
 	const email = "user@example.com"
 	predecessor := CredentialFileName(email, "", "account-a")
-	writeClaudeCredential(t, filepath.Join(authDir, predecessor), map[string]any{
-		"type":         "claude",
-		"email":        email,
-		"account_uuid": "account-a",
-		"weight":       5,
-	})
+	writeClaudeCredential(
+		t, filepath.Join(authDir, predecessor), map[string]any{
+			"type":         "claude",
+			"email":        email,
+			"account_uuid": "account-a",
+			"weight":       5,
+		},
+	)
 
 	matched, errMatch := FindMatchingLegacyCredential(
 		context.Background(), authDir, claudeTarget(email, "organization-a", "account-a"),

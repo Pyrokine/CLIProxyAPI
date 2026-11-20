@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	DevinGetUserStatusPath = "/exa.seat_management_pb.SeatManagementService/GetUserStatus"
+	GetUserStatusPath = "/exa.seat_management_pb.SeatManagementService/GetUserStatus"
 
 	devinFingerprintHexLen = 732
 	maxDevinStatusBodySize = 4 << 20
@@ -28,6 +28,8 @@ const (
 )
 
 // DevinUserStatus contains quota, plan, and account data from GetUserStatus.
+//
+//goland:noinspection GoNameStartsWithPackageName
 type DevinUserStatus struct {
 	Email                       string    `json:"email,omitempty"`
 	UserName                    string    `json:"user_name,omitempty"`
@@ -40,14 +42,14 @@ type DevinUserStatus struct {
 	WeeklyQuotaRemainingPercent int64     `json:"weekly_quota_remaining_percent"`
 	DailyQuotaPresent           bool      `json:"daily_quota_present"`
 	WeeklyQuotaPresent          bool      `json:"weekly_quota_present"`
-	DailyQuotaResetAt           time.Time `json:"daily_quota_reset_at,omitempty"`
-	WeeklyQuotaResetAt          time.Time `json:"weekly_quota_reset_at,omitempty"`
-	PlanStart                   time.Time `json:"plan_start,omitempty"`
-	PlanEnd                     time.Time `json:"plan_end,omitempty"`
+	DailyQuotaResetAt           time.Time `json:"daily_quota_reset_at"`
+	WeeklyQuotaResetAt          time.Time `json:"weekly_quota_reset_at"`
+	PlanStart                   time.Time `json:"plan_start"`
+	PlanEnd                     time.Time `json:"plan_end"`
 }
 
-// GenerateDeviceFingerprint creates the fixed-width Devin device identifier.
-func GenerateDeviceFingerprint(seed string) string {
+// generateDeviceFingerprint creates the fixed-width Devin device identifier.
+func generateDeviceFingerprint(seed string) string {
 	if seed == "" {
 		var random [devinFingerprintHexLen / 2]byte
 		if _, err := rand.Read(random[:]); err == nil {
@@ -68,10 +70,10 @@ func appendDevinStatusString(dst []byte, number protowire.Number, value string) 
 	return protowire.AppendString(dst, value)
 }
 
-// BuildGetUserStatusRequest encodes a unary GetUserStatus protobuf request.
-func BuildGetUserStatusRequest(sessionToken, deviceFingerprint string) []byte {
+// buildGetUserStatusRequest encodes a unary GetUserStatus protobuf request.
+func buildGetUserStatusRequest(sessionToken, deviceFingerprint string) []byte {
 	if deviceFingerprint == "" {
-		deviceFingerprint = GenerateDeviceFingerprint(sessionToken)
+		deviceFingerprint = generateDeviceFingerprint(sessionToken)
 	}
 	metadata := appendDevinStatusString(nil, 1, devinClientName)
 	metadata = appendDevinStatusString(metadata, 2, devinClientVersion)
@@ -85,8 +87,8 @@ func BuildGetUserStatusRequest(sessionToken, deviceFingerprint string) []byte {
 	return protowire.AppendBytes(request, metadata)
 }
 
-// ParseGetUserStatusResponse decodes a unary GetUserStatus protobuf response.
-func ParseGetUserStatusResponse(data []byte) (*DevinUserStatus, error) {
+// parseGetUserStatusResponse decodes a unary GetUserStatus protobuf response.
+func parseGetUserStatusResponse(data []byte) (*DevinUserStatus, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty Devin user status response")
 	}
@@ -152,6 +154,7 @@ func parseDevinUserStatus(data []byte, status *DevinUserStatus) error {
 				if err := parseDevinPlanStatus(value, status); err != nil {
 					return err
 				}
+			// noinspection GoDfaConstantCondition
 			case 36:
 				status.UserID = string(value)
 			}
@@ -194,6 +197,7 @@ func parseDevinPlanStatus(data []byte, status *DevinUserStatus) error {
 					return fmt.Errorf("parse plan start: %w", err)
 				}
 				status.PlanStart = time.Unix(seconds, 0).UTC()
+			// noinspection GoDfaConstantCondition
 			case 3:
 				seconds, err := parseDevinSeconds(value)
 				if err != nil {
@@ -229,6 +233,7 @@ func parseDevinPlanStatus(data []byte, status *DevinUserStatus) error {
 				if value > 0 {
 					status.DailyQuotaResetAt = time.Unix(int64(value), 0).UTC()
 				}
+			// noinspection GoDfaConstantCondition
 			case 18:
 				if value > 0 {
 					status.WeeklyQuotaResetAt = time.Unix(int64(value), 0).UTC()
@@ -347,7 +352,10 @@ func parseDevinSeconds(data []byte) (int64, error) {
 }
 
 // FetchUserStatus queries Devin's unary Connect endpoint without chat trace headers.
-func (service *DevinAuthService) FetchUserStatus(ctx context.Context, sessionToken, deviceSeed string) (*DevinUserStatus, error) {
+func (service *DevinAuthService) FetchUserStatus(
+	ctx context.Context,
+	sessionToken, deviceSeed string,
+) (*DevinUserStatus, error) {
 	if service == nil || service.client == nil {
 		return nil, errors.New("devin auth service is not initialized")
 	}
@@ -355,11 +363,11 @@ func (service *DevinAuthService) FetchUserStatus(ctx context.Context, sessionTok
 	if sessionToken == "" {
 		return nil, errors.New("devin session token is required")
 	}
-	requestBody := BuildGetUserStatusRequest(sessionToken, GenerateDeviceFingerprint(deviceSeed))
+	requestBody := buildGetUserStatusRequest(sessionToken, generateDeviceFingerprint(deviceSeed))
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		strings.TrimRight(service.serverBaseURL, "/")+DevinGetUserStatusPath,
+		strings.TrimRight(service.serverBaseURL, "/")+GetUserStatusPath,
 		bytes.NewReader(requestBody),
 	)
 	if err != nil {
@@ -375,7 +383,7 @@ func (service *DevinAuthService) FetchUserStatus(ctx context.Context, sessionTok
 	if err != nil {
 		return nil, fmt.Errorf("fetch Devin user status: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.ContentLength > maxDevinStatusBodySize {
 		return nil, fmt.Errorf("devin user status response exceeds %d bytes", maxDevinStatusBodySize)
 	}
@@ -386,5 +394,5 @@ func (service *DevinAuthService) FetchUserStatus(ctx context.Context, sessionTok
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("devin user status returned status %d", response.StatusCode)
 	}
-	return ParseGetUserStatusResponse(responseBody)
+	return parseGetUserStatusResponse(responseBody)
 }

@@ -46,7 +46,8 @@ func TestC04XAIAPIKeyManagementCRUDAndValidation(t *testing.T) {
 	if patch.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d, body=%s", patch.Code, patch.Body.String())
 	}
-	if h.cfg.XAIKey[0].Priority != 7 || h.cfg.XAIKey[0].Websockets || h.cfg.XAIKey[0].DisableCooling == nil || *h.cfg.XAIKey[0].DisableCooling {
+	if h.cfg.XAIKey[0].Priority != 7 || h.cfg.XAIKey[0].Websockets || h.cfg.XAIKey[0].DisableCooling == nil ||
+		*h.cfg.XAIKey[0].DisableCooling {
 		t.Fatalf("patched xAI config = %+v", h.cfg.XAIKey[0])
 	}
 

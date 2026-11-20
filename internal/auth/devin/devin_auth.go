@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	DefaultAppBaseURL = "https://app.devin.ai"
-	DefaultAPIBaseURL = "https://api.devin.ai"
+	defaultAppBaseURL = "https://app.devin.ai"
+	defaultAPIBaseURL = "https://api.devin.ai"
 	DefaultServerURL  = "https://server.codeium.com"
 
 	devinTokenPrefix        = "devin-session-token$"
@@ -28,17 +28,9 @@ const (
 	defaultDevinHTTPTimeout = 30 * time.Second
 )
 
-// DevinTokenBundle contains a completed Devin authentication result.
-type DevinTokenBundle struct {
-	SessionToken string `json:"session_token"`
-	RawToken     string `json:"raw_token"`
-	UserName     string `json:"user_name,omitempty"`
-	UserID       string `json:"user_id,omitempty"`
-	OrgID        string `json:"org_id,omitempty"`
-	BaseURL      string `json:"base_url,omitempty"`
-}
-
 // DevinAuthService performs Devin OAuth, profile, and status requests.
+//
+//goland:noinspection GoNameStartsWithPackageName
 type DevinAuthService struct {
 	client        *http.Client
 	appBaseURL    string
@@ -53,8 +45,8 @@ func NewDevinAuthService(client *http.Client) *DevinAuthService {
 	}
 	return &DevinAuthService{
 		client:        client,
-		appBaseURL:    DefaultAppBaseURL,
-		apiBaseURL:    DefaultAPIBaseURL,
+		appBaseURL:    defaultAppBaseURL,
+		apiBaseURL:    defaultAPIBaseURL,
 		serverBaseURL: DefaultServerURL,
 	}
 }
@@ -83,14 +75,15 @@ func (service *DevinAuthService) SetServerBaseURL(baseURL string) {
 // BuildAuthorizationURL constructs the Devin PKCE authorization URL.
 func (service *DevinAuthService) BuildAuthorizationURL(redirectURI, codeChallenge, state string) string {
 	redirectURI = strings.TrimSpace(redirectURI)
-	parts := []string{}
+	var parts []string
 	if redirectURI != "" {
 		parts = append(parts, "redirect_uri="+url.QueryEscape(redirectURI))
 	}
 	if state = strings.TrimSpace(state); state != "" {
 		parts = append(parts, "state="+url.QueryEscape(state))
 	}
-	parts = append(parts,
+	parts = append(
+		parts,
 		"prompt=select_account",
 		"code_challenge="+url.QueryEscape(strings.TrimSpace(codeChallenge)),
 		"code_challenge_method=S256",
@@ -102,7 +95,10 @@ func (service *DevinAuthService) BuildAuthorizationURL(redirectURI, codeChalleng
 }
 
 // ExchangeCodeForToken exchanges an OAuth authorization code for a session token.
-func (service *DevinAuthService) ExchangeCodeForToken(ctx context.Context, code, codeVerifier string) (string, error) {
+func (service *DevinAuthService) ExchangeCodeForToken(
+	ctx context.Context,
+	code, codeVerifier string,
+) (string, error) {
 	if service == nil || service.client == nil {
 		return "", errors.New("devin auth service is not initialized")
 	}
@@ -131,7 +127,7 @@ func (service *DevinAuthService) ExchangeCodeForToken(ctx context.Context, code,
 	if err != nil {
 		return "", fmt.Errorf("exchange Devin authorization code: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	responseBody, err := readBoundedDevinBody(response.Body, maxDevinAuthBodySize)
 	if err != nil {
 		return "", fmt.Errorf("read Devin token exchange response: %w", err)
@@ -153,7 +149,12 @@ func (service *DevinAuthService) ExchangeCodeForToken(ctx context.Context, code,
 }
 
 // FetchSelfProfile retrieves the authenticated Devin profile.
-func (service *DevinAuthService) FetchSelfProfile(ctx context.Context, sessionToken string) (userName, userID, orgID string, err error) {
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (service *DevinAuthService) FetchSelfProfile(
+	ctx context.Context,
+	sessionToken string,
+) (userName, userID, orgID string, err error) {
 	if service == nil || service.client == nil {
 		return "", "", "", errors.New("devin auth service is not initialized")
 	}
@@ -177,7 +178,7 @@ func (service *DevinAuthService) FetchSelfProfile(ctx context.Context, sessionTo
 	if err != nil {
 		return "", "", "", fmt.Errorf("fetch Devin profile: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	responseBody, err := readBoundedDevinBody(response.Body, maxDevinAuthBodySize)
 	if err != nil {
 		return "", "", "", fmt.Errorf("read Devin profile response: %w", err)
@@ -193,7 +194,13 @@ func (service *DevinAuthService) FetchSelfProfile(ctx context.Context, sessionTo
 	if err = json.Unmarshal(responseBody, &profile); err != nil {
 		return "", "", "", fmt.Errorf("decode Devin profile response: %w", err)
 	}
-	return strings.TrimSpace(profile.UserName), strings.TrimSpace(profile.UserID), strings.TrimSpace(profile.OrgID), nil
+	return strings.TrimSpace(
+			profile.UserName,
+		), strings.TrimSpace(
+			profile.UserID,
+		), strings.TrimSpace(
+			profile.OrgID,
+		), nil
 }
 
 // FormatSessionToken applies the mandatory Devin session-token prefix.
@@ -267,7 +274,8 @@ func (server *OAuthServer) Start() (int, error) {
 	}
 	server.running = true
 	go func() {
-		if serveErr := server.server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		if serveErr := server.server.Serve(listener); serveErr != nil &&
+			!errors.Is(serveErr, http.ErrServerClosed) {
 			select {
 			case server.errorChan <- serveErr:
 			default:
@@ -292,7 +300,10 @@ func (server *OAuthServer) Stop(ctx context.Context) error {
 }
 
 // WaitForCallbackWithContext waits for a callback, cancellation, or timeout.
-func (server *OAuthServer) WaitForCallbackWithContext(ctx context.Context, timeout time.Duration) (*OAuthResult, error) {
+func (server *OAuthServer) WaitForCallbackWithContext(ctx context.Context, timeout time.Duration) (
+	*OAuthResult,
+	error,
+) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
@@ -332,10 +343,20 @@ func (server *OAuthServer) handleCallback(response http.ResponseWriter, request 
 	}
 	if result.Error != "" {
 		response.WriteHeader(http.StatusBadRequest)
-		_, _ = response.Write([]byte("<!doctype html><title>Devin authentication failed</title><p>" + html.EscapeString(result.Error) + "</p>"))
+		_, _ = response.Write(
+			[]byte(
+				"<!doctype html><title>Devin authentication failed</title><p>" + html.EscapeString(
+					result.Error,
+				) + "</p>",
+			),
+		)
 	} else {
 		response.WriteHeader(http.StatusOK)
-		_, _ = response.Write([]byte("<!doctype html><title>Devin authentication complete</title><p>You may close this window.</p>"))
+		_, _ = response.Write(
+			[]byte(("<!doctype html><title>Devin authentication complete</title><p>You may " +
+				"close this window.</" +
+				"p>")),
+		)
 	}
 	select {
 	case server.resultChan <- result:

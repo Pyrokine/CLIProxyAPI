@@ -111,7 +111,9 @@ func FetchGCPProjects(ctx context.Context, httpClient *http.Client) ([]interface
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf(
-			"project list request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)),
+			"project list request failed with status %d: %s",
+			resp.StatusCode,
+			strings.TrimSpace(string(bodyBytes)),
 		)
 	}
 
@@ -346,7 +348,9 @@ func PerformCLISetup(
 					} else {
 						// Pro users: keep requested project ID (original behavior)
 						log.Warnf(
-							"Gemini onboarding returned project %s instead of requested %s; keeping requested project ID.",
+							"Gemini onboarding returned project %s instead of requested %s; "+
+								"keeping requested project "+
+								"ID.",
 							responseProjectID, projectID,
 						)
 					}

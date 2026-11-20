@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
@@ -114,7 +115,9 @@ func (h *Handler) FetchCredentialQuota(c *gin.Context) {
 		defer cancel()
 		probe, errProbe := h.probeCodexResetCredits(ctx, h.configSnapshot(), auth)
 		if errProbe != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to check Codex reset credits: %v", errProbe)})
+			c.JSON(
+				http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to check Codex reset credits: %v", errProbe)},
+			)
 			return
 		}
 		c.JSON(http.StatusOK, probe)
@@ -145,20 +148,24 @@ func (h *Handler) FetchCredentialQuota(c *gin.Context) {
 		}
 		if handled {
 			if errFetch != nil {
-				log.WithError(errFetch).WithFields(log.Fields{
-					"auth_index": auth.Index,
-					"plugin_id":  pluginID,
-					"provider":   provider,
-				}).Warn("management quota plugin fetch failed")
+				log.WithError(errFetch).WithFields(
+					log.Fields{
+						"auth_index": auth.Index,
+						"plugin_id":  pluginID,
+						"provider":   provider,
+					},
+				).Warn("management quota plugin fetch failed")
 				c.JSON(http.StatusBadGateway, gin.H{"error": "quota_fetch_failed"})
 				return
 			}
 			if errValidate := validateQuotaFetchResponse(response); errValidate != nil {
-				log.WithError(errValidate).WithFields(log.Fields{
-					"auth_index": auth.Index,
-					"plugin_id":  pluginID,
-					"provider":   provider,
-				}).Warn("management quota plugin returned invalid response")
+				log.WithError(errValidate).WithFields(
+					log.Fields{
+						"auth_index": auth.Index,
+						"plugin_id":  pluginID,
+						"provider":   provider,
+					},
+				).Warn("management quota plugin returned invalid response")
 				c.JSON(http.StatusBadGateway, gin.H{"error": "invalid_quota_response"})
 				return
 			}
@@ -178,10 +185,12 @@ func (h *Handler) FetchCredentialQuota(c *gin.Context) {
 		return
 	}
 	if errProbe != nil {
-		log.WithError(errProbe).WithFields(log.Fields{
-			"auth_index": auth.Index,
-			"provider":   provider,
-		}).Warn("management declarative quota probe failed")
+		log.WithError(errProbe).WithFields(
+			log.Fields{
+				"auth_index": auth.Index,
+				"provider":   provider,
+			},
+		).Warn("management declarative quota probe failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "quota_probe_failed"})
 		return
 	}
@@ -272,20 +281,24 @@ func (h *Handler) fetchQuotaForPlugin(c *gin.Context, pluginID, authIndex string
 		return
 	}
 	if errFetch != nil {
-		log.WithError(errFetch).WithFields(log.Fields{
-			"auth_index": auth.Index,
-			"plugin_id":  pluginID,
-			"provider":   auth.Provider,
-		}).Warn("management plugin quota fetch failed")
+		log.WithError(errFetch).WithFields(
+			log.Fields{
+				"auth_index": auth.Index,
+				"plugin_id":  pluginID,
+				"provider":   auth.Provider,
+			},
+		).Warn("management plugin quota fetch failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "quota_fetch_failed"})
 		return
 	}
 	if errValidate := validateQuotaFetchResponse(response); errValidate != nil {
-		log.WithError(errValidate).WithFields(log.Fields{
-			"auth_index": auth.Index,
-			"plugin_id":  pluginID,
-			"provider":   auth.Provider,
-		}).Warn("management plugin returned invalid quota response")
+		log.WithError(errValidate).WithFields(
+			log.Fields{
+				"auth_index": auth.Index,
+				"plugin_id":  pluginID,
+				"provider":   auth.Provider,
+			},
+		).Warn("management plugin returned invalid quota response")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid_quota_response"})
 		return
 	}
@@ -321,9 +334,7 @@ func (h *Handler) ResetPluginQuota(c *gin.Context) {
 }
 
 func (h *Handler) resetCredentialQuota(c *gin.Context, auth *coreauth.Auth, pluginID, provider string) {
-	if auth != nil {
-		setManagementMutationTarget(c, "auth_index", auth.Index)
-	}
+	setManagementMutationTarget(c, "auth_index", auth.Index)
 	host := h.quotaPluginHost()
 	if host == nil {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "quota_provider_unavailable"})
@@ -339,11 +350,13 @@ func (h *Handler) resetCredentialQuota(c *gin.Context, auth *coreauth.Auth, plug
 		return
 	}
 	if !quotaResetSupported(c.Request.Context(), host, pluginID, provider) {
-		log.WithFields(log.Fields{
-			"auth_index": auth.Index,
-			"plugin_id":  pluginID,
-			"provider":   provider,
-		}).Warn("management quota reset rejected because provider did not declare reset support")
+		log.WithFields(
+			log.Fields{
+				"auth_index": auth.Index,
+				"plugin_id":  pluginID,
+				"provider":   provider,
+			},
+		).Warn("management quota reset rejected because provider did not declare reset support")
 		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "quota_reset_not_supported"})
 		return
 	}
@@ -388,9 +401,13 @@ func (h *Handler) resetCredentialQuota(c *gin.Context, auth *coreauth.Auth, plug
 	}
 
 	if h.authManager != nil {
-		updated, _, errCore := h.authManager.ResetQuota(c.Request.Context(), auth.ID)
+		updated, _, errCore := h.authManager.ResetQuota(
+			coreauth.WithQuotaResetCredential(c.Request.Context(), auth), auth.ID,
+		)
 		if errCore != nil {
-			log.WithError(errCore).WithFields(fields).Error("management quota reset succeeded upstream but local routing reset failed")
+			log.WithError(errCore).
+				WithFields(fields).
+				Error("management quota reset succeeded upstream but local routing reset failed")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "routing_quota_reset_failed"})
 			return
 		}
@@ -558,9 +575,11 @@ func (h *Handler) executeQuotaProbeWithHTTPDo(
 	}
 
 	cfg := h.configSnapshot()
-	token, replacedData, errToken := substituteAPICallToken(headers, data, func() (string, error) {
-		return h.resolveTokenForAuth(ctx, cfg, auth)
-	})
+	token, replacedData, errToken := substituteAPICallToken(
+		headers, data, func() (string, error) {
+			return h.resolveTokenForAuth(ctx, cfg, auth)
+		},
+	)
 	if errToken != nil {
 		return pluginapi.QuotaFetchResponse{}, true, errToken
 	}
@@ -701,9 +720,7 @@ func quotaProbeHeaders(probe map[string]any) (map[string]string, error) {
 	switch values := raw.(type) {
 	case map[string]string:
 		out := make(map[string]string, len(values))
-		for name, value := range values {
-			out[name] = value
-		}
+		maps.Copy(out, values)
 		return out, nil
 	case map[string]any:
 		out := make(map[string]string, len(values))
@@ -780,12 +797,14 @@ func normalizeQuotaProbeResponse(data []byte) (pluginapi.QuotaFetchResponse, err
 				if !okFraction {
 					continue
 				}
-				group.Buckets = append(group.Buckets, pluginapi.QuotaBucket{
-					Window:            rawBucket.Get("window").String(),
-					RemainingFraction: fraction,
-					ResetTime:         firstGJSONValue(rawBucket, "resetTime", "reset_time"),
-					Description:       rawBucket.Get("description").String(),
-				})
+				group.Buckets = append(
+					group.Buckets, pluginapi.QuotaBucket{
+						Window:            rawBucket.Get("window").String(),
+						RemainingFraction: fraction,
+						ResetTime:         firstGJSONValue(rawBucket, "resetTime", "reset_time"),
+						Description:       rawBucket.Get("description").String(),
+					},
+				)
 			}
 			if len(group.Buckets) > 0 {
 				response.Groups = append(response.Groups, group)
@@ -828,7 +847,9 @@ func filterUsableQuotaSummary(data []byte) []pluginapi.QuotaMetric {
 			math.IsNaN(value.Float()) || math.IsInf(value.Float(), 0) {
 			continue
 		}
-		metric := pluginapi.QuotaMetric{Key: strings.TrimSpace(key.String()), Label: strings.TrimSpace(label.String()), Value: value.Float()}
+		metric := pluginapi.QuotaMetric{
+			Key: strings.TrimSpace(key.String()), Label: strings.TrimSpace(label.String()), Value: value.Float(),
+		}
 		if unit := item.Get("unit"); unit.Type == gjson.String {
 			metric.Unit = strings.TrimSpace(unit.String())
 		}
@@ -927,15 +948,21 @@ func mapQuotaProbeResponse(data []byte, mapping map[string]any) (pluginapi.Quota
 		}
 		assign(response.Subscription, value.String())
 	}
-	setSubscriptionField(mappingString(mapping, "plan"), func(item *pluginapi.QuotaSubscription, value string) {
-		item.Plan = value
-	})
-	setSubscriptionField(firstMappingString(mapping, "tier_name", "tierName"), func(item *pluginapi.QuotaSubscription, value string) {
-		item.TierName = value
-	})
-	setSubscriptionField(firstMappingString(mapping, "tier_id", "tierId"), func(item *pluginapi.QuotaSubscription, value string) {
-		item.TierID = value
-	})
+	setSubscriptionField(
+		mappingString(mapping, "plan"), func(item *pluginapi.QuotaSubscription, value string) {
+			item.Plan = value
+		},
+	)
+	setSubscriptionField(
+		firstMappingString(mapping, "tier_name", "tierName"), func(item *pluginapi.QuotaSubscription, value string) {
+			item.TierName = value
+		},
+	)
+	setSubscriptionField(
+		firstMappingString(mapping, "tier_id", "tierId"), func(item *pluginapi.QuotaSubscription, value string) {
+			item.TierID = value
+		},
+	)
 
 	rawGroups, _ := mapping["groups"].([]any)
 	for _, rawGroup := range rawGroups {
@@ -974,7 +1001,9 @@ func mapQuotaProbeResponse(data []byte, mapping map[string]any) (pluginapi.Quota
 	}
 	response.Summary = filterUsableQuotaSummary(data)
 	if errValidate := validateQuotaFetchResponse(response); errValidate != nil {
-		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("quota probe mapping did not produce a usable response: %w", errValidate)
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf(
+			"quota probe mapping did not produce a usable response: %w", errValidate,
+		)
 	}
 	return response, nil
 }

@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -150,7 +151,9 @@ type accountInspectionService struct {
 	updatedAt      time.Time
 }
 
-var accountInspectionSecretPattern = regexp.MustCompile(`(?i)(authorization|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|secret)(\s*[:=]\s*)("[^"]+"|\S+)`)
+var accountInspectionSecretPattern = regexp.MustCompile(
+	`(?i)(authorization|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|secret)(\s*[:=]\s*)("[^"]+"|\S+)`,
+)
 var accountInspectionLongKeyPattern = regexp.MustCompile(`\b(sk-[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{32,})\b`)
 
 func newAccountInspectionService(handler *Handler) *accountInspectionService {
@@ -234,7 +237,7 @@ func (s *accountInspectionService) loadPersistedState(now time.Time) {
 		s.status = accountInspectionStatusStopped
 		s.updatedAt = now
 		s.addLogLocked("warn", "account inspection interrupted by server restart")
-		s.persist()
+		_ = s.persist()
 	}
 }
 
@@ -279,21 +282,23 @@ func (s *accountInspectionService) close() {
 	}
 	s.mu.Unlock()
 	if shouldPersist {
-		s.persist()
+		_ = s.persist()
 	}
 }
 
-func (s *accountInspectionService) persist() {
+func (s *accountInspectionService) persist() error {
 	store := s.stateStore()
 	if store == nil {
-		return
+		return nil
 	}
 	state := s.persistenceSnapshot()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := store.saveAccountInspection(ctx, state); err != nil {
 		log.WithError(err).Warn("failed to save account inspection state")
+		return err
 	}
+	return nil
 }
 
 func (s *accountInspectionService) persistenceSnapshot() accountInspectionPersistedState {
@@ -322,14 +327,28 @@ func (h *Handler) GetAccountInspectionSchedule(c *gin.Context) {
 func (h *Handler) PutAccountInspectionSchedule(c *gin.Context) {
 	var req accountInspectionSchedule
 	if err := c.ShouldBindJSON(&req); err != nil {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
-	schedule, err := h.inspectionService().updateSchedule(req)
+	service := h.inspectionService()
+	schedule, err := service.updateSchedule(req)
 	if err != nil {
+		if _, persisted := errors.AsType[*configPersistenceError](err); persisted {
+			RecordMutationEffect(c.Request.Context(), "configuration.runtime_applied", "configuration")
+			failMutation(c.Request.Context())
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "failed to save account inspection schedule"})
+			return
+		}
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	RecordMutationEffect(c.Request.Context(), "configuration.runtime_applied", "configuration")
+	if service.stateStore() != nil {
+		RecordMutationEffect(c.Request.Context(), "configuration.persisted", "configuration")
+	}
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusOK, schedule)
 }
 
@@ -358,6 +377,8 @@ func (h *Handler) GetAccountInspectionLogs(c *gin.Context) {
 
 func (h *Handler) PostAccountInspectionRun(c *gin.Context) {
 	if run, ok := h.inspectionService().runAsync("manual", ""); ok {
+		RecordMutationEffect(c.Request.Context(), "task.queued", "task")
+		CompleteMutation(c.Request.Context())
 		c.JSON(http.StatusAccepted, run)
 		return
 	}
@@ -380,6 +401,8 @@ func (h *Handler) PostAccountInspectionInspectOne(c *gin.Context) {
 		return
 	}
 	if run, ok := h.inspectionService().runAsync("manual", target); ok {
+		RecordMutationEffect(c.Request.Context(), "task.queued", "task")
+		CompleteMutation(c.Request.Context())
 		c.JSON(http.StatusAccepted, run)
 		return
 	}
@@ -388,6 +411,8 @@ func (h *Handler) PostAccountInspectionInspectOne(c *gin.Context) {
 
 func (h *Handler) PostAccountInspectionStop(c *gin.Context) {
 	if h.inspectionService().stop() {
+		RecordMutationEffect(c.Request.Context(), "task.queued", "task")
+		CompleteMutation(c.Request.Context())
 		c.JSON(http.StatusAccepted, gin.H{"status": accountInspectionStatusStopped})
 		return
 	}
@@ -426,6 +451,7 @@ func (h *Handler) PostAccountInspectionRefreshToken(c *gin.Context) {
 		return
 	}
 	h.inspectionService().addLog("info", "manual token refresh completed for "+inspectionAccountName(auth))
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{"status": "refresh_completed"})
 }
 
@@ -451,17 +477,18 @@ func (s *accountInspectionService) scheduleSnapshot() accountInspectionSchedule 
 }
 
 func (s *accountInspectionService) updateSchedule(req accountInspectionSchedule) (accountInspectionSchedule, error) {
+	current := s.scheduleSnapshot()
 	if req.IntervalSeconds == 0 {
-		req.IntervalSeconds = s.schedule.IntervalSeconds
+		req.IntervalSeconds = current.IntervalSeconds
 	}
 	if req.MaxConcurrency == 0 {
-		req.MaxConcurrency = s.schedule.MaxConcurrency
+		req.MaxConcurrency = current.MaxConcurrency
 	}
 	if req.TimeoutSeconds == 0 {
-		req.TimeoutSeconds = s.schedule.TimeoutSeconds
+		req.TimeoutSeconds = current.TimeoutSeconds
 	}
 	if req.RetentionRuns == 0 {
-		req.RetentionRuns = s.schedule.RetentionRuns
+		req.RetentionRuns = current.RetentionRuns
 	}
 	if req.IntervalSeconds < 60 {
 		return accountInspectionSchedule{}, fmt.Errorf("interval_seconds must be at least 60")
@@ -495,7 +522,9 @@ func (s *accountInspectionService) updateSchedule(req accountInspectionSchedule)
 	)
 	out := cloneInspectionSchedule(s.schedule)
 	s.mu.Unlock()
-	s.persist()
+	if err := s.persist(); err != nil {
+		return out, &configPersistenceError{userMessage: "failed to save account inspection schedule", err: err}
+	}
 	return out, nil
 }
 
@@ -516,11 +545,12 @@ func (s *accountInspectionService) runAsync(trigger string, target string) (*acc
 	s.cancel = cancel
 	s.updatedAt = run.StartedAt
 	s.addLogLocked("info", "account inspection started trigger="+trigger)
+	out := cloneInspectionRun(run)
 	s.mu.Unlock()
-	s.persist()
+	_ = s.persist()
 
 	go s.execute(ctx, run, target)
-	return cloneInspectionRun(run), true
+	return out, true
 }
 
 func (s *accountInspectionService) stop() bool {
@@ -532,7 +562,7 @@ func (s *accountInspectionService) stop() bool {
 	s.cancel()
 	s.addLogLocked("info", "account inspection stop requested")
 	s.mu.Unlock()
-	s.persist()
+	_ = s.persist()
 	return true
 }
 
@@ -607,7 +637,7 @@ func (s *accountInspectionService) execute(ctx context.Context, run *accountInsp
 	s.updatedAt = ended
 	s.addLogLocked("info", fmt.Sprintf("account inspection %s checked=%d", status, len(results)))
 	s.mu.Unlock()
-	s.persist()
+	_ = s.persist()
 }
 
 func (s *accountInspectionService) inspectAccounts(ctx context.Context, target string) []accountInspectionResult {
@@ -705,6 +735,10 @@ func (s *accountInspectionService) inspectAccount(
 	result.CredentialDigest = inspectionCredentialDigest(candidate.auth)
 	if !candidate.hasProbeTarget || s.handler.quotaScheduler == nil {
 		applyInspectionProbeInconclusive(&result, "provider-safe probe is not available")
+		if candidate.auth.AuthSourceKind() == coreauth.AuthSourceConfig ||
+			coreauth.IsPluginVirtualAuth(candidate.auth) {
+			result.Advice = "none"
+		}
 		return result
 	}
 
@@ -717,6 +751,9 @@ func (s *accountInspectionService) inspectAccount(
 	switch probe.Outcome {
 	case quota.ProbeOutcomePassed:
 		result.ProbeStatus = accountProbePassed
+		if coreauth.IsPluginVirtualAuth(candidate.auth) {
+			result.Advice = "none"
+		}
 	case quota.ProbeOutcomeFailed:
 		if inspectionProbeAuthRejected(probe.Error) {
 			applyInspectionProbeFailed(&result, probe.Error)
@@ -797,7 +834,7 @@ func (s *accountInspectionService) addLog(level string, message string) {
 	s.mu.Lock()
 	s.addLogLocked(level, message)
 	s.mu.Unlock()
-	s.persist()
+	_ = s.persist()
 }
 
 func (s *accountInspectionService) addLogLocked(level string, message string) {
@@ -994,7 +1031,8 @@ func buildInspectionResult(auth *coreauth.Auth, quotaEntry *quota.Entry) account
 		result.AutoHandling = "retry_depends_on_provider"
 		return result
 	}
-	if auth.Status == coreauth.StatusUnknown || auth.Status == coreauth.StatusPending || auth.Status == coreauth.StatusRefreshing {
+	if auth.Status == coreauth.StatusUnknown || auth.Status == coreauth.StatusPending ||
+		auth.Status == coreauth.StatusRefreshing {
 		result.Status = accountHealthUnknown
 		result.Reason = string(auth.Status)
 		result.Advice = "wait_or_check_login"

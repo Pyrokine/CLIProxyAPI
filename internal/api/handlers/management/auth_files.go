@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -48,9 +50,16 @@ import (
 )
 
 var (
-	lastRefreshKeys                  = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
+	lastRefreshKeys = []string{
+		"last_refresh",
+		"lastRefresh",
+		"last_refreshed_at",
+		"lastRefreshedAt",
+	}
 	errAuthFileChangedDuringDeletion = errors.New("auth file changed during deletion")
-	errPluginVirtualAuth             = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
+	errPluginVirtualAuth             = errors.New(
+		"plugin virtual auth cannot be modified directly; edit or delete the source auth file",
+	)
 )
 
 const (
@@ -297,6 +306,19 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	nameFilter := strings.TrimSpace(c.Query("name"))
 	authIndexFilter := strings.TrimSpace(c.Query("auth_index"))
 	auths := h.authManager.List()
+	if authIndexFilter != "" {
+		var exact []*coreauth.Auth
+		for _, auth := range auths {
+			if auth != nil && strings.TrimSpace(auth.Index) == authIndexFilter && matchesAuthFileLookup(
+				auth, nameFilter, "",
+			) {
+				exact = append(exact, auth)
+			}
+		}
+		if len(exact) > 0 {
+			auths = exact
+		}
+	}
 	observedAt := time.Now().UTC()
 	cooldownsKnown := !h.authManager.HomeEnabled()
 	quotaProviders := make(map[string]struct{})
@@ -332,11 +354,13 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		}
 	}
 	if !pagination.enabled {
-		sort.Slice(files, func(i, j int) bool {
-			nameI, _ := files[i]["name"].(string)
-			nameJ, _ := files[j]["name"].(string)
-			return strings.ToLower(nameI) < strings.ToLower(nameJ)
-		})
+		sort.Slice(
+			files, func(i, j int) bool {
+				nameI, _ := files[i]["name"].(string)
+				nameJ, _ := files[j]["name"].(string)
+				return strings.ToLower(nameI) < strings.ToLower(nameJ)
+			},
+		)
 	}
 	response := authFilesListResponse(files, pagination, total, end)
 	response["observed_at"] = observedAt
@@ -352,7 +376,7 @@ func matchesAuthFileLookup(auth *coreauth.Auth, name, authIndex string) bool {
 	if name != "" && strings.TrimSpace(auth.ID) != name && strings.TrimSpace(auth.FileName) != name {
 		return false
 	}
-	return authIndex == "" || strings.TrimSpace(auth.EnsureIndex()) == authIndex
+	return authIndex == "" || auth.MatchesIndex(authIndex)
 }
 
 func (h *Handler) lookupAuthFile(name, authIndex string) (*coreauth.Auth, bool) {
@@ -361,12 +385,24 @@ func (h *Handler) lookupAuthFile(name, authIndex string) (*coreauth.Auth, bool) 
 	if h == nil || h.authManager == nil || name == "" && authIndex == "" {
 		return nil, false
 	}
+	var legacyMatch *coreauth.Auth
+	ambiguous := false
 	for _, auth := range h.authManager.List() {
-		if matchesAuthFileLookup(auth, name, authIndex) {
+		if !matchesAuthFileLookup(auth, name, authIndex) {
+			continue
+		}
+		if authIndex == "" || strings.TrimSpace(auth.Index) == authIndex {
 			return auth, true
 		}
+		if legacyMatch != nil {
+			ambiguous = true
+		}
+		legacyMatch = auth
 	}
-	return nil, false
+	if ambiguous {
+		return nil, false
+	}
+	return legacyMatch, legacyMatch != nil
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file
@@ -450,13 +486,19 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, authDir string, paginati
 	files := make([]gin.H, 0, end-start)
 	for _, candidate := range matching[start:end] {
 		name := candidate.entry.Name()
-		fileData := gin.H{"name": name, "size": candidate.info.Size(), "modtime": candidate.info.ModTime()}
+		fileData := gin.H{
+			"name": name, "size": candidate.info.Size(), "modtime": candidate.info.ModTime(), "quota": nil,
+			"model_quotas": nil,
+		}
 
 		// Read file to get type field
 		full := filepath.Join(authDir, name)
 		if data, errRead := os.ReadFile(full); errRead == nil {
 			fileData["type"] = gjson.GetBytes(data, "type").String()
 			fileData["email"] = gjson.GetBytes(data, "email").String()
+			if projectID := strings.TrimSpace(gjson.GetBytes(data, "project_id").String()); projectID != "" {
+				fileData["project_id"] = projectID
+			}
 			if websockets, ok := authFileBoolValueFromGJSON(gjson.GetBytes(data, "websockets")); ok {
 				fileData["websockets"] = websockets
 			}
@@ -519,8 +561,10 @@ func buildAuthFileRuntimeError(auth *coreauth.Auth) *authFileRuntimeError {
 			continue
 		}
 		selectedScope := selected.effectScope
-		if selected.err != nil && selected.err.EffectScope != "" {
-			selectedScope = string(selected.err.EffectScope)
+		if selected.err != nil {
+			if disposition := selected.err.ExplicitExecutionDisposition(); disposition.EffectScope != "" {
+				selectedScope = string(disposition.EffectScope)
+			}
 		}
 		selectedIsModelAggregate := selected.model == "" &&
 			(selectedScope == "exact_model" || selectedScope == "quota_family")
@@ -557,14 +601,15 @@ func buildAuthFileRuntimeError(auth *coreauth.Auth) *authFileRuntimeError {
 			result.Message = message
 		}
 		result.HTTPStatus = selected.err.HTTPStatus
-		if selected.err.EffectScope != "" {
-			result.EffectScope = string(selected.err.EffectScope)
+		disposition := selected.err.ExplicitExecutionDisposition()
+		if disposition.EffectScope != "" {
+			result.EffectScope = string(disposition.EffectScope)
 		}
-		if effectKey := strings.TrimSpace(selected.err.EffectKey); effectKey != "" {
+		if effectKey := strings.TrimSpace(disposition.EffectKey); effectKey != "" {
 			result.EffectKey = effectKey
 		}
-		if selected.err.StateGeneration != 0 {
-			result.StateGeneration = selected.err.StateGeneration
+		if generation := selected.err.ExecutionStateGeneration(); generation != 0 {
+			result.StateGeneration = generation
 		}
 	}
 	result.Message = strings.TrimSpace(string(util.MaskSensitivePayload([]byte(result.Message))))
@@ -595,8 +640,11 @@ func isPersistentAuthFailure(auth *coreauth.Auth, now time.Time) bool {
 	if auth == nil {
 		return false
 	}
-	if auth.Unavailable && auth.Status == coreauth.StatusError && auth.NextRefreshAfter.IsZero() && auth.LastError != nil &&
-		(auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized")) {
+	if auth.Unavailable && auth.Status == coreauth.StatusError && auth.NextRefreshAfter.IsZero() &&
+		auth.LastError != nil &&
+		(auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(
+			auth.LastError.Code, "unauthorized",
+		)) {
 		return true
 	}
 	if expiresAt, ok := auth.AccessTokenExpirationTime(); ok && !expiresAt.IsZero() && !expiresAt.After(now) {
@@ -621,7 +669,10 @@ func isModelStateBlocked(state *coreauth.ModelState, now time.Time) bool {
 	return state.NextRetryAfter.IsZero() && (!state.Quota.Exceeded || state.Quota.NextRecoverAt.IsZero())
 }
 
-func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (bool, coreauth.Status, string, time.Time) {
+func reconcileAuthFileCooldownState(
+	auth *coreauth.Auth,
+	now time.Time,
+) (bool, coreauth.Status, string, time.Time) {
 	if auth == nil {
 		return false, coreauth.StatusActive, "", time.Time{}
 	}
@@ -640,7 +691,8 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (bool, c
 	activeCredentialCooldown := false
 	if auth.Unavailable || auth.Quota.Exceeded {
 		activeCredentialCooldown = auth.NextRetryAfter.After(now)
-		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" &&
+			auth.Quota.NextRecoverAt.After(now) {
 			activeCredentialCooldown = true
 			if auth.Quota.NextRecoverAt.After(nextRetry) {
 				nextRetry = auth.Quota.NextRecoverAt
@@ -664,7 +716,8 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (bool, c
 			allModelsBlocked = false
 		}
 	}
-	hadCooldown := !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded && !auth.Quota.NextRecoverAt.IsZero() || hadModelCooldown
+	hadCooldown := !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded && !auth.Quota.NextRecoverAt.IsZero() ||
+		hadModelCooldown
 	if activeCredentialCooldown || hasModels && allModelsBlocked && auth.Unavailable {
 		if !nextRetry.After(now) {
 			nextRetry = time.Time{}
@@ -684,6 +737,38 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (bool, c
 		nextRetry = time.Time{}
 	}
 	return unavailable, status, statusMessage, nextRetry
+}
+
+func quotaObservationPayloadForProvider(provider string, quota coreauth.QuotaState) gin.H {
+	if !coreauth.ProviderSupportsQuotaObservation(provider) {
+		return quotaObservationPayload(coreauth.QuotaState{})
+	}
+	return quotaObservationPayload(quota)
+}
+
+func quotaObservationPayload(quota coreauth.QuotaState) gin.H {
+	observed := gin.H{}
+	if !quota.ObservedAt.IsZero() {
+		observed["observed_at"] = quota.ObservedAt
+	}
+	signals := make(map[string]string, len(quota.Signals))
+	maps.Copy(signals, quota.Signals)
+	observed["signals"] = signals
+	return observed
+}
+
+func modelQuotaObservationPayload(provider string, states map[string]*coreauth.ModelState) gin.H {
+	observations := gin.H{}
+	if !coreauth.ProviderSupportsQuotaObservation(provider) {
+		return observations
+	}
+	for model, state := range states {
+		if state == nil || state.Quota.ObservedAt.IsZero() && len(state.Quota.Signals) == 0 {
+			continue
+		}
+		observations[model] = quotaObservationPayloadForProvider(provider, state.Quota)
+	}
+	return observations
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
@@ -722,6 +807,8 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"failed":          auth.Failed,
 		"recent_requests": auth.RecentRequestsSnapshot(time.Now()),
 	}
+	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
+	entry["model_quotas"] = modelQuotaObservationPayload(auth.Provider, auth.ModelStates)
 	if runtimeError := buildAuthFileRuntimeError(auth); runtimeError != nil {
 		entry["runtime_error"] = runtimeError
 	}
@@ -1147,7 +1234,13 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	data, err := os.ReadFile(full)
+	root, err := os.OpenRoot(authDir)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to open auth directory"})
+		return
+	}
+	defer func() { _ = root.Close() }()
+	data, err := root.ReadFile(filepath.Base(full))
 	if err != nil {
 		if os.IsNotExist(err) {
 			c.JSON(404, gin.H{"error": "file not found"})
@@ -1196,7 +1289,8 @@ func authsFromUploadedFile(
 			return nil, false, false, fmt.Errorf("invalid auth file: %w", errUnmarshal)
 		}
 		coreauth.NormalizeCredentialMetadata(metadata)
-		if _, _, errProfile := coreauth.ClaudeFingerprintProfile(&coreauth.Auth{Metadata: metadata}); errProfile != nil {
+		if _, _, errProfile := coreauth.ClaudeFingerprintProfile(&coreauth.Auth{Metadata: metadata}); errProfile !=
+			nil {
 			return nil, false, false, errProfile
 		}
 		provider, _ := metadata["type"].(string)
@@ -1259,6 +1353,7 @@ func persistUploadedAuthFile(
 	}
 	persister, ok := store.(uploadedAuthPersister)
 	if !ok {
+		RecordMutationEffect(ctx, "credential.persisted", "credential")
 		return nil
 	}
 	if errPersist := persister.PersistAuthFiles(ctx, "Upload auth "+filepath.Base(path), path); errPersist != nil {
@@ -1270,6 +1365,7 @@ func persistUploadedAuthFile(
 		}
 		return errors.Join(fmt.Errorf("persist uploaded auth: %w", errPersist), errRestore)
 	}
+	RecordMutationEffect(ctx, "credential.persisted", "credential")
 	return nil
 }
 
@@ -1345,6 +1441,7 @@ func (h *Handler) publishUploadedPluginAuths(
 		if updated == nil {
 			return fmt.Errorf("persisted plugin auth mutation was superseded")
 		}
+		RecordMutationEffect(ctx, "credential.published", "credential")
 		updatedAuths = append(updatedAuths, updated)
 
 		for _, auth := range auths[1:] {
@@ -1363,6 +1460,7 @@ func (h *Handler) publishUploadedPluginAuths(
 			if published == nil {
 				return fmt.Errorf("publish plugin auth %s: update was superseded", auth.ID)
 			}
+			RecordMutationEffect(ctx, "credential.published", "credential")
 			updatedAuths = append(updatedAuths, published)
 		}
 	}
@@ -1411,6 +1509,7 @@ func (h *Handler) saveUploadedAuth(ctx context.Context, authDir, path string, da
 	}
 	auths, _, pluginHandled, errValidate := authsFromUploadedFile(ctx, parser, authDir, path, data)
 	if errValidate != nil {
+		rejectMutation(ctx)
 		return errValidate
 	}
 	if pluginHandled {
@@ -1438,6 +1537,7 @@ func (h *Handler) saveUploadedAuth(ctx context.Context, authDir, path string, da
 		return fmt.Errorf("persisted auth mutation was superseded")
 	}
 
+	RecordMutationEffect(ctx, "credential.published", "credential")
 	if errSync := h.disableSupersededFileAuths(mutationCtx, path, updated); errSync != nil {
 		return errSync
 	}
@@ -1463,10 +1563,21 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	form, err := c.MultipartForm()
-	if err == nil && form != nil && len(form.File["file"]) > 0 {
-		uploadedFiles := make([]string, 0, len(form.File["file"]))
+	if err == nil && form != nil && len(form.File) > 0 {
+		files := form.File["file"]
+		fields := make([]string, 0, len(form.File))
+		for field := range form.File {
+			if field != "file" {
+				fields = append(fields, field)
+			}
+		}
+		sort.Strings(fields)
+		for _, field := range fields {
+			files = append(files, form.File[field]...)
+		}
+		uploadedFiles := make([]string, 0, len(files))
 		failed := make([]gin.H, 0)
-		for _, file := range form.File["file"] {
+		for _, file := range files {
 			dst, errV := validateAuthFileName(authDir, filepath.Base(file.Filename))
 			if errV != nil {
 				failed = append(failed, gin.H{"name": file.Filename, "error": errV.Error()})
@@ -1475,7 +1586,8 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			source, errOpen := file.Open()
 			if errOpen != nil {
 				failed = append(
-					failed, gin.H{"name": file.Filename, "error": fmt.Sprintf("failed to open upload: %v", errOpen)},
+					failed,
+					gin.H{"name": file.Filename, "error": fmt.Sprintf("failed to open upload: %v", errOpen)},
 				)
 				continue
 			}
@@ -1497,7 +1609,15 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			status = "partial"
 			statusCode = http.StatusMultiStatus
 		}
-		c.JSON(statusCode, gin.H{"status": status, "uploaded": len(uploadedFiles), "files": uploadedFiles, "failed": failed})
+		if len(failed) > 0 {
+			failMutation(ctx)
+		} else {
+			CompleteMutation(ctx)
+		}
+		c.JSON(
+			statusCode,
+			gin.H{"status": status, "uploaded": len(uploadedFiles), "files": uploadedFiles, "failed": failed},
+		)
 		return
 	}
 	dst, errV := validateAuthFileName(authDir, c.Query("name"))
@@ -1514,7 +1634,11 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, gin.H{"status": "ok", "uploaded": 1, "files": []string{filepath.Base(dst)}, "failed": []string{}})
+	CompleteMutation(ctx)
+	c.JSON(
+		200,
+		gin.H{"status": "ok", "uploaded": 1, "files": []string{filepath.Base(dst)}, "failed": []string{}},
+	)
 }
 
 // DeleteAuthFile deletes auth files: single by name, batch by body, or all.
@@ -1558,6 +1682,8 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 				status := http.StatusInternalServerError
 				if errors.Is(errDelete, errAuthFileChangedDuringDeletion) {
 					status = http.StatusConflict
+				} else if errors.Is(errDelete, os.ErrPermission) {
+					status = http.StatusForbidden
 				}
 				c.JSON(status, gin.H{"error": errDelete.Error()})
 				return
@@ -1565,17 +1691,67 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			deleted++
 			h.syncQuotaSchedulerRemoval(full)
 		}
+		CompleteMutation(ctx)
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return
 	}
-	var body struct {
-		Names []string `json:"names"`
+	names := c.QueryArray("name")
+	batch := false
+	data, errRead := io.ReadAll(c.Request.Body)
+	if errRead != nil && len(names) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read body"})
+		return
 	}
-	if err := c.ShouldBindJSON(&body); err == nil && len(body.Names) > 0 {
-		deletedFiles := make([]string, 0, len(body.Names))
+	if data = bytes.TrimSpace(data); errRead == nil && len(data) > 0 {
+		var errParse error
+		if data[0] == '[' {
+			var arrayNames []string
+			errParse = json.Unmarshal(data, &arrayNames)
+			if errParse == nil && len(names) == 0 {
+				names = arrayNames
+			}
+		} else {
+			var body struct {
+				Name  string   `json:"name"`
+				Names []string `json:"names"`
+			}
+			errParse = json.Unmarshal(data, &body)
+			if errParse == nil {
+				if len(body.Names) > 0 {
+					names = append([]string{body.Name}, body.Names...)
+					batch = true
+				} else if len(names) == 0 {
+					names = []string{body.Name}
+				}
+			}
+		}
+		if errParse != nil && len(names) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+	}
+	seen := make(map[string]struct{}, len(names))
+	uniqueNames := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		uniqueNames = append(uniqueNames, name)
+	}
+	names = uniqueNames
+	if len(names) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid name"})
+		return
+	}
+	if batch || len(names) > 1 {
+		deletedFiles := make([]string, 0, len(names))
 		failed := make([]gin.H, 0)
-		for _, rawName := range body.Names {
-			name := strings.TrimSpace(rawName)
+		for _, name := range names {
 			if _, childIdentity := h.lookupPluginVirtualChildIdentity(name, ""); childIdentity {
 				failed = append(failed, gin.H{"name": name, "error": errPluginVirtualAuth.Error()})
 				continue
@@ -1608,11 +1784,19 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			status = "partial"
 			statusCode = http.StatusMultiStatus
 		}
-		c.JSON(statusCode, gin.H{"status": status, "deleted": len(deletedFiles), "files": deletedFiles, "failed": failed})
+		if len(failed) > 0 {
+			failMutation(ctx)
+		} else {
+			CompleteMutation(ctx)
+		}
+		c.JSON(
+			statusCode,
+			gin.H{"status": status, "deleted": len(deletedFiles), "files": deletedFiles, "failed": failed},
+		)
 		return
 	}
 
-	name := strings.TrimSpace(c.Query("name"))
+	name := names[0]
 	authIndex := strings.TrimSpace(c.Query("auth_index"))
 	if _, childIdentity := h.lookupPluginVirtualChildIdentity(name, authIndex); childIdentity {
 		c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
@@ -1635,11 +1819,14 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		status := http.StatusInternalServerError
 		if errors.Is(errDelete, errAuthFileChangedDuringDeletion) {
 			status = http.StatusConflict
+		} else if errors.Is(errDelete, os.ErrPermission) {
+			status = http.StatusForbidden
 		}
 		c.JSON(status, gin.H{"error": errDelete.Error()})
 		return
 	}
 	h.syncQuotaSchedulerRemoval(full)
+	CompleteMutation(ctx)
 	c.JSON(200, gin.H{"status": "ok", "deleted": 1, "files": []string{filepath.Base(full)}})
 }
 
@@ -1824,18 +2011,21 @@ func (h *Handler) updatePluginVirtualAuthStatus(
 	snapshot := pluginLoginTargetSnapshot{path: sourcePath, existed: true, persisted: data}
 	for _, auth := range parsed {
 		current := currentByID[auth.ID]
-		if current == nil || !coreauth.IsPluginVirtualAuth(auth) || current.EnsureIndex() != auth.EnsureIndex() {
+		if current == nil || !coreauth.IsPluginVirtualAuth(auth) ||
+			current.EnsureIndex() != auth.EnsureIndex() {
 			return fmt.Errorf("plugin auth identities changed while updating source status")
 		}
 		snapshot.runtime = append(snapshot.runtime, current.Clone())
+		snapshot.runtimeAfter = append(snapshot.runtimeAfter, current)
 	}
 
 	store := h.tokenStoreSnapshot()
 	if store == nil {
 		return fmt.Errorf("token store unavailable")
 	}
+	authDir := h.authDirSnapshot()
 	sourceRecord := &coreauth.Auth{
-		ID:       authIDForPath(sourcePath, h.authDirSnapshot()),
+		ID:       authIDForPath(sourcePath, authDir),
 		Provider: strings.TrimSpace(provider),
 		FileName: filepath.Base(sourcePath),
 		Disabled: disabled,
@@ -1850,45 +2040,45 @@ func (h *Handler) updatePluginVirtualAuthStatus(
 	if disabled {
 		sourceRecord.Status = coreauth.StatusDisabled
 	}
-	if _, errSave := store.Save(ctx, sourceRecord); errSave != nil {
-		if errors.Is(errSave, coreauth.ErrAuthDurableStateUncertain) {
-			return errors.Join(fmt.Errorf("persist plugin auth source status: %w", errSave),
-				h.restorePluginLoginPersisted(ctx, h.authDirSnapshot(), snapshot))
-		}
-		return fmt.Errorf("persist plugin auth source status: %w", errSave)
+	version, errVersion := coreauth.PersistedVersionForAuth(sourcePath, sourceRecord)
+	if errVersion != nil {
+		return fmt.Errorf("version plugin auth source: %w", errVersion)
 	}
+	snapshot.version = &version
 	restoreOnFailure := func(failure error) error {
-		persistError := h.restorePluginLoginPersisted(ctx, h.authDirSnapshot(), snapshot)
-		restoreCtx := coreauth.WithSkipPersist(context.WithoutCancel(ctx))
-		var runtimeError error
-		for _, previous := range snapshot.runtime {
-			restored, errUpdate := h.authManager.Update(restoreCtx, previous.Clone())
-			if errUpdate != nil {
-				runtimeError = errors.Join(runtimeError, fmt.Errorf("restore plugin auth %s: %w", previous.ID, errUpdate))
-				continue
-			}
-			if restored == nil {
-				runtimeError = errors.Join(runtimeError, fmt.Errorf("plugin auth %s changed during rollback", previous.ID))
-				continue
-			}
-			h.syncQuotaSchedulerForAuth(restored)
-			if h.postAuthPersistHook != nil {
-				if errHook := h.postAuthPersistHook(restoreCtx, restored); errHook != nil {
-					runtimeError = errors.Join(runtimeError, fmt.Errorf("restore plugin auth runtime %s: %w", previous.ID, errHook))
-				}
-			}
+		return errors.Join(
+			failure,
+			h.rollbackPluginLoginTargets(ctx, authDir, []pluginLoginTargetSnapshot{snapshot}),
+		)
+	}
+	originalDigest, errDigest := coreauth.DigestPersistedJSON(data)
+	if errDigest != nil {
+		return fmt.Errorf("version original plugin auth source: %w", errDigest)
+	}
+	savedPath, errSave := func() (string, error) {
+		unlockFile := authfile.LockFileMutation(sourcePath)
+		defer unlockFile()
+		current, errRead := coreauth.ReadPersistedVersion(sourcePath)
+		if errRead != nil {
+			return "", errRead
 		}
-		return errors.Join(failure, persistError, runtimeError)
+		if current.SHA256 != originalDigest {
+			return "", coreauth.ErrAuthGenerationConflict
+		}
+		return store.Save(ctx, sourceRecord)
+	}()
+	if errSave != nil {
+		failure := fmt.Errorf("persist plugin auth source status: %w", errSave)
+		if strings.TrimSpace(savedPath) != "" || errors.Is(errSave, coreauth.ErrAuthDurableStateUncertain) {
+			return restoreOnFailure(failure)
+		}
+		return failure
 	}
 
-	digest, errDigest := coreauth.DigestPersistedJSON(updatedRaw)
-	if errDigest != nil {
-		return restoreOnFailure(fmt.Errorf("digest plugin auth source: %w", errDigest))
-	}
 	now := time.Now().UTC()
-	digestText := hex.EncodeToString(digest[:])
+	digestText := hex.EncodeToString(version.SHA256[:])
 	publicationCtx := coreauth.WithSkipPersist(context.WithoutCancel(ctx))
-	for _, parsedAuth := range parsed {
+	for index, parsedAuth := range parsed {
 		current := currentByID[parsedAuth.ID]
 		next := current.Clone()
 		next.Disabled = parsedAuth.Disabled
@@ -1912,12 +2102,29 @@ func (h *Handler) updatePluginVirtualAuthStatus(
 		next.Attributes[coreauth.PersistedSHA256Attribute] = digestText
 		next.Attributes[coreauth.PersistedReadAtAttribute] = now.Format(time.RFC3339Nano)
 		next.UpdatedAt = now
-		updated, errUpdate := h.authManager.Update(publicationCtx, next)
+		updated, errUpdate := h.authManager.MutatePersistentAuth(
+			coreauth.WithExpectedAuthGeneration(publicationCtx, current.Generation),
+			next.ID,
+			func(context.Context) (*coreauth.Auth, error) {
+				persisted, errRead := coreauth.ReadPersistedVersion(sourcePath)
+				if errRead != nil {
+					return nil, errRead
+				}
+				if persisted.SHA256 != version.SHA256 {
+					return nil, coreauth.ErrAuthGenerationConflict
+				}
+				return next, nil
+			},
+		)
 		if errUpdate != nil {
 			return restoreOnFailure(fmt.Errorf("publish plugin auth source status: %w", errUpdate))
 		}
 		if updated == nil {
 			return restoreOnFailure(fmt.Errorf("plugin auth source status update was superseded"))
+		}
+		snapshot.runtimeAfter[index] = updated
+		if updated.ID == sourceRecord.ID {
+			snapshot.written = updated
 		}
 		h.syncQuotaSchedulerForAuth(updated)
 		if h.postAuthPersistHook != nil {
@@ -1961,7 +2168,8 @@ func mergeAuthRuntimeState(target *coreauth.Auth, existing *coreauth.Auth, hasLa
 	if target.StatusMessage == "" {
 		target.StatusMessage = existing.StatusMessage
 	}
-	if target.Status == coreauth.StatusActive && existing.Status != "" && existing.Status != coreauth.StatusActive {
+	if target.Status == coreauth.StatusActive && existing.Status != "" &&
+		existing.Status != coreauth.StatusActive {
 		target.Status = existing.Status
 	}
 }
@@ -2093,7 +2301,12 @@ func authFromFile(authDir, path string, data []byte) (*coreauth.Auth, bool, erro
 	}
 	if rawStatus, ok := metadata["status"].(string); ok {
 		switch candidate := coreauth.Status(strings.TrimSpace(rawStatus)); candidate {
-		case coreauth.StatusUnknown, coreauth.StatusActive, coreauth.StatusPending, coreauth.StatusRefreshing, coreauth.StatusError, coreauth.StatusDisabled:
+		case coreauth.StatusUnknown,
+			coreauth.StatusActive,
+			coreauth.StatusPending,
+			coreauth.StatusRefreshing,
+			coreauth.StatusError,
+			coreauth.StatusDisabled:
 			status = candidate
 		}
 	}
@@ -2191,9 +2404,10 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	var req struct {
-		Name      string `json:"name"`
-		AuthIndex string `json:"auth_index"`
-		Disabled  *bool  `json:"disabled"`
+		Name          string          `json:"name"`
+		AuthIndex     string          `json:"auth_index"`
+		Disabled      *bool           `json:"disabled"`
+		ExpectedProbe json.RawMessage `json:"expected_probe"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -2211,6 +2425,23 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
+	var expectedProbe *accountInspectionExpectedProbe
+	if len(req.ExpectedProbe) > 0 {
+		expectedProbe = &accountInspectionExpectedProbe{}
+		if err := json.Unmarshal(req.ExpectedProbe, expectedProbe); err != nil || !expectedProbe.complete() {
+			rejectMutation(c.Request.Context())
+			c.JSON(
+				http.StatusBadRequest,
+				gin.H{
+					"error": "expected_probe requires auth_generation, credential_digest, " +
+						"probe_revision and " +
+						"checked_at",
+				},
+			)
+			return
+		}
+	}
+
 	h.authStatusMu.Lock()
 	locked := true
 	defer func() {
@@ -2226,6 +2457,12 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
+	if expectedProbe != nil &&
+		(coreauth.IsPluginVirtualAuth(targetAuth) || targetAuth.AuthSourceKind() == coreauth.AuthSourceConfig) {
+		rejectMutation(ctx)
+		c.JSON(http.StatusConflict, gin.H{"error": "inspection_account_status_not_supported"})
+		return
+	}
 	if coreauth.IsPluginVirtualAuth(targetAuth) {
 		if pluginVirtualChildIdentity(targetAuth, name, authIndex) {
 			c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
@@ -2234,21 +2471,34 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		locked = false
 		h.authStatusMu.Unlock()
 		if errUpdate := h.updatePluginVirtualAuthStatus(ctx, targetAuth, *req.Disabled); errUpdate != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update plugin auth source: %v", errUpdate)})
+			c.JSON(
+				http.StatusInternalServerError,
+				gin.H{"error": fmt.Sprintf("failed to update plugin auth source: %v", errUpdate)},
+			)
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 		return
 	}
 	if targetAuth.AuthSourceKind() == coreauth.AuthSourceConfig {
-		if _, ok := h.mutateConfig(c, func(next *config.Config) error {
-			return toggleConfigAPIKeyExcludedAll(next, targetAuth, *req.Disabled)
-		}); ok {
+		locked = false
+		h.authStatusMu.Unlock()
+		if _, ok := h.mutateConfig(
+			c, func(next *config.Config) error {
+				return toggleConfigAPIKeyExcludedAll(next, targetAuth, *req.Disabled)
+			},
+		); ok {
+			if current, exists := h.authManager.GetByID(targetAuth.ID); exists &&
+				current.Disabled == *req.Disabled {
+				RecordMutationEffect(ctx, "credential.published", "credential")
+				CompleteMutation(ctx)
+			}
 			c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 		}
 		return
 	}
 
+	expectedAuth := targetAuth.Clone()
 	// Update disabled state
 	targetAuth.Disabled = *req.Disabled
 	if *req.Disabled {
@@ -2260,16 +2510,39 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 	targetAuth.UpdatedAt = time.Now()
 
-	updatedAuth, errUpdate := h.authManager.Update(coreauth.WithDurableAuthPublication(ctx), targetAuth)
+	var updatedAuth *coreauth.Auth
+	var errUpdate error
+	if expectedProbe == nil {
+		updatedAuth, errUpdate = h.authManager.Update(coreauth.WithDurableAuthPublication(ctx), targetAuth)
+	} else {
+		service := h.inspectionService()
+		updatedAuth, errUpdate = h.authManager.MergePersistentUpdateConditional(
+			coreauth.WithDurableAuthPublication(ctx), expectedAuth, targetAuth,
+			func(reserve func() bool) bool {
+				service.mu.Lock()
+				defer service.mu.Unlock()
+				return service.expectedProbeCurrentLocked(expectedAuth, expectedProbe) && reserve()
+			},
+		)
+	}
 	if errUpdate != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", errUpdate)})
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": fmt.Sprintf("failed to update auth: %v", errUpdate)},
+		)
 		return
 	}
 	if updatedAuth == nil {
+		if expectedProbe != nil {
+			rejectMutation(ctx)
+			c.JSON(http.StatusConflict, gin.H{"error": "inspection_result_outdated"})
+			return
+		}
 		c.JSON(http.StatusConflict, gin.H{"error": "auth update was superseded"})
 		return
 	}
 
+	RecordMutationEffect(ctx, "credential.published", "credential")
 	h.syncQuotaSchedulerForAuth(updatedAuth)
 	locked = false
 	h.authStatusMu.Unlock()
@@ -2284,6 +2557,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		}
 	}
 
+	CompleteMutation(ctx)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
@@ -2389,7 +2663,9 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		FingerprintProfile   json.RawMessage   `json:"fingerprint_profile"`
 		FingerprintLegacy    json.RawMessage   `json:"fingerprint-profile"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
@@ -2402,7 +2678,12 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	h.authStatusMu.Lock()
-	defer h.authStatusMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			h.authStatusMu.Unlock()
+		}
+	}()
 
 	ctx := c.Request.Context()
 
@@ -2411,12 +2692,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		if auth, ok := h.authManager.GetByID(authIndex); ok {
 			targetAuth = auth
 		} else {
-			for _, auth := range h.authManager.List() {
-				if auth != nil && auth.Index == authIndex {
-					targetAuth = auth
-					break
-				}
-			}
+			targetAuth = h.authByIndex(authIndex)
 		}
 	}
 	if targetAuth == nil && name != "" {
@@ -2436,7 +2712,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
-	if (authIndex != "" && authIndex != targetAuth.ID && authIndex != targetAuth.Index) ||
+	if (authIndex != "" && authIndex != targetAuth.ID && !targetAuth.MatchesIndex(authIndex)) ||
 		(name != "" && name != targetAuth.ID && name != targetAuth.FileName) {
 		c.JSON(http.StatusConflict, gin.H{"error": "auth file identity mismatch"})
 		return
@@ -2457,9 +2733,11 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid fingerprint-profile"})
 			return
 		}
-		if err := coreauth.ApplyClaudeFingerprintProfileMetadata(targetAuth, map[string]any{
-			coreauth.AttributeClaudeFingerprintProfile: value,
-		}); err != nil {
+		if err := coreauth.ApplyClaudeFingerprintProfileMetadata(
+			targetAuth, map[string]any{
+				coreauth.AttributeClaudeFingerprintProfile: value,
+			},
+		); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -2604,7 +2882,9 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 	var cooling *bool
 	var retry *int
-	if err := (credentialOverridesPatch{DisableCooling: coolingRaw, RequestRetry: retryRaw}).apply(&cooling, &retry); err != nil {
+	if err := (credentialOverridesPatch{DisableCooling: coolingRaw, RequestRetry: retryRaw}).apply(
+		&cooling, &retry,
+	); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -2730,13 +3010,19 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	updatedAuth, errUpdate := h.authManager.Update(coreauth.WithDurableAuthPublication(ctx), targetAuth)
 	if errUpdate != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", errUpdate)})
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": fmt.Sprintf("failed to update auth: %v", errUpdate)},
+		)
 		return
 	}
 	if updatedAuth == nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "auth update was superseded"})
 		return
 	}
+	RecordMutationEffect(ctx, "credential.published", "credential")
+	locked = false
+	h.authStatusMu.Unlock()
 	if h.postAuthPersistHook != nil {
 		if errHook := h.postAuthPersistHook(ctx, updatedAuth); errHook != nil {
 			c.JSON(
@@ -2747,6 +3033,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 	}
 
+	CompleteMutation(ctx)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
@@ -2801,32 +3088,70 @@ func (h *Handler) deleteAuthFile(ctx context.Context, authDir, path string) erro
 	if h == nil || h.authManager == nil {
 		return fmt.Errorf("core auth manager unavailable")
 	}
-	matched := authsForDeletion(h.authManager.List(), authDir, path)
-	if len(matched) == 0 {
-		return h.deleteTokenRecord(ctx, path)
+	auths := h.authManager.List()
+	for _, auth := range auths {
+		if auth == nil || (auth.FileName != filepath.Base(path) && auth.ID != authIDForPath(path, authDir)) {
+			continue
+		}
+		source := strings.TrimSpace(auth.Attributes[coreauth.AttributePath])
+		if source == "" {
+			source = strings.TrimSpace(auth.Attributes[coreauth.AttributeSource])
+		}
+		if source != "" && !authFilePathsEqual(source, path) {
+			return fmt.Errorf(
+				"%w: credential identity refers to a file outside the authorized auth directory",
+				os.ErrPermission,
+			)
+		}
 	}
-	pluginVirtual := false
+	matched := authsForDeletion(auths, authDir, path)
+	generations := make(map[string]uint64, len(matched))
 	for _, auth := range matched {
-		if coreauth.IsPluginVirtualAuth(auth) {
-			pluginVirtual = true
-			break
+		generations[auth.ID] = auth.Generation
+	}
+	store := h.tokenStoreSnapshot()
+	if store == nil {
+		return fmt.Errorf("token store unavailable")
+	}
+	versionedStore, versioned := store.(coreauth.VersionedStore)
+	var version coreauth.PersistedVersion
+	if versioned {
+		var err error
+		version, err = coreauth.ReadPersistedVersion(path)
+		if err != nil {
+			return fmt.Errorf("read auth version before deletion: %w", err)
 		}
 	}
-	removeCtx := ctx
-	if pluginVirtual {
-		if errDelete := h.deleteTokenRecord(ctx, path); errDelete != nil {
-			return errDelete
-		}
-		removeCtx = coreauth.WithRuntimeOnlyRemove(coreauth.WithSkipPersist(context.WithoutCancel(ctx)))
+	removed, errRemove := h.authManager.RemoveIfGenerations(
+		ctx, generations,
+		func(deleteCtx context.Context) (bool, error) {
+			current := authsForDeletion(h.authManager.List(), authDir, path)
+			if len(current) != len(generations) {
+				return false, errAuthFileChangedDuringDeletion
+			}
+			for _, auth := range current {
+				if generation, ok := generations[auth.ID]; !ok || auth.Generation != generation {
+					return false, errAuthFileChangedDuringDeletion
+				}
+			}
+			deleted := true
+			var errDelete error
+			if versioned {
+				deleted, errDelete = versionedStore.DeleteIfVersion(deleteCtx, path, version)
+			} else {
+				errDelete = store.Delete(deleteCtx, path)
+			}
+			if errDelete == nil && deleted {
+				RecordMutationEffect(ctx, "credential.deleted", "credential")
+			}
+			return deleted, errDelete
+		},
+	)
+	if errRemove != nil {
+		return errRemove
 	}
-	for _, auth := range matched {
-		removed, errRemove := h.authManager.RemoveIfGeneration(removeCtx, auth.ID, auth.Generation)
-		if errRemove != nil {
-			return errRemove
-		}
-		if !removed {
-			return fmt.Errorf("%w: %s", errAuthFileChangedDuringDeletion, filepath.Base(path))
-		}
+	if !removed {
+		return fmt.Errorf("%w: %s", errAuthFileChangedDuringDeletion, filepath.Base(path))
 	}
 	return nil
 }
@@ -2870,7 +3195,11 @@ func (h *Handler) deleteTokenRecord(ctx context.Context, path string) error {
 	}
 	versionedStore, versioned := store.(coreauth.VersionedStore)
 	if !versioned {
-		return store.Delete(ctx, path)
+		if errDelete := store.Delete(ctx, path); errDelete != nil {
+			return errDelete
+		}
+		RecordMutationEffect(ctx, "credential.deleted", "credential")
+		return nil
 	}
 	version, errVersion := coreauth.ReadPersistedVersion(path)
 	if errVersion != nil {
@@ -2886,6 +3215,7 @@ func (h *Handler) deleteTokenRecord(ctx context.Context, path string) error {
 	if !deleted {
 		return fmt.Errorf("%w: %s", errAuthFileChangedDuringDeletion, filepath.Base(path))
 	}
+	RecordMutationEffect(ctx, "credential.deleted", "credential")
 	return nil
 }
 
@@ -2903,6 +3233,7 @@ func (h *Handler) saveTokenRecord(
 	ctx context.Context,
 	authDir string,
 	record *coreauth.Auth,
+	saved ...**coreauth.Auth,
 ) (string, error) {
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
@@ -2942,7 +3273,69 @@ func (h *Handler) saveTokenRecord(
 			return "", fmt.Errorf("post-auth hook failed: %w", errHook)
 		}
 	}
+	var legacyClaude *coreauth.Auth
+	var legacyClaudeVersion coreauth.PersistedVersion
+	var legacyClaudeAuths []*coreauth.Auth
+	cleanupLegacyClaude := func(savedPath string) error {
+		if legacyClaude == nil {
+			return nil
+		}
+		if strings.TrimSpace(savedPath) == "" {
+			return fmt.Errorf("canonical Claude credential was not persisted; legacy retained")
+		}
+		versionedStore, ok := store.(coreauth.VersionedStore)
+		if !ok {
+			return fmt.Errorf("legacy Claude credential cleanup requires conditional deletion")
+		}
+		deleteFile := func(deleteCtx context.Context) error {
+			deleted, errDelete := versionedStore.DeleteIfVersion(
+				deleteCtx, legacyClaudeVersion.Path, legacyClaudeVersion,
+			)
+			if errDelete != nil {
+				return errDelete
+			}
+			if !deleted {
+				return errAuthFileChangedDuringDeletion
+			}
+			RecordMutationEffect(ctx, "credential.deleted", "credential")
+			return nil
+		}
+		if h.authManager == nil {
+			return deleteFile(ctx)
+		}
+		generations := make(map[string]uint64, len(legacyClaudeAuths))
+		for _, previous := range legacyClaudeAuths {
+			generations[previous.ID] = previous.Generation
+		}
+		removed, errRemove := h.authManager.RemoveIfGenerations(
+			ctx, generations,
+			func(deleteCtx context.Context) (bool, error) {
+				current := authsForDeletion(h.authManager.List(), authDir, legacyClaudeVersion.Path)
+				if len(current) != len(generations) {
+					return false, errAuthFileChangedDuringDeletion
+				}
+				for _, auth := range current {
+					if generation, ok := generations[auth.ID]; !ok || auth.Generation != generation {
+						return false, errAuthFileChangedDuringDeletion
+					}
+				}
+				if errDelete := deleteFile(deleteCtx); errDelete != nil {
+					return false, errDelete
+				}
+				return true, nil
+			},
+		)
+		if errRemove != nil {
+			return errRemove
+		}
+		if !removed {
+			return errAuthFileChangedDuringDeletion
+		}
+		RecordMutationEffect(ctx, "credential.deleted", "credential")
+		return nil
+	}
 	save := func(saveCtx context.Context) (string, error) {
+		setOAuthSessionPhaseFromContext(saveCtx, "publishing_file")
 		if coreauth.HasAuthCreationIntent(saveCtx) {
 			existing, _, errLoad := authFromFile(authDir, targetPath, nil)
 			if errLoad != nil && !errors.Is(errLoad, os.ErrNotExist) {
@@ -2953,24 +3346,98 @@ func (h *Handler) saveTokenRecord(
 					return "", fmt.Errorf("preserve existing credential settings: %w", errMerge)
 				}
 			}
+			var errLegacy error
+			legacyClaude, errLegacy = claude.FindMatchingLegacyCredential(saveCtx, authDir, record)
+			if errLegacy != nil {
+				return "", fmt.Errorf("find matching Claude legacy credential: %w", errLegacy)
+			}
+			if legacyClaude != nil {
+				legacyClaudeVersion.Path = legacyClaude.Attributes[coreauth.AttributePath]
+				digest, errDigest := hex.DecodeString(
+					legacyClaude.Attributes[coreauth.PersistedSHA256Attribute],
+				)
+				if errDigest != nil || len(digest) != len(legacyClaudeVersion.SHA256) {
+					return "", fmt.Errorf("matching Claude legacy credential has no valid persisted version")
+				}
+				legacyClaudeVersion.SHA256 = [sha256.Size]byte(digest)
+				if h.authManager != nil {
+					legacyClaudeAuths = authsForDeletion(
+						h.authManager.List(),
+						authDir,
+						legacyClaudeVersion.Path,
+					)
+					for _, previous := range legacyClaudeAuths {
+						if source := previous.Attributes[coreauth.AttributePath]; source != "" &&
+							!authFilePathsEqual(source, legacyClaudeVersion.Path) {
+							return "", fmt.Errorf("legacy credential runtime refers to a different file")
+						}
+					}
+				}
+				if errMerge := coreauth.MergeExistingAuthMetadata(record, legacyClaude.Metadata); errMerge != nil {
+					return "", fmt.Errorf("preserve Claude legacy settings: %w", errMerge)
+				}
+			}
 		}
+		var path string
+		var err error
 		if scopedStore, ok := store.(interface {
 			SaveWithBaseDir(context.Context, string, *coreauth.Auth) (string, error)
 		}); ok {
-			return scopedStore.SaveWithBaseDir(saveCtx, authDir, record)
+			path, err = scopedStore.SaveWithBaseDir(saveCtx, authDir, record)
+		} else {
+			path, err = store.Save(saveCtx, record)
 		}
-		return store.Save(saveCtx, record)
+		if err == nil {
+			if strings.TrimSpace(path) != "" {
+				RecordMutationEffect(saveCtx, "credential.persisted", "credential")
+			}
+			setOAuthSessionPhaseFromContext(saveCtx, "publishing_auth")
+		}
+		return path, err
 	}
 
 	if h.authManager == nil {
+		unlockFile := authfile.LockFileMutation(targetPath)
+		locked := true
+		defer func() {
+			if locked {
+				unlockFile()
+			}
+		}()
 		savedPath, errSave := save(ctx)
 		if errSave != nil {
 			return savedPath, errSave
 		}
+		parsePath := strings.TrimSpace(savedPath)
+		if parsePath == "" || !filepath.IsAbs(parsePath) {
+			parsePath = targetPath
+		}
+		persisted, _, errLoad := authFromFile(authDir, parsePath, nil)
+		if errLoad != nil {
+			raw, errMarshal := json.Marshal(record.Metadata)
+			if errMarshal != nil {
+				return savedPath, errors.Join(errLoad, errMarshal)
+			}
+			persisted, _, errLoad = authFromFile(authDir, targetPath, raw)
+			if errLoad != nil {
+				return savedPath, errLoad
+			}
+		}
+		if len(saved) > 0 && saved[0] != nil {
+			*saved[0] = persisted.Clone()
+		}
+		locked = false
+		unlockFile()
 		if h.postAuthPersistHook != nil {
-			if errHook := h.postAuthPersistHook(ctx, record); errHook != nil {
+			if errHook := h.postAuthPersistHook(ctx, persisted); errHook != nil {
 				return savedPath, fmt.Errorf("failed to synchronize auth runtime: %w", errHook)
 			}
+		}
+		if errCleanup := cleanupLegacyClaude(savedPath); errCleanup != nil {
+			return savedPath, fmt.Errorf(
+				"canonical Claude credential saved but legacy cleanup failed: %w",
+				errCleanup,
+			)
 		}
 		return savedPath, nil
 	}
@@ -3009,6 +3476,10 @@ func (h *Handler) saveTokenRecord(
 		return "", fmt.Errorf("persisted auth mutation was superseded")
 	}
 
+	RecordMutationEffect(ctx, "credential.published", "credential")
+	if len(saved) > 0 && saved[0] != nil {
+		*saved[0] = updated.Clone()
+	}
 	if errSync := h.disableSupersededFileAuths(mutationCtx, targetPath, updated); errSync != nil {
 		return "", errSync
 	}
@@ -3017,6 +3488,12 @@ func (h *Handler) saveTokenRecord(
 		if errHook := h.postAuthPersistHook(ctx, updated); errHook != nil {
 			return savedPath, fmt.Errorf("failed to synchronize auth runtime: %w", errHook)
 		}
+	}
+	if errCleanup := cleanupLegacyClaude(savedPath); errCleanup != nil {
+		return savedPath, fmt.Errorf(
+			"canonical Claude credential saved but legacy cleanup failed: %w",
+			errCleanup,
+		)
 	}
 	return savedPath, nil
 }
@@ -3033,9 +3510,13 @@ func (h *Handler) saveOAuthTokenRecord(
 	}
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 	defer cancel()
-	savedPath, errSave := h.saveTokenRecord(coreauth.WithAuthCreationIntent(saveCtx), authDir, record)
+	savedPath, errSave := h.saveTokenRecord(
+		withOAuthSessionContext(
+			coreauth.WithAuthCreationIntent(saveCtx), state, provider,
+		), authDir, record,
+	)
 	if errSave != nil {
-		return "", errSave
+		return savedPath, errSave
 	}
 	fields := log.Fields{
 		"provider": provider,
@@ -3092,9 +3573,17 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
-	registerOAuthSessionForAuthDir(state, "anthropic", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, "anthropic", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 
-	forwarder, ok := h.setupOAuthForwarder(c, flowCfg, "anthropic", anthropicCallbackPort, "/anthropic/callback")
+	forwarder, ok := h.setupOAuthForwarder(
+		c,
+		flowCfg,
+		"anthropic",
+		anthropicCallbackPort,
+		"/anthropic/callback",
+	)
 	if !ok {
 		return
 	}
@@ -3134,6 +3623,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		code, _, _ := strings.Cut(rawCode, "#")
 
 		// Exchange code for tokens using internal auth service
+		if !oauthSessions.setPhase(state, "anthropic", "exchanging") {
+			return
+		}
 		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
 		if errExchange != nil {
 			authErr := oauthcommon.NewAuthenticationError(oauthcommon.ErrCodeExchangeFailed, errExchange)
@@ -3157,17 +3649,24 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if len(tokenStorage.DeviceIDs) > 0 {
 			metadata[claude.DeviceIDsMetadataKey] = append([]string(nil), tokenStorage.DeviceIDs...)
 		}
+		fileName := claude.CredentialFileName(
+			tokenStorage.Email, tokenStorage.OrganizationUUID, tokenStorage.AccountUUID,
+		)
 		record := &coreauth.Auth{
-			ID:       fmt.Sprintf("claude-%s.json", tokenStorage.Email),
+			ID:       fileName,
 			Provider: "claude",
-			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
+			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
 		savedPath, errSave := h.saveOAuthTokenRecord(ctx, flowCfg.AuthDir, state, "anthropic", record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			setOAuthSessionError(state, "Failed to save authentication tokens")
+			message := "Failed to save authentication tokens"
+			if savedPath != "" {
+				message = "Credential saved; authentication synchronization did not complete"
+			}
+			setOAuthSessionError(state, message)
 			return
 		}
 
@@ -3179,6 +3678,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		completeOAuthSession(state)
 	}()
 
+	CompleteMutation(c.Request.Context())
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -3215,7 +3715,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	state := "gem-" + randomState
 	authURL := conf.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 
-	registerOAuthSessionForAuthDir(state, "gemini", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, "gemini", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -3261,6 +3763,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		}
 
 		// Exchange authorization code for token
+		if !oauthSessions.setPhase(state, "gemini", "exchanging") {
+			return
+		}
 		token, err := conf.Exchange(ctx, authCode)
 		if err != nil {
 			log.Errorf("Failed to exchange token: %v", err)
@@ -3299,7 +3804,10 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			log.Errorf("Get user info request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
-			setOAuthSessionError(state, fmt.Sprintf("Get user info request failed with status %d", resp.StatusCode))
+			setOAuthSessionError(
+				state,
+				fmt.Sprintf("Get user info request failed with status %d", resp.StatusCode),
+			)
 			return
 		}
 
@@ -3448,6 +3956,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		log.Infof("You can now use Gemini CLI services through this CLI; token saved to %s", savedPath)
 	}()
 
+	CompleteMutation(c.Request.Context())
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -3477,7 +3986,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
-	registerOAuthSessionForAuthDir(state, "codex", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, "codex", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 
 	forwarder, ok := h.setupOAuthForwarder(c, flowCfg, "codex", codexCallbackPort, "/codex/callback")
 	if !ok {
@@ -3517,6 +4028,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		log.Debug("Authorization code received, exchanging for tokens...")
 		// Exchange code for tokens using internal auth service
+		if !oauthSessions.setPhase(state, "codex", "exchanging") {
+			return
+		}
 		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
 		if errExchange != nil {
 			authErr := oauthcommon.NewAuthenticationError(oauthcommon.ErrCodeExchangeFailed, errExchange)
@@ -3572,6 +4086,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		completeOAuthSession(state)
 	}()
 
+	CompleteMutation(c.Request.Context())
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -3597,9 +4112,17 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
-	registerOAuthSessionForAuthDir(state, "antigravity", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, "antigravity", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 
-	forwarder, ok := h.setupOAuthForwarder(c, flowCfg, "antigravity", antigravity.CallbackPort, "/antigravity/callback")
+	forwarder, ok := h.setupOAuthForwarder(
+		c,
+		flowCfg,
+		"antigravity",
+		antigravity.CallbackPort,
+		"/antigravity/callback",
+	)
 	if !ok {
 		return
 	}
@@ -3634,6 +4157,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			return
 		}
 
+		if !oauthSessions.setPhase(state, "antigravity", "exchanging") {
+			return
+		}
 		tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, authCode, redirectURI)
 		if errToken != nil {
 			log.Errorf("Failed to exchange token: %v", errToken)
@@ -3708,6 +4234,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		log.Info("You can now use Antigravity services through this CLI")
 	}()
 
+	CompleteMutation(c.Request.Context())
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -3734,7 +4261,9 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 	}
 	authURL := deviceFlow.VerificationURIComplete
 
-	registerOAuthSessionForAuthDir(state, "qwen", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, "qwen", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 	pollCtx, cancelPoll := context.WithCancel(ctx)
 	if !setOAuthSessionCancel(state, "qwen", cancelPoll) {
 		c.JSON(http.StatusConflict, gin.H{"error": "oauth session is no longer pending"})
@@ -3744,6 +4273,9 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 	go func() {
 		defer cancelPoll()
 		log.Info("Waiting for authentication...")
+		if !oauthSessions.setPhase(state, "qwen", "exchanging") {
+			return
+		}
 		tokenData, errPollForToken := qwenAuth.PollForToken(
 			pollCtx, deviceFlow.DeviceCode, deviceFlow.CodeVerifier,
 		)
@@ -3772,6 +4304,7 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 		completeOAuthSession(state)
 	}()
 
+	CompleteMutation(c.Request.Context())
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -3807,20 +4340,20 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		domain = strings.TrimSpace(c.Query("channel"))
 	}
 	if domain == "" {
-		domain = kimi.KimiDefaultDomain
+		domain = kimi.DefaultDomain
 	}
 	switch strings.ToLower(domain) {
-	case kimi.KimiDefaultDomain, "kimi", "com":
-		h.requestKimiTokenWithDomain(c, kimi.KimiDefaultDomain)
-	case kimi.KimiAIDomain, "kimi-ai", "ai":
-		h.requestKimiTokenWithDomain(c, kimi.KimiAIDomain)
+	case kimi.DefaultDomain, "kimi", "com":
+		h.requestKimiTokenWithDomain(c, kimi.DefaultDomain)
+	case kimi.AIDomain, "kimi-ai", "ai":
+		h.requestKimiTokenWithDomain(c, kimi.AIDomain)
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported Kimi domain"})
 	}
 }
 
 func (h *Handler) RequestKimiAIToken(c *gin.Context) {
-	h.requestKimiTokenWithDomain(c, kimi.KimiAIDomain)
+	h.requestKimiTokenWithDomain(c, kimi.AIDomain)
 }
 
 func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
@@ -3854,18 +4387,27 @@ func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
 	}
 
-	registerOAuthSessionForAuthDir(state, provider, strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, provider, strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
 		defer cancelPoll()
 		if !setOAuthSessionCancel(state, provider, cancelPoll) {
 			return
 		}
+		if !oauthSessions.setPhase(state, provider, "exchanging") {
+			return
+		}
 		authBundle, err := kimiAuth.WaitForAuthorization(pollCtx, deviceFlow)
 		if err != nil {
 			if isOAuthSessionPending(state, provider) {
 				log.WithError(err).Warnf("%s device authorization did not complete", provider)
-				setPendingOAuthSessionError(state, provider, oauthSessionErrorWithCause("Authentication failed", err))
+				setPendingOAuthSessionError(
+					state,
+					provider,
+					oauthSessionErrorWithCause("Authentication failed", err),
+				)
 			}
 			return
 		}
@@ -3885,17 +4427,20 @@ func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 		completeOAuthSession(state)
 	}()
 
-	c.JSON(http.StatusOK, gin.H{
-		"status":                    "ok",
-		"url":                       authURL,
-		"state":                     state,
-		"flow":                      "device",
-		"user_code":                 strings.TrimSpace(deviceFlow.UserCode),
-		"verification_uri":          strings.TrimSpace(deviceFlow.VerificationURI),
-		"verification_uri_complete": strings.TrimSpace(deviceFlow.VerificationURIComplete),
-		"expires_in":                deviceFlow.ExpiresIn,
-		"interval":                  deviceFlow.Interval,
-	})
+	CompleteMutation(c.Request.Context())
+	c.JSON(
+		http.StatusOK, gin.H{
+			"status":                    "ok",
+			"url":                       authURL,
+			"state":                     state,
+			"flow":                      "device",
+			"user_code":                 strings.TrimSpace(deviceFlow.UserCode),
+			"verification_uri":          strings.TrimSpace(deviceFlow.VerificationURI),
+			"verification_uri_complete": strings.TrimSpace(deviceFlow.VerificationURIComplete),
+			"expires_in":                deviceFlow.ExpiresIn,
+			"interval":                  deviceFlow.Interval,
+		},
+	)
 }
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
@@ -3917,7 +4462,9 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	authSvc := iflowauth.NewAuth(flowCfg)
 	authURL, redirectURI := authSvc.AuthorizationURL(state, iflowauth.CallbackPort)
 
-	registerOAuthSessionForAuthDir(state, "iflow", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, "iflow", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 
 	forwarder, ok := h.setupOAuthForwarder(c, flowCfg, "iflow", iflowauth.CallbackPort, "/iflow/callback")
 	if !ok {
@@ -3958,6 +4505,9 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 			return
 		}
 
+		if !oauthSessions.setPhase(state, "iflow", "exchanging") {
+			return
+		}
 		tokenData, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI)
 		if errExchange != nil {
 			setOAuthSessionError(state, "Authentication failed")
@@ -3995,11 +4545,12 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		completeOAuthSession(state)
 	}()
 
+	CompleteMutation(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
 func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
-	ctx := context.Background()
+	ctx := context.WithoutCancel(c.Request.Context())
 	flowCfg, ok := h.authFlowConfig(c)
 	if !ok {
 		return
@@ -4009,6 +4560,7 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 		Cookie string `json:"cookie"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "cookie is required"})
 		return
 	}
@@ -4016,12 +4568,14 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 	cookieValue := strings.TrimSpace(payload.Cookie)
 
 	if cookieValue == "" {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "cookie is required"})
 		return
 	}
 
 	cookieValue, errNormalize := iflowauth.NormalizeCookie(cookieValue)
 	if errNormalize != nil {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": errNormalize.Error()})
 		return
 	}
@@ -4033,6 +4587,7 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 		return
 	} else if existingFile != "" {
 		existingFileName := filepath.Base(existingFile)
+		rejectMutation(c.Request.Context())
 		c.JSON(
 			http.StatusConflict,
 			gin.H{"status": "error", "error": "duplicate BXAuth found", "existing_file": existingFileName},
@@ -4087,11 +4642,15 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 	savedPath, errSave := h.saveTokenRecord(ctx, flowCfg.AuthDir, record)
 	if errSave != nil {
 		c.JSON(
-			http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to save authentication tokens"},
+			http.StatusInternalServerError,
+			gin.H{"status": "error", "error": "failed to save authentication tokens"},
 		)
 		return
 	}
 
+	if savedPath != "" {
+		CompleteMutation(ctx)
+	}
 	log.Infof("iFlow cookie authentication successful. Token saved to %s", savedPath)
 	c.JSON(
 		http.StatusOK, gin.H{
@@ -4209,9 +4768,6 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 
-	h.authStatusMu.Lock()
-	defer h.authStatusMu.Unlock()
-
 	session, ok := getOAuthSessionIntegrationDetails(state)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "expired", "error": "unknown or expired state"})
@@ -4229,28 +4785,36 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "error", "error": session.Status})
 		return
 	}
-	if session.Source == oauthSessionSourcePlugin {
-		h.pollPluginOAuthSession(c, state, session)
-		return
+	payload := gin.H{"status": "wait", "phase": oauthSessionPhase(session)}
+	if session.Source == oauthSessionSourcePlugin && session.Message != "" {
+		payload["message"] = session.Message
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "wait", "phase": oauthSessionPhase(session)})
+	c.JSON(http.StatusOK, payload)
 }
 
 func (h *Handler) CancelAuthSession(c *gin.Context) {
 	state := strings.TrimSpace(c.Query("state"))
 	if state == "" {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "state is required"})
 		return
 	}
 	if err := validateOAuthState(state); err != nil {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
 		return
 	}
 	if _, _, _, ok := getOAuthSessionDetails(state); ok && !verifyOAuthNonce(state, c.Query("nonce")) {
+		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "error": "nonce mismatch"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "cancelled": cancelOAuthSession(state)})
+	cancelled := cancelOAuthSession(state)
+	if cancelled {
+		RecordMutationEffect(c.Request.Context(), "task.runtime_applied", "task")
+		CompleteMutation(c.Request.Context())
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "cancelled": cancelled})
 }
 
 func (h *Handler) RequestXAIToken(c *gin.Context) {
@@ -4283,7 +4847,9 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
 	}
 
-	registerOAuthSessionForAuthDir(state, "xai", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir)
+	registerOAuthSessionForAuthDir(
+		state, "xai", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+	)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -4293,6 +4859,9 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		}
 
 		log.Info("Waiting for xAI authentication...")
+		if !oauthSessions.setPhase(state, "xai", "exchanging") {
+			return
+		}
 		bundle, errWaitForAuthorization := authSvc.WaitForAuthorization(pollCtx, deviceFlow)
 		if errWaitForAuthorization != nil {
 			if !isOAuthSessionPending(state, "xai") {
@@ -4370,6 +4939,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 	if expiresIn <= 0 {
 		expiresIn = int(xaiauth.MaxPollDuration / time.Second)
 	}
+	CompleteMutation(c.Request.Context())
 	c.JSON(
 		http.StatusOK, gin.H{
 			"status":                    "ok",

@@ -193,7 +193,9 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 			}
 			if !isChecked {
 				log.Errorf(
-					"Failed to check if Cloud AI API is enabled for project %s. If you encounter an error message, please create an issue.",
+					"Failed to check if Cloud AI API is enabled for project %s. If you "+
+						"encounter an error message, please create an "+
+						"issue.",
 					pid,
 				)
 				return
@@ -266,7 +268,10 @@ func promptForProjectSelection(
 				return trimmedPreset
 			}
 		}
-		log.Warnf("Provided project ID %s not found in available projects; please choose from the list.", trimmedPreset)
+		log.Warnf(
+			"Provided project ID %s not found in available projects; please choose from the list.",
+			trimmedPreset,
+		)
 	}
 
 	for {

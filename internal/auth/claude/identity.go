@@ -4,8 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"strings"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
 const (

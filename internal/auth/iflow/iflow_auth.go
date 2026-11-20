@@ -47,7 +47,11 @@ type Auth struct {
 }
 
 // NewAuth constructs a new Auth with proxy-aware transport.
-func NewAuth(cfg *config.Config) *Auth {
+// 提供客户端时，所有认证请求复用该客户端的代理、传输和超时
+func NewAuth(cfg *config.Config, clients ...*http.Client) *Auth {
+	if len(clients) > 0 && clients[0] != nil {
+		return &Auth{httpClient: clients[0]}
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	return &Auth{httpClient: util.SetProxy(&cfg.SDKConfig, client)}
 }
@@ -250,6 +254,8 @@ type tokenResponse struct {
 }
 
 // TokenData captures processed token details.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type TokenData struct {
 	AccessToken  string
 	RefreshToken string
@@ -283,6 +289,8 @@ type iFlowAPIKeyResponse struct {
 }
 
 // KeyData contains the API key information
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type KeyData struct {
 	HasExpired bool   `json:"hasExpired"`
 	ExpireTime string `json:"expireTime"`
@@ -337,7 +345,9 @@ func (ia *Auth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*KeyData, e
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set(
 		"User-Agent",
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, "+
+			"like Gecko) Chrome/91.0.4472.124 Safari/"+
+			"537.36",
 	)
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
@@ -382,7 +392,10 @@ func (ia *Auth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*KeyData, e
 	}
 
 	if !keyResp.Success {
-		return nil, fmt.Errorf("iflow cookie: GET request not successful: %s", sanitizeIFlowText(keyResp.Message))
+		return nil, fmt.Errorf(
+			"iflow cookie: GET request not successful: %s",
+			sanitizeIFlowText(keyResp.Message),
+		)
 	}
 
 	// Handle initial response where apiKey field might be apiKeyMask
@@ -425,7 +438,9 @@ func (ia *Auth) RefreshAPIKey(ctx context.Context, cookie, name string) (*KeyDat
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set(
 		"User-Agent",
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, "+
+			"like Gecko) Chrome/91.0.4472.124 Safari/"+
+			"537.36",
 	)
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")

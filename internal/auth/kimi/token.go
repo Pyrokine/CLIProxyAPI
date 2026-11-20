@@ -47,13 +47,10 @@ func (ts *TokenStorage) CloneForPersistence() coreauth.TokenStorage {
 }
 
 // SetMetadata injects metadata before the token is persisted.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
-}
-
-// BuildMetadata constructs the standard metadata map for a Kimi Code auth bundle.
-func BuildMetadata(bundle *AuthBundle) map[string]any {
-	return BuildMetadataForDomain(bundle, KimiDefaultDomain)
 }
 
 // BuildMetadataForDomain includes the provider and API endpoint for the selected Kimi service.
@@ -105,6 +102,8 @@ type AuthBundle struct {
 }
 
 // DeviceCodeResponse represents Kimi's device code response.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type DeviceCodeResponse struct {
 	// DeviceCode is the device verification code.
 	DeviceCode string `json:"device_code"`
@@ -124,10 +123,10 @@ type DeviceCodeResponse struct {
 func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	if IsKimiAIDomain(ts.Type) || IsKimiAIDomain(ts.Domain) {
 		ts.Type = "kimi-ai"
-		ts.Domain = KimiAIDomain
+		ts.Domain = AIDomain
 	} else {
 		ts.Type = "kimi"
-		ts.Domain = KimiDefaultDomain
+		ts.Domain = DefaultDomain
 	}
 	if ts.BaseURL == "" {
 		ts.BaseURL = ResolveKimiAPIBaseURL(ts.Domain)

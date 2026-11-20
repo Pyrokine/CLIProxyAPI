@@ -42,12 +42,21 @@ func CodexResetCreditAvailability(data []byte, now time.Time) (string, error) {
 		return "", fmt.Errorf("invalid Codex reset credit response")
 	}
 	for _, field := range []string{"rate_limit_reset_credits_error", "rateLimitResetCreditsError"} {
-		if value := bytes.TrimSpace(payload[field]); len(value) > 0 && string(value) != "null" && string(value) != `""` {
+		if value := bytes.TrimSpace(payload[field]); len(value) > 0 && string(value) != "null" &&
+			string(value) != `""` {
 			return "", fmt.Errorf("codex reset credit query failed")
 		}
 	}
-	usage := parseCodexResetCreditSummary(codexResetCreditField(payload, "rate_limit_reset_credits", "rateLimitResetCredits"), now)
-	details := parseCodexResetCreditSummary(codexResetCreditField(payload, "rate_limit_reset_credits_details", "rateLimitResetCreditsDetails"), now)
+	usage := parseCodexResetCreditSummary(
+		codexResetCreditField(
+			payload, "rate_limit_reset_credits", "rateLimitResetCredits",
+		), now,
+	)
+	details := parseCodexResetCreditSummary(
+		codexResetCreditField(
+			payload, "rate_limit_reset_credits_details", "rateLimitResetCreditsDetails",
+		), now,
+	)
 	if usage.count.state == "conflict" || details.count.state == "conflict" ||
 		(usage.count.state == "known" && details.count.state == "known" && usage.count.value != details.count.value) {
 		return "conflict", nil
@@ -103,7 +112,9 @@ func parseCodexResetCreditSummary(data json.RawMessage, now time.Time) codexRese
 	}
 	if len(record) > 0 {
 		expected := false
-		for _, field := range []string{"credits", "available_count", "availableCount", "applicable_available_count", "applicableAvailableCount"} {
+		for _, field := range []string{
+			"credits", "available_count", "availableCount", "applicable_available_count", "applicableAvailableCount",
+		} {
 			if _, ok := record[field]; ok {
 				expected = true
 				break
@@ -207,7 +218,9 @@ func parseCodexResetCreditCount(data json.RawMessage) (float64, bool) {
 	default:
 		return 0, false
 	}
-	return count, !math.IsNaN(count) && !math.IsInf(count, 0) && count >= 0 && count <= 9007199254740991 && math.Trunc(count) == count
+	return count, !math.IsNaN(count) && !math.IsInf(
+		count, 0,
+	) && count >= 0 && count <= 9007199254740991 && math.Trunc(count) == count
 }
 
 func codexResetCreditTextAliases(record map[string]json.RawMessage, snake, camel string) (string, bool) {
@@ -220,7 +233,9 @@ func codexResetCreditTextAliases(record map[string]json.RawMessage, snake, camel
 		var text string
 		if json.Unmarshal(raw, &text) != nil {
 			var number float64
-			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &number) != nil || math.IsInf(number, 0) || math.IsNaN(number) {
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(
+				raw, &number,
+			) != nil || math.IsInf(number, 0) || math.IsNaN(number) {
 				return "", false
 			}
 			text = strconv.FormatFloat(number, 'f', -1, 64)

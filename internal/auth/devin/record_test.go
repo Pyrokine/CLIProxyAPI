@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,16 +14,22 @@ import (
 )
 
 func TestCreateAuthRecordKeepsTokenServerSideAndSanitizesFilename(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/v3/self":
-			_, _ = response.Write([]byte(`{"user_name":"../../unsafe user","user_id":"user-1","org_id":"org-1"}`))
-		case DevinGetUserStatusPath:
-			_, _ = response.Write(testDevinUserStatusResponse(0, 75))
-		default:
-			http.NotFound(response, request)
-		}
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/v3/self":
+					_, _ = response.Write(
+						[]byte(`{"user_name":"../../unsafe user","user_id":"user-1","org_id":"org-1"}`),
+					)
+				case GetUserStatusPath:
+					_, _ = response.Write(testDevinUserStatusResponse(0, 75))
+				default:
+					http.NotFound(response, request)
+				}
+			},
+		),
+	)
 	defer server.Close()
 
 	service := NewDevinAuthService(server.Client())
@@ -45,8 +53,17 @@ func TestCreateAuthRecordKeepsTokenServerSideAndSanitizesFilename(t *testing.T) 
 	if record.Attributes["session_token"] != token || record.Metadata["session_token"] != token {
 		t.Fatalf("record token metadata is missing")
 	}
-	if _, exists := record.Attributes["api_key"]; exists {
-		t.Fatal("runtime attributes expose Devin token as generic api_key")
+	if record.Attributes["api_key"] != token || record.Metadata["api_key"] != token {
+		t.Fatal("formatted SDK token aliases are inconsistent")
+	}
+	if record.AuthKind() != coreauth.AuthKindOAuth {
+		t.Fatal("session token was classified as an API key")
+	}
+	if _, account := record.AccountInfo(); strings.Contains(account, token) {
+		t.Fatal("account information exposes the session token")
+	}
+	if wireToken, _, _ := CredentialsFromAuth(record); wireToken != token {
+		t.Fatal("executor credentials differ from the SDK token")
 	}
 	for _, key := range []string{
 		"daily_quota_present",
@@ -66,6 +83,24 @@ func TestCreateAuthRecordKeepsTokenServerSideAndSanitizesFilename(t *testing.T) 
 	}
 	if record.Quota.Family != "devin" || record.Quota.Exceeded || record.Quota.ObservedAt.IsZero() {
 		t.Fatalf("record quota state = %+v", record.Quota)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	record.Status, record.Unavailable = coreauth.StatusError, true
+	record.NextRetryAfter = time.Now().Add(time.Hour)
+	registered, err := manager.Register(coreauth.WithSkipPersist(context.Background()), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := coreauth.NewFileCooldownStateStore(filepath.Join(t.TempDir(), "cds"))
+	manager.SetCooldownStateStore(store)
+	manager.PersistCooldownStates(context.Background())
+	records, err := store.Load(context.Background())
+	if err != nil || len(records) != 1 {
+		t.Fatalf("CDS records=%+v error=%v", records, err)
+	}
+	if records[0].AuthID != registered.ID || !reflect.DeepEqual(records[0].Quota.Signals, record.Quota.Signals) ||
+		!records[0].Quota.ObservedAt.Equal(record.Quota.ObservedAt) {
+		t.Fatalf("record -> Manager -> CDS lost Devin observation: %+v", records[0])
 	}
 }
 
@@ -93,13 +128,15 @@ func TestApplyQuotaStatusReplacesObservationAndPreservesGeneration(t *testing.T)
 			"weekly_quota_reset_at":          "stale",
 		},
 	}
-	ApplyQuotaStatus(&quota, &DevinUserStatus{
-		Plan:                       "Pro",
-		DailyQuotaPresent:          true,
-		DailyQuotaRemainingPercent: 0,
-		WeeklyQuotaPresent:         false,
-		PlanStart:                  observedAt.Add(-time.Hour),
-	}, observedAt)
+	ApplyQuotaStatus(
+		&quota, &DevinUserStatus{
+			Plan:                       "Pro",
+			DailyQuotaPresent:          true,
+			DailyQuotaRemainingPercent: 0,
+			WeeklyQuotaPresent:         false,
+			PlanStart:                  observedAt.Add(-time.Hour),
+		}, observedAt,
+	)
 
 	if quota.Generation != 7 || !quota.ObservedAt.Equal(observedAt) {
 		t.Fatalf("quota ownership changed: %+v", quota)
@@ -118,9 +155,13 @@ func TestApplyQuotaStatusReplacesObservationAndPreservesGeneration(t *testing.T)
 }
 
 func TestCreateAuthRecordFallsBackToTokenDigestWithoutExposingToken(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		http.Error(response, "failed", http.StatusBadGateway)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(response http.ResponseWriter, _ *http.Request) {
+				http.Error(response, "failed", http.StatusBadGateway)
+			},
+		),
+	)
 	defer server.Close()
 	service := NewDevinAuthService(server.Client())
 	service.SetAPIBaseURL(server.URL)
@@ -133,7 +174,7 @@ func TestCreateAuthRecordFallsBackToTokenDigestWithoutExposingToken(t *testing.T
 	if strings.Contains(record.FileName, "private-token-value") || !strings.HasPrefix(record.FileName, "devin-user-") {
 		t.Fatalf("fallback filename = %q", record.FileName)
 	}
-	if accountType, account := record.AccountInfo(); accountType != "" || account != "" {
+	if accountType, account := record.AccountInfo(); accountType != coreauth.AuthKindOAuth || account != "" {
 		t.Fatalf("browser-facing account info exposes fallback credential: %q/%q", accountType, account)
 	}
 	if !record.Quota.ObservedAt.IsZero() || len(record.Quota.Signals) != 0 {

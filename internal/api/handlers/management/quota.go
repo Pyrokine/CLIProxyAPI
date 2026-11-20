@@ -19,7 +19,9 @@ import (
 	"github.com/google/uuid"
 )
 
-const codexRateLimitResetCreditsConsumeDefaultURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+const codexRateLimitResetCreditsConsumeDefaultURL = "https://chatgpt.com/backend-api/wham/" +
+	"rate-limit-reset-credits/" +
+	"consume"
 
 var codexRateLimitResetCreditsConsumeURL = codexRateLimitResetCreditsConsumeDefaultURL
 
@@ -82,6 +84,17 @@ func (h *Handler) resetQuota(c *gin.Context, consumeCodexCredit bool) {
 	}
 
 	resetContext := c.Request.Context()
+	consumed := false
+	respondError := func(status int, message string) {
+		body := gin.H{"error": message}
+		if consumed {
+			body["consumed"] = true
+			body["phase"] = "local_cleanup"
+			body["auth_index"] = authIndex
+		}
+		failMutation(c.Request.Context())
+		c.JSON(status, body)
+	}
 	var expected *coreauth.Auth
 	if consumeCodexCredit && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		if _, busy := h.quotaResetInFlight.LoadOrStore(auth.ID, struct{}{}); busy {
@@ -96,7 +109,10 @@ func (h *Handler) resetQuota(c *gin.Context, consumeCodexCredit bool) {
 		resetContext = ctx
 		probe, errProbe := h.probeCodexResetCredits(ctx, cfg, expected)
 		if errProbe != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to check Codex reset credits: %v", errProbe)})
+			c.JSON(
+				http.StatusBadGateway,
+				gin.H{"error": fmt.Sprintf("failed to check Codex reset credits: %v", errProbe)},
+			)
 			return
 		}
 		if probe.Availability != "available" {
@@ -104,11 +120,18 @@ func (h *Handler) resetQuota(c *gin.Context, consumeCodexCredit bool) {
 			return
 		}
 		if err := h.consumeCodexResetCredit(ctx, cfg, expected, probe.Data); err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to consume Codex reset credit: %v", err)})
+			c.JSON(
+				http.StatusBadGateway,
+				gin.H{"error": fmt.Sprintf("failed to consume Codex reset credit: %v", err)},
+			)
 			return
 		}
+		consumed = true
 		if !h.codexResetBindingCurrent(expected, cfg) {
-			c.JSON(http.StatusConflict, gin.H{"error": "credential or proxy changed after Codex reset; local cooldown was retained"})
+			respondError(
+				http.StatusConflict,
+				"credential or proxy changed after Codex reset; local cooldown was retained",
+			)
 			return
 		}
 	}
@@ -125,22 +148,28 @@ func (h *Handler) resetQuota(c *gin.Context, consumeCodexCredit bool) {
 		updated, models, err = h.authManager.ResetCooldown(resetContext, auth.ID)
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to clear local routing state: %v", err)})
+		respondError(
+			http.StatusInternalServerError,
+			fmt.Sprintf("failed to clear local routing state: %v", err),
+		)
 		return
 	}
 	if updated == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		respondError(http.StatusNotFound, "auth not found")
 		return
 	}
 	updated.EnsureIndex()
 
-	c.JSON(
-		http.StatusOK, gin.H{
-			"status":     "ok",
-			"auth_index": updated.Index,
-			"models":     models,
-		},
-	)
+	if len(models) > 0 || expected != nil && updated.Generation != expected.Generation {
+		RecordMutationEffect(c.Request.Context(), "credential.published", "credential")
+	}
+	response := gin.H{"status": "ok", "auth_index": updated.Index, "models": models}
+	if consumed {
+		response["consumed"] = true
+		response["phase"] = "completed"
+	}
+	CompleteMutation(c.Request.Context())
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) consumeCodexResetCredit(
@@ -191,7 +220,10 @@ func (h *Handler) consumeCodexResetCredit(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)")
+	req.Header.Set(
+		"User-Agent",
+		"codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)",
+	)
 
 	client := &http.Client{Timeout: defaultAPICallTimeout, Transport: h.apiCallTransport(cfg, auth, "")}
 	resp, err := client.Do(req)
@@ -219,6 +251,9 @@ func (h *Handler) consumeCodexResetCredit(
 	if confirmation.Code != "reset" && confirmation.Code != "already_redeemed" {
 		return fmt.Errorf("upstream did not confirm reset credit consumption")
 	}
+	if confirmation.Code == "reset" {
+		RecordMutationEffect(ctx, "quota.consumed", "quota")
+	}
 	return nil
 }
 
@@ -231,7 +266,11 @@ type codexResetCreditProbe struct {
 	Data         json.RawMessage `json:"data"`
 }
 
-func (h *Handler) probeCodexResetCredits(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (codexResetCreditProbe, error) {
+func (h *Handler) probeCodexResetCredits(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+) (codexResetCreditProbe, error) {
 	if h.quotaScheduler == nil {
 		return codexResetCreditProbe{}, fmt.Errorf("native quota probe is unavailable")
 	}
@@ -263,7 +302,9 @@ func (h *Handler) probeCodexResetCredits(ctx context.Context, cfg *config.Config
 		return codexResetCreditProbe{}, fmt.Errorf("codex reset credit query did not complete: %s", probe.Error)
 	}
 	if !h.codexResetBindingCurrent(auth, cfg) {
-		return codexResetCreditProbe{}, fmt.Errorf("credential or proxy changed during Codex reset credit query")
+		return codexResetCreditProbe{}, fmt.Errorf(
+			"credential or proxy changed during Codex reset credit query",
+		)
 	}
 	checkedAt := time.Now().UTC()
 	availability, err := quota.CodexResetCreditAvailability(probe.Data, checkedAt)
@@ -275,7 +316,10 @@ func (h *Handler) probeCodexResetCredits(ctx context.Context, cfg *config.Config
 		return codexResetCreditProbe{}, err
 	}
 	data := make(map[string]json.RawMessage)
-	for _, field := range []string{"rate_limit_reset_credits", "rateLimitResetCredits", "rate_limit_reset_credits_details", "rateLimitResetCreditsDetails"} {
+	for _, field := range []string{
+		"rate_limit_reset_credits", "rateLimitResetCredits", "rate_limit_reset_credits_details",
+		"rateLimitResetCreditsDetails",
+	} {
 		if value, exists := payload[field]; exists {
 			data[field] = value
 		}

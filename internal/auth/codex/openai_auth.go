@@ -7,6 +7,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,7 @@ const (
 
 var codexRefreshGroup singleflight.Group
 var codexRefreshTimeout = 30 * time.Second
+var errMissingAccessToken = errors.New("token response is missing access_token")
 
 // Auth handles the OpenAI OAuth2 authentication flow.
 // It manages the HTTP client and provides methods for generating authorization URLs,
@@ -149,6 +151,9 @@ func (o *Auth) ExchangeCodeForTokensWithRedirect(
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
+	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+		return nil, errMissingAccessToken
+	}
 
 	// Extract account ID from ID token
 	claims, err := ParseJWTToken(tokenResp.IDToken)
@@ -255,6 +260,9 @@ func (o *Auth) refreshTokensSingleFlight(ctx context.Context, refreshToken strin
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("failed to parse refresh response: %w", err)
 	}
+	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+		return nil, errMissingAccessToken
+	}
 
 	// Extract account ID from ID token
 	claims, err := ParseJWTToken(tokenResp.IDToken)
@@ -314,6 +322,9 @@ func (o *Auth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, 
 func isNonRetryableRefreshErr(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, errMissingAccessToken) {
+		return true
 	}
 	raw := strings.ToLower(err.Error())
 	return strings.Contains(raw, "refresh_token_reused")

@@ -7,213 +7,75 @@ import (
 
 // loginSuccessHTML is the HTML template displayed to users after successful OAuth authentication.
 // The placeholder {{PROVIDER_NAME}} is replaced with the actual provider name (e.g. "Claude", "Codex").
-const loginSuccessHTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authentication Successful - {{PROVIDER_NAME}}</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2310b981'%3E%3Cpath d='M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z'/%3E%3C/svg%3E">
-    <style>
-        * {
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 1rem;
-        }
-        .container {
-            text-align: center;
-            background: white;
-            padding: 2.5rem;
-            border-radius: 12px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
-            max-width: 480px;
-            width: 100%;
-            animation: slideIn 0.3s ease-out;
-        }
-        @keyframes slideIn {
-            from {
-                opacity: 0;
-                transform: translateY(-20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        .success-icon {
-            width: 64px;
-            height: 64px;
-            margin: 0 auto 1.5rem;
-            background: #10b981;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-size: 2rem;
-            font-weight: bold;
-        }
-        h1 {
-            color: #1f2937;
-            margin-bottom: 1rem;
-            font-size: 1.75rem;
-            font-weight: 600;
-        }
-        .subtitle {
-            color: #6b7280;
-            margin-bottom: 1.5rem;
-            font-size: 1rem;
-            line-height: 1.5;
-        }
-        .setup-notice {
-            background: #fef3c7;
-            border: 1px solid #f59e0b;
-            border-radius: 6px;
-            padding: 1rem;
-            margin: 1rem 0;
-        }
-        .setup-notice h3 {
-            color: #92400e;
-            margin: 0 0 0.5rem 0;
-            font-size: 1rem;
-        }
-        .setup-notice p {
-            color: #92400e;
-            margin: 0;
-            font-size: 0.875rem;
-        }
-        .setup-notice a {
-            color: #1d4ed8;
-            text-decoration: none;
-        }
-        .setup-notice a:hover {
-            text-decoration: underline;
-        }
-        .actions {
-            display: flex;
-            gap: 1rem;
-            justify-content: center;
-            flex-wrap: wrap;
-            margin-top: 2rem;
-        }
-        .button {
-            padding: 0.75rem 1.5rem;
-            border-radius: 8px;
-            font-size: 0.875rem;
-            font-weight: 500;
-            text-decoration: none;
-            transition: all 0.2s;
-            cursor: pointer;
-            border: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-        .button-primary {
-            background: #3b82f6;
-            color: white;
-        }
-        .button-primary:hover {
-            background: #2563eb;
-            transform: translateY(-1px);
-        }
-        .button-secondary {
-            background: #f3f4f6;
-            color: #374151;
-            border: 1px solid #d1d5db;
-        }
-        .button-secondary:hover {
-            background: #e5e7eb;
-        }
-        .countdown {
-            color: #9ca3af;
-            font-size: 0.75rem;
-            margin-top: 1rem;
-        }
-        .footer {
-            margin-top: 2rem;
-            padding-top: 1.5rem;
-            border-top: 1px solid #e5e7eb;
-            color: #9ca3af;
-            font-size: 0.75rem;
-        }
-        .footer a {
-            color: #3b82f6;
-            text-decoration: none;
-        }
-        .footer a:hover {
-            text-decoration: underline;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="success-icon">✓</div>
-        <h1>Authentication Successful!</h1>
-        <p class="subtitle">You have successfully authenticated with {{PROVIDER_NAME}}. You can now close this window and return to your terminal to continue.</p>
-
-        {{SETUP_NOTICE}}
-
-        <div class="actions">
-            <button class="button button-primary" onclick="window.close()">
-                <span>Close Window</span>
-            </button>
-            <a href="{{PLATFORM_URL}}" target="_blank" class="button button-secondary">
-                <span>Open Platform</span>
-                <span>↗</span>
-            </a>
-        </div>
-
-        <div class="countdown">
-            This window will close automatically in <span id="countdown">10</span> seconds
-        </div>
-
-        <div class="footer">
-            <p>Powered by <a href="https://chatgpt.com" target="_blank">ChatGPT</a></p>
-        </div>
-    </div>
-
-    <script>
-        let countdown = 10;
-        const countdownElement = document.getElementById('countdown');
-
-        const timer = setInterval(() => {
-            countdown--;
-            countdownElement.textContent = countdown;
-
-            if (countdown <= 0) {
-                clearInterval(timer);
-                window.close();
-            }
-        }, 1000);
-
-        // Close window when user presses Escape
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                window.close();
-            }
-        });
-
-        // Focus the close button for keyboard accessibility
-        document.querySelector('.button-primary').focus();
-    </script>
-</body>
-</html>`
+//
+//goland:noinspection SpellCheckingInspection
+const loginSuccessHTML = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n    <meta charset=\"UTF-8\">\n    <" +
+	"meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Authentication " +
+	"Successful - {{PROVIDER_NAME}}</title>\n    <link rel=\"icon\" type=\"image/svg+xml\" href=\"data:image/" +
+	"svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2310b981'%3E%3Cpath d='M9 " +
+	"12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z'/%3E%3C/svg%3E\">\n    <style>\n        * {\n            box-" +
+	"sizing: border-box;\n        }\n        body {\n            font-family: -apple-system, " +
+	"BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;\n            display: " +
+	"flex;\n            justify-content: center;\n            align-items: center;\n            min-height: " +
+	"100vh;\n            margin: 0;\n            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%" +
+	");\n            padding: 1rem;\n        }\n        .container {\n            text-align: center;\n      " +
+	"      background: white;\n            padding: 2.5rem;\n            border-radius: 12px;\n            " +
+	"box-shadow: 0 10px 25px rgba(0,0,0,0.1);\n            max-width: 480px;\n            width: 100%;\n     " +
+	"       animation: slideIn 0.3s ease-out;\n        }\n        @keyframes slideIn {\n            from {\n " +
+	"               opacity: 0;\n                transform: translateY(-20px);\n            }\n            " +
+	"to {\n                opacity: 1;\n                transform: translateY(0);\n            }\n        }\n" +
+	"        .success-icon {\n            width: 64px;\n            height: 64px;\n            margin: 0 " +
+	"auto 1.5rem;\n            background: #10b981;\n            border-radius: 50%;\n            display: " +
+	"flex;\n            align-items: center;\n            justify-content: center;\n            color: white;" +
+	"\n            font-size: 2rem;\n            font-weight: bold;\n        }\n        h1 {\n            " +
+	"color: #1f2937;\n            margin-bottom: 1rem;\n            font-size: 1.75rem;\n            font-" +
+	"weight: 600;\n        }\n        .subtitle {\n            color: #6b7280;\n            margin-bottom: 1." +
+	"5rem;\n            font-size: 1rem;\n            line-height: 1.5;\n        }\n        .setup-notice {\n" +
+	"            background: #fef3c7;\n            border: 1px solid #f59e0b;\n            border-radius: " +
+	"6px;\n            padding: 1rem;\n            margin: 1rem 0;\n        }\n        .setup-notice h3 {\n  " +
+	"          color: #92400e;\n            margin: 0 0 0.5rem 0;\n            font-size: 1rem;\n        }\n " +
+	"       .setup-notice p {\n            color: #92400e;\n            margin: 0;\n            font-size: 0." +
+	"875rem;\n        }\n        .setup-notice a {\n            color: #1d4ed8;\n            text-decoration:" +
+	" none;\n        }\n        .setup-notice a:hover {\n            text-decoration: underline;\n        }\n" +
+	"        .actions {\n            display: flex;\n            gap: 1rem;\n            justify-content: " +
+	"center;\n            flex-wrap: wrap;\n            margin-top: 2rem;\n        }\n        .button {\n    " +
+	"        padding: 0.75rem 1.5rem;\n            border-radius: 8px;\n            font-size: 0.875rem;\n   " +
+	"         font-weight: 500;\n            text-decoration: none;\n            transition: all 0.2s;\n     " +
+	"       cursor: pointer;\n            border: none;\n            display: inline-flex;\n            " +
+	"align-items: center;\n            gap: 0.5rem;\n        }\n        .button-primary {\n            " +
+	"background: #3b82f6;\n            color: white;\n        }\n        .button-primary:hover {\n           " +
+	" background: #2563eb;\n            transform: translateY(-1px);\n        }\n        .button-secondary {" +
+	"\n            background: #f3f4f6;\n            color: #374151;\n            border: 1px solid #d1d5db;" +
+	"\n        }\n        .button-secondary:hover {\n            background: #e5e7eb;\n        }\n        ." +
+	"countdown {\n            color: #9ca3af;\n            font-size: 0.75rem;\n            margin-top: 1rem;" +
+	"\n        }\n        .footer {\n            margin-top: 2rem;\n            padding-top: 1.5rem;\n       " +
+	"     border-top: 1px solid #e5e7eb;\n            color: #9ca3af;\n            font-size: 0.75rem;\n     " +
+	"   }\n        .footer a {\n            color: #3b82f6;\n            text-decoration: none;\n        }\n " +
+	"       .footer a:hover {\n            text-decoration: underline;\n        }\n    </style>\n</head>\n<" +
+	"body>\n    <div class=\"container\">\n        <div class=\"success-icon\">✓</div>\n        <h1>" +
+	"Authentication Successful!</h1>\n        <p class=\"subtitle\">You have successfully authenticated with " +
+	"{{PROVIDER_NAME}}. You can now close this window and return to your terminal to continue.</p>\n\n       " +
+	" {{SETUP_NOTICE}}\n\n        <div class=\"actions\">\n            <button class=\"button button-" +
+	"primary\" onclick=\"window.close()\">\n                <span>Close Window</span>\n            </button>" +
+	"\n            <a href=\"{{PLATFORM_URL}}\" target=\"_blank\" class=\"button button-secondary\">\n       " +
+	"         <span>Open Platform</span>\n                <span>↗</span>\n            </a>\n        </div>\n" +
+	"\n        <div class=\"countdown\">\n            This window will close automatically in <span id=\"" +
+	"countdown\">10</span> seconds\n        </div>\n\n        <div class=\"footer\">\n            <p>Powered " +
+	"by <a href=\"https://chatgpt.com\" target=\"_blank\">ChatGPT</a></p>\n        </div>\n    </div>\n\n    " +
+	"<script>\n        let countdown = 10;\n        const countdownElement = document.getElementById('" +
+	"countdown');\n\n        const timer = setInterval(() => {\n            countdown--;\n            " +
+	"countdownElement.textContent = countdown;\n\n            if (countdown <= 0) {\n                " +
+	"clearInterval(timer);\n                window.close();\n            }\n        }, 1000);\n\n        // " +
+	"Close window when user presses Escape\n        document.addEventListener('keydown', (e) => {\n          " +
+	"  if (e.key === 'Escape') {\n                window.close();\n            }\n        });\n\n        // " +
+	"Focus the close button for keyboard accessibility\n        document.querySelector('.button-primary')." +
+	"focus();\n    </script>\n</body>\n</html>"
 
 // setupNoticeHTML is the HTML template for the setup notice section.
-const setupNoticeHTML = `
-        <div class="setup-notice">
-            <h3>Additional Setup Required</h3>
-            <p>To complete your setup, please visit the <a href="{{PLATFORM_URL}}" target="_blank">{{PROVIDER_NAME}}</a> to configure your account.</p>
-        </div>`
+const setupNoticeHTML = "\n        <div class=\"setup-notice\">\n            <h3>Additional Set" +
+	"up Required</h3>\n            <p>To complete your setup, please visit " +
+	`the <a href="{{PLATFORM_URL}}" target="_blank">{{PROVIDER_NAME}}</a> t` +
+	"o configure your account.</p>\n        </div>"
 
 // generateSuccessHTML creates the HTML content for the success page.
 func generateSuccessHTML(providerName string, setupRequired bool, platformURL string) string {

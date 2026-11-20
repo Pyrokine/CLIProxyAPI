@@ -84,12 +84,16 @@ func (h *Handler) RefreshAuthFile(c *gin.Context) {
 	}
 
 	safeError := strings.TrimSpace(string(util.MaskSensitivePayload([]byte(errRefresh.Error()))))
-	log.WithFields(log.Fields{
-		"provider":   result.Provider,
-		"filename":   result.FileName,
-		"auth_index": result.AuthIndex,
-		"error":      safeError,
-	}).Warn("explicit credential refresh failed")
+	// ForceRefreshAuth 失败时仍返回凭据的安全摘要
+	//noinspection GoDfaErrorMayBeNotNil
+	log.WithFields(
+		log.Fields{
+			"provider":   result.Provider,
+			"filename":   result.FileName,
+			"auth_index": result.AuthIndex,
+			"error":      safeError,
+		},
+	).Warn("explicit credential refresh failed")
 
 	status := http.StatusBadGateway
 	errorCode := "credential_refresh_failed"
@@ -97,10 +101,12 @@ func (h *Handler) RefreshAuthFile(c *gin.Context) {
 		status = http.StatusGatewayTimeout
 		errorCode = "credential_refresh_timeout"
 	}
-	c.JSON(status, authFileRefreshResponse{
-		ForceRefreshResult: result,
-		Error:              errorCode,
-	})
+	c.JSON(
+		status, authFileRefreshResponse{
+			ForceRefreshResult: result,
+			Error:              errorCode,
+		},
+	)
 }
 
 func (h *Handler) refreshAllAuthFiles(c *gin.Context) {
@@ -137,13 +143,13 @@ func (h *Handler) refreshAllAuthFiles(c *gin.Context) {
 
 	var wg sync.WaitGroup
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for job := range jobs {
-				results[job.index] = h.refreshAuthFileJob(ctx, job.auth)
-			}
-		}()
+		wg.Go(
+			func() {
+				for job := range jobs {
+					results[job.index] = h.refreshAuthFileJob(ctx, job.auth)
+				}
+			},
+		)
 	}
 	wg.Wait()
 	c.JSON(http.StatusOK, authFileRefreshBatchResponse{Results: results})
@@ -168,7 +174,9 @@ func metaManualRefreshAvailable(auth *coreauth.Auth) bool {
 		return true
 	}
 	if storage, ok := auth.Storage.(*metaauth.MetaTokenStorage); ok && storage != nil {
-		return strings.TrimSpace(storage.DCAToken) != "" || strings.HasPrefix(strings.TrimSpace(storage.AccessToken), "dca:")
+		return strings.TrimSpace(storage.DCAToken) != "" || strings.HasPrefix(
+			strings.TrimSpace(storage.AccessToken), "dca:",
+		)
 	}
 	return false
 }
@@ -188,9 +196,11 @@ func refreshableAuthFiles(auths []*coreauth.Auth) []*coreauth.Auth {
 		}
 		targets = append(targets, auth)
 	}
-	sort.Slice(targets, func(i, j int) bool {
-		return strings.TrimSpace(targets[i].ID) < strings.TrimSpace(targets[j].ID)
-	})
+	sort.Slice(
+		targets, func(i, j int) bool {
+			return strings.TrimSpace(targets[i].ID) < strings.TrimSpace(targets[j].ID)
+		},
+	)
 	return targets
 }
 
@@ -242,14 +252,22 @@ func (h *Handler) refreshAuthFileJob(ctx context.Context, auth *coreauth.Auth) a
 	if errRefresh == nil {
 		return authFileRefreshBatchItem{ForceRefreshResult: result, Success: true}
 	}
-	log.WithFields(log.Fields{
-		"provider":   result.Provider,
-		"filename":   result.FileName,
-		"auth_index": result.AuthIndex,
-		"error": strings.TrimSpace(string(util.MaskSensitivePayload(
-			[]byte(errRefresh.Error()),
-		))),
-	}).Warn("bulk credential refresh failed")
+	// ForceRefreshAuth 失败时仍返回凭据的安全摘要
+	//noinspection GoDfaErrorMayBeNotNil
+	log.WithFields(
+		log.Fields{
+			"provider":   result.Provider,
+			"filename":   result.FileName,
+			"auth_index": result.AuthIndex,
+			"error": strings.TrimSpace(
+				string(
+					util.MaskSensitivePayload(
+						[]byte(errRefresh.Error()),
+					),
+				),
+			),
+		},
+	).Warn("bulk credential refresh failed")
 	return authFileRefreshBatchItem{
 		ForceRefreshResult: result,
 		Error:              refreshErrorCode(jobCtx, errRefresh),

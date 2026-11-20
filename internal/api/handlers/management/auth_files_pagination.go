@@ -111,13 +111,19 @@ func isAuthFileListable(auth *coreauth.Auth) bool {
 		return runtimeOnly
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) && !runtimeOnly &&
-		(auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")) {
+		(auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(
+			strings.TrimSpace(auth.StatusMessage), "removed via management api",
+		)) {
 		return false
 	}
 	return true
 }
 
-func sortedPaginatedAuths(auths []*coreauth.Auth, name, authIndex string, pagination authFilesPagination) ([]*coreauth.Auth, int, int) {
+func sortedPaginatedAuths(
+	auths []*coreauth.Auth,
+	name, authIndex string,
+	pagination authFilesPagination,
+) ([]*coreauth.Auth, int, int) {
 	matching := make([]*coreauth.Auth, 0, len(auths))
 	for _, auth := range auths {
 		if matchesAuthFileLookup(auth, name, authIndex) && isAuthFileListable(auth) {
@@ -125,9 +131,11 @@ func sortedPaginatedAuths(auths []*coreauth.Auth, name, authIndex string, pagina
 			matching = append(matching, auth)
 		}
 	}
-	sort.Slice(matching, func(i, j int) bool {
-		return compareAuthFileListOrder(matching[i], matching[j]) < 0
-	})
+	sort.Slice(
+		matching, func(i, j int) bool {
+			return compareAuthFileListOrder(matching[i], matching[j]) < 0
+		},
+	)
 	start, end := pagination.bounds(len(matching))
 	return matching[start:end], len(matching), end
 }

@@ -29,7 +29,7 @@ func TestQuotaRefreshTaskPersistsTargetResults(t *testing.T) {
 	scheduler.Register("claude.json", quota.TypeClaude, "auth-1")
 	h := NewHandler(&config.Config{}, configPath, nil, withQuotaScheduler(scheduler))
 
-	task, err := h.quotaRefreshService().createTask([]string{"claude.json", "missing.json"})
+	task, err := h.quotaRefreshService().createTask(true, []string{"claude.json", "missing.json"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestQuotaRefreshTaskAppliesGlobalAndProviderConcurrencyLimits(t *testing.T)
 		scheduler.Register("codex-"+suffix+".json", quota.TypeCodex, "codex-auth-"+suffix)
 	}
 	h := newQuotaRefreshTaskTestHandler(t, scheduler)
-	task, err := h.quotaRefreshService().createTask(nil)
+	task, err := h.quotaRefreshService().createTask(true, nil)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -117,7 +117,12 @@ func TestQuotaRefreshTaskAppliesGlobalAndProviderConcurrencyLimits(t *testing.T)
 	}
 	for provider, maximum := range maxByProvider {
 		if maximum > quotaRefreshTaskProviderConcurrency {
-			t.Fatalf("provider %s max active = %d, limit %d", provider, maximum, quotaRefreshTaskProviderConcurrency)
+			t.Fatalf(
+				"provider %s max active = %d, limit %d",
+				provider,
+				maximum,
+				quotaRefreshTaskProviderConcurrency,
+			)
 		}
 	}
 	mu.Unlock()
@@ -153,7 +158,7 @@ func TestQuotaRefreshTaskPauseStopsQueuedTargetsUntilResume(t *testing.T) {
 	service.providerSemaphores = make(map[string]chan struct{})
 	service.mu.Unlock()
 
-	task, err := service.createTask(nil)
+	task, err := service.createTask(true, nil)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -199,7 +204,7 @@ func TestQuotaRefreshTaskCancelPreservesQuotaState(t *testing.T) {
 	scheduler.Register("claude.json", quota.TypeClaude, "auth-1")
 	h := newQuotaRefreshTaskTestHandler(t, scheduler)
 	service := h.quotaRefreshService()
-	task, err := service.createTask([]string{"claude.json"})
+	task, err := service.createTask(true, []string{"claude.json"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -239,8 +244,16 @@ func TestQuotaRefreshTaskRestartMarksActiveTargetsInterrupted(t *testing.T) {
 				CreatedAt: startedAt,
 				StartedAt: &startedAt,
 				Targets: []quotaRefreshTaskTarget{
-					{ID: "claude::one.json", EntryKey: "claude::one.json", Status: quotaRefreshTargetStatusRunning},
-					{ID: "claude::two.json", EntryKey: "claude::two.json", Status: quotaRefreshTargetStatusQueued},
+					{
+						ID:       "claude::one.json",
+						EntryKey: "claude::one.json",
+						Status:   quotaRefreshTargetStatusRunning,
+					},
+					{
+						ID:       "claude::two.json",
+						EntryKey: "claude::two.json",
+						Status:   quotaRefreshTargetStatusQueued,
+					},
 				},
 			},
 		},
@@ -289,7 +302,7 @@ func TestQuotaRefreshTaskPersistenceFailureCannotPublishSuccess(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	h := NewHandler(&config.Config{}, configPath, nil, withQuotaScheduler(scheduler))
 	service := h.quotaRefreshService()
-	task, err := service.createTask([]string{"claude.json"})
+	task, err := service.createTask(true, []string{"claude.json"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -316,7 +329,12 @@ func TestPostQuotaRefreshReturnsPersistentTaskIdentity(t *testing.T) {
 		func(context.Context, *quota.Entry) ([]byte, error) { return []byte(`{}`), nil },
 	)
 	scheduler.Register("claude.json", quota.TypeClaude, "auth-1")
-	h := NewHandler(&config.Config{}, filepath.Join(t.TempDir(), "config.yaml"), nil, withQuotaScheduler(scheduler))
+	h := NewHandler(
+		&config.Config{},
+		filepath.Join(t.TempDir(), "config.yaml"),
+		nil,
+		withQuotaScheduler(scheduler),
+	)
 	defer func() { _ = h.Close() }()
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
@@ -350,12 +368,21 @@ func TestPostQuotaRefreshRejectsUnavailableTaskPersistence(t *testing.T) {
 	defer func() { _ = h.Close() }()
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
-	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/quota/refresh", bytes.NewBufferString(`{}`))
+	ginCtx.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/v0/management/quota/refresh",
+		bytes.NewBufferString(`{}`),
+	)
 	ginCtx.Request.Header.Set("Content-Type", "application/json")
 
 	h.PostQuotaRefresh(ginCtx)
 	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+		t.Fatalf(
+			"status = %d, want %d body=%s",
+			recorder.Code,
+			http.StatusServiceUnavailable,
+			recorder.Body.String(),
+		)
 	}
 }
 
@@ -371,7 +398,7 @@ func TestQuotaRefreshTaskControlHandlersExposePersistentState(t *testing.T) {
 	)
 	scheduler.Register("claude.json", quota.TypeClaude, "auth-1")
 	h := newQuotaRefreshTaskTestHandler(t, scheduler)
-	task, err := h.quotaRefreshService().createTask([]string{"claude.json"})
+	task, err := h.quotaRefreshService().createTask(true, []string{"claude.json"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -472,7 +499,12 @@ func TestQuotaRefreshTaskHandlersReturnNotFoundAndConflict(t *testing.T) {
 				ginCtx.Request = httptest.NewRequest(testCase.method, "/", nil)
 				testCase.handler(ginCtx)
 				if recorder.Code != http.StatusNotFound {
-					t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusNotFound, recorder.Body.String())
+					t.Fatalf(
+						"status = %d, want %d body=%s",
+						recorder.Code,
+						http.StatusNotFound,
+						recorder.Body.String(),
+					)
 				}
 			},
 		)
@@ -484,7 +516,7 @@ func TestQuotaRefreshTaskHandlersReturnNotFoundAndConflict(t *testing.T) {
 	)
 	scheduler.Register("claude.json", quota.TypeClaude, "auth-1")
 	h2 := newQuotaRefreshTaskTestHandler(t, scheduler)
-	task, err := h2.quotaRefreshService().createTask([]string{"claude.json"})
+	task, err := h2.quotaRefreshService().createTask(true, []string{"claude.json"})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -497,6 +529,275 @@ func TestQuotaRefreshTaskHandlersReturnNotFoundAndConflict(t *testing.T) {
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusConflict, recorder.Body.String())
 	}
+}
+
+func TestPostQuotaRefreshRecoveryMode(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		body        string
+		wantCalls   []string
+		wantSkipped int
+		wantHTTP    int
+	}{
+		{
+			name:        "selected restricted batch",
+			body:        `{"credentials":["banned.json","disabled.json","exceeded.json"],"allow_recovery":false}`,
+			wantSkipped: 3,
+		},
+		{name: "one selected banned", body: `{"credentials":["banned.json"],"allow_recovery":false}`, wantSkipped: 1},
+		{
+			name: "one selected disabled", body: `{"credentials":["disabled.json"],"allow_recovery":false}`,
+			wantSkipped: 1,
+		},
+		{
+			name: "one selected exhausted", body: `{"credentials":["exceeded.json"],"allow_recovery":false}`,
+			wantSkipped: 1,
+		},
+		{
+			name: "single banned recovery", body: `{"credentials":["banned.json"],"allow_recovery":true}`,
+			wantCalls: []string{"claude::banned.json"},
+		},
+		{
+			name: "single disabled recovery", body: `{"credentials":["disabled.json"],"allow_recovery":true}`,
+			wantCalls: []string{"claude::disabled.json"},
+		},
+		{
+			name: "single exhausted recovery", body: `{"credentials":["exceeded.json"],"allow_recovery":true}`,
+			wantCalls: []string{"claude::exceeded.json"},
+		},
+		{
+			name: "healthy batch", body: `{"credentials":["healthy.json","healthy-other.json"],"allow_recovery":false}`,
+			wantCalls: []string{"claude::healthy-other.json", "claude::healthy.json"},
+		},
+		{
+			name: "mixed selected batch", body: `{"credentials":["healthy.json","banned.json"],"allow_recovery":false}`,
+			wantCalls: []string{"claude::healthy.json"}, wantSkipped: 1,
+		},
+		{
+			name:        "multiple recovery targets stay protected",
+			body:        `{"credentials":["banned.json","disabled.json","exceeded.json"],"allow_recovery":true}`,
+			wantSkipped: 3,
+		},
+		{
+			name: "mixed recovery batch", body: `{"credentials":["healthy.json","banned.json"],"allow_recovery":true}`,
+			wantCalls: []string{"claude::healthy.json"}, wantSkipped: 1,
+		},
+		{
+			name: "unknown recovery target", body: `{"credentials":["missing.json"],"allow_recovery":true}`,
+			wantSkipped: 1,
+		},
+		{
+			name: "unknown prevents single recovery",
+			body: `{"credentials":["banned.json","missing.json"],"allow_recovery":true}`, wantSkipped: 2,
+		},
+		{
+			name:      "duplicates resolve one recovery target",
+			body:      `{"credentials":["banned.json"," claude::banned.json ","banned.json"],"allow_recovery":true}`,
+			wantCalls: []string{"claude::banned.json"},
+		},
+		{
+			name: "duplicates stay bulk without recovery",
+			body: `{"credentials":["banned.json","banned.json"],"allow_recovery":false}`, wantSkipped: 1,
+		},
+		{
+			name: "ambiguous legacy name stays protected",
+			body: `{"credentials":["shared.json"],"allow_recovery":true}`, wantSkipped: 2,
+		},
+		{
+			name:      "provider key selects exactly one",
+			body:      `{"credentials":["codex::shared.json"],"allow_recovery":true}`,
+			wantCalls: []string{"codex::shared.json"},
+		},
+		{
+			name: "legacy single target recovery", body: `{"credentials":["banned.json"]}`,
+			wantCalls: []string{"claude::banned.json"},
+		},
+		{
+			name: "legacy multiple targets stay protected",
+			body: `{"credentials":["banned.json","disabled.json","exceeded.json"]}`, wantSkipped: 3,
+		},
+		{
+			name: "legacy mixed batch", body: `{"credentials":["healthy.json","exceeded.json"]}`,
+			wantCalls: []string{"claude::healthy.json"}, wantSkipped: 1,
+		},
+		{name: "legacy ambiguous name stays protected", body: `{"credentials":["shared.json"]}`, wantSkipped: 2},
+		{
+			name: "legacy empty body", body: ``,
+			wantCalls: []string{"claude::healthy-other.json", "claude::healthy.json"}, wantSkipped: 5,
+		},
+		{
+			name: "legacy empty object", body: `{}`,
+			wantCalls: []string{"claude::healthy-other.json", "claude::healthy.json"}, wantSkipped: 5,
+		},
+		{
+			name: "no selection cannot request recovery", body: `{"allow_recovery":true}`,
+			wantCalls: []string{"claude::healthy-other.json", "claude::healthy.json"}, wantSkipped: 5,
+		},
+		{
+			name: "invalid recovery field", body: `{"credentials":["banned.json"],"allow_recovery":"true"}`,
+			wantHTTP: http.StatusBadRequest,
+		},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				var mu sync.Mutex
+				var calls []string
+				scheduler := quota.NewSchedulerWithContext(
+					quota.DefaultConfig(), func(_ context.Context, entry *quota.Entry) ([]byte, error) {
+						mu.Lock()
+						calls = append(calls, quota.EntryKey(entry.Type, entry.FileName))
+						mu.Unlock()
+						return []byte(`{"remaining":10}`), nil
+					},
+				)
+				states := map[string]quota.EntryState{
+					"claude::banned.json": {
+						FileName: "banned.json", Type: quota.TypeClaude,
+						Status: quota.StatusBanned,
+					},
+					"claude::disabled.json": {
+						FileName: "disabled.json", Type: quota.TypeClaude,
+						Status: quota.StatusIdle, Disabled: true,
+					},
+					"claude::exceeded.json": {
+						FileName: "exceeded.json", Type: quota.TypeClaude,
+						Status: quota.StatusQuotaExceeded,
+					},
+					"claude::healthy.json": {
+						FileName: "healthy.json", Type: quota.TypeClaude,
+						Status: quota.StatusIdle,
+					},
+					"claude::healthy-other.json": {
+						FileName: "healthy-other.json", Type: quota.TypeClaude,
+						Status: quota.StatusIdle,
+					},
+					"claude::shared.json": {
+						FileName: "shared.json", Type: quota.TypeClaude,
+						Status: quota.StatusBanned,
+					},
+					"codex::shared.json": {
+						FileName: "shared.json", Type: quota.TypeCodex,
+						Status: quota.StatusQuotaExceeded,
+					},
+				}
+				for key, state := range states {
+					state.AuthIndex = "synthetic-" + key
+					states[key] = state
+					scheduler.Register(state.FileName, state.Type, state.AuthIndex)
+					scheduler.SetDisabled(state.FileName, state.Type, state.Disabled)
+				}
+				scheduler.Restore(states)
+				h := newQuotaRefreshTaskTestHandler(t, scheduler)
+				recorder := httptest.NewRecorder()
+				ginCtx, _ := gin.CreateTestContext(recorder)
+				ginCtx.Request = httptest.NewRequest(
+					http.MethodPost, "/v0/management/quota/refresh", bytes.NewBufferString(test.body),
+				)
+				ginCtx.Request.Header.Set("Content-Type", "application/json")
+				h.PostQuotaRefresh(ginCtx)
+				wantHTTP := test.wantHTTP
+				if wantHTTP == 0 {
+					wantHTTP = http.StatusAccepted
+				}
+				if recorder.Code != wantHTTP {
+					t.Fatalf("HTTP = %d, want %d: %s", recorder.Code, wantHTTP, recorder.Body.String())
+				}
+				if wantHTTP != http.StatusAccepted {
+					mu.Lock()
+					defer mu.Unlock()
+					if len(calls) != 0 {
+						t.Fatalf("invalid request called quota provider: %v", calls)
+					}
+					return
+				}
+				var initial quotaRefreshTask
+				if err := json.Unmarshal(recorder.Body.Bytes(), &initial); err != nil {
+					t.Fatal(err)
+				}
+				wantStatus := quotaRefreshTaskStatusInconclusive
+				if len(test.wantCalls) > 0 {
+					wantStatus = quotaRefreshTaskStatusSucceeded
+				}
+				completed := waitQuotaRefreshTask(t, h.quotaRefreshService(), initial.ID, wantStatus)
+				mu.Lock()
+				actualCalls := slices.Clone(calls)
+				mu.Unlock()
+				slices.Sort(actualCalls)
+				if !slices.Equal(actualCalls, test.wantCalls) {
+					t.Fatalf("quota calls = %v, want %v", actualCalls, test.wantCalls)
+				}
+				if completed.CompletedAt ==
+					nil ||
+					completed.Summary.Succeeded !=
+						len(test.wantCalls) ||
+					completed.Summary.Skipped !=
+						test.wantSkipped ||
+					completed.Summary.Total != len(
+						test.wantCalls,
+					)+test.wantSkipped || completed.Summary.Queued != 0 ||
+					completed.Summary.Running != 0 {
+					t.Fatalf("incomplete terminal task: %+v", completed)
+				}
+				for _, target := range completed.Targets {
+					if target.CompletedAt == nil ||
+						target.Status == quotaRefreshTargetStatusSkipped && target.Error == "" {
+						t.Fatalf("target lacks completion or skip reason: %+v", target)
+					}
+					if target.Status == quotaRefreshTargetStatusSkipped && target.EntryKey != "" {
+						state := scheduler.GetStatus().Credentials[target.EntryKey]
+						before := states[target.EntryKey]
+						if state.Status != before.Status || state.Disabled != before.Disabled ||
+							state.LastRefresh != nil {
+							t.Fatalf("skipped credential changed: %+v", state)
+						}
+					}
+				}
+				t.Logf(
+					"POST body=%s HTTP=%d quota_requests=%d entries=%v status=%s summary=%+v",
+					test.body,
+					recorder.Code,
+					len(actualCalls),
+					actualCalls,
+					completed.Status,
+					completed.Summary,
+				)
+			},
+		)
+	}
+}
+
+func TestQuotaRefreshAutomaticProtection(t *testing.T) {
+	calls := make(chan string, 3)
+	scheduler := quota.NewSchedulerWithContext(
+		quota.DefaultConfig(), func(_ context.Context, entry *quota.Entry) ([]byte, error) {
+			calls <- quota.EntryKey(entry.Type, entry.FileName)
+			return []byte(`{"remaining":10}`), nil
+		},
+	)
+	states := map[string]quota.EntryState{
+		"claude::banned.json": {
+			FileName: "banned.json", Type: quota.TypeClaude, AuthIndex: "synthetic-banned",
+			Status: quota.StatusBanned,
+		},
+		"claude::disabled.json": {
+			FileName: "disabled.json", Type: quota.TypeClaude, AuthIndex: "synthetic-disabled",
+			Status: quota.StatusIdle, Disabled: true,
+		},
+		"claude::exceeded.json": {
+			FileName: "exceeded.json", Type: quota.TypeClaude, AuthIndex: "synthetic-exceeded",
+			Status: quota.StatusQuotaExceeded,
+		},
+	}
+	for _, state := range states {
+		scheduler.Register(state.FileName, state.Type, state.AuthIndex)
+		scheduler.SetDisabled(state.FileName, state.Type, state.Disabled)
+	}
+	scheduler.Restore(states)
+	scheduler.RefreshNow(nil)
+	if len(calls) != 0 {
+		t.Fatalf("automatic refresh requested restricted quota: %d calls", len(calls))
+	}
+	t.Log("Scheduler.RefreshNow(nil): banned=0 disabled=0 quota_exceeded=0 quota_requests=0")
 }
 
 func newQuotaRefreshTaskTestHandler(t *testing.T, scheduler *quota.Scheduler) *Handler {
