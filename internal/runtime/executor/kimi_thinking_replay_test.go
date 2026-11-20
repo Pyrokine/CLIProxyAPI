@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -72,9 +73,17 @@ func seedKimiThinkingReplay(
 
 func TestKimiThinkingReplayModelFamily(t *testing.T) {
 	tests := map[string]string{
+		"k3":                              "k3",
 		"kimi-k3":                         "k3",
+		"k3-256k":                         "k3",
 		"kimi-k3-256k":                    "k3",
+		"kimi-k3-256k(high)":              "k3",
 		"k3-256k(high)":                   "k3",
+		"kimi-k2.8":                       "kimi-for-coding",
+		"kimi-k2.8-code":                  "kimi-for-coding",
+		"kimi-k2.8(max)":                  "kimi-for-coding",
+		"kimi-k2.8-code[1m](high)":        "kimi-for-coding",
+		"kimi-for-coding":                 "kimi-for-coding",
 		"kimi-k2.7-code":                  "kimi-for-coding",
 		"kimi-k2.7-code-highspeed":        "kimi-for-coding-highspeed",
 		"kimi-for-coding-highspeed(high)": "kimi-for-coding-highspeed",
@@ -87,7 +96,8 @@ func TestKimiThinkingReplayModelFamily(t *testing.T) {
 }
 
 func TestKimiThinkingReplayScopePreservesAgentAndCallerIsolation(t *testing.T) {
-	payload := []byte(`{"model":"kimi-k3","metadata":{"user_id":"{\"session_id\":\"session-a\"}"},"messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"model":"kimi-k3","metadata":{"user_id":"{\"session_id\":\"session-a\` +
+		`"}"},"messages":[{"role":"user","content":"hello"}]}`)
 	req := cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload}
 	baseOptions := cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatClaude,
@@ -249,12 +259,20 @@ func TestRestoreKimiThinkingReplayContentDoesNotOverwriteThinkingOrMismatch(t *t
 	}
 }
 
+type kimiLocalBadRequestError struct{}
+
+func (kimiLocalBadRequestError) Error() string   { return "local validation failed" }
+func (kimiLocalBadRequestError) StatusCode() int { return http.StatusBadRequest }
+
 func TestShouldClearKimiThinkingReplayAfterErrorUsesUpstreamProvenance(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
 		want bool
 	}{
+		{name: "nil"},
+		{name: "transport failed", err: errors.New("transport failed")},
+		{name: "local validation failed", err: kimiLocalBadRequestError{}},
 		{
 			name: "upstream 400",
 			err:  claudeUpstreamHTTPError{statusErr{code: http.StatusBadRequest}},
@@ -308,8 +326,10 @@ func TestKimiThinkingReplayStreamAccumulatorRebuildsSignedToolContent(t *testing
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"check"}}`,
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed"}}`,
 		`data: {"type":"content_block_stop","index":0}`,
-		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool-a","name":"shell","input":{}}}`,
-		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":` +
+			`"tool_use","id":"tool-a","name":"shell","input":{}}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_j` +
+			`son_delta","partial_json":"{\"command\":\"pwd\"}"}}`,
 		`data: {"type":"content_block_stop","index":1}`,
 		`data: {"type":"message_stop"}`,
 	} {
@@ -334,13 +354,17 @@ func TestKimiThinkingReplayStreamAccumulatorPreservesCitations(t *testing.T) {
 	accumulator := newKimiThinkingReplayStreamAccumulator()
 	for _, line := range []string{
 		`data: {"type":"message_start","message":{"id":"msg","model":"k3"}}`,
-		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"check","signature":"signed"}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+			`"thinking","thinking":"check","signature":"signed"}}`,
 		`data: {"type":"content_block_stop","index":0}`,
 		`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":"answer"}}`,
-		`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://example.com","title":"Example"}}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"type":"` +
+			`web_search_result_location","url":"https://example.com","title":"Example"}}}`,
 		`data: {"type":"content_block_stop","index":1}`,
-		`data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tool-a","name":"shell","input":{}}}`,
-		`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}`,
+		`data: {"type":"content_block_start","index":2,"content_block":{"type":` +
+			`"tool_use","id":"tool-a","name":"shell","input":{}}}`,
+		`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_j` +
+			`son_delta","partial_json":"{\"command\":\"pwd\"}"}}`,
 		`data: {"type":"content_block_stop","index":2}`,
 		`data: {"type":"message_stop"}`,
 	} {
@@ -410,7 +434,8 @@ func TestKimiThinkingReplayStreamAccumulatorRejectsInvalidLifecycle(t *testing.T
 			name: "invalid partial JSON",
 			lines: []string{
 				`data: {"type":"message_start","message":{"id":"msg","model":"k3"}}`,
-				`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-a","name":"shell","input":{}}}`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+					`"tool_use","id":"tool-a","name":"shell","input":{}}}`,
 				`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{"}}`,
 				`data: {"type":"content_block_stop","index":0}`,
 				`data: {"type":"message_stop"}`,
@@ -420,7 +445,9 @@ func TestKimiThinkingReplayStreamAccumulatorRejectsInvalidLifecycle(t *testing.T
 			name: "sparse block index",
 			lines: []string{
 				`data: {"type":"message_start","message":{"id":"msg","model":"k3"}}`,
-				`data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"x","signature":"signed"}}`,
+				`data: {"type":"content_block_start","index":1,"content_block":{"type":` +
+					`"thinking","thinking":"x","signature":` +
+					`"signed"}}`,
 				`data: {"type":"content_block_stop","index":1}`,
 				`data: {"type":"message_stop"}`,
 			},
@@ -493,7 +520,11 @@ func TestKimiThinkingReplayStreamObserverPreservesMalformedAndClearsLimitedState
 			observe: func(accumulator *kimiThinkingReplayStreamAccumulator) {
 				accumulator.observe([]byte(`data: {"type":"message_start","message":{"id":"msg","model":"k3"}}`))
 				accumulator.bytesUsed = internalcache.KimiThinkingReplayCacheMaxBytesPerEntry
-				accumulator.observe([]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"x"}}`))
+				accumulator.observe(
+					[]byte(`data: {"type":"content_block_start","index":0,"content_block":` +
+						`{"type":"thinking","thinking":` +
+						`"x"}}`),
+				)
 				accumulator.observe([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`))
 				accumulator.observe([]byte(`data: {"type":"message_stop"}`))
 			},
@@ -785,12 +816,21 @@ func TestKimiExecutorClaudeStreamCachesRawSignedContent(t *testing.T) {
 			func(_ *http.Request) (*http.Response, error) {
 				stream := strings.Join(
 					[]string{
-						`data: {"type":"message_start","message":{"id":"msg","model":"k3","usage":{"input_tokens":1,"output_tokens":0}}}`,
-						`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
-						`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"check"}}`,
-						`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed"}}`,
+						`data: {"type":"message_start","message":{"id":"msg","model":"k3",` +
+							`"usage":{"input_tokens":1,"output_tokens":` +
+							`0}}}`,
+						`data: {"type":"content_block_start","index":0,"content_block":{"type":` +
+							`"thinking","thinking":` +
+							`""}}`,
+						`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+							`"thinking_delta","thinking":` +
+							`"check"}}`,
+						`data: {"type":"content_block_delta","index":0,"delta":{"type":` +
+							`"signature_delta","signature":` +
+							`"signed"}}`,
 						`data: {"type":"content_block_stop","index":0}`,
-						`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool-a","name":"shell","input":{"command":"pwd"}}}`,
+						`data: {"type":"content_block_start","index":1,"content_block":{"type":` +
+							`"tool_use","id":"tool-a","name":"shell","input":{"command":"pwd"}}}`,
 						`data: {"type":"content_block_stop","index":1}`,
 						`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}`,
 						`data: {"type":"message_stop"}`,
@@ -960,7 +1000,11 @@ func TestKimiExecutorClaudeHTTPReplayRejectionClearsOnly400And422(t *testing.T) 
 				)
 				if errGet != nil || found != test.wantFound {
 					t.Fatalf(
-						"cache after status %d = found %v, want %v, err %v", test.status, found, test.wantFound, errGet,
+						"cache after status %d = found %v, want %v, err %v",
+						test.status,
+						found,
+						test.wantFound,
+						errGet,
 					)
 				}
 			},

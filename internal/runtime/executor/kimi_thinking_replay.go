@@ -22,6 +22,7 @@ import (
 )
 
 type kimiThinkingReplayScope struct {
+	provider      string
 	modelFamily   string
 	sessionKey    string
 	snapshot      internalcache.KimiThinkingReplaySnapshot
@@ -49,6 +50,7 @@ func kimiThinkingReplayScopeFromRequest(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) kimiThinkingReplayScope {
+	req.Payload = originalRequestPayload(req, opts)
 	sessionKey := codexReasoningReplaySessionKey(
 		ctx,
 		sdktranslator.FormatClaude,
@@ -58,6 +60,7 @@ func kimiThinkingReplayScopeFromRequest(
 	)
 	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	return kimiThinkingReplayScope{
+		provider:    "kimi",
 		modelFamily: kimiThinkingReplayModelFamily(req.Model),
 		sessionKey:  sessionKey,
 	}

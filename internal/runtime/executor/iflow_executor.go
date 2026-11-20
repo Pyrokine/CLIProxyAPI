@@ -103,6 +103,7 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 	}
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -112,7 +113,8 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
-		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, isStream, helps.APIKeyModelIsCompat(req),
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, isStream,
+		helps.APIKeyModelIsCompat(req),
 	)
 	if err != nil {
 		return nil, err
@@ -135,7 +137,14 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 		}
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier())
+	body = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel,
+		payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
+
+	if err := bindFinalModelContext(&req, auth, opts, gjson.GetBytes(body, "model").String()); err != nil {
+		return nil, err
+	}
 	reporter.setTranslatedReasoningEffort(body, e.Identifier())
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
@@ -172,12 +181,13 @@ func (e *IFlowExecutor) Execute(
 	if err != nil {
 		return resp, err
 	}
+	ctx = prepared.reporter.withContext(ctx)
 	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return resp, err
 	}
 	defer func() {
@@ -185,7 +195,7 @@ func (e *IFlowExecutor) Execute(
 			log.Errorf("iflow executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
@@ -216,7 +226,11 @@ func (e *IFlowExecutor) Execute(
 	)
 	if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil || len(out) == 0 {
 		if errTranslate == nil {
-			errTranslate = markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload"})
+			errTranslate = markResponseStarted(
+				statusErr{
+					code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload",
+				},
+			)
 		}
 		recordAPIResponseError(ctx, e.cfg, errTranslate)
 		prepared.reporter.publishFailureWithDetail(ctx, parseOpenAIUsage(data), errTranslate)
@@ -245,16 +259,17 @@ func (e *IFlowExecutor) ExecuteStream(
 	if err != nil {
 		return nil, err
 	}
+	ctx = prepared.reporter.withContext(ctx)
 	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return nil, err
 	}
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -324,7 +339,9 @@ func (e *IFlowExecutor) ExecuteStream(
 			return
 		}
 		if from == sdktranslator.FormatOpenAIResponse {
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+			chunks := sdktranslator.TranslateStream(
+				ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
+			)
 			if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil {
 				recordAPIResponseError(ctx, e.cfg, errTranslate)
 				reporter.publishFailureWithDetail(ctx, streamUsage.detail, errTranslate)
@@ -345,7 +362,7 @@ func (e *IFlowExecutor) ExecuteStream(
 
 func (e *IFlowExecutor) CountTokens(
 	ctx context.Context,
-	_ *cliproxyauth.Auth,
+	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
@@ -355,13 +372,20 @@ func (e *IFlowExecutor) CountTokens(
 	to := sdktranslator.FromString("openai")
 	originalPayload := originalRequestPayload(req, opts)
 	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
-		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, false, helps.APIKeyModelIsCompat(req),
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, false,
+		helps.APIKeyModelIsCompat(req),
 	)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated,
-		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier())
+	body = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated,
+		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
+
+	if err := bindFinalModelContext(&req, auth, opts, gjson.GetBytes(body, "model").String()); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	enc, err := tokenizerForModel(baseModel)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("iflow executor: tokenizer init failed: %w", err)
@@ -373,7 +397,9 @@ func (e *IFlowExecutor) CountTokens(
 	}
 
 	usageJSON := buildOpenAIUsageJSON(count)
-	translated := sdktranslator.TranslateTokenCount(ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, usageJSON)
+	translated := sdktranslator.TranslateTokenCount(
+		ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, usageJSON,
+	)
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
@@ -436,7 +462,7 @@ func (e *IFlowExecutor) refreshCookieBased(
 
 	log.Infof("iflow executor: refreshing cookie-based API key for user: %s", email)
 
-	svc := iflowauth.NewAuth(e.cfg)
+	svc := iflowauth.NewAuth(e.cfg, newProxyAwareHTTPClient(ctx, e.cfg, auth, 30*time.Second))
 	keyData, err := svc.RefreshAPIKey(ctx, cookie, email)
 	if err != nil {
 		log.Errorf("iflow executor: cookie-based API key refresh failed: %v", err)
@@ -484,7 +510,7 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 		log.Debugf("iflow executor: refreshing access token, old: %s", util.HideAPIKey(oldAccessToken))
 	}
 
-	svc := iflowauth.NewAuth(e.cfg)
+	svc := iflowauth.NewAuth(e.cfg, newProxyAwareHTTPClient(ctx, e.cfg, auth, 30*time.Second))
 	tokenData, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		log.Errorf("iflow executor: token refresh failed: %v", err)
@@ -590,7 +616,8 @@ func iflowCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func ensureToolsArray(body []byte) []byte {
-	placeholder := `[{"type":"function","function":{"name":"noop","description":"Placeholder tool to stabilise streaming","parameters":{"type":"object"}}}]`
+	placeholder := `[{"type":"function","function":{"name":"noop","description":"Placeholder tool to ` +
+		`stabilise streaming","parameters":{"type":"object"}}}]`
 	updated, err := sjson.SetRawBytes(body, "tools", []byte(placeholder))
 	if err != nil {
 		return body

@@ -78,11 +78,15 @@ func TestAIStudioPrepareRequestUsesExplicitDynamicHeaderSource(t *testing.T) {
 
 func TestAIStudioStreamCancellationWinsOverBufferedUsage(t *testing.T) {
 	const authID = "aistudio-cancel-auth"
-	manager := wsrelay.NewManager(wsrelay.Options{
-		ProviderFactory: func(*http.Request) (string, error) {
-			return authID, nil
+	connected := make(chan struct{})
+	manager := wsrelay.NewManager(
+		wsrelay.Options{
+			ProviderFactory: func(*http.Request) (string, error) {
+				return authID, nil
+			},
+			OnConnected: func(string) { close(connected) },
 		},
-	})
+	)
 	server := httptest.NewServer(manager.Handler())
 	t.Cleanup(server.Close)
 	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
@@ -96,6 +100,11 @@ func TestAIStudioStreamCancellationWinsOverBufferedUsage(t *testing.T) {
 		t.Fatal(errDial)
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("relay connection was not registered")
+	}
 
 	clientDone := make(chan error, 1)
 	go func() {
@@ -106,23 +115,29 @@ func TestAIStudioStreamCancellationWinsOverBufferedUsage(t *testing.T) {
 			clientDone <- errRead
 			return
 		}
-		if errWrite := client.WriteJSON(map[string]any{
-			"id":   request.ID,
-			"type": wsrelay.MessageTypeStreamStart,
-			"payload": map[string]any{
-				"status": http.StatusOK,
+		if errWrite := client.WriteJSON(
+			map[string]any{
+				"id":   request.ID,
+				"type": wsrelay.MessageTypeStreamStart,
+				"payload": map[string]any{
+					"status": http.StatusOK,
+				},
 			},
-		}); errWrite != nil {
+		); errWrite != nil {
 			clientDone <- errWrite
 			return
 		}
-		clientDone <- client.WriteJSON(map[string]any{
-			"id":   request.ID,
-			"type": wsrelay.MessageTypeStreamChunk,
-			"payload": map[string]any{
-				"data": `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"totalTokenCount":7}}` + "\n\n",
+		clientDone <- client.WriteJSON(
+			map[string]any{
+				"id":   request.ID,
+				"type": wsrelay.MessageTypeStreamChunk,
+				"payload": map[string]any{
+					"data": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"" +
+						"hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"" +
+						"candidatesTokenCount\":4,\"totalTokenCount\":7}}\n\n",
+				},
 			},
-		})
+		)
 	}()
 
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
@@ -185,11 +200,15 @@ func TestAIStudioStreamCancellationWinsOverBufferedUsage(t *testing.T) {
 
 func TestAIStudioHTTPResponseCancellationWinsOverBufferedUsage(t *testing.T) {
 	const authID = "aistudio-http-cancel-auth"
-	manager := wsrelay.NewManager(wsrelay.Options{
-		ProviderFactory: func(*http.Request) (string, error) {
-			return authID, nil
+	connected := make(chan struct{})
+	manager := wsrelay.NewManager(
+		wsrelay.Options{
+			ProviderFactory: func(*http.Request) (string, error) {
+				return authID, nil
+			},
+			OnConnected: func(string) { close(connected) },
 		},
-	})
+	)
 	server := httptest.NewServer(manager.Handler())
 	t.Cleanup(server.Close)
 	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
@@ -203,6 +222,11 @@ func TestAIStudioHTTPResponseCancellationWinsOverBufferedUsage(t *testing.T) {
 		t.Fatal(errDial)
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("relay connection was not registered")
+	}
 
 	clientDone := make(chan error, 1)
 	go func() {
@@ -213,14 +237,18 @@ func TestAIStudioHTTPResponseCancellationWinsOverBufferedUsage(t *testing.T) {
 			clientDone <- errRead
 			return
 		}
-		clientDone <- client.WriteJSON(map[string]any{
-			"id":   request.ID,
-			"type": wsrelay.MessageTypeHTTPResp,
-			"payload": map[string]any{
-				"status": http.StatusOK,
-				"body":   `{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]} ,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"totalTokenCount":7}}`,
+		clientDone <- client.WriteJSON(
+			map[string]any{
+				"id":   request.ID,
+				"type": wsrelay.MessageTypeHTTPResp,
+				"payload": map[string]any{
+					"status": http.StatusOK,
+					"body": `{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]} ` +
+						`,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candid` +
+						`atesTokenCount":4,"totalTokenCount":7}}`,
+				},
 			},
-		})
+		)
 	}()
 
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
@@ -272,11 +300,15 @@ func TestAIStudioHTTPResponseCancellationWinsOverBufferedUsage(t *testing.T) {
 
 func TestAIStudioStreamPublishesSuccessfulZeroUsageOnce(t *testing.T) {
 	const authID = "aistudio-zero-usage-auth"
-	manager := wsrelay.NewManager(wsrelay.Options{
-		ProviderFactory: func(*http.Request) (string, error) {
-			return authID, nil
+	connected := make(chan struct{})
+	manager := wsrelay.NewManager(
+		wsrelay.Options{
+			ProviderFactory: func(*http.Request) (string, error) {
+				return authID, nil
+			},
+			OnConnected: func(string) { close(connected) },
 		},
-	})
+	)
 	server := httptest.NewServer(manager.Handler())
 	t.Cleanup(server.Close)
 	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
@@ -290,6 +322,11 @@ func TestAIStudioStreamPublishesSuccessfulZeroUsageOnce(t *testing.T) {
 		t.Fatal(errDial)
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("relay connection was not registered")
+	}
 
 	clientDone := make(chan error, 1)
 	go func() {
@@ -300,20 +337,24 @@ func TestAIStudioStreamPublishesSuccessfulZeroUsageOnce(t *testing.T) {
 			clientDone <- errRead
 			return
 		}
-		if errWrite := client.WriteJSON(map[string]any{
-			"id":   request.ID,
-			"type": wsrelay.MessageTypeStreamStart,
-			"payload": map[string]any{
-				"status": http.StatusOK,
+		if errWrite := client.WriteJSON(
+			map[string]any{
+				"id":   request.ID,
+				"type": wsrelay.MessageTypeStreamStart,
+				"payload": map[string]any{
+					"status": http.StatusOK,
+				},
 			},
-		}); errWrite != nil {
+		); errWrite != nil {
 			clientDone <- errWrite
 			return
 		}
-		clientDone <- client.WriteJSON(map[string]any{
-			"id":   request.ID,
-			"type": wsrelay.MessageTypeStreamEnd,
-		})
+		clientDone <- client.WriteJSON(
+			map[string]any{
+				"id":   request.ID,
+				"type": wsrelay.MessageTypeStreamEnd,
+			},
+		)
 	}()
 
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
@@ -410,14 +451,18 @@ func TestAIStudioTranslationFailureReleasesRelaySource(t *testing.T) {
 	before := countReaders()
 	const authID = "synthetic-relay-source-lifecycle"
 	connected := make(chan struct{})
-	relay := wsrelay.NewManager(wsrelay.Options{
-		ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
-		OnConnected:     func(string) { close(connected) },
-	})
+	relay := wsrelay.NewManager(
+		wsrelay.Options{
+			ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
+			OnConnected:     func(string) { close(connected) },
+		},
+	)
 	server := httptest.NewServer(relay.Handler())
 	t.Cleanup(server.Close)
 	t.Cleanup(func() { _ = relay.Stop(context.Background()) })
-	conn, response, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+relay.Path(), nil)
+	conn, response, errDial := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(server.URL, "http")+relay.Path(), nil,
+	)
 	if response != nil && response.Body != nil {
 		t.Cleanup(func() { _ = response.Body.Close() })
 	}
@@ -440,8 +485,20 @@ func TestAIStudioTranslationFailureReleasesRelaySource(t *testing.T) {
 			return
 		}
 		for _, message := range []map[string]any{
-			{"id": request.ID, "type": wsrelay.MessageTypeStreamStart, "payload": map[string]any{"status": http.StatusOK}},
-			{"id": request.ID, "type": wsrelay.MessageTypeStreamChunk, "payload": map[string]any{"data": "data: {\"responseId\":\"lifecycle\",\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"apply_patch\",\"args\":{\"input\":7}}}]},\"finishReason\":\"STOP\"}]}\n\n"}},
+			{
+				"id": request.ID, "type": wsrelay.MessageTypeStreamStart,
+				"payload": map[string]any{"status": http.StatusOK},
+			},
+			{
+				"id": request.ID, "type": wsrelay.MessageTypeStreamChunk,
+				"payload": map[string]any{
+					"data": ("data: {\"responseId\":\"lifecycle\",\"candidates\":" +
+						"[{\"content\":" +
+						"{\"pa") +
+						"rts\":[{\"functionCall\":{\"name\":\"apply_patch\",\"args\":{\"input\"" +
+						":7}}}]},\"finishReason\":\"STOP\"}]}\n\n",
+				},
+			},
 		} {
 			if errWrite := conn.WriteJSON(message); errWrite != nil {
 				clientDone <- errWrite
@@ -453,9 +510,19 @@ func TestAIStudioTranslationFailureReleasesRelaySource(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
-	request := cliproxyexecutor.Request{Model: "gemini-3.1-pro-preview", Payload: []byte(`{"input":"synthetic patch","tools":[{"type":"custom","name":"apply_patch"}]}`)}
-	stream, errStream := executor.ExecuteStream(ctx, &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, request,
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: request.Payload})
+	request := cliproxyexecutor.Request{
+		Model:   "gemini-3.1-pro-preview",
+		Payload: []byte(`{"input":"synthetic patch","tools":[{"type":"custom","name":"apply_patch"}]}`),
+	}
+	stream, errStream := executor.ExecuteStream(
+		ctx,
+		&cliproxyauth.Auth{ID: authID, Provider: "aistudio"},
+		request,
+		cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatOpenAIResponse,
+			OriginalRequest: request.Payload,
+		},
+	)
 	if errStream != nil {
 		t.Fatal(errStream)
 	}
@@ -490,113 +557,170 @@ func TestAIStudioFailedResponsesPublishFailure(t *testing.T) {
 			body   string
 			failed bool
 		}{
-			{"provider-error", `{"error":{"code":503,"message":"synthetic upstream failure"},"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}}`, true},
-			{"missing-finish", `{"responseId":"synthetic","candidates":[{"content":{"parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}}`, true},
-			{"completed", `{"responseId":"synthetic","candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}}`, false},
+			{
+				"provider-error",
+				`{"error":{"code":503,"message":"synthetic upstream failure"},"usageMetadata":{"` +
+					`promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}}`,
+				true,
+			},
+			{
+				"missing-finish",
+				`{"responseId":"synthetic","candidates":[{"content":{"parts":[{"text":"` +
+					`partial"}]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCo` +
+					`unt":3,"totalTokenCount":8}}`,
+				true,
+			},
+			{
+				"completed",
+				`{"responseId":"synthetic","candidates":[{"content":{"parts":[{"text":"` +
+					`answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount"` +
+					`:5,"candidatesTokenCount":3,"totalTokenCount":8}}`,
+				false,
+			},
 		} {
 			name := scenario.name + "/execute"
 			if streaming {
 				name = scenario.name + "/stream"
 			}
-			t.Run(name, func(t *testing.T) {
-				authID := "synthetic-" + t.Name()
-				connected := make(chan struct{})
-				relay := wsrelay.NewManager(wsrelay.Options{
-					ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
-					OnConnected:     func(string) { close(connected) },
-				})
-				server := httptest.NewServer(relay.Handler())
-				t.Cleanup(server.Close)
-				t.Cleanup(func() { _ = relay.Stop(context.Background()) })
-				conn, response, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+relay.Path(), nil)
-				if response != nil && response.Body != nil {
-					t.Cleanup(func() { _ = response.Body.Close() })
-				}
-				if errDial != nil {
-					t.Fatal(errDial)
-				}
-				t.Cleanup(func() { _ = conn.Close() })
-				select {
-				case <-connected:
-				case <-time.After(time.Second):
-					t.Fatal("relay connection was not registered")
-				}
-				clientDone := make(chan error, 1)
-				go func() {
-					var request struct {
-						ID string `json:"id"`
+			t.Run(
+				name, func(t *testing.T) {
+					authID := "synthetic-" + t.Name()
+					connected := make(chan struct{})
+					relay := wsrelay.NewManager(
+						wsrelay.Options{
+							ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
+							OnConnected:     func(string) { close(connected) },
+						},
+					)
+					server := httptest.NewServer(relay.Handler())
+					t.Cleanup(server.Close)
+					t.Cleanup(func() { _ = relay.Stop(context.Background()) })
+					conn, response, errDial := websocket.DefaultDialer.Dial(
+						"ws"+strings.TrimPrefix(
+							server.URL, "http",
+						)+relay.Path(), nil,
+					)
+					if response != nil && response.Body != nil {
+						t.Cleanup(func() { _ = response.Body.Close() })
 					}
-					if errRead := conn.ReadJSON(&request); errRead != nil {
-						clientDone <- errRead
-						return
+					if errDial != nil {
+						t.Fatal(errDial)
 					}
-					messages := []map[string]any{{"id": request.ID, "type": wsrelay.MessageTypeHTTPResp, "payload": map[string]any{"status": http.StatusOK, "body": scenario.body}}}
-					if streaming {
-						messages = []map[string]any{
-							{"id": request.ID, "type": wsrelay.MessageTypeStreamStart, "payload": map[string]any{"status": http.StatusOK}},
-							{"id": request.ID, "type": wsrelay.MessageTypeStreamChunk, "payload": map[string]any{"data": "data: " + scenario.body + "\n\n"}},
-							{"id": request.ID, "type": wsrelay.MessageTypeStreamEnd},
+					t.Cleanup(func() { _ = conn.Close() })
+					select {
+					case <-connected:
+					case <-time.After(time.Second):
+						t.Fatal("relay connection was not registered")
+					}
+					clientDone := make(chan error, 1)
+					go func() {
+						var request struct {
+							ID string `json:"id"`
 						}
-					}
-					for _, message := range messages {
-						if errWrite := conn.WriteJSON(message); errWrite != nil {
-							clientDone <- errWrite
+						if errRead := conn.ReadJSON(&request); errRead != nil {
+							clientDone <- errRead
 							return
 						}
-					}
-					clientDone <- nil
-				}()
-				plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
-				registerTestUsagePlugin(t, plugin)
-				ctx := usage.WithRequestedModelAlias(t.Context(), t.Name())
-				executor := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
-				request := cliproxyexecutor.Request{Model: "gemini-3.6-flash", Payload: []byte(`{"input":"synthetic response"}`)}
-				options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: request.Payload}
-				auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}
-				var failure error
-				if streaming {
-					stream, errStream := executor.ExecuteStream(ctx, auth, request, options)
-					if errStream != nil {
-						t.Fatal(errStream)
-					}
-					for chunk := range stream.Chunks {
-						if chunk.Err != nil {
-							if failure != nil {
-								t.Error("duplicate stream error")
+						messages := []map[string]any{
+							{
+								"id": request.ID, "type": wsrelay.MessageTypeHTTPResp, "payload": map[string]any{
+									"status": http.StatusOK, "body": scenario.body,
+									"headers": http.Header{"X-Upstream-Provider": {"reported-aistudio"}},
+								},
+							},
+						}
+						if streaming {
+							messages = []map[string]any{
+								{
+									"id": request.ID, "type": wsrelay.MessageTypeStreamStart,
+									"payload": map[string]any{
+										"status":  http.StatusOK,
+										"headers": http.Header{"X-Upstream-Provider": {"reported-aistudio"}},
+									},
+								},
+								{
+									"id": request.ID, "type": wsrelay.MessageTypeStreamChunk,
+									"payload": map[string]any{"data": "data: " + scenario.body + "\n\n"},
+								},
+								{"id": request.ID, "type": wsrelay.MessageTypeStreamEnd},
 							}
-							failure = chunk.Err
+						}
+						for _, message := range messages {
+							if errWrite := conn.WriteJSON(message); errWrite != nil {
+								clientDone <- errWrite
+								return
+							}
+						}
+						clientDone <- nil
+					}()
+					plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
+					registerTestUsagePlugin(t, plugin)
+					ctx := usage.WithRequestedModelAlias(t.Context(), t.Name())
+					executor := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+					request := cliproxyexecutor.Request{
+						Model: "gemini-3.6-flash", Payload: []byte(`{"input":"synthetic response"}`),
+					}
+					options := cliproxyexecutor.Options{
+						SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: request.Payload,
+					}
+					auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}
+					var failure error
+					if streaming {
+						stream, errStream := executor.ExecuteStream(ctx, auth, request, options)
+						if errStream != nil {
+							t.Fatal(errStream)
+						}
+						for chunk := range stream.Chunks {
+							if chunk.Err != nil {
+								if failure != nil {
+									t.Error("duplicate stream error")
+								}
+								failure = chunk.Err
+							}
+						}
+					} else {
+						response, errExecute := executor.Execute(ctx, auth, request, options)
+						failure = errExecute
+						if scenario.failed && len(response.Payload) != 0 {
+							t.Error("failed response returned a payload")
 						}
 					}
-				} else {
-					response, errExecute := executor.Execute(ctx, auth, request, options)
-					failure = errExecute
-					if scenario.failed && len(response.Payload) != 0 {
-						t.Error("failed response returned a payload")
+					if scenario.failed {
+						var status interface{ StatusCode() int }
+						if !errors.As(failure, &status) || status.StatusCode() != http.StatusBadGateway {
+							t.Errorf("failed response error=%v, want HTTP 502", failure)
+						}
+					} else if failure != nil {
+						t.Errorf("successful response error=%v", failure)
 					}
-				}
-				if scenario.failed {
-					var status interface{ StatusCode() int }
-					if !errors.As(failure, &status) || status.StatusCode() != http.StatusBadGateway {
-						t.Errorf("failed response error=%v, want HTTP 502", failure)
+					if errClient := <-clientDone; errClient != nil {
+						t.Fatal(errClient)
 					}
-				} else if failure != nil {
-					t.Errorf("successful response error=%v", failure)
-				}
-				if errClient := <-clientDone; errClient != nil {
-					t.Fatal(errClient)
-				}
-				select {
-				case record := <-plugin.records:
-					if record.Alias != t.Name() || record.Failed != scenario.failed || record.Completed == scenario.failed {
-						t.Errorf("usage alias=%q failed=%v completed=%v, want failed=%v", record.Alias, record.Failed, record.Completed, scenario.failed)
+					select {
+					case record := <-plugin.records:
+						if record.ResponseProvider != "reported-aistudio" || record.ResponseProviderSource != "header.X-Upstream-Provider" || record.UpstreamModel != "gemini-3.6-flash" || !strings.Contains(
+							record.UpstreamURL, "/models/gemini-3.6-flash:",
+						) {
+							t.Errorf("request observations did not reach outer consumer: %+v", record)
+						}
+						if record.Alias != t.Name() || record.Failed != scenario.failed ||
+							record.Completed == scenario.failed {
+							t.Errorf(
+								"usage alias=%q failed=%v completed=%v, want failed=%v",
+								record.Alias,
+								record.Failed,
+								record.Completed,
+								scenario.failed,
+							)
+						}
+						if record.Detail.InputTokens != 5 || record.Detail.OutputTokens != 3 {
+							t.Errorf("observed usage was lost: %+v", record.Detail)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("usage record was not published")
 					}
-					if record.Detail.InputTokens != 5 || record.Detail.OutputTokens != 3 {
-						t.Errorf("observed usage was lost: %+v", record.Detail)
-					}
-				case <-time.After(time.Second):
-					t.Fatal("usage record was not published")
-				}
-			})
+				},
+			)
 		}
 	}
 }
@@ -607,43 +731,63 @@ func TestAIStudioPreparationFailurePublishesUsageOnce(t *testing.T) {
 		if streaming {
 			name = "stream"
 		}
-		t.Run(name, func(t *testing.T) {
-			plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
-			registerTestUsagePlugin(t, plugin)
-			ctx := usage.WithRequestedModelAlias(t.Context(), t.Name())
-			executor := NewAIStudioExecutor(&config.Config{}, "aistudio", wsrelay.NewManager(wsrelay.Options{}))
-			auth := &cliproxyauth.Auth{ID: "synthetic-preparation-failure", Provider: "aistudio"}
-			request := cliproxyexecutor.Request{Model: "gemini-3.6-flash", Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"synthetic-file-not-stored"}}]}]}`)}
-			options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}
-			var errRequest error
-			if streaming {
-				_, errRequest = executor.ExecuteStream(ctx, auth, request, options)
-			} else {
-				_, errRequest = executor.Execute(ctx, auth, request, options)
-			}
-			var unsupported *translatorcommon.UnsupportedPartError
-			if !errors.As(errRequest, &unsupported) || unsupported.StatusCode() != http.StatusBadRequest || !unsupported.IsRequestScoped() {
-				t.Fatalf("preparation error=%v, want request-scoped HTTP 400", errRequest)
-			}
-			usage.PublishRecord(context.Background(), usage.Record{Alias: t.Name() + "-barrier"})
-			count := 0
-			for {
-				select {
-				case record := <-plugin.records:
-					if record.Alias == t.Name()+"-barrier" {
-						if count != 1 {
-							t.Errorf("preparation failure usage records=%d, want 1", count)
-						}
-						return
-					}
-					count++
-					if record.Alias != t.Name() || !record.Failed || record.Completed || record.Fail.StatusCode != http.StatusBadRequest {
-						t.Errorf("preparation failure usage=%+v", record)
-					}
-				case <-time.After(time.Second):
-					t.Fatal("usage dispatcher barrier did not arrive")
+		t.Run(
+			name, func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
+				registerTestUsagePlugin(t, plugin)
+				ctx := usage.WithRequestedModelAlias(t.Context(), t.Name())
+				executor := NewAIStudioExecutor(
+					&config.Config{},
+					"aistudio",
+					wsrelay.NewManager(wsrelay.Options{}),
+				)
+				auth := &cliproxyauth.Auth{ID: "synthetic-preparation-failure", Provider: "aistudio"}
+				request := cliproxyexecutor.Request{
+					Model: "gemini-3.6-flash",
+					Payload: []byte(
+						`{"messages":[{"role":"user","content":[{"type":"file","file":` +
+							`{"file_id":"synthetic-file-not-stored"}}]}]}`,
+					),
 				}
-			}
-		})
+				options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}
+				var errRequest error
+				if streaming {
+					_, errRequest = executor.ExecuteStream(ctx, auth, request, options)
+				} else {
+					_, errRequest = executor.Execute(ctx, auth, request, options)
+				}
+				var unsupported *translatorcommon.UnsupportedPartError
+				if !errors.As(
+					errRequest, &unsupported,
+				) || unsupported.StatusCode() != http.StatusBadRequest || !unsupported.IsRequestScoped() {
+					t.Fatalf("preparation error=%v, want request-scoped HTTP 400", errRequest)
+				}
+				if err := usage.PublishRecord(
+					context.Background(),
+					usage.Record{Alias: t.Name() + "-barrier"},
+				); err != nil {
+					t.Fatalf("publish usage barrier: %v", err)
+				}
+				count := 0
+				for {
+					select {
+					case record := <-plugin.records:
+						if record.Alias == t.Name()+"-barrier" {
+							if count != 1 {
+								t.Errorf("preparation failure usage records=%d, want 1", count)
+							}
+							return
+						}
+						count++
+						if record.Alias != t.Name() || !record.Failed || record.Completed ||
+							record.Fail.StatusCode != http.StatusBadRequest {
+							t.Errorf("preparation failure usage=%+v", record)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("usage dispatcher barrier did not arrive")
+					}
+				}
+			},
+		)
 	}
 }

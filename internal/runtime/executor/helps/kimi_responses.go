@@ -11,8 +11,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ResolveKimiBaseURL returns the configured endpoint for the selected Kimi credential.
-func ResolveKimiBaseURL(auth *cliproxyauth.Auth) string {
+// resolveKimiBaseURL returns the configured endpoint for the selected Kimi credential.
+func resolveKimiBaseURL(auth *cliproxyauth.Auth) string {
 	if auth != nil {
 		if raw := strings.TrimRight(strings.TrimSpace(auth.Attributes["base_url"]), "/"); raw != "" {
 			return raw
@@ -23,7 +23,7 @@ func ResolveKimiBaseURL(auth *cliproxyauth.Auth) string {
 			}
 		}
 		if kimiauth.IsKimiAIAuth(auth) {
-			return kimiauth.KimiAIAPIBaseURL
+			return kimiauth.AIAPIBaseURL
 		}
 	}
 	return kimiauth.APIBaseURL
@@ -31,7 +31,7 @@ func ResolveKimiBaseURL(auth *cliproxyauth.Auth) string {
 
 // ResolveKimiResponsesURL resolves the upstream URL for Kimi Responses API requests.
 func ResolveKimiResponsesURL(auth *cliproxyauth.Auth) string {
-	baseURL := ResolveKimiBaseURL(auth)
+	baseURL := resolveKimiBaseURL(auth)
 	if strings.HasSuffix(baseURL, "/v1") {
 		return baseURL + "/responses"
 	}
@@ -40,7 +40,7 @@ func ResolveKimiResponsesURL(auth *cliproxyauth.Auth) string {
 
 // ResolveKimiChatURL resolves the upstream URL for Kimi chat completions.
 func ResolveKimiChatURL(auth *cliproxyauth.Auth) string {
-	baseURL := ResolveKimiBaseURL(auth)
+	baseURL := resolveKimiBaseURL(auth)
 	if strings.HasSuffix(baseURL, "/v1") {
 		return baseURL + "/chat/completions"
 	}
@@ -49,7 +49,7 @@ func ResolveKimiChatURL(auth *cliproxyauth.Auth) string {
 
 // ResolveKimiClaudeBaseURL resolves the endpoint used by the Claude Messages adapter.
 func ResolveKimiClaudeBaseURL(auth *cliproxyauth.Auth) string {
-	return strings.TrimSuffix(ResolveKimiBaseURL(auth), "/v1")
+	return strings.TrimSuffix(resolveKimiBaseURL(auth), "/v1")
 }
 
 func isResponsesToolCall(item gjson.Result) bool {

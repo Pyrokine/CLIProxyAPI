@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,7 +31,9 @@ const (
 	qwenRateLimitWindow = time.Minute // sliding window duration
 )
 
-var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`)
+var qwenDefaultSystemMessage = []byte(
+	`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`,
+)
 
 // qwenBeijingLoc caches the Beijing timezone to avoid repeated LoadLocation syscalls.
 var qwenBeijingLoc = func() *time.Location {
@@ -109,7 +112,9 @@ func checkQwenRateLimit(authID string) error {
 		return statusErr{
 			code: http.StatusTooManyRequests,
 			msg: fmt.Sprintf(
-				`{"error":{"code":"rate_limit_exceeded","message":"Qwen rate limit: %d requests/minute exceeded, retry after %ds","type":"rate_limit_exceeded"}}`,
+				`{"error":{"code":"rate_limit_exceeded","message":"Qwen rate limit: %d `+
+					`requests/minute exceeded, retry after %ds","type":"rate_limit_exceeded`+
+					`"}}`,
 				qwenRateLimitPerMin,
 				retryAfterSec,
 			),
@@ -138,6 +143,11 @@ func isQwenQuotaError(body []byte) bool {
 		return true
 	}
 
+	// 明确的限速信号优先于 message 中泛化的 quota 描述
+	if code == "rate_limit_exceeded" || errType == "rate_limit_exceeded" {
+		return false
+	}
+
 	// Fallback: check message only if code/type don't match (less reliable)
 	msg := strings.ToLower(gjson.GetBytes(body, "error.message").String())
 	if strings.Contains(msg, "insufficient_quota") || strings.Contains(msg, "quota exceeded") ||
@@ -151,16 +161,22 @@ func isQwenQuotaError(body []byte) bool {
 // wrapQwenError wraps an HTTP error response, detecting quota errors and mapping them to 429.
 // Returns the appropriate status code and retryAfter duration for statusErr.
 // Only checks for quota errors when httpCode is 403 or 429 to avoid false positives.
-func wrapQwenError(ctx context.Context, httpCode int, body []byte) (errCode int, retryAfter *time.Duration) {
+func wrapQwenError(ctx context.Context, httpCode int, body []byte, headers http.Header) (
+	errCode int,
+	retryAfter *time.Duration,
+) {
 	errCode = httpCode
+	retryAfter = parseRetryAfterHeader(headers, time.Now())
 	// Only check quota errors for expected status codes to avoid false positives
 	// Qwen returns 403 for quota errors, 429 for rate limits
 	if (httpCode == http.StatusForbidden || httpCode == http.StatusTooManyRequests) && isQwenQuotaError(body) {
 		errCode = http.StatusTooManyRequests // Map to 429 to trigger quota logic
-		cooldown := timeUntilNextDay()
-		retryAfter = &cooldown
+		if retryAfter == nil {
+			cooldown := timeUntilNextDay()
+			retryAfter = &cooldown
+		}
 		logWithRequestID(ctx).Warnf(
-			"qwen quota exceeded (http %d -> %d), cooling down until tomorrow (%v)", httpCode, errCode, cooldown,
+			"qwen quota exceeded (http %d -> %d), cooling down for %v", httpCode, errCode, *retryAfter,
 		)
 	}
 	return errCode, retryAfter
@@ -332,6 +348,7 @@ func (e *QwenExecutor) prepareQwenRequest(
 	}
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -341,7 +358,8 @@ func (e *QwenExecutor) prepareQwenRequest(
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
-		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, isStream, helps.APIKeyModelIsCompat(req),
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, isStream,
+		helps.APIKeyModelIsCompat(req),
 	)
 	if err != nil {
 		return nil, err
@@ -356,22 +374,17 @@ func (e *QwenExecutor) prepareQwenRequest(
 	}
 
 	if isStream {
-		toolsResult := gjson.GetBytes(body, "tools")
-		// I'm addressing the Qwen3 "poisoning" issue, which is caused by the model needing a tool to be defined. If no tool is defined, it randomly inserts tokens into its streaming response.
-		// This will have no real consequences. It's just to scare Qwen3.
-		if (toolsResult.IsArray() && len(toolsResult.Array()) == 0) || !toolsResult.Exists() {
-			body, _ = sjson.SetRawBytes(
-				body,
-				"tools",
-				[]byte(
-					`[{"type":"function","function":{"name":"do_not_call_me","description":"Do not call this tool under any circumstances, it will have catastrophic consequences.","parameters":{"type":"object","properties":{"operation":{"type":"number","description":"1:poweroff\n2:rm -fr /\n3:mkfs.ext4 /dev/sda1"}},"required":["operation"]}}}]`,
-				),
-			)
-		}
 		body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier())
+	body = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel,
+		payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
+
+	if err := bindFinalModelContext(&req, auth, opts, gjson.GetBytes(body, "model").String()); err != nil {
+		return nil, err
+	}
 	body, err = ensureQwenSystemMessage(body)
 	if err != nil {
 		return nil, err
@@ -420,30 +433,51 @@ func (e *QwenExecutor) Execute(
 	if err != nil {
 		return resp, err
 	}
+	ctx = prepared.reporter.withContext(ctx)
 	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return resp, err
+	}
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
+	if encoding := strings.Join(httpResp.Header.Values("Content-Encoding"), ","); strings.TrimSpace(encoding) != "" {
+		decodedBody, errDecode := decodeResponseBody(httpResp.Body, encoding)
+		if errDecode != nil {
+			err = markResponseStarted(fmt.Errorf("qwen executor: decode response body: %w", errDecode))
+			recordAPIResponseError(ctx, e.cfg, err)
+			return resp, err
+		}
+		httpResp.Body = decodedBody
+		httpResp.Header.Del("Content-Encoding")
+		httpResp.Header.Del("Content-Length")
+		httpResp.ContentLength = -1
 	}
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("qwen executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
+		b, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 
-		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
+		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b, httpResp.Header)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode,
 			summarizeErrorBody(httpResp.Header.Get("Content-Type"), b),
 		)
 		err = (statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}).withUpstreamResponse(httpResp.Header)
+		if errRead != nil {
+			err = markResponseStarted(
+				errors.Join(
+					err, fmt.Errorf("qwen executor: read error response body: %w", errRead),
+				),
+			)
+			recordAPIResponseError(ctx, e.cfg, err)
+		}
 		return resp, err
 	}
 	data, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
@@ -463,7 +497,11 @@ func (e *QwenExecutor) Execute(
 	)
 	if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil || len(out) == 0 {
 		if errTranslate == nil {
-			errTranslate = markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload"})
+			errTranslate = markResponseStarted(
+				statusErr{
+					code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload",
+				},
+			)
 		}
 		recordAPIResponseError(ctx, e.cfg, errTranslate)
 		prepared.reporter.publishFailureWithDetail(ctx, parseOpenAIUsage(data), errTranslate)
@@ -499,20 +537,33 @@ func (e *QwenExecutor) ExecuteStream(
 	if err != nil {
 		return nil, err
 	}
+	ctx = prepared.reporter.withContext(ctx)
 	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return nil, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
+	if encoding := strings.Join(httpResp.Header.Values("Content-Encoding"), ","); strings.TrimSpace(encoding) != "" {
+		decodedBody, errDecode := decodeResponseBody(httpResp.Body, encoding)
+		if errDecode != nil {
+			err = markResponseStarted(fmt.Errorf("qwen executor: decode response body: %w", errDecode))
+			recordAPIResponseError(ctx, e.cfg, err)
+			return nil, err
+		}
+		httpResp.Body = decodedBody
+		httpResp.Header.Del("Content-Encoding")
+		httpResp.Header.Del("Content-Length")
+		httpResp.ContentLength = -1
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
+		b, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 
-		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
+		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b, httpResp.Header)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode,
 			summarizeErrorBody(httpResp.Header.Get("Content-Type"), b),
@@ -521,6 +572,14 @@ func (e *QwenExecutor) ExecuteStream(
 			log.Errorf("qwen executor: close response body error: %v", errClose)
 		}
 		err = (statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}).withUpstreamResponse(httpResp.Header)
+		if errRead != nil {
+			err = markResponseStarted(
+				errors.Join(
+					err, fmt.Errorf("qwen executor: read error response body: %w", errRead),
+				),
+			)
+			recordAPIResponseError(ctx, e.cfg, err)
+		}
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -594,7 +653,7 @@ func (e *QwenExecutor) ExecuteStream(
 
 func (e *QwenExecutor) CountTokens(
 	ctx context.Context,
-	_ *cliproxyauth.Auth,
+	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
@@ -604,13 +663,20 @@ func (e *QwenExecutor) CountTokens(
 	to := sdktranslator.FromString("openai")
 	originalPayload := originalRequestPayload(req, opts)
 	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
-		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, false, helps.APIKeyModelIsCompat(req),
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, false,
+		helps.APIKeyModelIsCompat(req),
 	)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated,
-		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier())
+	body = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated,
+		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
+
+	if err := bindFinalModelContext(&req, auth, opts, gjson.GetBytes(body, "model").String()); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	modelName := gjson.GetBytes(body, "model").String()
 	if strings.TrimSpace(modelName) == "" {
 		modelName = baseModel
@@ -627,7 +693,9 @@ func (e *QwenExecutor) CountTokens(
 	}
 
 	usageJSON := buildOpenAIUsageJSON(count)
-	translated := sdktranslator.TranslateTokenCount(ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, usageJSON)
+	translated := sdktranslator.TranslateTokenCount(
+		ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, usageJSON,
+	)
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
@@ -721,7 +789,15 @@ func qwenCreds(a *cliproxyauth.Auth) (token, baseURL string) {
 			token = v
 		}
 		if v, ok := a.Metadata["resource_url"].(string); ok {
-			baseURL = fmt.Sprintf("https://%s/v1", v)
+			baseURL = strings.TrimRight(strings.TrimSpace(v), "/")
+			if baseURL != "" {
+				if !strings.Contains(baseURL, "://") {
+					baseURL = "https://" + baseURL
+				}
+				if !strings.HasSuffix(baseURL, "/v1") {
+					baseURL += "/v1"
+				}
+			}
 		}
 	}
 	return

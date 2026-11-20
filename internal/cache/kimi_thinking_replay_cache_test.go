@@ -189,7 +189,8 @@ func homeKimiReplayContext(
 
 func kimiReplayTestContent(label string) []byte {
 	return []byte(fmt.Sprintf(
-		`[{"type":"thinking","thinking":"%s","signature":"sig-%s"},{"type":"tool_use","id":"tool-%s","name":"shell","input":{"value":%q}}]`,
+		`[{"type":"thinking","thinking":"%s","signature":"sig-%s"},{"type":"too`+
+			`l_use","id":"tool-%s","name":"shell","input":{"value":%q}}]`,
 		label,
 		label,
 		label,

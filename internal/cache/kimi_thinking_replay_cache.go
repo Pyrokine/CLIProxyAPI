@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -347,6 +348,22 @@ func readOrReserveKimiThinkingReplayHomeValue(
 			if len(raw) > kimiThinkingReplayCacheMaxSerializedBytes {
 				return nil, fmt.Errorf("kimi thinking replay value exceeds size limit")
 			}
+			if validKimiThinkingReplayContent(raw) {
+				migrated, errMarshal := marshalKimiThinkingReplayHomeValue(uuid.NewString(), false, raw)
+				if errMarshal != nil {
+					return nil, errMarshal
+				}
+				swapped, errMigrate := client.KVCompareAndSwap(
+					ctx, key, raw, true, migrated, kimiThinkingReplayCacheTTL,
+				)
+				if errMigrate != nil {
+					return nil, fmt.Errorf("migrate legacy kimi thinking replay content: %w", errMigrate)
+				}
+				if swapped {
+					return migrated, nil
+				}
+				continue
+			}
 			return raw, nil
 		}
 		tombstone, errMarshal := marshalKimiThinkingReplayHomeValue(uuid.NewString(), true, nil)
@@ -368,7 +385,7 @@ func readOrReserveKimiThinkingReplayHomeValue(
 			return tombstone, nil
 		}
 	}
-	return nil, fmt.Errorf("could not reserve absent kimi thinking replay state")
+	return nil, fmt.Errorf("could not reserve or migrate kimi thinking replay state after concurrent changes")
 }
 
 func marshalKimiThinkingReplayHomeValue(
@@ -380,7 +397,14 @@ func marshalKimiThinkingReplayHomeValue(
 	if !deleted {
 		value.Content = append(json.RawMessage(nil), content...)
 	}
-	return json.Marshal(value)
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	// 避免 HTML 转义将合法内容扩展到缓存大小上限之外
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
 }
 
 func decodeKimiThinkingReplayHomeValue(raw []byte) ([]byte, string, bool, bool) {
