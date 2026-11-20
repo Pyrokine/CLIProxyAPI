@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestShouldAcceptOAuthPollFiltersStaleMessages(t *testing.T) {
@@ -53,7 +53,7 @@ func TestOAuthTabUpdateIgnoresStalePollMsg(t *testing.T) {
 	m.authState = "state-current"
 	m.pollGeneration = 2
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 	m.viewport.SetContent(m.renderContent())
 
 	updated, cmd := m.update(
@@ -81,7 +81,7 @@ func TestOAuthTabUpdateAcceptsCurrentPollMsg(t *testing.T) {
 	m.authState = "state-current"
 	m.pollGeneration = 3
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 	m.viewport.SetContent(m.renderContent())
 
 	updated, _ := m.update(
@@ -105,17 +105,18 @@ func TestOAuthTabEscRemoteWaitsForCancellationResult(t *testing.T) {
 	m.deviceFlow = true
 	m.pollGeneration = 4
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 	m.viewport.SetContent(m.renderContent())
 
-	updated, cmd := m.update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, cmd := m.update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if updated.state != oauthCancelling {
 		t.Fatalf("state = %v, want oauthCancelling", updated.state)
 	}
 	if updated.pollGeneration != 5 {
 		t.Fatalf("pollGeneration = %d, want 5", updated.pollGeneration)
 	}
-	if updated.authState != "state-to-cancel" || updated.authURL != "https://example.com" || !updated.deviceFlow {
+	if updated.authState != "state-to-cancel" || updated.authURL != "https://example.com" ||
+		!updated.deviceFlow {
 		t.Fatalf(
 			"remote fields changed before cancellation confirmation: state=%q url=%q device=%v",
 			updated.authState,
@@ -139,10 +140,10 @@ func TestOAuthTabEscWithActiveCallbackInputPreservesFlowUntilCancelled(t *testin
 	m.callbackInput.SetValue("https://callback.example/?code=abc&state=state-to-cancel")
 	m.pollGeneration = 7
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 	m.viewport.SetContent(m.renderContent())
 
-	updated, cmd := m.update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, cmd := m.update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if updated.state != oauthCancelling {
 		t.Fatalf("state = %v, want oauthCancelling", updated.state)
 	}
@@ -176,7 +177,7 @@ func TestOAuthTabStaleStartIsIgnored(t *testing.T) {
 	m.state = oauthIdle
 	m.pollGeneration = 2
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 	m.viewport.SetContent(m.renderContent())
 
 	updated, cmd := m.update(
@@ -216,7 +217,7 @@ func TestOAuthTabCurrentStartOpensBrowserAfterGenerationCheck(t *testing.T) {
 	m.state = oauthPending
 	m.pollGeneration = 3
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 
 	updated, cmd := m.update(
 		oauthStartMsg{
@@ -240,6 +241,61 @@ func TestOAuthTabCurrentStartOpensBrowserAfterGenerationCheck(t *testing.T) {
 	}
 }
 
+func TestOAuthTabCancellationWaitKeepsSessionUntilServerResult(t *testing.T) {
+	for _, sample := range []struct {
+		name      string
+		key       rune
+		cancelled bool
+	}{
+		{"escape rejected", tea.KeyEsc, false},
+		{"enter rejected", tea.KeyEnter, false},
+		{"escape confirmed", tea.KeyEsc, true},
+		{"enter confirmed", tea.KeyEnter, true},
+	} {
+		t.Run(
+			sample.name, func(t *testing.T) {
+				model := newOAuthTabModel(nil)
+				model.state = oauthRemote
+				model.authState = "original-cancel-session"
+				model.authURL = "https://synthetic.invalid/device"
+				model.providerKey = "xai"
+				model.userCode = "synthetic-code"
+				model.deviceFlow = true
+				model.pollGeneration = 4
+				model.ready = true
+				model.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
+				waiting, cancelCommand := model.update(tea.KeyPressMsg{Code: tea.KeyEsc})
+				if cancelCommand == nil || waiting.state != oauthCancelling || waiting.pollGeneration != 5 {
+					t.Fatal("initial escape did not start cancellation")
+				}
+				updated, command := waiting.update(tea.KeyPressMsg{Code: sample.key})
+				if command != nil || updated.state != oauthCancelling || updated.pollGeneration != 5 ||
+					updated.authState !=
+						"original-cancel-session" ||
+					updated.authURL !=
+						"https://synthetic.invalid/device" ||
+					updated.providerKey != "xai" || updated.userCode != "synthetic-code" || !updated.deviceFlow {
+					t.Fatal("key changed the active cancellation session before the server result")
+				}
+				resolved, next := updated.update(
+					oauthCancelMsg{
+						state: "original-cancel-session", generation: 5, cancelled: sample.cancelled,
+					},
+				)
+				if sample.cancelled {
+					if resolved.state != oauthIdle || resolved.authState != "" || resolved.authURL != "" ||
+						resolved.providerKey != "" || resolved.userCode != "" || resolved.deviceFlow || next != nil {
+						t.Fatal("confirmed cancellation did not clear the original session")
+					}
+				} else if resolved.state != oauthRemote || resolved.authState != "original-cancel-session" ||
+					resolved.pollGeneration != 5 || next == nil {
+					t.Fatal("rejected cancellation did not resume the original session")
+				}
+			},
+		)
+	}
+}
+
 func TestOAuthTabCancellationConfirmationClearsRemoteState(t *testing.T) {
 	m := newOAuthTabModel(nil)
 	m.state = oauthCancelling
@@ -249,7 +305,7 @@ func TestOAuthTabCancellationConfirmationClearsRemoteState(t *testing.T) {
 	m.deviceFlow = true
 	m.pollGeneration = 5
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 
 	updated, cmd := m.update(
 		oauthCancelMsg{
@@ -277,7 +333,7 @@ func TestOAuthTabCancellationRejectionResumesPolling(t *testing.T) {
 	m.expiresIn = 60
 	m.pollGeneration = 6
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 
 	updated, cmd := m.update(oauthCancelMsg{state: "saving-state", generation: 6})
 	if updated.state != oauthRemote {
@@ -298,7 +354,7 @@ func TestOAuthTabPollFailureCancelsBeforeShowingTerminalError(t *testing.T) {
 	m.authState = "state-to-cancel"
 	m.pollGeneration = 7
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 
 	cancelling, cancelCmd := m.update(
 		oauthPollMsg{
@@ -335,7 +391,7 @@ func TestOAuthTabIgnoresStaleCallbackSubmitResult(t *testing.T) {
 	m.pollGeneration = 9
 	m.message = "unchanged"
 	m.ready = true
-	m.viewport = viewport.New(80, 24)
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(24))
 
 	updated, cmd := m.update(
 		oauthCallbackSubmitMsg{
@@ -367,7 +423,14 @@ func TestOAuthProvidersHaveCanonicalCallbackKeys(t *testing.T) {
 	} {
 		provider, ok := providers[tc.name]
 		if !ok || provider.key != tc.key || provider.apiPath != tc.path || provider.deviceFlow != tc.device {
-			t.Fatalf("provider %q = %+v, want key=%q path=%q device=%t", tc.name, provider, tc.key, tc.path, tc.device)
+			t.Fatalf(
+				"provider %q = %+v, want key=%q path=%q device=%t",
+				tc.name,
+				provider,
+				tc.key,
+				tc.path,
+				tc.device,
+			)
 		}
 	}
 }

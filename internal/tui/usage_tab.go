@@ -2,13 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // usageTabModel displays usage statistics with charts and breakdowns.
@@ -57,7 +58,7 @@ func (m *usageTabModel) update(msg tea.Msg) (usageTabModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderContent())
 		return *m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if msg.String() == "r" {
 			return *m, m.fetchData
 		}
@@ -75,12 +76,12 @@ func (m *usageTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	if !m.ready {
-		m.viewport = viewport.New(w, h)
+		m.viewport = viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
 		m.viewport.SetContent(m.renderContent())
 		m.ready = true
 	} else {
-		m.viewport.Width = w
-		m.viewport.Height = h
+		m.viewport.SetWidth(w)
+		m.viewport.SetHeight(h)
 	}
 }
 
@@ -136,8 +137,8 @@ func (m *usageTabModel) renderContent() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
 		Padding(0, 1).
-		Width(cardWidth).
-		Height(3)
+		Width(cardWidth + 2).
+		Height(5)
 
 	// Total Requests
 	card1 := cardStyle.BorderForeground(lipgloss.Color("111")).Render(
@@ -212,7 +213,7 @@ func (m *usageTabModel) renderContent() string {
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 		sb.WriteString("\n")
-		sb.WriteString(renderBarChart(rByH, m.width-6, "111"))
+		sb.WriteString(renderBarChart(rByH, m.width-6, lipgloss.Color("111")))
 		sb.WriteString("\n")
 	}
 
@@ -222,7 +223,7 @@ func (m *usageTabModel) renderContent() string {
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 		sb.WriteString("\n")
-		sb.WriteString(renderBarChart(tByH, m.width-6, "214"))
+		sb.WriteString(renderBarChart(tByH, m.width-6, lipgloss.Color("214")))
 		sb.WriteString("\n")
 	}
 
@@ -232,7 +233,7 @@ func (m *usageTabModel) renderContent() string {
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 		sb.WriteString("\n")
-		sb.WriteString(renderBarChart(rByD, m.width-6, "76"))
+		sb.WriteString(renderBarChart(rByD, m.width-6, lipgloss.Color("76")))
 		sb.WriteString("\n")
 	}
 
@@ -320,7 +321,10 @@ func (m *usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 		)
 	}
 
-	if inputTotal == 0 && outputTotal == 0 && cachedTotal == 0 && reasoningTotal == 0 && latestTimestamp.IsZero() && latencyCount == 0 && ttfbCount == 0 && durationCount == 0 {
+	if inputTotal == 0 && outputTotal == 0 && cachedTotal == 0 && reasoningTotal == 0 && latestTimestamp.IsZero() &&
+		latencyCount == 0 &&
+		ttfbCount == 0 &&
+		durationCount == 0 {
 		return ""
 	}
 
@@ -387,7 +391,7 @@ func formatDurationMS(ms int64) string {
 }
 
 // renderBarChart renders a simple ASCII horizontal bar chart.
-func renderBarChart(data map[string]any, maxBarWidth int, barColor lipgloss.Color) string {
+func renderBarChart(data map[string]any, maxBarWidth int, barColor color.Color) string {
 	if maxBarWidth < 10 {
 		maxBarWidth = 10
 	}

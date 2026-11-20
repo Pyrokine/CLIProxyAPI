@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // dashboardModel displays server info, stats cards, and config overview.
@@ -87,7 +87,7 @@ func (m *dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		m.viewport.SetContent(m.content)
 		return *m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if msg.String() == "r" {
 			return *m, m.fetchData
 		}
@@ -105,12 +105,12 @@ func (m *dashboardModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	if !m.ready {
-		m.viewport = viewport.New(w, h)
+		m.viewport = viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
 		m.viewport.SetContent(m.content)
 		m.ready = true
 	} else {
-		m.viewport.Width = w
-		m.viewport.Height = h
+		m.viewport.SetWidth(w)
+		m.viewport.SetHeight(h)
 	}
 }
 
@@ -153,8 +153,8 @@ func (m *dashboardModel) renderDashboard(
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
 		Padding(0, 1).
-		Width(cardWidth).
-		Height(2)
+		Width(cardWidth + 2).
+		Height(4)
 
 	// Card 1: API Keys
 	keyCount := len(apiKeys)

@@ -4,30 +4,32 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // keysTabModel displays and manages API keys.
 type keysTabModel struct {
-	client   *Client
-	viewport viewport.Model
-	keys     []string
-	gemini   []map[string]any
-	claude   []map[string]any
-	codex    []map[string]any
-	vertex   []map[string]any
-	openai   []map[string]any
-	err      error
-	width    int
-	height   int
-	ready    bool
-	cursor   int
-	confirm  int // -1 = no deletion pending
-	status   string
+	client       *Client
+	viewport     viewport.Model
+	keys         []string
+	gemini       []map[string]any
+	claude       []map[string]any
+	codex        []map[string]any
+	vertex       []map[string]any
+	interactions []map[string]any
+	xai          []map[string]any
+	openai       []map[string]any
+	err          error
+	width        int
+	height       int
+	ready        bool
+	cursor       int
+	confirm      int // -1 = no deletion pending
+	status       string
 
 	// Editing / Adding
 	editing   bool
@@ -37,13 +39,15 @@ type keysTabModel struct {
 }
 
 type keysDataMsg struct {
-	apiKeys []string
-	gemini  []map[string]any
-	claude  []map[string]any
-	codex   []map[string]any
-	vertex  []map[string]any
-	openai  []map[string]any
-	err     error
+	apiKeys      []string
+	gemini       []map[string]any
+	claude       []map[string]any
+	codex        []map[string]any
+	vertex       []map[string]any
+	interactions []map[string]any
+	xai          []map[string]any
+	openai       []map[string]any
+	err          error
 }
 
 type keyActionMsg struct {
@@ -74,11 +78,26 @@ func (m *keysTabModel) fetchKeys() tea.Msg {
 		return result
 	}
 	result.apiKeys = apiKeys
-	result.gemini, _ = m.client.getGeminiKeys()
-	result.claude, _ = m.client.getClaudeKeys()
-	result.codex, _ = m.client.getCodexKeys()
-	result.vertex, _ = m.client.getVertexKeys()
-	result.openai, _ = m.client.getOpenAICompat()
+	for _, provider := range []struct {
+		name  string
+		fetch func() ([]map[string]any, error)
+		keys  *[]map[string]any
+	}{
+		{"Gemini", m.client.getGeminiKeys, &result.gemini},
+		{"Claude", m.client.getClaudeKeys, &result.claude},
+		{"Codex", m.client.getCodexKeys, &result.codex},
+		{"Vertex", m.client.getVertexKeys, &result.vertex},
+		{"Interactions", m.client.getInteractionsKeys, &result.interactions},
+		{"xAI", m.client.getXAIKeys, &result.xai},
+		{"OpenAI Compatibility", m.client.getOpenAICompat, &result.openai},
+	} {
+		keys, errFetch := provider.fetch()
+		if errFetch != nil {
+			result.err = fmt.Errorf("%s: %w", provider.name, errFetch)
+			return result
+		}
+		*provider.keys = keys
+	}
 	return result
 }
 
@@ -97,6 +116,8 @@ func (m *keysTabModel) update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 			m.claude = msg.claude
 			m.codex = msg.codex
 			m.vertex = msg.vertex
+			m.interactions = msg.interactions
+			m.xai = msg.xai
 			m.openai = msg.openai
 			if m.cursor >= len(m.keys) {
 				m.cursor = max(0, len(m.keys)-1)
@@ -115,7 +136,7 @@ func (m *keysTabModel) update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderContent())
 		return *m, m.fetchKeys
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// ---- Editing / Adding mode ----
 		if m.editing || m.adding {
 			switch msg.String() {
@@ -250,6 +271,11 @@ func (m *keysTabModel) update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	if m.editing || m.adding {
+		m.editInput, cmd = m.editInput.Update(msg)
+		m.viewport.SetContent(m.renderContent())
+		return *m, cmd
+	}
 	m.viewport, cmd = m.viewport.Update(msg)
 	return *m, cmd
 }
@@ -257,14 +283,14 @@ func (m *keysTabModel) update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 func (m *keysTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.editInput.Width = w - 16
+	m.editInput.SetWidth(w - 16)
 	if !m.ready {
-		m.viewport = viewport.New(w, h)
+		m.viewport = viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
 		m.viewport.SetContent(m.renderContent())
 		m.ready = true
 	} else {
-		m.viewport.Width = w
-		m.viewport.Height = h
+		m.viewport.SetWidth(w)
+		m.viewport.SetHeight(h)
 	}
 }
 
@@ -343,6 +369,8 @@ func (m *keysTabModel) renderContent() string {
 	renderProviderKeys(&sb, "Claude API Keys", m.claude)
 	renderProviderKeys(&sb, "Codex API Keys", m.codex)
 	renderProviderKeys(&sb, "Vertex API Keys", m.vertex)
+	renderProviderKeys(&sb, "Interactions API Keys", m.interactions)
+	renderProviderKeys(&sb, "xAI API Keys", m.xai)
 
 	if len(m.openai) > 0 {
 		renderSection(&sb, "OpenAI Compatibility", len(m.openai))

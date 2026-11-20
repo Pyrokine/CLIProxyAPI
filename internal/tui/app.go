@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // Tab identifiers
@@ -115,7 +115,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		a.ready = true
 		if a.width > 0 {
-			a.authInput.Width = a.width - 6
+			a.authInput.SetWidth(a.width - 6)
 		}
 		contentH := max(a.height-4, 1) // tab bar + status bar
 		contentW := a.width
@@ -177,7 +177,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, cmdLogs
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if !a.authenticated {
 			switch msg.String() {
 			case "ctrl+c", "q":
@@ -241,11 +241,38 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 	}
 
-	// OAuth commands may finish after the user has switched tabs.
+	// 异步结果始终交给所属标签，保留切换标签期间完成的请求
 	switch msg.(type) {
+	case dashboardDataMsg:
+		var cmd tea.Cmd
+		a.dashboard, cmd = a.dashboard.update(msg)
+		return a, cmd
+	case configDataMsg:
+		var cmd tea.Cmd
+		a.config, cmd = a.config.update(msg)
+		return a, cmd
+	case authFilesMsg, authActionMsg:
+		var cmd tea.Cmd
+		a.auth, cmd = a.auth.update(msg)
+		return a, cmd
+	case keysDataMsg, keyActionMsg:
+		var cmd tea.Cmd
+		a.keys, cmd = a.keys.update(msg)
+		return a, cmd
 	case oauthStartMsg, oauthPollMsg, oauthCallbackSubmitMsg, oauthCancelMsg:
 		var cmd tea.Cmd
 		a.oauth, cmd = a.oauth.update(msg)
+		return a, cmd
+	case usageDataMsg:
+		var cmd tea.Cmd
+		a.usage, cmd = a.usage.update(msg)
+		return a, cmd
+	case logsPollMsg, logsTickMsg, logLineMsg:
+		if !a.logsEnabled {
+			return a, nil
+		}
+		var cmd tea.Cmd
+		a.logs, cmd = a.logs.update(msg)
 		return a, cmd
 	}
 
@@ -266,18 +293,6 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.usage, cmd = a.usage.update(msg)
 	case tabLogs:
 		a.logs, cmd = a.logs.update(msg)
-	}
-
-	// Keep logs polling alive even when logs tab is not active.
-	if a.logsEnabled && a.activeTab != tabLogs {
-		switch msg.(type) {
-		case logsPollMsg, logsTickMsg, logLineMsg:
-			var logCmd tea.Cmd
-			a.logs, logCmd = a.logs.update(msg)
-			if logCmd != nil {
-				cmd = logCmd
-			}
-		}
 	}
 
 	return a, cmd
@@ -337,13 +352,13 @@ func (a *app) initTabIfNeeded(_ int) tea.Cmd {
 	return nil
 }
 
-func (a *app) View() string {
+func (a *app) View() tea.View {
 	if !a.authenticated {
-		return a.renderAuthView()
+		return tea.View{Content: a.renderAuthView(), AltScreen: true}
 	}
 
 	if !a.ready {
-		return t("initializing_tui")
+		return tea.View{Content: t("initializing_tui"), AltScreen: true}
 	}
 
 	var sb strings.Builder
@@ -376,7 +391,7 @@ func (a *app) View() string {
 	sb.WriteString("\n")
 	sb.WriteString(a.renderStatusBar())
 
-	return sb.String()
+	return tea.View{Content: sb.String(), AltScreen: true}
 }
 
 func (a *app) renderAuthView() string {
@@ -495,7 +510,7 @@ func Run(client *Client, secretKey string, hook *LogHook, output io.Writer) erro
 		output = os.Stdout
 	}
 	app := new(newApp(client, secretKey, hook))
-	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithOutput(output))
+	p := tea.NewProgram(app, tea.WithOutput(output))
 	_, err := p.Run()
 	return err
 }

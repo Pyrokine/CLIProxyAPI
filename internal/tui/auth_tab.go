@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // editableField represents an editable field on an auth file.
@@ -88,7 +88,6 @@ func (m *authTabModel) update(msg tea.Msg) (authTabModel, tea.Cmd) {
 			if m.cursor >= len(m.files) {
 				m.cursor = max(0, len(m.files)-1)
 			}
-			m.status = ""
 		}
 		m.viewport.SetContent(m.renderContent())
 		return *m, nil
@@ -103,7 +102,7 @@ func (m *authTabModel) update(msg tea.Msg) (authTabModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderContent())
 		return *m, m.fetchFiles
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// ---- Editing mode ----
 		if m.editing {
 			return m.handleEditInput(msg)
@@ -119,6 +118,11 @@ func (m *authTabModel) update(msg tea.Msg) (authTabModel, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	if m.editing {
+		m.editInput, cmd = m.editInput.Update(msg)
+		m.viewport.SetContent(m.renderContent())
+		return *m, cmd
+	}
 	m.viewport, cmd = m.viewport.Update(msg)
 	return *m, cmd
 }
@@ -146,14 +150,14 @@ func (m *authTabModel) startEdit(fieldIdx int) tea.Cmd {
 func (m *authTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.editInput.Width = w - 20
+	m.editInput.SetWidth(w - 20)
 	if !m.ready {
-		m.viewport = viewport.New(w, h)
+		m.viewport = viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
 		m.viewport.SetContent(m.renderContent())
 		m.ready = true
 	} else {
-		m.viewport.Width = w
-		m.viewport.Height = h
+		m.viewport.SetWidth(w)
+		m.viewport.SetHeight(h)
 	}
 }
 
@@ -324,7 +328,7 @@ func getAnyString(m map[string]any, key string) string {
 	return fmt.Sprintf("%v", v)
 }
 
-func (m *authTabModel) handleEditInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+func (m *authTabModel) handleEditInput(msg tea.KeyPressMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		value := m.editInput.Value()
@@ -364,7 +368,7 @@ func (m *authTabModel) handleEditInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 	}
 }
 
-func (m *authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+func (m *authTabModel) handleConfirmInput(msg tea.KeyPressMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		idx := m.confirm
@@ -389,7 +393,7 @@ func (m *authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd
 	return *m, nil
 }
 
-func (m *authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+func (m *authTabModel) handleNormalInput(msg tea.KeyPressMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
 		if len(m.files) > 0 {
@@ -403,7 +407,7 @@ func (m *authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd)
 			m.viewport.SetContent(m.renderContent())
 		}
 		return *m, nil
-	case "enter", " ":
+	case "enter", "space":
 		if m.expanded == m.cursor {
 			m.expanded = -1
 		} else {
@@ -443,12 +447,28 @@ func (m *authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd)
 	case "3":
 		return *m, m.startEdit(2) // priority
 	case "R":
+		if m.cursor >= len(m.files) {
+			return *m, nil
+		}
 		m.status = ""
+		file := m.files[m.cursor]
+		name, authIndex := getString(file, "name"), getString(file, "auth_index")
+		client := m.client
+		action := fmt.Sprintf(t("credentials_refreshed"), name)
 		return *m, func() tea.Msg {
-			if err := m.client.refreshAllAuthFiles(); err != nil {
+			if err := client.refreshAuthFile(name, authIndex); err != nil {
 				return authActionMsg{err: err}
 			}
-			return authActionMsg{action: t("credentials_refreshed")}
+			return authActionMsg{action: action}
+		}
+	case "ctrl+r":
+		m.status = ""
+		client, action := m.client, t("all_credentials_refreshed")
+		return *m, func() tea.Msg {
+			if err := client.refreshAllAuthFiles(); err != nil {
+				return authActionMsg{err: err}
+			}
+			return authActionMsg{action: action}
 		}
 	case "r":
 		m.status = ""

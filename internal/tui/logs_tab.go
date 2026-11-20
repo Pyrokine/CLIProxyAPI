@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 )
 
 // logsTabModel displays real-time log lines from hook/API source.
@@ -120,7 +120,7 @@ func (m *logsTabModel) update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 		}
 		return *m, m.waitForLog
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "a":
 			m.autoScroll = !m.autoScroll
@@ -174,12 +174,12 @@ func (m *logsTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	if !m.ready {
-		m.viewport = viewport.New(w, h)
+		m.viewport = viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
 		m.viewport.SetContent(m.renderLogs())
 		m.ready = true
 	} else {
-		m.viewport.Width = w
-		m.viewport.Height = h
+		m.viewport.SetWidth(w)
+		m.viewport.SetHeight(h)
 	}
 }
 

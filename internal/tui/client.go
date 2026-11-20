@@ -252,8 +252,8 @@ func (c *Client) patchAuthFileFields(name string, fields map[string]any) error {
 	return err
 }
 
-func (c *Client) refreshAllAuthFiles() error {
-	body, errMarshal := json.Marshal(map[string]bool{"all": true})
+func (c *Client) refreshAuthFile(name, authIndex string) error {
+	body, errMarshal := json.Marshal(map[string]string{"name": name, "auth_index": authIndex})
 	if errMarshal != nil {
 		return errMarshal
 	}
@@ -268,6 +268,46 @@ func (c *Client) refreshAllAuthFiles() error {
 	}
 	if status >= http.StatusBadRequest {
 		return fmt.Errorf("HTTP %d", status)
+	}
+	return nil
+}
+
+func (c *Client) refreshAllAuthFiles() error {
+	body, errMarshal := json.Marshal(map[string]bool{"all": true})
+	if errMarshal != nil {
+		return errMarshal
+	}
+	data, status, errRequest := c.doRequestWithTimeout(
+		http.MethodPost,
+		"/v0/management/auth-files/refresh",
+		strings.NewReader(string(body)),
+		4*time.Minute+35*time.Second,
+	)
+	if errRequest != nil {
+		return errRequest
+	}
+	if status >= http.StatusBadRequest {
+		return fmt.Errorf("HTTP %d", status)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	var response struct {
+		Results []struct {
+			Success bool `json:"success"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return err
+	}
+	failed := 0
+	for _, result := range response.Results {
+		if !result.Success {
+			failed++
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("credential refresh failed for %d of %d credentials", failed, len(response.Results))
 	}
 	return nil
 }
@@ -395,6 +435,14 @@ func (c *Client) getCodexKeys() ([]map[string]any, error) {
 // getVertexKeys fetches Vertex API keys.
 func (c *Client) getVertexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/vertex-api-key", "vertex-api-key")
+}
+
+func (c *Client) getInteractionsKeys() ([]map[string]any, error) {
+	return c.getWrappedKeyList("/v0/management/interactions-api-key", "interactions-api-key")
+}
+
+func (c *Client) getXAIKeys() ([]map[string]any, error) {
+	return c.getWrappedKeyList("/v0/management/xai-api-key", "xai-api-key")
 }
 
 // getOpenAICompat fetches OpenAI compatibility entries.

@@ -5,10 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // oauthProvider represents an OAuth provider option.
@@ -125,29 +125,29 @@ func newOAuthTabModel(client *Client) oauthTabModel {
 	}
 }
 
-func (m oauthTabModel) init() tea.Cmd {
+func (m *oauthTabModel) init() tea.Cmd {
 	return nil
 }
 
-func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
+func (m *oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 	case oauthStartMsg:
 		if !shouldAcceptOAuthStart(msg, m.pollGeneration) {
 			// Stale start after Esc/restart: cancel server session so credentials are not saved.
 			if msg.err == nil && strings.TrimSpace(msg.state) != "" {
-				return m, m.cancelOAuthSession(msg.state, msg.generation, nil)
+				return *m, m.cancelOAuthSession(msg.state, msg.generation, nil)
 			}
-			return m, nil
+			return *m, nil
 		}
 		if msg.err != nil {
 			m.state = oauthError
 			m.err = msg.err
 			m.message = errorStyle.Render("✗ " + msg.err.Error())
 			m.viewport.SetContent(m.renderContent())
-			return m, nil
+			return *m, nil
 		}
 		m.authURL = msg.url
 		m.authState = msg.state
@@ -164,16 +164,16 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 			m.inputActive = false
 			m.callbackInput.Blur()
 			m.viewport.SetContent(m.renderContent())
-			return m, m.pollOAuthStatus(msg.state, msg.expiresIn, true, msg.generation)
+			return *m, m.pollOAuthStatus(msg.state, msg.expiresIn, true, msg.generation)
 		}
 		m.callbackInput.Focus()
 		m.inputActive = true
 		m.viewport.SetContent(m.renderContent())
-		return m, tea.Batch(textinput.Blink, m.pollOAuthStatus(msg.state, msg.expiresIn, false, msg.generation))
+		return *m, tea.Batch(textinput.Blink, m.pollOAuthStatus(msg.state, msg.expiresIn, false, msg.generation))
 
 	case oauthPollMsg:
 		if !shouldAcceptOAuthPoll(msg, m.authState, m.pollGeneration, m.state) {
-			return m, nil
+			return *m, nil
 		}
 		if msg.err != nil && msg.cancelSession {
 			m.state = oauthCancelling
@@ -182,7 +182,7 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 			m.inputActive = false
 			m.callbackInput.Blur()
 			m.viewport.SetContent(m.renderContent())
-			return m, m.cancelOAuthSession(msg.state, msg.generation, msg.err)
+			return *m, m.cancelOAuthSession(msg.state, msg.generation, msg.err)
 		}
 		if msg.err != nil {
 			m.state = oauthError
@@ -199,11 +199,11 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 			m.message = warningStyle.Render("⏳ " + msg.message)
 		}
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 
 	case oauthCallbackSubmitMsg:
 		if !shouldAcceptOAuthCallbackSubmit(msg, m.authState, m.pollGeneration, m.state) {
-			return m, nil
+			return *m, nil
 		}
 		if msg.err != nil {
 			m.message = errorStyle.Render(t("oauth_submit_fail") + ": " + msg.err.Error())
@@ -211,11 +211,11 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 			m.message = successStyle.Render(t("oauth_submit_ok"))
 		}
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 
 	case oauthCancelMsg:
 		if !shouldAcceptOAuthCancel(msg, m.authState, m.pollGeneration, m.state) {
-			return m, nil
+			return *m, nil
 		}
 		if msg.cancelled {
 			if msg.flowErr != nil {
@@ -224,11 +224,11 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 				m.err = msg.flowErr
 				m.message = errorStyle.Render("✗ " + msg.flowErr.Error())
 				m.viewport.SetContent(m.renderContent())
-				return m, nil
+				return *m, nil
 			}
 			m.resetRemoteOAuth()
 			m.viewport.SetContent(m.renderContent())
-			return m, nil
+			return *m, nil
 		}
 
 		m.state = oauthRemote
@@ -244,32 +244,38 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderContent())
 		pollCmd := m.pollOAuthStatus(m.authState, m.expiresIn, m.deviceFlow, m.pollGeneration)
 		if m.inputActive {
-			return m, tea.Batch(textinput.Blink, pollCmd)
+			return *m, tea.Batch(textinput.Blink, pollCmd)
 		}
-		return m, pollCmd
+		return *m, pollCmd
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
+		if m.state == oauthCancelling {
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return *m, cmd
+		}
 		// ---- Input active: typing callback URL (web flow only) ----
 		if m.inputActive && !m.deviceFlow {
 			switch msg.String() {
 			case "enter":
 				callbackURL := m.callbackInput.Value()
 				if callbackURL == "" {
-					return m, nil
+					return *m, nil
 				}
 				m.inputActive = false
 				m.callbackInput.Blur()
 				m.message = warningStyle.Render(t("oauth_submitting"))
 				m.viewport.SetContent(m.renderContent())
-				return m, m.submitCallback(callbackURL)
+				return *m, m.submitCallback(callbackURL)
 			case "esc":
 				// Cancel the remote OAuth session even while the callback input is focused.
-				return m, m.cancelRemoteOAuth()
+				cmd := m.cancelRemoteOAuth()
+				return *m, cmd
 			default:
 				var cmd tea.Cmd
 				m.callbackInput, cmd = m.callbackInput.Update(msg)
 				m.viewport.SetContent(m.renderContent())
-				return m, cmd
+				return *m, cmd
 			}
 		}
 
@@ -278,19 +284,20 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 			switch msg.String() {
 			case "c", "C":
 				if m.deviceFlow {
-					return m, nil
+					return *m, nil
 				}
 				// Re-activate input
 				m.inputActive = true
 				m.callbackInput.Focus()
 				m.viewport.SetContent(m.renderContent())
-				return m, textinput.Blink
+				return *m, textinput.Blink
 			case "esc":
-				return m, m.cancelRemoteOAuth()
+				cmd := m.cancelRemoteOAuth()
+				return *m, cmd
 			}
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
-			return m, cmd
+			return *m, cmd
 		}
 
 		// ---- Pending (auto polling) ----
@@ -301,7 +308,7 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 				m.message = ""
 				m.viewport.SetContent(m.renderContent())
 			}
-			return m, nil
+			return *m, nil
 		}
 
 		// ---- Idle ----
@@ -311,13 +318,13 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 				m.cursor--
 				m.viewport.SetContent(m.renderContent())
 			}
-			return m, nil
+			return *m, nil
 		case "down", "j":
 			if m.cursor < len(oauthProviders)-1 {
 				m.cursor++
 				m.viewport.SetContent(m.renderContent())
 			}
-			return m, nil
+			return *m, nil
 		case "enter":
 			if m.cursor >= 0 && m.cursor < len(oauthProviders) {
 				provider := oauthProviders[m.cursor]
@@ -325,31 +332,37 @@ func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 				m.state = oauthPending
 				m.message = warningStyle.Render(fmt.Sprintf(t("oauth_initiating"), provider.name))
 				m.viewport.SetContent(m.renderContent())
-				return m, m.startOAuth(provider, m.pollGeneration)
+				return *m, m.startOAuth(provider, m.pollGeneration)
 			}
-			return m, nil
+			return *m, nil
 		case "esc":
 			m.state = oauthIdle
 			m.message = ""
 			m.err = nil
 			m.viewport.SetContent(m.renderContent())
-			return m, nil
+			return *m, nil
 		}
 
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
-		return m, cmd
+		return *m, cmd
 	}
 
 	var cmd tea.Cmd
+	if m.inputActive && !m.deviceFlow {
+		m.callbackInput, cmd = m.callbackInput.Update(msg)
+		m.viewport.SetContent(m.renderContent())
+		return *m, cmd
+	}
 	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
+	return *m, cmd
 }
 
-func (m oauthTabModel) startOAuth(provider oauthProvider, generation int) tea.Cmd {
+func (m *oauthTabModel) startOAuth(provider oauthProvider, generation int) tea.Cmd {
+	client := m.client
 	return func() tea.Msg {
 		// Call the auth URL endpoint with is_webui=true
-		data, err := m.client.getJSON("/v0/management/" + provider.apiPath + "?is_webui=true")
+		data, err := client.getJSON("/v0/management/" + provider.apiPath + "?is_webui=true")
 		if err != nil {
 			return oauthStartMsg{
 				generation: generation, err: fmt.Errorf("failed to start %s login: %w", provider.name, err),
@@ -392,7 +405,8 @@ func (m *oauthTabModel) cancelRemoteOAuth() tea.Cmd {
 	return m.cancelOAuthSession(state, m.pollGeneration, nil)
 }
 
-func (m oauthTabModel) cancelOAuthSession(state string, generation int, flowErr error) tea.Cmd {
+func (m *oauthTabModel) cancelOAuthSession(state string, generation int, flowErr error) tea.Cmd {
+	client := m.client
 	state = strings.TrimSpace(state)
 	return func() tea.Msg {
 		if state == "" {
@@ -401,13 +415,13 @@ func (m oauthTabModel) cancelOAuthSession(state string, generation int, flowErr 
 				err: fmt.Errorf("OAuth state is empty"),
 			}
 		}
-		if m.client == nil {
+		if client == nil {
 			return oauthCancelMsg{
 				state: state, generation: generation, flowErr: flowErr,
 				err: fmt.Errorf("OAuth management client is unavailable"),
 			}
 		}
-		cancelled, err := m.client.cancelAuthSession(state)
+		cancelled, err := client.cancelAuthSession(state)
 		return oauthCancelMsg{
 			state:      state,
 			generation: generation,
@@ -434,12 +448,13 @@ func (m *oauthTabModel) resetRemoteOAuth() {
 	m.callbackInput.SetValue("")
 }
 
-func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
+func (m *oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
+	client := m.client
 	state := m.authState
 	generation := m.pollGeneration
 	providerKey := m.providerKey
 	return func() tea.Msg {
-		if m.client == nil {
+		if client == nil {
 			return oauthCallbackSubmitMsg{
 				state: state, generation: generation, err: fmt.Errorf("OAuth management client is unavailable"),
 			}
@@ -449,12 +464,13 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 			"redirect_url": callbackURL,
 			"state":        state,
 		}
-		err := m.client.postJSON("/v0/management/oauth-callback", body)
+		err := client.postJSON("/v0/management/oauth-callback", body)
 		return oauthCallbackSubmitMsg{state: state, generation: generation, err: err}
 	}
 }
 
-func (m oauthTabModel) pollOAuthStatus(state string, expiresIn int, deviceFlow bool, generation int) tea.Cmd {
+func (m *oauthTabModel) pollOAuthStatus(state string, expiresIn int, deviceFlow bool, generation int) tea.Cmd {
+	client := m.client
 	return func() tea.Msg {
 		timeout := defaultOAuthPollTimeout
 		if expiresIn > 0 {
@@ -476,7 +492,7 @@ func (m oauthTabModel) pollOAuthStatus(state string, expiresIn int, deviceFlow b
 
 			time.Sleep(oauthStatusPollInterval)
 
-			status, errMsg, err := m.client.getAuthStatus(state)
+			status, errMsg, err := client.getAuthStatus(state)
 			if err != nil {
 				consecutiveErrors++
 				if shouldFailOAuthStatusPoll(consecutiveErrors, maxOAuthStatusPollErrors) {
@@ -560,25 +576,25 @@ func shouldFailOAuthStatusPoll(consecutiveErrors, maxErrors int) bool {
 func (m *oauthTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.callbackInput.Width = w - 16
+	m.callbackInput.SetWidth(w - 16)
 	if !m.ready {
-		m.viewport = viewport.New(w, h)
+		m.viewport = viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
 		m.viewport.SetContent(m.renderContent())
 		m.ready = true
 	} else {
-		m.viewport.Width = w
-		m.viewport.Height = h
+		m.viewport.SetWidth(w)
+		m.viewport.SetHeight(h)
 	}
 }
 
-func (m oauthTabModel) view() string {
+func (m *oauthTabModel) view() string {
 	if !m.ready {
 		return t("loading")
 	}
 	return m.viewport.View()
 }
 
-func (m oauthTabModel) renderContent() string {
+func (m *oauthTabModel) renderContent() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render(t("oauth_title")))
@@ -619,9 +635,14 @@ func (m oauthTabModel) renderContent() string {
 
 		label := fmt.Sprintf("%s %s", p.emoji, p.name)
 		if isSelected {
-			label = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(colorPrimary).Padding(
-				0, 1,
-			).Render(label)
+			label = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(colorPrimary).
+				Padding(
+					0, 1,
+				).
+				Render(label)
 		} else {
 			label = lipgloss.NewStyle().Foreground(colorText).Padding(0, 1).Render(label)
 		}
@@ -635,7 +656,7 @@ func (m oauthTabModel) renderContent() string {
 	return sb.String()
 }
 
-func (m oauthTabModel) renderRemoteMode() string {
+func (m *oauthTabModel) renderRemoteMode() string {
 	var sb strings.Builder
 
 	providerStyle := lipgloss.NewStyle().Bold(true).Foreground(colorHighlight)
@@ -676,7 +697,7 @@ func (m oauthTabModel) renderRemoteMode() string {
 	return sb.String()
 }
 
-func (m oauthTabModel) renderDeviceMode() string {
+func (m *oauthTabModel) renderDeviceMode() string {
 	var sb strings.Builder
 
 	providerStyle := lipgloss.NewStyle().Bold(true).Foreground(colorHighlight)
@@ -696,9 +717,13 @@ func (m oauthTabModel) renderDeviceMode() string {
 	if strings.TrimSpace(m.userCode) != "" {
 		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(t("oauth_user_code")))
 		sb.WriteString("\n")
-		codeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(colorPrimary).Padding(
-			0, 1,
-		)
+		codeStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(colorPrimary).
+			Padding(
+				0, 1,
+			)
 		sb.WriteString("  " + codeStyle.Render(m.userCode) + "\n\n")
 	}
 

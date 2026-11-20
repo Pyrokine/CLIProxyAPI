@@ -1,7 +1,7 @@
 // Package tui provides a terminal-based management interface for CLIProxyAPI.
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import "charm.land/lipgloss/v2"
 
 // Color palette
 var (

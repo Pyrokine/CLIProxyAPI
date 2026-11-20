@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // configField represents a single editable config field.
@@ -90,7 +90,7 @@ func (m *configTabModel) update(msg tea.Msg) (configTabModel, tea.Cmd) {
 		// Refresh config from server
 		return *m, m.fetchConfig
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.editing {
 			return m.handleEditingKey(msg)
 		}
@@ -98,11 +98,16 @@ func (m *configTabModel) update(msg tea.Msg) (configTabModel, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	if m.editing {
+		m.textInput, cmd = m.textInput.Update(msg)
+		m.viewport.SetContent(m.renderContent())
+		return *m, cmd
+	}
 	m.viewport, cmd = m.viewport.Update(msg)
 	return *m, cmd
 }
 
-func (m *configTabModel) handleNormalKey(msg tea.KeyMsg) (configTabModel, tea.Cmd) {
+func (m *configTabModel) handleNormalKey(msg tea.KeyPressMsg) (configTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "r":
 		m.message = ""
@@ -122,7 +127,7 @@ func (m *configTabModel) handleNormalKey(msg tea.KeyMsg) (configTabModel, tea.Cm
 			m.ensureCursorVisible()
 		}
 		return *m, nil
-	case "enter", " ":
+	case "enter", "space":
 		if m.cursor >= 0 && m.cursor < len(m.fields) {
 			f := m.fields[m.cursor]
 			if f.kind == "readonly" {
@@ -147,7 +152,7 @@ func (m *configTabModel) handleNormalKey(msg tea.KeyMsg) (configTabModel, tea.Cm
 	return *m, cmd
 }
 
-func (m *configTabModel) handleEditingKey(msg tea.KeyMsg) (configTabModel, tea.Cmd) {
+func (m *configTabModel) handleEditingKey(msg tea.KeyPressMsg) (configTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		m.editing = false
@@ -167,11 +172,12 @@ func (m *configTabModel) handleEditingKey(msg tea.KeyMsg) (configTabModel, tea.C
 }
 
 func (m *configTabModel) toggleBool(idx int) tea.Cmd {
+	f := m.fields[idx]
+	client := m.client
 	return func() tea.Msg {
-		f := m.fields[idx]
 		current := f.value == "true"
 		newValue := !current
-		errPutBool := m.client.putBoolField(f.apiPath, newValue)
+		errPutBool := client.putBoolField(f.apiPath, newValue)
 		return configUpdateMsg{
 			path:  f.apiPath,
 			value: newValue,
@@ -181,8 +187,9 @@ func (m *configTabModel) toggleBool(idx int) tea.Cmd {
 }
 
 func (m *configTabModel) submitEdit(idx int, newValue string) tea.Cmd {
+	f := m.fields[idx]
+	client := m.client
 	return func() tea.Msg {
-		f := m.fields[idx]
 		var err error
 		var value any
 		switch f.kind {
@@ -195,10 +202,10 @@ func (m *configTabModel) submitEdit(idx int, newValue string) tea.Cmd {
 				}
 			}
 			value = valueInt
-			err = m.client.putIntField(f.apiPath, valueInt)
+			err = client.putIntField(f.apiPath, valueInt)
 		case "string":
 			value = newValue
-			err = m.client.putStringField(f.apiPath, newValue)
+			err = client.putStringField(f.apiPath, newValue)
 		}
 		return configUpdateMsg{
 			path:  f.apiPath,
@@ -219,23 +226,23 @@ func (m *configTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	if !m.ready {
-		m.viewport = viewport.New(w, h)
+		m.viewport = viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
 		m.viewport.SetContent(m.renderContent())
 		m.ready = true
 	} else {
-		m.viewport.Width = w
-		m.viewport.Height = h
+		m.viewport.SetWidth(w)
+		m.viewport.SetHeight(h)
 	}
 }
 
 func (m *configTabModel) ensureCursorVisible() {
 	// Each field takes ~1 line, header takes ~4 lines
 	targetLine := m.cursor + 5
-	if targetLine < m.viewport.YOffset {
+	if targetLine < m.viewport.YOffset() {
 		m.viewport.SetYOffset(targetLine)
 	}
-	if targetLine >= m.viewport.YOffset+m.viewport.Height {
-		m.viewport.SetYOffset(targetLine - m.viewport.Height + 1)
+	if targetLine >= m.viewport.YOffset()+m.viewport.Height() {
+		m.viewport.SetYOffset(targetLine - m.viewport.Height() + 1)
 	}
 }
 
