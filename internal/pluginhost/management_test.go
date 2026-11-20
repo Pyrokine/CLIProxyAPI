@@ -43,7 +43,10 @@ func TestRegisterManagementRoutesSkipsReservedAndUsesPriority(t *testing.T) {
 			{
 				Method: http.MethodPost, Path: "plugins/low/run", Handler: managementHandlerFunc(
 					func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
-						return pluginapi.ManagementResponse{StatusCode: http.StatusAccepted, Body: []byte("low-only")}, nil
+						return pluginapi.ManagementResponse{
+							StatusCode: http.StatusAccepted,
+							Body:       []byte("low-only"),
+						}, nil
 					},
 				),
 			},
@@ -99,43 +102,53 @@ func TestRegisterManagementRoutesSkipsReservedAndUsesPriority(t *testing.T) {
 func TestServeManagementPreservesRawJSONForLegacyAndSchemaSix(t *testing.T) {
 	const rawJSON = `{"prompt":"Analyze <input> & preserve > output"}`
 	for _, schemaVersion := range []uint32{0, pluginabi.SchemaVersionRawManagementResponse} {
-		t.Run(fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
-			plugin := validTestPlugin("raw-json")
-			plugin.Capabilities = pluginapi.Capabilities{ManagementAPI: &managementPluginDouble{}}
-			lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
-			lookup.schemaVersion = schemaVersion
-			lookup.schemaVersionSet = true
-			lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
-				pluginabi.MethodManagementRegister: func(context.Context, []byte) ([]byte, error) {
-					return marshalRPCResult(rpcManagementRegistrationResponse{Routes: []pluginapi.ManagementRoute{{
-						Method: http.MethodGet,
-						Path:   "/plugins/raw-json/config",
-					}}})
-				},
-				pluginabi.MethodManagementHandle: func(context.Context, []byte) ([]byte, error) {
-					return marshalRPCResult(pluginapi.ManagementResponse{
-						Headers: http.Header{"Content-Type": {"application/json"}},
-						Body:    []byte(rawJSON),
-					})
-				},
-			}
-			registered, errRegister := registerRPCPlugin(
-				context.Background(), New(), "raw-json", lookup, pluginabi.MethodPluginRegister, nil,
-			)
-			if errRegister != nil {
-				t.Fatalf("registerRPCPlugin() error = %v", errRegister)
-			}
-			host := newHostWithRecords(capabilityRecord{id: "raw-json", plugin: registered})
-			host.RegisterManagementRoutes(context.Background(), nil)
-			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodGet, "/v0/management/plugins/raw-json/config", nil)
-			if !host.ServeManagementHTTP(recorder, request) {
-				t.Fatal("ServeManagementHTTP() = false, want true")
-			}
-			if recorder.Body.String() != rawJSON {
-				t.Fatalf("body = %q, want raw %q", recorder.Body.String(), rawJSON)
-			}
-		})
+		t.Run(
+			fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
+				plugin := validTestPlugin("raw-json")
+				plugin.Capabilities = pluginapi.Capabilities{ManagementAPI: &managementPluginDouble{}}
+				lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+				lookup.schemaVersion = schemaVersion
+				lookup.schemaVersionSet = true
+				lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+					pluginabi.MethodManagementRegister: func(context.Context, []byte) ([]byte, error) {
+						return marshalRPCResult(
+							rpcManagementRegistrationResponse{
+								Routes: []pluginapi.ManagementRoute{
+									{
+										Method: http.MethodGet,
+										Path:   "/plugins/raw-json/config",
+									},
+								},
+							},
+						)
+					},
+					pluginabi.MethodManagementHandle: func(context.Context, []byte) ([]byte, error) {
+						return marshalRPCResult(
+							pluginapi.ManagementResponse{
+								Headers: http.Header{"Content-Type": {"application/json"}},
+								Body:    []byte(rawJSON),
+							},
+						)
+					},
+				}
+				registered, errRegister := registerRPCPlugin(
+					context.Background(), New(), "raw-json", lookup, pluginabi.MethodPluginRegister, nil,
+				)
+				if errRegister != nil {
+					t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+				}
+				host := newHostWithRecords(capabilityRecord{id: "raw-json", plugin: registered})
+				host.RegisterManagementRoutes(context.Background(), nil)
+				recorder := httptest.NewRecorder()
+				request := httptest.NewRequest(http.MethodGet, "/v0/management/plugins/raw-json/config", nil)
+				if !host.ServeManagementHTTP(recorder, request) {
+					t.Fatal("ServeManagementHTTP() = false, want true")
+				}
+				if recorder.Body.String() != rawJSON {
+					t.Fatalf("body = %q, want raw %q", recorder.Body.String(), rawJSON)
+				}
+			},
+		)
 	}
 }
 
@@ -402,7 +415,8 @@ func TestRegisteredPluginsIncludesResourceMenus(t *testing.T) {
 		t.Fatalf("RegisteredPlugins()[0].Menus = %#v, want one visible GET menu", plugins[0].Menus)
 	}
 	menu := plugins[0].Menus[0]
-	if menu.Path != "/v0/resource/plugins/menu/status" || menu.Menu != "Status" || menu.Description != "Shows plugin status." {
+	if menu.Path != "/v0/resource/plugins/menu/status" || menu.Menu != "Status" ||
+		menu.Description != "Shows plugin status." {
 		t.Fatalf("menu = %#v, want normalized status menu", menu)
 	}
 }

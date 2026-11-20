@@ -5,7 +5,37 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	legacyyaml "gopkg.in/yaml.v3"
 )
+
+func TestParseJSHandlerConfigFromHostYAML(t *testing.T) {
+	var hostNode legacyyaml.Node
+	if err := legacyyaml.Unmarshal(
+		[]byte(`defaults: &defaults
+  enabled: false
+  timeout: 2s
+  script_paths: [fixture.js]
+<<: *defaults
+priority: 0
+opaque_int: 9223372036854775807
+`), &hostNode,
+	); err != nil {
+		t.Fatal(err)
+	}
+	raw, errMarshal := legacyyaml.Marshal(&hostNode)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	cfg, errParse := parseJSHandlerConfig(raw)
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	if cfg.Enabled || cfg.Timeout != 2*time.Second || len(cfg.ScriptPaths) != 1 || cfg.ScriptPaths[0] != "fixture.js" {
+		t.Fatalf("host YAML configuration changed: %+v", cfg)
+	}
+}
 
 func TestResolvedScriptPathsRejectsRelativeSymlinkEscapingPluginDir(t *testing.T) {
 	pluginDir := t.TempDir()

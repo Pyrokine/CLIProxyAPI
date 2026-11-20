@@ -94,11 +94,12 @@ func registerRPCPlugin(
 		Metadata:      resp.Metadata,
 		SchemaVersion: schemaVersion,
 		Capabilities: pluginapi.Capabilities{
-			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
-			SchedulerAcrossPriorities:     resp.Capabilities.Scheduler && resp.Capabilities.SchedulerAcrossPriorities,
-			ExecutorModelScope:            resp.Capabilities.ExecutorModelScope,
-			ExecutorInputFormats:          append([]string(nil), resp.Capabilities.ExecutorInputFormats...),
-			ExecutorOutputFormats:         append([]string(nil), resp.Capabilities.ExecutorOutputFormats...),
+			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider &&
+				resp.Capabilities.FrontendAuthProviderExclusive,
+			SchedulerAcrossPriorities: resp.Capabilities.Scheduler && resp.Capabilities.SchedulerAcrossPriorities,
+			ExecutorModelScope:        resp.Capabilities.ExecutorModelScope,
+			ExecutorInputFormats:      append([]string(nil), resp.Capabilities.ExecutorInputFormats...),
+			ExecutorOutputFormats:     append([]string(nil), resp.Capabilities.ExecutorOutputFormats...),
 		},
 	}
 	if resp.Capabilities.ModelRegistrar {
@@ -150,7 +151,8 @@ func registerRPCPlugin(
 	if resp.Capabilities.StreamChunkInterceptor {
 		plugin.Capabilities.StreamChunkInterceptor = adapter
 	}
-	if resp.Capabilities.WebSocketResponseObserver && schemaVersion >= pluginabi.SchemaVersionWebSocketResponseObserver {
+	if resp.Capabilities.WebSocketResponseObserver &&
+		schemaVersion >= pluginabi.SchemaVersionWebSocketResponseObserver {
 		plugin.Capabilities.WebSocketResponseObserver = adapter
 	}
 	if resp.Capabilities.ThinkingApplier {
@@ -222,6 +224,9 @@ func sanitizePluginRequest(request any) any {
 	case pluginapi.RequestInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
+	case pluginapi.RequestCompletion:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
 	case pluginapi.ResponseInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
@@ -240,6 +245,9 @@ func sanitizePluginRequest(request any) any {
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcRequestInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcRequestCompletion:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcResponseInterceptRequest:
@@ -438,6 +446,7 @@ func (a rpcThinkingApplier) Identifier() string {
 	return callPluginIdentifier(a.client, pluginabi.MethodThinkingIdentifier)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *rpcPluginAdapter) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (
 	pluginapi.AuthParseResponse,
 	error,
@@ -445,6 +454,7 @@ func (a *rpcPluginAdapter) ParseAuth(ctx context.Context, req pluginapi.AuthPars
 	return callPlugin[pluginapi.AuthParseResponse](ctx, a.client, pluginabi.MethodAuthParse, req)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *rpcPluginAdapter) StartLogin(
 	ctx context.Context,
 	req pluginapi.AuthLoginStartRequest,
@@ -459,6 +469,7 @@ func (a *rpcPluginAdapter) StartLogin(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *rpcPluginAdapter) PollLogin(
 	ctx context.Context,
 	req pluginapi.AuthLoginPollRequest,
@@ -473,6 +484,7 @@ func (a *rpcPluginAdapter) PollLogin(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *rpcPluginAdapter) RefreshAuth(
 	ctx context.Context,
 	req pluginapi.AuthRefreshRequest,
@@ -487,6 +499,7 @@ func (a *rpcPluginAdapter) RefreshAuth(
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *rpcPluginAdapter) Authenticate(
 	ctx context.Context,
 	req pluginapi.FrontendAuthRequest,
@@ -494,6 +507,7 @@ func (a *rpcPluginAdapter) Authenticate(
 	return callPlugin[pluginapi.FrontendAuthResponse](ctx, a.client, pluginabi.MethodFrontendAuthAuthenticate, req)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *rpcPluginAdapter) Execute(ctx context.Context, req pluginapi.ExecutorRequest) (
 	pluginapi.ExecutorResponse,
 	error,
@@ -508,6 +522,7 @@ func (a *rpcPluginAdapter) Execute(ctx context.Context, req pluginapi.ExecutorRe
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *rpcPluginAdapter) ExecuteStream(
 	ctx context.Context,
 	req pluginapi.ExecutorRequest,
@@ -539,6 +554,7 @@ func (a *rpcPluginAdapter) ExecuteStream(
 	return pluginapi.ExecutorStreamResponse{Headers: resp.Headers, Chunks: chunks}, nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *rpcPluginAdapter) CountTokens(ctx context.Context, req pluginapi.ExecutorRequest) (
 	pluginapi.ExecutorResponse,
 	error,
@@ -553,6 +569,7 @@ func (a *rpcPluginAdapter) CountTokens(ctx context.Context, req pluginapi.Execut
 	)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *rpcPluginAdapter) HttpRequest(
 	ctx context.Context,
 	req pluginapi.ExecutorHTTPRequest,

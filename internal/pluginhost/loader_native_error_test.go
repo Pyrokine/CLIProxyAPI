@@ -27,7 +27,8 @@ typedef struct { uint32_t version; void* ctx; void* call; void* free_buffer; } h
 typedef struct { uint32_t version; void* call; void* free_buffer; void* shutdown; } plugin_api;
 
 static int call(const char* method, const uint8_t* request, size_t length, buffer* response) {
-    const char* payload = "{\"ok\":false,\"error\":{\"code\":\"insufficient_quota\",\"message\":\"plan limit reached\",\"http_status\":403}}";
+    const char* payload = "{\"ok\":false,\"error\":{\"code\":\"insufficient_quota\",` +
+		`\"message\":\"plan limit reached\",\"http_status\":403}}";
     if (strcmp(method, "fixture.invalid") == 0) {
         payload = "invalid JSON";
     } else if (strcmp(method, "fixture.success") == 0) {
@@ -68,7 +69,9 @@ int cliproxy_plugin_init(const host_api* host, plugin_api* plugin) {
 		t.Fatal(err)
 	}
 	t.Cleanup(client.Shutdown)
-	_, err = callPlugin[rpcEmptyResponse](context.Background(), client, pluginabi.MethodExecutorExecute, rpcEmptyResponse{})
+	_, err = callPlugin[rpcEmptyResponse](
+		context.Background(), client, pluginabi.MethodExecutorExecute, rpcEmptyResponse{},
+	)
 	if err == nil || err.Error() != "plan limit reached" {
 		t.Fatalf("native plugin error = %v, want plan limit reached", err)
 	}
@@ -77,7 +80,9 @@ int cliproxy_plugin_init(const host_api* host, plugin_api* plugin) {
 		t.Fatalf("native plugin error %T does not directly expose status 403", err)
 	}
 	for _, method := range []string{"fixture.invalid", "fixture.success"} {
-		if _, err := client.Call(context.Background(), method, nil); err == nil || !strings.Contains(err.Error(), "returned 1") {
+		if _, err := client.Call(context.Background(), method, nil); err == nil || !strings.Contains(
+			err.Error(), "returned 1",
+		) {
 			t.Fatalf("non-error envelope for %s accepted despite native failure: %v", method, err)
 		}
 	}

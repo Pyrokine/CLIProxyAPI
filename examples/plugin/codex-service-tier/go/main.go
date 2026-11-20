@@ -42,7 +42,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	"github.com/tidwall/sjson"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 var fastEnabled atomic.Bool
@@ -81,6 +81,7 @@ func main() {}
 // The exported name is fixed by the plugin C ABI.
 //
 //export cliproxy_plugin_init
+//goland:noinspection GoUnusedFunction,GoSnakeCaseUsage
 func cliproxy_plugin_init(_ *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
 	if plugin == nil {
 		return 1
@@ -166,7 +167,7 @@ func pluginRegistration() registration {
 			Name:             "codex-service-tier",
 			Version:          "0.1.0",
 			Author:           "router-for-me",
-			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			GitHubRepository: "https://github.com/Pyrokine/CLIProxyAPI",
 			Logo:             "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/docs/logo.png",
 			ConfigFields: []pluginapi.ConfigField{
 				{

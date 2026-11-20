@@ -6,7 +6,7 @@ import "fmt"
 
 type unsupportedLoader struct{}
 
-func (unsupportedLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
+func (unsupportedLoader) Open(file pluginFile, _host *Host) (pluginClient, error) {
 	return nil, fmt.Errorf("standard dynamic library plugin loading requires cgo on this platform: %s", file.Path)
 }
 

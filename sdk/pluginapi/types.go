@@ -38,9 +38,11 @@ type Metadata struct {
 }
 
 // ConfigFieldType classifies plugin-owned configuration values for management clients.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ConfigFieldType string
 
-// noinspection GoUnusedConst
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedConst
 const (
 	// ConfigFieldTypeString describes a string configuration value.
 	ConfigFieldTypeString ConfigFieldType = "string"
@@ -80,7 +82,8 @@ type Capabilities struct {
 	AuthProvider AuthProvider
 	// FrontendAuthProvider authenticates frontend requests before proxy handling.
 	FrontendAuthProvider FrontendAuthProvider
-	// FrontendAuthProviderExclusive makes this frontend auth provider the only active request auth provider when selected.
+	// FrontendAuthProviderExclusive makes this frontend auth provider the only active request auth provider when
+	// selected.
 	FrontendAuthProviderExclusive bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
@@ -107,7 +110,8 @@ type Capabilities struct {
 	ResponseAfterTranslator ResponseNormalizer
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
-	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
+	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request
+	// interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
@@ -319,6 +323,8 @@ type AuthLoginPollRequest struct {
 }
 
 // AuthLoginStatus describes the current provider login state.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type AuthLoginStatus string
 
 // noinspection GoUnusedConst
@@ -484,6 +490,8 @@ const (
 )
 
 // Scheduler chooses an auth candidate before the built-in scheduler runs.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Scheduler interface {
 	Pick(context.Context, SchedulerPickRequest) (SchedulerPickResponse, error)
 }
@@ -710,7 +718,7 @@ type HostAffinityLookupResponse struct {
 	// AuthIndex identifies the bound credential without exposing credential material.
 	AuthIndex string `json:"auth_index,omitempty"`
 	// ObservedAt is the time at which the binding was observed.
-	ObservedAt time.Time `json:"observed_at,omitempty"`
+	ObservedAt time.Time `json:"observed_at"`
 	// Disabled reports whether the bound credential is disabled.
 	Disabled bool `json:"disabled,omitempty"`
 	// Unavailable reports whether the bound credential is unavailable.
@@ -878,11 +886,15 @@ type ExecutorStreamChunk struct {
 }
 
 // RequestTranslator converts canonical request payloads to another format.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type RequestTranslator interface {
 	TranslateRequest(context.Context, RequestTransformRequest) (PayloadResponse, error)
 }
 
 // RequestNormalizer converts request payloads into a canonical format.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type RequestNormalizer interface {
 	NormalizeRequest(context.Context, RequestTransformRequest) (PayloadResponse, error)
 }
@@ -903,7 +915,8 @@ type RequestInterceptor interface {
 	InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
 }
 
-// RequestLifecyclePlugin receives asynchronous terminal events after execution finishes, fails, is rejected, or is canceled.
+// RequestLifecyclePlugin receives asynchronous terminal events after execution finishes, fails, is rejected, or is
+// canceled.
 type RequestLifecyclePlugin interface {
 	HandleRequestComplete(context.Context, RequestCompletion) error
 }
@@ -1159,7 +1172,10 @@ type UsagePlugin interface {
 
 // CommandLinePlugin declares and handles plugin-owned command-line flags.
 type CommandLinePlugin interface {
-	RegisterCommandLine(context.Context, CommandLineRegistrationRequest) (CommandLineRegistrationResponse, error)
+	RegisterCommandLine(
+		context.Context,
+		CommandLineRegistrationRequest,
+	) (CommandLineRegistrationResponse, error)
 	ExecuteCommandLine(context.Context, CommandLineExecutionRequest) (CommandLineExecutionResponse, error)
 }
 
@@ -1279,6 +1295,8 @@ type ResourceRoute struct {
 }
 
 // ManagementHandler handles one plugin-owned Management API or resource route.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ManagementHandler interface {
 	HandleManagement(context.Context, ManagementRequest) (ManagementResponse, error)
 }
@@ -1410,7 +1428,7 @@ type QuotaProvider interface {
 
 // QuotaDescribeRequest carries host context for describing quota capabilities.
 type QuotaDescribeRequest struct {
-	Plugin Metadata `json:"plugin,omitempty"`
+	Plugin Metadata `json:"plugin"`
 }
 
 // QuotaDescribeResponse describes supported providers and reset capability.
@@ -1428,7 +1446,7 @@ type QuotaFetchRequest struct {
 	StorageJSON []byte            `json:"storage_json,omitempty"`
 	Metadata    map[string]any    `json:"metadata,omitempty"`
 	Attributes  map[string]string `json:"attributes,omitempty"`
-	Host        HostConfigSummary `json:"host,omitempty"`
+	Host        HostConfigSummary `json:"host"`
 	HTTPClient  HostHTTPClient    `json:"-"`
 }
 
@@ -1554,7 +1572,7 @@ type QuotaResetRequest struct {
 	StorageJSON []byte            `json:"storage_json,omitempty"`
 	Metadata    map[string]any    `json:"metadata,omitempty"`
 	Attributes  map[string]string `json:"attributes,omitempty"`
-	Host        HostConfigSummary `json:"host,omitempty"`
+	Host        HostConfigSummary `json:"host"`
 	HTTPClient  HostHTTPClient    `json:"-"`
 }
 
@@ -1573,6 +1591,8 @@ const (
 
 // QuotaProbe describes the declarative HTTP probe contract consumed after plugin providers decline a credential.
 // Probe execution, target validation, redirects, limits, and response mapping belong to the management integration.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type QuotaProbe struct {
 	URL     string            `json:"url"`
 	Method  string            `json:"method,omitempty"`

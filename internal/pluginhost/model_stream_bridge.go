@@ -61,7 +61,9 @@ func (b *modelStreamBridge) open(
 		}
 		return ""
 	}
-	b.streams[id] = modelStreamEntry{pluginID: pluginID, instanceID: instanceID, ctx: ctx, chunks: chunks, cancel: cancel}
+	b.streams[id] = modelStreamEntry{
+		pluginID: pluginID, instanceID: instanceID, ctx: ctx, chunks: chunks, cancel: cancel,
+	}
 	b.mu.Unlock()
 	stop := context.AfterFunc(ctx, func() { _ = b.close(ctx, id) })
 	b.setCleanup(ctx, id, func() { stop() })
@@ -106,7 +108,9 @@ func (b *modelStreamBridge) read(ctx context.Context, id string) (handlers.Model
 	}
 	pluginID, instanceID := modelStreamOwner(ctx)
 	if entry.pluginID != pluginID || entry.instanceID != instanceID {
-		return handlers.ModelExecutionChunk{}, true, fmt.Errorf("model stream does not belong to the calling plugin instance")
+		return handlers.ModelExecutionChunk{}, true, fmt.Errorf(
+			"model stream does not belong to the calling plugin instance",
+		)
 	}
 	if ctx == nil {
 		ctx = context.Background()

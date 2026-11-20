@@ -368,7 +368,9 @@ func (h *Host) commandLineExecutionState(flagSet *flag.FlagSet) (
 	return triggeredByPlugin, allFlags
 }
 
-func cloneCommandLineFlagValues(in map[string]pluginapi.CommandLineFlagValue) map[string]pluginapi.CommandLineFlagValue {
+func cloneCommandLineFlagValues(
+	in map[string]pluginapi.CommandLineFlagValue,
+) map[string]pluginapi.CommandLineFlagValue {
 	if len(in) == 0 {
 		return nil
 	}

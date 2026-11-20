@@ -3,6 +3,7 @@ package pluginstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -231,7 +232,7 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 				log.WithError(errClose).Debug("failed to close plugin store redirect body")
 			}
 			if errRedirect != nil {
-				return nil, errRedirect
+				return nil, &pluginStoreRequestError{cause: errRedirect}
 			}
 			if redirects >= maxPluginStoreRedirects {
 				return nil, fmt.Errorf("stopped after %d redirects", maxPluginStoreRedirects)
@@ -275,14 +276,30 @@ func pluginStoreGetNoRedirect(
 	}
 	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if errRequest != nil {
-		return nil, fmt.Errorf("create request: %w", errRequest)
+		return nil, &pluginStoreRequestError{cause: errRequest}
 	}
 	req.Header = headers.Clone()
 	resp, errDo := pluginStoreNoRedirectClient(client).Do(req)
 	if errDo != nil {
-		return nil, fmt.Errorf("request failed: %w", errDo)
+		return nil, &pluginStoreRequestError{cause: errDo}
 	}
 	return resp, nil
+}
+
+type pluginStoreRequestError struct {
+	cause error
+}
+
+func (err *pluginStoreRequestError) Error() string {
+	if requestError, ok := errors.AsType[*url.Error](err.cause); ok {
+		return fmt.Sprintf("request failed: %s: %v", requestError.Op, requestError.Err)
+	}
+	return fmt.Sprintf("request failed: %v", err.cause)
+}
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (err *pluginStoreRequestError) Unwrap() error {
+	return err.cause
 }
 
 func pluginStoreNoRedirectClient(client HTTPDoer) HTTPDoer {
@@ -299,7 +316,11 @@ func pluginStoreNoRedirectClient(client HTTPDoer) HTTPDoer {
 
 func pluginStoreRedirectStatus(status int) bool {
 	switch status {
-	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	case http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect:
 		return true
 	default:
 		return false

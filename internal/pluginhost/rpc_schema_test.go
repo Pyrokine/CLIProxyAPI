@@ -21,19 +21,21 @@ func TestRPCErrorEnvelopePreservesHTTPStatus(t *testing.T) {
 		{name: "legacy error", statusCode: 0},
 		{name: "quota error", statusCode: 429},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			raw, errMarshal := pluginabi.NewErrorEnvelope("quota", "quota exceeded", testCase.statusCode)
-			if errMarshal != nil {
-				t.Fatalf("marshal error envelope: %v", errMarshal)
-			}
-			_, errDecode := decodeRPCEnvelope[rpcEmptyResponse](raw)
-			if errDecode == nil {
-				t.Fatal("decodeRPCEnvelope() error = nil")
-			}
-			if got := clienterror.HTTPStatusFromError(errDecode); got != testCase.statusCode {
-				t.Fatalf("decoded HTTP status = %d, want %d", got, testCase.statusCode)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				raw, errMarshal := pluginabi.NewErrorEnvelope("quota", "quota exceeded", testCase.statusCode)
+				if errMarshal != nil {
+					t.Fatalf("marshal error envelope: %v", errMarshal)
+				}
+				_, errDecode := decodeRPCEnvelope[rpcEmptyResponse](raw)
+				if errDecode == nil {
+					t.Fatal("decodeRPCEnvelope() error = nil")
+				}
+				if got := clienterror.HTTPStatusFromError(errDecode); got != testCase.statusCode {
+					t.Fatalf("decoded HTTP status = %d, want %d", got, testCase.statusCode)
+				}
+			},
+		)
 	}
 }
 
@@ -54,7 +56,9 @@ func TestHostCallbackRPCErrorPreservesHTTPStatus(t *testing.T) {
 		_, errCall := callPlugin[pluginapi.SchedulerPickResponse](
 			context.Background(), lookup, pluginabi.MethodSchedulerPick, pluginapi.SchedulerPickRequest{},
 		)
-		if errCall == nil || !strings.Contains(errCall.Error(), "plan limit reached") || clienterror.HTTPStatusFromError(errCall) != status {
+		if errCall == nil || !strings.Contains(
+			errCall.Error(), "plan limit reached",
+		) || clienterror.HTTPStatusFromError(errCall) != status {
 			t.Fatalf("host callback status %d decoded as %v", status, errCall)
 		}
 	}
@@ -298,7 +302,9 @@ func TestIsPluginErrorEnvelopeAcceptsNonzeroReturnEnvelope(t *testing.T) {
 	if !isPluginErrorEnvelope(raw) {
 		t.Fatalf("isPluginErrorEnvelope(%s) = false, want true", raw)
 	}
-	for _, raw := range [][]byte{[]byte(`not json`), []byte(`{"ok":false}`), []byte(`{"ok":true,"error":{"message":"failed"}}`)} {
+	for _, raw := range [][]byte{
+		[]byte(`not json`), []byte(`{"ok":false}`), []byte(`{"ok":true,"error":{"message":"failed"}}`),
+	} {
 		if isPluginErrorEnvelope(raw) {
 			t.Fatalf("isPluginErrorEnvelope accepted invalid error envelope: %s", raw)
 		}
@@ -317,7 +323,9 @@ func TestCallPluginPreservesPluginErrorsAndDecodeContext(t *testing.T) {
 				return raw, nil
 			},
 		}
-		_, err = callPlugin[rpcEmptyResponse](context.Background(), lookup, pluginabi.MethodExecutorExecute, rpcEmptyResponse{})
+		_, err = callPlugin[rpcEmptyResponse](
+			context.Background(), lookup, pluginabi.MethodExecutorExecute, rpcEmptyResponse{},
+		)
 		if err == nil || err.Error() != "plan limit reached" {
 			t.Fatalf("plugin error status %d = %v, want plan limit reached", status, err)
 		}
@@ -334,17 +342,21 @@ func TestCallPluginPreservesPluginErrorsAndDecodeContext(t *testing.T) {
 		{name: "envelope", raw: []byte(`{invalid`), prefix: "decode plugin envelope executor.execute:"},
 		{name: "result", raw: []byte(`{"ok":true,"result":[]}`), prefix: "decode plugin result executor.execute:"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			lookup := newTestSymbolLookup(&testPlugin{})
-			lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
-				pluginabi.MethodExecutorExecute: func(context.Context, []byte) ([]byte, error) {
-					return testCase.raw, nil
-				},
-			}
-			_, err := callPlugin[rpcEmptyResponse](context.Background(), lookup, pluginabi.MethodExecutorExecute, rpcEmptyResponse{})
-			if err == nil || !strings.HasPrefix(err.Error(), testCase.prefix) {
-				t.Fatalf("decode error = %v, want prefix %q", err, testCase.prefix)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				lookup := newTestSymbolLookup(&testPlugin{})
+				lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+					pluginabi.MethodExecutorExecute: func(context.Context, []byte) ([]byte, error) {
+						return testCase.raw, nil
+					},
+				}
+				_, err := callPlugin[rpcEmptyResponse](
+					context.Background(), lookup, pluginabi.MethodExecutorExecute, rpcEmptyResponse{},
+				)
+				if err == nil || !strings.HasPrefix(err.Error(), testCase.prefix) {
+					t.Fatalf("decode error = %v, want prefix %q", err, testCase.prefix)
+				}
+			},
+		)
 	}
 }

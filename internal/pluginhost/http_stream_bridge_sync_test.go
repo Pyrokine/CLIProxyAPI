@@ -77,10 +77,14 @@ func TestHostHTTPStreamBridgeCancelsOnParentAndPluginShutdown(t *testing.T) {
 
 func TestHostHTTPCallbacksRejectForeignAndClosedContext(t *testing.T) {
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		_, _ = w.Write([]byte("ok"))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				_, _ = w.Write([]byte("ok"))
+			},
+		),
+	)
 	defer server.Close()
 
 	host := New()
@@ -98,8 +102,10 @@ func TestHostHTTPCallbacksRejectForeignAndClosedContext(t *testing.T) {
 		}
 	}
 	closeCallback()
-	if _, errCall := host.callFromPlugin(withHostCallbackPluginID(context.Background(), "first"),
-		pluginabi.MethodHostHTTPDo, request); errCall == nil || !strings.Contains(errCall.Error(), "is not open") {
+	if _, errCall := host.callFromPlugin(
+		withHostCallbackPluginID(context.Background(), "first"),
+		pluginabi.MethodHostHTTPDo, request,
+	); errCall == nil || !strings.Contains(errCall.Error(), "is not open") {
 		t.Fatalf("closed callback error = %v", errCall)
 	}
 	if got := calls.Load(); got != 0 {
@@ -109,10 +115,14 @@ func TestHostHTTPCallbacksRejectForeignAndClosedContext(t *testing.T) {
 
 func TestHostHTTPDoCancelsWhenCallbackEnds(t *testing.T) {
 	received := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		close(received)
-		<-r.Context().Done()
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(_ http.ResponseWriter, r *http.Request) {
+				close(received)
+				<-r.Context().Done()
+			},
+		),
+	)
 	defer server.Close()
 
 	host := New()
@@ -124,7 +134,9 @@ func TestHostHTTPDoCancelsWhenCallbackEnds(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, errCall := host.callFromPlugin(withHostCallbackPluginID(context.Background(), "first"), pluginabi.MethodHostHTTPDo, request)
+		_, errCall := host.callFromPlugin(
+			withHostCallbackPluginID(context.Background(), "first"), pluginabi.MethodHostHTTPDo, request,
+		)
 		done <- errCall
 	}()
 	select {
@@ -145,13 +157,17 @@ func TestHostHTTPDoCancelsWhenCallbackEnds(t *testing.T) {
 
 func TestHostHTTPStreamClosesWhenCallbackEnds(t *testing.T) {
 	upstreamDone := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer close(upstreamDone)
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("ready"))
-		w.(http.Flusher).Flush()
-		<-r.Context().Done()
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				defer close(upstreamDone)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("ready"))
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			},
+		),
+	)
 	defer server.Close()
 
 	host := New()
@@ -176,7 +192,9 @@ func TestHostHTTPStreamClosesWhenCallbackEnds(t *testing.T) {
 		t.Fatal(errMarshal)
 	}
 	otherInstance := withHostCallbackInstanceID(withHostCallbackPluginID(context.Background(), "first"), 8)
-	if _, errRead := host.callFromPlugin(otherInstance, pluginabi.MethodHostHTTPStreamRead, readRequest); errRead == nil {
+	if _, errRead := host.callFromPlugin(
+		otherInstance, pluginabi.MethodHostHTTPStreamRead, readRequest,
+	); errRead == nil {
 		t.Fatal("another instance read a stream it did not open")
 	}
 	if _, errRead := host.callFromPlugin(caller, pluginabi.MethodHostHTTPStreamRead, readRequest); errRead != nil {

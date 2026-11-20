@@ -60,7 +60,10 @@ static int cliproxy_call_init(void* fn, const cliproxy_host_api* host, cliproxy_
 	return ((cliproxy_plugin_init_fn)fn)(host, plugin);
 }
 
-static int cliproxy_call_plugin(cliproxy_plugin_call_fn fn, const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
+static int cliproxy_call_plugin(
+	cliproxy_plugin_call_fn fn, const char* method, const uint8_t* request,
+	size_t request_len, cliproxy_buffer* response
+) {
 	return fn(method, request, request_len, response);
 }
 

@@ -23,15 +23,17 @@ func TestClientWithNetworkScope(t *testing.T) {
 		"plain": NewClient(nil, ""),
 		"auth":  NewClientWithAuth(nil, "", nil),
 	} {
-		t.Run(name, func(t *testing.T) {
-			scoped := client.WithNetworkScope("  http://proxy.example:8080  ")
-			if scoped.inner.NetworkScope != "http://proxy.example:8080" || client.inner.NetworkScope != "" {
-				t.Fatal("WithNetworkScope must normalize the scope without modifying the original client")
-			}
-			if scoped.WithNetworkScope("").inner.NetworkScope != "" {
-				t.Fatal("empty scope must restore the direct-network identity")
-			}
-		})
+		t.Run(
+			name, func(t *testing.T) {
+				scoped := client.WithNetworkScope("  http://proxy.example:8080  ")
+				if scoped.inner.NetworkScope != "http://proxy.example:8080" || client.inner.NetworkScope != "" {
+					t.Fatal("WithNetworkScope must normalize the scope without modifying the original client")
+				}
+				if scoped.WithNetworkScope("").inner.NetworkScope != "" {
+					t.Fatal("empty scope must restore the direct-network identity")
+				}
+			},
+		)
 	}
 }
 
@@ -40,21 +42,25 @@ func TestClientNetworkScopeIsolatesAndSharesCooldowns(t *testing.T) {
 	limiter := &internalpluginstore.GitHubRateLimiter{}
 	plugin := Plugin{Repository: "https://github.com/test/network-scope"}
 	calls := 0
-	client := NewClient(networkScopeDoer(func(*http.Request) (*http.Response, error) {
-		calls++
-		if calls == 1 {
-			return &http.Response{
-				StatusCode: http.StatusTooManyRequests,
-				Header:     http.Header{"Retry-After": []string{"3600"}},
-				Body:       io.NopCloser(strings.NewReader("limited")),
-			}, nil
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v1.0.0"}`)),
-		}, nil
-	}), "")
+	client := NewClient(
+		networkScopeDoer(
+			func(*http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					return &http.Response{
+						StatusCode: http.StatusTooManyRequests,
+						Header:     http.Header{"Retry-After": []string{"3600"}},
+						Body:       io.NopCloser(strings.NewReader("limited")),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v1.0.0"}`)),
+				}, nil
+			},
+		), "",
+	)
 	client.inner.RateLimiter = limiter
 	proxyA := client.WithNetworkScope("http://proxy-a.example")
 	_, errRelease := proxyA.FetchLatestRelease(context.Background(), plugin)

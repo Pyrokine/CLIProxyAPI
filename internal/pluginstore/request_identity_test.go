@@ -24,11 +24,13 @@ func TestLatestReleaseCacheKeyNormalizesRepository(t *testing.T) {
 func TestLatestReleaseCacheKeyTracksCredentialsAndNetworkScope(t *testing.T) {
 	plugin := Plugin{Repository: "https://github.com/owner/repo"}
 	client := Client{
-		Auth: []AuthConfig{{
-			Match:    "https://api.github.com/",
-			Type:     AuthTypeGitHubToken,
-			TokenEnv: "PLUGIN_STORE_CACHE_TEST_TOKEN",
-		}},
+		Auth: []AuthConfig{
+			{
+				Match:    "https://api.github.com/",
+				Type:     AuthTypeGitHubToken,
+				TokenEnv: "PLUGIN_STORE_CACHE_TEST_TOKEN",
+			},
+		},
 	}
 	t.Setenv("PLUGIN_STORE_CACHE_TEST_TOKEN", "secret-token-one")
 	first, errFirst := client.LatestReleaseCacheKey(plugin)
@@ -59,21 +61,25 @@ func (do pluginIdentityDoerFunc) Do(request *http.Request) (*http.Response, erro
 func TestPrepareLatestReleaseSnapshotsEnvironmentCredentials(t *testing.T) {
 	plugin := Plugin{Repository: "https://github.com/owner/repo"}
 	client := Client{
-		Auth: []AuthConfig{{
-			Match:    "https://api.github.com/",
-			Type:     AuthTypeGitHubToken,
-			TokenEnv: "PLUGIN_STORE_SNAPSHOT_TEST_TOKEN",
-		}},
-		HTTPClient: pluginIdentityDoerFunc(func(request *http.Request) (*http.Response, error) {
-			if got := request.Header.Get("Authorization"); got != "Bearer original-token" {
-				t.Errorf("Authorization = %q, want credential snapshot", got)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v1.0.0"}`)),
-			}, nil
-		}),
+		Auth: []AuthConfig{
+			{
+				Match:    "https://api.github.com/",
+				Type:     AuthTypeGitHubToken,
+				TokenEnv: "PLUGIN_STORE_SNAPSHOT_TEST_TOKEN",
+			},
+		},
+		HTTPClient: pluginIdentityDoerFunc(
+			func(request *http.Request) (*http.Response, error) {
+				if got := request.Header.Get("Authorization"); got != "Bearer original-token" {
+					t.Errorf("Authorization = %q, want credential snapshot", got)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v1.0.0"}`)),
+				}, nil
+			},
+		),
 	}
 	t.Setenv("PLUGIN_STORE_SNAPSHOT_TEST_TOKEN", "original-token")
 	prepared, originalKey, errPrepare := client.PrepareLatestRelease(plugin)

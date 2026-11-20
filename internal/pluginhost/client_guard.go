@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const pluginShutdownTimeout = 15 * time.Second
@@ -46,12 +48,51 @@ func (c *guardedPluginClient) callbackInstance() *hostCallbackInstance {
 }
 
 func (c *guardedPluginClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	inner, errAcquire := c.acquire()
 	if errAcquire != nil {
 		return nil, errAcquire
 	}
-	defer c.release()
-	return inner.Call(ctx, method, request)
+	if ctx.Done() == nil {
+		defer c.release()
+		return inner.Call(ctx, method, request)
+	}
+
+	type callResult struct {
+		response []byte
+		err      error
+		panicked any
+	}
+	finished := make(chan callResult, 1)
+	go func() {
+		var result callResult
+		defer func() {
+			result.panicked = recover()
+			c.release()
+			if result.panicked != nil {
+				log.WithField("method", method).Error("pluginhost: plugin RPC call panicked")
+			}
+			finished <- result
+		}()
+		if result.err = ctx.Err(); result.err != nil {
+			return
+		}
+		result.response, result.err = inner.Call(ctx, method, request)
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-finished:
+		if result.panicked != nil {
+			panic(result.panicked)
+		}
+		return result.response, result.err
+	}
 }
 
 func (c *guardedPluginClient) acquire() (pluginClient, error) {

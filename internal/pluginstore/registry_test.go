@@ -64,7 +64,8 @@ func TestParseRegistryNormalizesPluginFields(t *testing.T) {
 	if !ok {
 		t.Fatal("PluginByID(sample-provider) missing")
 	}
-	if plugin.ID != "sample-provider" || plugin.Version != "0.1.0" || plugin.Repository != "https://github.com/author-name/cliproxy-sample-provider-plugin" {
+	if plugin.ID != "sample-provider" || plugin.Version != "0.1.0" ||
+		plugin.Repository != "https://github.com/author-name/cliproxy-sample-provider-plugin" {
 		t.Fatalf("plugin not normalized: %#v", plugin)
 	}
 	if plugin.Name != "Sample Provider" || plugin.Tags[0] != "provider" {
@@ -346,6 +347,7 @@ func TestNormalizeSourcesSkipsDuplicates(t *testing.T) {
 func TestGitHubRepositoryPartsRejectsNonRepositoryURLs(t *testing.T) {
 	t.Parallel()
 
+	//goland:noinspection HttpUrlsUsage
 	tests := []string{
 		"http://github.com/owner/repo",
 		"https://github.com/owner",

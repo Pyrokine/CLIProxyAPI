@@ -42,7 +42,7 @@ type InstallTransaction struct {
 	journal     installJournal
 }
 
-// PrepareInstallTransactionLocked creates a durable install journal before artifact publication.
+// PrepareInstallTransactionLocked creates a durable installation journal before artifact publication.
 func PrepareInstallTransactionLocked(
 	root,
 	pluginID,
@@ -218,7 +218,7 @@ func (t *InstallTransaction) Commit() error {
 	return syncDirectory(root)
 }
 
-// Rollback restores the previous artifact or removes a first-time install.
+// Rollback restores the previous artifact or removes a first-time installation.
 func (t *InstallTransaction) Rollback(result InstallResult) error {
 	if t == nil || t.stageDir == "" || result.Skipped {
 		return t.Commit()
@@ -236,7 +236,7 @@ func (t *InstallTransaction) clear() {
 	t.journal = installJournal{}
 }
 
-// PendingInstallPluginIDs returns plugin IDs hidden by unfinished install journals.
+// PendingInstallPluginIDs returns plugin IDs hidden by unfinished installation journals.
 func PendingInstallPluginIDs(root string) (map[string]struct{}, error) {
 	transactions, errTransactions := loadInstallTransactions(root)
 	if errTransactions != nil {
@@ -249,7 +249,7 @@ func PendingInstallPluginIDs(root string) (map[string]struct{}, error) {
 	return pending, nil
 }
 
-// RecoverInstallTransactions resolves interrupted installs against persisted desired versions.
+// RecoverInstallTransactions resolves interrupted installations against persisted desired versions.
 func RecoverInstallTransactions(root string, configFingerprints map[string]string) error {
 	transactions, errTransactions := loadInstallTransactions(root)
 	if errTransactions != nil {

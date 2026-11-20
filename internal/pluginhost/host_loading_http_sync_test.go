@@ -17,7 +17,13 @@ type blockingHTTPPluginLoader struct {
 func (loader blockingHTTPPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
 	instance := &hostCallbackInstance{}
 	host.registerHostCallbackInstance(file.ID, instance)
-	caller := withHostCallbackInstance(withHostCallbackInstanceID(withHostCallbackPluginID(context.Background(), file.ID), 7), instance)
+	caller := withHostCallbackInstance(
+		withHostCallbackInstanceID(
+			withHostCallbackPluginID(
+				context.Background(), file.ID,
+			), 7,
+		), instance,
+	)
 	operation, err := host.callFromPlugin(caller, "host.http.operation_open", []byte(`{}`))
 	if err != nil {
 		return nil, err
@@ -37,11 +43,15 @@ func (loader blockingHTTPPluginLoader) Open(file pluginFile, host *Host) (plugin
 func TestCancelledPluginLoadCancelsHTTPBeforeInitializationReturns(t *testing.T) {
 	started := make(chan struct{})
 	stopped := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
-		close(started)
-		<-request.Context().Done()
-		close(stopped)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(_ http.ResponseWriter, request *http.Request) {
+				close(started)
+				<-request.Context().Done()
+				close(stopped)
+			},
+		),
+	)
 	defer server.Close()
 
 	host := newForTest(blockingHTTPPluginLoader{url: server.URL})

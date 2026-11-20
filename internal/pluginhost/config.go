@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var defaultRuntimeConfigYAML = []byte("enabled: true\npriority: 0\n")
+var defaultRuntimeConfigYAML = []byte("enabled: false\npriority: 0\n")
 
 type runtimeConfig struct {
 	Enabled bool
@@ -52,7 +52,7 @@ func runtimeConfigFromConfig(cfg *config.Config) (runtimeConfig, error) {
 	for _, configuredID := range ids {
 		item := cfg.Plugins.Configs[configuredID]
 		id := pluginstore.CanonicalPluginID(configuredID)
-		enabled := true
+		enabled := false
 		if item.Enabled != nil {
 			enabled = *item.Enabled
 		}
@@ -71,7 +71,7 @@ func runtimeConfigFromConfig(cfg *config.Config) (runtimeConfig, error) {
 func defaultRuntimeItemConfig(id string) runtimeItemConfig {
 	return runtimeItemConfig{
 		ID:         id,
-		Enabled:    true,
+		Enabled:    false,
 		Priority:   0,
 		ConfigYAML: append([]byte(nil), defaultRuntimeConfigYAML...),
 	}
@@ -213,17 +213,27 @@ func intYAMLValue(v int) string {
 }
 
 func deepCopyYAMLNode(node *yaml.Node) *yaml.Node {
-	if node == nil {
-		return nil
-	}
-	copyNode := *node
-	if len(node.Content) > 0 {
-		copyNode.Content = make([]*yaml.Node, 0, len(node.Content))
-		for _, child := range node.Content {
-			copyNode.Content = append(copyNode.Content, deepCopyYAMLNode(child))
+	copies := make(map[*yaml.Node]*yaml.Node)
+	var clone func(*yaml.Node) *yaml.Node
+	clone = func(source *yaml.Node) *yaml.Node {
+		if source == nil {
+			return nil
 		}
+		if copied := copies[source]; copied != nil {
+			return copied
+		}
+		copied := *source
+		copies[source] = &copied
+		if source.Content != nil {
+			copied.Content = make([]*yaml.Node, len(source.Content))
+			for index, child := range source.Content {
+				copied.Content[index] = clone(child)
+			}
+		}
+		copied.Alias = clone(source.Alias)
+		return &copied
 	}
-	return &copyNode
+	return clone(node)
 }
 
 func mustMarshalYAML(v any) []byte {

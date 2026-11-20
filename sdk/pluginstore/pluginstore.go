@@ -17,7 +17,8 @@ func CanonicalPluginID(id string) string {
 }
 
 // These aliases expose the supported registry protocol values to SDK consumers.
-// noinspection GoUnusedConst
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedConst
 const (
 	DefaultRegistryURL = internalpluginstore.DefaultRegistryURL
 	DefaultSourceID    = internalpluginstore.DefaultSourceID
@@ -47,6 +48,8 @@ type Source struct {
 }
 
 // Registry contains plugins advertised by one registry source.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Registry struct {
 	SchemaVersion int      `json:"schema_version"`
 	Plugins       []Plugin `json:"plugins"`
@@ -65,14 +68,16 @@ type Plugin struct {
 	Homepage     string      `json:"homepage,omitempty"`
 	License      string      `json:"license,omitempty"`
 	Tags         []string    `json:"tags,omitempty"`
-	Install      InstallPlan `json:"install,omitempty"`
+	Install      InstallPlan `json:"install"`
 	AuthRequired bool        `json:"auth_required,omitempty"`
 }
 
 // Version describes one plugin version entry.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Version struct {
 	Version string      `json:"version"`
-	Install InstallPlan `json:"install,omitempty"`
+	Install InstallPlan `json:"install"`
 }
 
 // Release describes a GitHub release.
@@ -87,6 +92,8 @@ type Release struct {
 }
 
 // ReleaseAsset describes an asset in a GitHub release.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ReleaseAsset struct {
 	APIURL             string `json:"url"`
 	Name               string `json:"name"`
@@ -117,6 +124,8 @@ type InstallTransaction struct {
 }
 
 // DeletionTransaction preserves every plugin version until deletion commits.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type DeletionTransaction struct {
 	inner *internalpluginstore.DeletionTransaction
 }
@@ -176,7 +185,7 @@ func FindPluginArtifacts(root, pluginID string) ([]string, error) {
 	return internalpluginstore.FindPluginArtifacts(root, pluginID)
 }
 
-// PrepareInstallTransactionLocked journals an install while rootLock is held.
+// PrepareInstallTransactionLocked journals an installation while rootLock is held.
 func PrepareInstallTransactionLocked(
 	root,
 	pluginID,
@@ -207,6 +216,8 @@ func (t *InstallTransaction) SetExpectedConfigFingerprint(fingerprint string) er
 }
 
 // Commit removes install rollback state after config persistence.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (t *InstallTransaction) Commit() error {
 	if t == nil || t.inner == nil {
 		return nil
@@ -238,7 +249,7 @@ func (l *RootLock) Unlock() {
 	}
 }
 
-// RecoverInstallTransactionsLocked resolves unfinished installs while rootLock is held.
+// RecoverInstallTransactionsLocked resolves unfinished installations while rootLock is held.
 func RecoverInstallTransactionsLocked(
 	root string,
 	configFingerprints map[string]string,
@@ -300,7 +311,7 @@ func (p *PreparedInstall) Install(options InstallOptions) (InstallResult, error)
 	return fromInternalInstallResult(result), err
 }
 
-// InstallResult describes an install operation result.
+// InstallResult describes an installation operation result.
 type InstallResult struct {
 	ID          string `json:"id"`
 	Version     string `json:"version"`
@@ -312,12 +323,16 @@ type InstallResult struct {
 }
 
 // InstallPlan describes plugin artifact delivery.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type InstallPlan struct {
 	Type      string     `yaml:"type,omitempty" json:"type,omitempty"`
 	Artifacts []Artifact `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
 }
 
 // Artifact describes one installable artifact.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Artifact struct {
 	GOOS   string `yaml:"goos,omitempty" json:"goos,omitempty"`
 	GOARCH string `yaml:"goarch,omitempty" json:"goarch,omitempty"`
@@ -327,6 +342,8 @@ type Artifact struct {
 }
 
 // Platform describes an artifact platform.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Platform struct {
 	GOOS   string `json:"goos"`
 	GOARCH string `json:"goarch"`
@@ -349,7 +366,7 @@ type Manifest struct {
 	SourceID      string      `yaml:"source-id,omitempty" json:"source_id,omitempty"`
 	SourceName    string      `yaml:"source-name,omitempty" json:"source_name,omitempty"`
 	SourceURL     string      `yaml:"source-url,omitempty" json:"source_url,omitempty"`
-	Install       InstallPlan `yaml:"install,omitempty" json:"install,omitempty"`
+	Install       InstallPlan `yaml:"install,omitempty" json:"install"`
 }
 
 // AuthConfig describes credentials for registry, metadata, or artifact requests.
@@ -370,7 +387,8 @@ type HTTPDoer interface {
 }
 
 // These aliases expose install transaction errors to SDK consumers.
-// noinspection GoUnusedGlobalVariable
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedGlobalVariable
 var (
 	ErrLoadedPluginLocked = internalpluginstore.ErrLoadedPluginLocked
 	ErrPendingDeletion    = internalpluginstore.ErrPendingDeletion
@@ -408,35 +426,38 @@ func (c Client) WithNetworkScope(networkScope string) Client {
 	return c
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func DefaultSource() Source {
 	return fromInternalSource(internalpluginstore.DefaultSource())
 }
 
-// noinspection GoUnusedExportedFunction
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func NormalizeSources(registryURLs []string) ([]Source, error) {
 	sources, err := internalpluginstore.NormalizeSources(registryURLs)
 	return fromInternalSources(sources), err
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func SourceID(registryURL string) string {
 	return internalpluginstore.SourceID(registryURL)
 }
 
-// noinspection GoUnusedExportedFunction
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func ValidatePlugin(plugin Plugin) error {
 	return internalpluginstore.ValidatePlugin(toInternalPlugin(plugin))
 }
 
-// noinspection GoUnusedExportedFunction
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func PluginInstallType(plugin Plugin) string {
 	return internalpluginstore.PluginInstallType(toInternalPlugin(plugin))
 }
 
-// noinspection GoUnusedExportedFunction
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func PluginPlatforms(plugin Plugin) []Platform {
 	return fromInternalPlatforms(internalpluginstore.PluginPlatforms(toInternalPlugin(plugin)))
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func PluginArtifacts(plugin Plugin) []Artifact {
 	return fromInternalArtifacts(internalpluginstore.PluginArtifacts(toInternalPlugin(plugin)))
 }
@@ -445,12 +466,12 @@ func NormalizeAuthConfigs(auth []AuthConfig) []AuthConfig {
 	return fromInternalAuthConfigs(internalpluginstore.NormalizeAuthConfigs(toInternalAuthConfigs(auth)))
 }
 
-// noinspection GoUnusedExportedFunction
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func AuthConfigured(auth []AuthConfig, requestURL string, kind string) bool {
 	return internalpluginstore.AuthConfigured(toInternalAuthConfigs(auth), requestURL, kind)
 }
 
-// noinspection GoUnusedExportedFunction
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func PluginAuthConfigured(source Source, plugin Plugin, auth []AuthConfig) bool {
 	return internalpluginstore.PluginAuthConfigured(
 		toInternalSource(source), toInternalPlugin(plugin), toInternalAuthConfigs(auth),
@@ -461,11 +482,12 @@ func UpdateAvailable(installed, latest string) bool {
 	return internalpluginstore.UpdateAvailable(installed, latest)
 }
 
-// noinspection GoUnusedExportedFunction
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func ReleaseVersion(release Release) (string, error) {
 	return internalpluginstore.ReleaseVersion(toInternalRelease(release))
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func ManifestFromRelease(source Source, plugin Plugin, release Release) (Manifest, error) {
 	manifest, err := internalpluginstore.ManifestFromRelease(
 		toInternalSource(source), toInternalPlugin(plugin), toInternalRelease(release),
@@ -473,16 +495,19 @@ func ManifestFromRelease(source Source, plugin Plugin, release Release) (Manifes
 	return fromInternalManifest(manifest), err
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func ManifestFromPlugin(source Source, plugin Plugin) (Manifest, error) {
 	manifest, err := internalpluginstore.ManifestFromPlugin(toInternalSource(source), toInternalPlugin(plugin))
 	return fromInternalManifest(manifest), err
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r Registry) PluginByID(id string) (Plugin, bool) {
 	plugin, ok := toInternalRegistry(r).PluginByID(id)
 	return fromInternalPlugin(plugin), ok
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m Manifest) Plugin() Plugin {
 	return fromInternalPlugin(toInternalManifest(m).Plugin())
 }
@@ -495,6 +520,7 @@ func (m Manifest) Validate() error {
 	return toInternalManifest(m).Validate()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
 	registry, err := c.inner.FetchRegistry(ctx)
 	return fromInternalRegistry(registry), err
@@ -505,21 +531,25 @@ func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release,
 	return fromInternalRelease(release), err
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c Client) FetchReleases(ctx context.Context, plugin Plugin, pageSize int) ([]Release, error) {
 	releases, err := c.inner.FetchReleases(ctx, toInternalPlugin(plugin), pageSize)
 	return fromInternalReleases(releases), err
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c Client) FetchReleaseByTag(ctx context.Context, plugin Plugin, tag string) (Release, error) {
 	release, err := c.inner.FetchReleaseByTag(ctx, toInternalPlugin(plugin), tag)
 	return fromInternalRelease(release), err
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptions) (InstallResult, error) {
 	result, err := c.inner.Install(ctx, toInternalPlugin(plugin), toInternalInstallOptions(options))
 	return fromInternalInstallResult(result), err
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c Client) InstallVersion(
 	ctx context.Context,
 	plugin Plugin,
@@ -546,6 +576,7 @@ func (c Client) PrepareManifest(
 	return PreparedInstall{inner: prepared}, err
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c Client) InstallManifest(ctx context.Context, manifest Manifest, options InstallOptions) (InstallResult, error) {
 	prepared, err := c.PrepareManifest(ctx, manifest, options)
 	if err != nil {

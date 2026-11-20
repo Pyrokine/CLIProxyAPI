@@ -63,11 +63,15 @@ http://localhost:8080/v0/resource/plugins/host-model-callback/status
 
 Non-streaming request with explicit protocol and prompt:
 
+<!--suppress LongLine -->
+
 ```text
 http://localhost:8080/v0/resource/plugins/host-model-callback/status?entry_protocol=openai&exit_protocol=openai&model=gpt-5.5&prompt=Say%20hello%20in%20one%20sentence
 ```
 
 Streaming request with explicit close:
+
+<!--suppress LongLine -->
 
 ```text
 http://localhost:8080/v0/resource/plugins/host-model-callback/status?stream=true&model=gpt-5.5&prompt=Write%20three%20short%20tokens
@@ -111,6 +115,8 @@ The generated default body is OpenAI-compatible:
 ```
 
 For example, a URL-encoded `body` query value can provide the raw OpenAI-compatible request:
+
+<!--suppress LongLine -->
 
 ```text
 http://localhost:8080/v0/resource/plugins/host-model-callback/status?body=%7B%22model%22%3A%22gpt-5.5%22%2C%22stream%22%3Afalse%2C%22messages%22%3A%5B%7B%22role%22%3A%22user%22%2C%22content%22%3A%22Say%20hello%20in%20one%20sentence%22%7D%5D%7D

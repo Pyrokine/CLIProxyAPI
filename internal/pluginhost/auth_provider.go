@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -215,9 +216,9 @@ func (h *Host) callParseAuths(
 	if !resp.Handled {
 		return nil, false, nil
 	}
-	datas := pluginAuthParseResponseAuths(resp)
-	auths = make([]*coreauth.Auth, 0, len(datas))
-	for _, data := range datas {
+	authData := pluginAuthParseResponseAuths(resp)
+	auths = make([]*coreauth.Auth, 0, len(authData))
+	for _, data := range authData {
 		if strings.TrimSpace(data.Provider) == "" {
 			data.Provider = req.Provider
 		}
@@ -335,7 +336,7 @@ func (h *Host) callPollLogin(
 	metadata map[string]any,
 ) (resp pluginapi.AuthLoginPollResponse, handled bool, err error) {
 	authProvider := record.plugin.Capabilities.AuthProvider
-	if h == nil || authProvider == nil || h.isPluginFused(record.id) {
+	if h == nil || authProvider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.AuthLoginPollResponse{}, false, nil
 	}
 	defer func() {
@@ -351,7 +352,7 @@ func (h *Host) callPollLogin(
 		State:      strings.TrimSpace(state),
 		Host:       h.hostConfigSummary(),
 		HTTPClient: h.newHTTPClient(nil),
-		Metadata:   cloneAnyMap(metadata),
+		Metadata:   cloneInterceptorMetadata(metadata),
 	}
 	resp, errPoll := authProvider.PollLogin(ctx, req)
 	if errPoll != nil {
@@ -412,7 +413,8 @@ func (h *Host) refreshAuth(
 	data := pluginResp.Auth
 	expectedProvider := authProvider(auth)
 	expectedID := authID(auth)
-	if returnedProvider := strings.TrimSpace(data.Provider); returnedProvider != "" && returnedProvider != expectedProvider {
+	if returnedProvider := strings.TrimSpace(data.Provider); returnedProvider != "" &&
+		returnedProvider != expectedProvider {
 		return nil, true, fmt.Errorf("auth provider refresh changed auth provider")
 	}
 	if returnedID := strings.TrimSpace(data.ID); returnedID != "" && returnedID != expectedID {
@@ -517,6 +519,7 @@ func (s *pluginTokenStorage) CloneForPersistence() coreauth.TokenStorage {
 	return &copyStorage
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	if s == nil {
 		return
@@ -524,7 +527,7 @@ func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	if _, hadPriority := s.meta["priority"]; hadPriority {
 		if _, hasPriority := meta["priority"]; !hasPriority && len(s.rawJSON) > 0 {
 			var raw map[string]any
-			if errUnmarshal := json.Unmarshal(s.rawJSON, &raw); errUnmarshal != nil {
+			if errUnmarshal := decodePluginStorageJSON(s.rawJSON, &raw); errUnmarshal != nil {
 				log.WithError(errUnmarshal).Warn("pluginhost: invalid token storage while clearing file priority")
 			} else {
 				delete(raw, "priority")
@@ -539,6 +542,7 @@ func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	s.meta = cloneAnyMap(meta)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *pluginTokenStorage) RawJSON() []byte {
 	if s == nil {
 		return nil
@@ -578,13 +582,29 @@ func pluginTokenStorageFileCurrent(path string, payload []byte) bool {
 	return jsonPayloadEqual(current, payload)
 }
 
+func decodePluginStorageJSON(raw []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("plugin token storage contains multiple JSON values")
+	}
+	return nil
+}
+
 func jsonPayloadEqual(left, right []byte) bool {
 	var leftValue any
-	if errUnmarshalLeft := json.Unmarshal(left, &leftValue); errUnmarshalLeft != nil {
+	if errUnmarshalLeft := decodePluginStorageJSON(left, &leftValue); errUnmarshalLeft != nil {
 		return false
 	}
 	var rightValue any
-	if errUnmarshalRight := json.Unmarshal(right, &rightValue); errUnmarshalRight != nil {
+	if errUnmarshalRight := decodePluginStorageJSON(right, &rightValue); errUnmarshalRight != nil {
 		return false
 	}
 	return reflect.DeepEqual(leftValue, rightValue)
@@ -593,7 +613,7 @@ func jsonPayloadEqual(left, right []byte) bool {
 func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]byte, error) {
 	out := make(map[string]any)
 	if len(bytes.TrimSpace(raw)) > 0 {
-		if errUnmarshal := json.Unmarshal(raw, &out); errUnmarshal != nil {
+		if errUnmarshal := decodePluginStorageJSON(raw, &out); errUnmarshal != nil {
 			return nil, fmt.Errorf("decode plugin token storage: %w", errUnmarshal)
 		}
 		if out == nil {

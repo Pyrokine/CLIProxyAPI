@@ -57,10 +57,12 @@ func (h *Host) callHostAffinityLookup(_ context.Context, request []byte) ([]byte
 	observedAt := time.Now().UTC()
 	manager := h.currentAffinityManager()
 	if manager == nil {
-		return marshalRPCResult(pluginapi.HostAffinityLookupResponse{
-			Status:     pluginapi.HostAffinityStatusUnsupported,
-			ObservedAt: observedAt,
-		})
+		return marshalRPCResult(
+			pluginapi.HostAffinityLookupResponse{
+				Status:     pluginapi.HostAffinityStatusUnsupported,
+				ObservedAt: observedAt,
+			},
+		)
 	}
 
 	auth, status := manager.LookupSessionAffinity(req.Provider, req.Model, req.SessionID)
@@ -73,20 +75,24 @@ func (h *Host) callHostAffinityLookup(_ context.Context, request []byte) ([]byte
 		if authIndex == "" {
 			return nil, fmt.Errorf("affinity lookup returned bound without auth index")
 		}
-		return marshalRPCResult(pluginapi.HostAffinityLookupResponse{
-			Status:      status,
-			AuthIndex:   authIndex,
-			ObservedAt:  observedAt,
-			Disabled:    auth.Disabled || auth.Status == coreauth.StatusDisabled,
-			Unavailable: auth.Unavailable || auth.Status == coreauth.StatusError,
-		})
+		return marshalRPCResult(
+			pluginapi.HostAffinityLookupResponse{
+				Status:      status,
+				AuthIndex:   authIndex,
+				ObservedAt:  observedAt,
+				Disabled:    auth.Disabled || auth.Status == coreauth.StatusDisabled,
+				Unavailable: auth.Unavailable || auth.Status == coreauth.StatusError,
+			},
+		)
 	case pluginapi.HostAffinityStatusUnbound,
 		pluginapi.HostAffinityStatusAmbiguous,
 		pluginapi.HostAffinityStatusUnsupported:
-		return marshalRPCResult(pluginapi.HostAffinityLookupResponse{
-			Status:     status,
-			ObservedAt: observedAt,
-		})
+		return marshalRPCResult(
+			pluginapi.HostAffinityLookupResponse{
+				Status:     status,
+				ObservedAt: observedAt,
+			},
+		)
 	default:
 		return nil, fmt.Errorf("unsupported affinity lookup status %q", status)
 	}
@@ -116,15 +122,19 @@ func (h *Host) callHostRoutingResetCooldown(ctx context.Context, request []byte)
 		if updated == nil {
 			break
 		}
-		log.WithFields(log.Fields{
-			"plugin_id":  hostCallbackPluginIDFromContext(ctx),
-			"auth_index": updated.Index,
-			"models":     len(models),
-		}).Info("pluginhost: plugin reset credential cooldown")
-		return marshalRPCResult(pluginapi.HostRoutingResetCooldownResponse{
-			AuthIndex: updated.Index,
-			Models:    models,
-		})
+		log.WithFields(
+			log.Fields{
+				"plugin_id":  hostCallbackPluginIDFromContext(ctx),
+				"auth_index": updated.Index,
+				"models":     len(models),
+			},
+		).Info("pluginhost: plugin reset credential cooldown")
+		return marshalRPCResult(
+			pluginapi.HostRoutingResetCooldownResponse{
+				AuthIndex: updated.Index,
+				Models:    models,
+			},
+		)
 	}
 	return nil, fmt.Errorf("auth not found for auth_index %s", authIndex)
 }

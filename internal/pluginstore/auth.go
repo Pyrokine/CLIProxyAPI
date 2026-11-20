@@ -74,6 +74,9 @@ func NormalizeAuthConfigs(auth []AuthConfig) []AuthConfig {
 }
 
 func AuthConfigured(auth []AuthConfig, requestURL string, kind string) bool {
+	if parsed, err := url.Parse(strings.TrimSpace(requestURL)); err == nil && parsed.User != nil {
+		return true
+	}
 	item, ok := matchingAuthConfig(auth, requestURL, kind)
 	if !ok {
 		return false
@@ -84,7 +87,8 @@ func AuthConfigured(auth []AuthConfig, requestURL string, kind string) bool {
 	case AuthTypeBearer, AuthTypeGitHubToken:
 		return strings.TrimSpace(os.Getenv(item.TokenEnv)) != ""
 	case AuthTypeBasic:
-		return strings.TrimSpace(os.Getenv(item.UsernameEnv)) != "" && strings.TrimSpace(os.Getenv(item.PasswordEnv)) != ""
+		return strings.TrimSpace(os.Getenv(item.UsernameEnv)) != "" &&
+			strings.TrimSpace(os.Getenv(item.PasswordEnv)) != ""
 	case AuthTypeHeader:
 		return item.HeaderName != "" && strings.TrimSpace(os.Getenv(item.HeaderValueEnv)) != ""
 	default:
@@ -134,13 +138,21 @@ func applyPluginStoreAuthForClient(
 	requestURL string,
 	kind string,
 ) (bool, error) {
+	authenticated := headers.Get("Authorization") != ""
+	if parsed, err := url.Parse(strings.TrimSpace(requestURL)); err == nil && parsed.User != nil && !authenticated {
+		password, _ := parsed.User.Password()
+		headers.Set(
+			"Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(parsed.User.Username()+":"+password)),
+		)
+		authenticated = true
+	}
 	item, ok := matchingAuthConfig(auth, requestURL, kind)
 	if !ok {
-		return false, nil
+		return authenticated, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(item.Type)) {
 	case "", AuthTypeNone:
-		return false, nil
+		return authenticated, nil
 	case AuthTypeBearer:
 		token, errToken := envValueRequired(item.TokenEnv, "token-env")
 		if errToken != nil {

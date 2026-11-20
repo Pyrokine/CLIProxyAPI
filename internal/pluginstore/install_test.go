@@ -61,7 +61,12 @@ func TestInstallBlocksLoadedWindowsPlugin(t *testing.T) {
 					t.Fatal("Install() error = nil")
 				}
 				if gotBlocked := errors.Is(errInstall, ErrLoadedPluginLocked); gotBlocked != tt.wantBlocked {
-					t.Fatalf("Install() error = %v, blocked = %v, want %v", errInstall, gotBlocked, tt.wantBlocked)
+					t.Fatalf(
+						"Install() error = %v, blocked = %v, want %v",
+						errInstall,
+						gotBlocked,
+						tt.wantBlocked,
+					)
 				}
 			},
 		)
@@ -603,7 +608,8 @@ func TestInstallUsesLatestReleaseVersion(t *testing.T) {
 	checksum := sha256.Sum256(archiveData)
 	client := Client{
 		HTTPClient: mapHTTPDoer{
-			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(
+				`{
 			"tag_name": "v0.2.0",
 			"assets": [
 				{
@@ -617,9 +623,12 @@ func TestInstallUsesLatestReleaseVersion(t *testing.T) {
 					"browser_download_url": "https://downloads.example/checksums.txt"
 				}
 			]
-		}`),
+		}`,
+			),
 			"https://downloads.example/" + archiveName: archiveData,
-			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+			"https://downloads.example/checksums.txt": []byte(
+				hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n",
+			),
 		},
 	}
 
@@ -720,8 +729,10 @@ func TestDownloadAssetUsesBrowserDownloadURLWithUnrelatedAuth(t *testing.T) {
 
 	data, errDownload := client.downloadAsset(
 		context.Background(), ReleaseAsset{
-			Name:               "sample-provider_0.2.0_darwin_arm64.zip",
-			APIURL:             "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/1",
+			Name: "sample-provider_0.2.0_darwin_arm64.zip",
+			APIURL: "https://api.github.com/repos/author-name/" +
+				"cliproxy-sample-provider-plugin/releases/assets/" +
+				"1",
 			BrowserDownloadURL: browserURL,
 		},
 	)
@@ -742,15 +753,21 @@ func TestInstallVersionUsesPinnedReleaseTag(t *testing.T) {
 	checksum := sha256.Sum256(archiveData)
 	client := Client{
 		HTTPClient: mapHTTPDoer{
-			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/tags/v0.3.0": []byte(`{
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/tags/v0.3.0": []byte(
+				`{
 			"tag_name": "v0.3.0",
 			"assets": [
-				{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
-				{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
-			]
-		}`),
+				{"name": "` +
+					archiveName +
+					`", "browser_download_url": "https://downloads.example/` +
+					archiveName +
+					("\"},\n\t\t\t\t{\"name\": \"checksums.txt\", \"browser_download_url\": \"https://" +
+						"downloads.example/checksums.txt\"}\n\t\t\t]\n\t\t}"),
+			),
 			"https://downloads.example/" + archiveName: archiveData,
-			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+			"https://downloads.example/checksums.txt": []byte(
+				hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n",
+			),
 		},
 	}
 
@@ -1015,7 +1032,9 @@ func TestInstallRejectsInvalidLatestReleaseTag(t *testing.T) {
 
 	client := Client{
 		HTTPClient: mapHTTPDoer{
-			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{"tag_name": "latest", "assets": []}`),
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(
+				`{"tag_name": "latest", "assets": []}`,
+			),
 		},
 	}
 	_, errInstall := client.Install(

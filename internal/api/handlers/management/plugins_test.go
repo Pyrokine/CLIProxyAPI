@@ -19,13 +19,23 @@ import (
 )
 
 func TestListPluginsPublishesOAuthRouteProvider(t *testing.T) {
-	cfg := &config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: t.TempDir()}}
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     t.TempDir(),
+			Configs: map[string]config.PluginInstanceConfig{
+				"binary-name": {Enabled: new(true)},
+			},
+		},
+	}
 	h := NewHandler(cfg, "", nil)
-	h.pluginHost = &fakePluginRuntimeHost{registered: []pluginhost.RegisteredPluginInfo{
-		{ID: "binary-name", SupportsOAuth: true, OAuthProvider: "custom-provider"},
-		{ID: "without-oauth"},
-		{ID: "claude", SupportsOAuth: true},
-	}}
+	h.pluginHost = &fakePluginRuntimeHost{
+		registered: []pluginhost.RegisteredPluginInfo{
+			{ID: "binary-name", SupportsOAuth: true, OAuthProvider: "custom-provider"},
+			{ID: "without-oauth"},
+			{ID: "claude", SupportsOAuth: true},
+		},
+	}
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
@@ -429,7 +439,8 @@ func TestPluginConfigMutationsPreserveStoreIdentity(t *testing.T) {
 			Configs: map[string]config.PluginInstanceConfig{
 				"alpha": pluginConfigFromYAML(
 					t,
-					"enabled: true\nmode: safe\nstore:\n  id: alpha\n  source-id: official\n  source-url: https://official.example/registry.json\n",
+					"enabled: true\nmode: safe\nstore:\n  id: alpha\n  source-id: official"+
+						"\n  source-url: https://official.example/registry.json\n",
 				),
 			},
 		},

@@ -296,37 +296,71 @@ func TestHostSchedulerTerminalRejection(t *testing.T) {
 		wantCode   string
 		wantReason string
 	}{
-		{"defaults", pluginapi.SchedulerPickResponse{Handled: true, Reject: true}, "auth_unavailable", "scheduler rejected candidate selection"},
-		{"explicit with auth", pluginapi.SchedulerPickResponse{Handled: true, Reject: true, AuthID: "auth-a", RejectCode: "quota_exhausted", RejectReason: "quota exhausted"}, "quota_exhausted", "quota exhausted"},
+		{
+			"defaults", pluginapi.SchedulerPickResponse{Handled: true, Reject: true}, "auth_unavailable",
+			"scheduler rejected candidate selection",
+		},
+		{
+			"explicit with auth", pluginapi.SchedulerPickResponse{
+				Handled: true, Reject: true, AuthID: "auth-a", RejectCode: "quota_exhausted",
+				RejectReason: "quota exhausted",
+			}, "quota_exhausted", "quota exhausted",
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			host := newHostWithRecords(capabilityRecord{id: "scheduler", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-				Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
-					return tc.response, nil
-				}),
-			}}})
-			response, handled, err := host.PickAuth(context.Background(), schedulerRequest("auth-a"))
-			if err != nil || !handled || !response.Reject || response.RejectCode != tc.wantCode || response.RejectReason != tc.wantReason {
-				t.Fatalf("terminal rejection = (%#v, %v, %v)", response, handled, err)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				host := newHostWithRecords(
+					capabilityRecord{
+						id: "scheduler", plugin: pluginapi.Plugin{
+							Capabilities: pluginapi.Capabilities{
+								Scheduler: schedulerFunc(
+									func(
+										context.Context,
+										pluginapi.SchedulerPickRequest,
+									) (pluginapi.SchedulerPickResponse, error) {
+										return tc.response, nil
+									},
+								),
+							},
+						},
+					},
+				)
+				response, handled, err := host.PickAuth(context.Background(), schedulerRequest("auth-a"))
+				if err != nil || !handled || !response.Reject || response.RejectCode != tc.wantCode ||
+					response.RejectReason != tc.wantReason {
+					t.Fatalf("terminal rejection = (%#v, %v, %v)", response, handled, err)
+				}
+			},
+		)
 	}
 }
 
 func TestHostSchedulerAcrossPrioritiesOptIn(t *testing.T) {
-	scheduler := schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
-		return pluginapi.SchedulerPickResponse{}, nil
-	})
+	scheduler := schedulerFunc(
+		func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+			return pluginapi.SchedulerPickResponse{}, nil
+		},
+	)
 	for _, enabled := range []bool{false, true} {
-		host := newHostWithRecords(capabilityRecord{id: "scheduler", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-			Scheduler: scheduler, SchedulerAcrossPriorities: enabled,
-		}}})
+		host := newHostWithRecords(
+			capabilityRecord{
+				id: "scheduler", plugin: pluginapi.Plugin{
+					Capabilities: pluginapi.Capabilities{
+						Scheduler: scheduler, SchedulerAcrossPriorities: enabled,
+					},
+				},
+			},
+		)
 		if got := host.SchedulerWantsAcrossPriorities(); got != enabled {
 			t.Fatalf("SchedulerWantsAcrossPriorities() = %v, want %v", got, enabled)
 		}
-		if got := rpcCapabilitiesFromPlugin(pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-			Scheduler: scheduler, SchedulerAcrossPriorities: enabled,
-		}}).SchedulerAcrossPriorities; got != enabled {
+		if got := rpcCapabilitiesFromPlugin(
+			pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					Scheduler: scheduler, SchedulerAcrossPriorities: enabled,
+				},
+			},
+		).SchedulerAcrossPriorities; got != enabled {
 			t.Fatalf("RPC scheduler capability = %v, want %v", got, enabled)
 		}
 	}
@@ -337,9 +371,13 @@ type acrossPriorityScheduler struct{ schedulerFunc }
 func (acrossPriorityScheduler) SchedulerWantsAcrossPriorities() bool { return true }
 
 func TestHostSchedulerAcrossPrioritiesViaMethod(t *testing.T) {
-	scheduler := acrossPriorityScheduler{schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
-		return pluginapi.SchedulerPickResponse{}, nil
-	})}
+	scheduler := acrossPriorityScheduler{
+		schedulerFunc(
+			func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{}, nil
+			},
+		),
+	}
 	plugin := pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: scheduler}}
 	host := newHostWithRecords(capabilityRecord{id: "scheduler", plugin: plugin})
 	if !host.SchedulerWantsAcrossPriorities() || !rpcCapabilitiesFromPlugin(plugin).SchedulerAcrossPriorities {
@@ -365,80 +403,97 @@ func TestHostSchedulerManagerPriorityAndRejection(t *testing.T) {
 		{name: "local reject", reject: true},
 		{name: "RPC reject", rpc: true, across: true, reject: true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var received []pluginapi.SchedulerAuthCandidate
-			plugin := pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-				SchedulerAcrossPriorities: tc.across,
-				Scheduler: schedulerFunc(func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
-					received = req.Candidates
-					if tc.reject {
-						return pluginapi.SchedulerPickResponse{
-							Handled: true, Reject: true, RejectCode: "blocked_by_plugin", RejectReason: "selection rejected",
-						}, nil
-					}
-					authID := "priority-plugin-high"
-					if tc.across {
-						authID = "priority-plugin-low"
-					}
-					return pluginapi.SchedulerPickResponse{Handled: true, AuthID: authID}, nil
-				}),
-			}}
-			if tc.rpc {
-				lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
-				registered, err := registerRPCPlugin(context.Background(), nil, "scheduler", lookup, pluginabi.MethodPluginRegister, nil)
-				if err != nil {
-					t.Fatalf("registerRPCPlugin() error = %v", err)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				var received []pluginapi.SchedulerAuthCandidate
+				plugin := pluginapi.Plugin{
+					Capabilities: pluginapi.Capabilities{
+						SchedulerAcrossPriorities: tc.across,
+						Scheduler: schedulerFunc(
+							func(
+								_ context.Context,
+								req pluginapi.SchedulerPickRequest,
+							) (pluginapi.SchedulerPickResponse, error) {
+								received = req.Candidates
+								if tc.reject {
+									return pluginapi.SchedulerPickResponse{
+										Handled: true, Reject: true, RejectCode: "blocked_by_plugin",
+										RejectReason: "selection rejected",
+									}, nil
+								}
+								authID := "priority-plugin-high"
+								if tc.across {
+									authID = "priority-plugin-low"
+								}
+								return pluginapi.SchedulerPickResponse{Handled: true, AuthID: authID}, nil
+							},
+						),
+					},
 				}
-				plugin = registered
-			}
-			host := newHostWithRecords(capabilityRecord{id: "scheduler", plugin: plugin})
-			if got := host.SchedulerWantsAcrossPriorities(); got != tc.across {
-				t.Fatalf("SchedulerWantsAcrossPriorities() = %v, want %v", got, tc.across)
-			}
+				if tc.rpc {
+					lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+					registered, err := registerRPCPlugin(
+						context.Background(), nil, "scheduler", lookup, pluginabi.MethodPluginRegister, nil,
+					)
+					if err != nil {
+						t.Fatalf("registerRPCPlugin() error = %v", err)
+					}
+					plugin = registered
+				}
+				host := newHostWithRecords(capabilityRecord{id: "scheduler", plugin: plugin})
+				if got := host.SchedulerWantsAcrossPriorities(); got != tc.across {
+					t.Fatalf("SchedulerWantsAcrossPriorities() = %v, want %v", got, tc.across)
+				}
 
-			manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
-			manager.RegisterExecutor(&stubRefreshCompatExecutor{id: "gemini"})
-			for _, candidate := range []struct {
-				id       string
-				priority string
-			}{
-				{id: "priority-plugin-high", priority: "10"},
-				{id: "priority-plugin-low", priority: "5"},
-			} {
-				if _, err := manager.Register(context.Background(), &coreauth.Auth{
-					ID: candidate.id, Provider: "gemini", Attributes: map[string]string{"priority": candidate.priority},
-				}); err != nil {
-					t.Fatalf("Register(%s) error = %v", candidate.id, err)
+				manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+				manager.RegisterExecutor(&stubRefreshCompatExecutor{id: "gemini"})
+				for _, candidate := range []struct {
+					id       string
+					priority string
+				}{
+					{id: "priority-plugin-high", priority: "10"},
+					{id: "priority-plugin-low", priority: "5"},
+				} {
+					if _, err := manager.Register(
+						context.Background(), &coreauth.Auth{
+							ID: candidate.id, Provider: "gemini",
+							Attributes: map[string]string{"priority": candidate.priority},
+						},
+					); err != nil {
+						t.Fatalf("Register(%s) error = %v", candidate.id, err)
+					}
 				}
-			}
-			manager.SetPluginScheduler(host)
-			selected, executor, err := manager.PickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
-			if tc.reject {
-				var rejected *coreauth.Error
-				if selected != nil || executor != nil || !errors.As(err, &rejected) ||
-					rejected.Code != "blocked_by_plugin" || rejected.Message != "selection rejected" {
-					t.Fatalf("PickNext() = (%+v, %v, %v), want terminal plugin rejection", selected, executor, err)
+				manager.SetPluginScheduler(host)
+				selected, executor, err := manager.PickNext(
+					context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil,
+				)
+				if tc.reject {
+					var rejected *coreauth.Error
+					if selected != nil || executor != nil || !errors.As(err, &rejected) ||
+						rejected.Code != "blocked_by_plugin" || rejected.Message != "selection rejected" {
+						t.Fatalf("PickNext() = (%+v, %v, %v), want terminal plugin rejection", selected, executor, err)
+					}
+				} else {
+					wantID := "priority-plugin-high"
+					if tc.across {
+						wantID = "priority-plugin-low"
+					}
+					if err != nil || selected == nil || selected.ID != wantID || executor == nil {
+						t.Fatalf("PickNext() = (%+v, %v, %v), want %s", selected, executor, err, wantID)
+					}
 				}
-			} else {
-				wantID := "priority-plugin-high"
+				wantCount := 1
 				if tc.across {
-					wantID = "priority-plugin-low"
+					wantCount = 2
 				}
-				if err != nil || selected == nil || selected.ID != wantID || executor == nil {
-					t.Fatalf("PickNext() = (%+v, %v, %v), want %s", selected, executor, err, wantID)
+				if len(received) != wantCount || received[0].ID != "priority-plugin-high" {
+					t.Fatalf("plugin received candidates = %+v, want %d with high priority first", received, wantCount)
 				}
-			}
-			wantCount := 1
-			if tc.across {
-				wantCount = 2
-			}
-			if len(received) != wantCount || received[0].ID != "priority-plugin-high" {
-				t.Fatalf("plugin received candidates = %+v, want %d with high priority first", received, wantCount)
-			}
-			if tc.across && received[1].ID != "priority-plugin-low" {
-				t.Fatalf("plugin received candidates = %+v, want low priority included", received)
-			}
-		})
+				if tc.across && received[1].ID != "priority-plugin-low" {
+					t.Fatalf("plugin received candidates = %+v, want low priority included", received)
+				}
+			},
+		)
 	}
 }
 

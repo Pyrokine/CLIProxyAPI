@@ -81,12 +81,17 @@ func TestModelExecutionErrorKeepsStatusAndCause(t *testing.T) {
 func TestHostModelCallbacksRejectInvalidProxyBeforeExecuting(t *testing.T) {
 	host := New()
 	for _, method := range []string{pluginabi.MethodHostModelExecute, pluginabi.MethodHostModelExecuteStream} {
-		req, errMarshal := json.Marshal(pluginapi.HostModelExecutionRequest{ProxyURL: "file:///tmp/proxy", Stream: method == pluginabi.MethodHostModelExecuteStream})
+		req, errMarshal := json.Marshal(
+			pluginapi.HostModelExecutionRequest{
+				ProxyURL: "file:///tmp/proxy", Stream: method == pluginabi.MethodHostModelExecuteStream,
+			},
+		)
 		if errMarshal != nil {
 			t.Fatal(errMarshal)
 		}
 		_, errCall := host.callFromPlugin(context.Background(), method, req)
-		if errCall == nil || errCall.Error() != "invalid proxy_url" || clienterror.HTTPStatusFromError(errCall) != http.StatusBadRequest {
+		if errCall == nil || errCall.Error() != "invalid proxy_url" ||
+			clienterror.HTTPStatusFromError(errCall) != http.StatusBadRequest {
 			t.Fatalf("%s invalid proxy error = %v, want HTTP 400", method, errCall)
 		}
 	}
@@ -104,12 +109,14 @@ func TestHostAffinityLookupValidatesRequiredFields(t *testing.T) {
 		{name: "model", request: `{"provider":"p","session_id":"s"}`, want: "model is required"},
 		{name: "session", request: `{"provider":"p","model":"m"}`, want: "session_id is required"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			_, errLookup := host.callHostAffinityLookup(context.Background(), []byte(testCase.request))
-			if errLookup == nil || !strings.Contains(errLookup.Error(), testCase.want) {
-				t.Fatalf("callHostAffinityLookup() error = %v, want %q", errLookup, testCase.want)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				_, errLookup := host.callHostAffinityLookup(context.Background(), []byte(testCase.request))
+				if errLookup == nil || !strings.Contains(errLookup.Error(), testCase.want) {
+					t.Fatalf("callHostAffinityLookup() error = %v, want %q", errLookup, testCase.want)
+				}
+			},
+		)
 	}
 }
 
@@ -124,25 +131,30 @@ func TestHostAffinityLookupReturnsReadOnlyStatusContract(t *testing.T) {
 		t.Fatalf("unsupported lookup error = %v", errUnsupported)
 	}
 	unsupported, errDecode := decodeRPCEnvelope[pluginapi.HostAffinityLookupResponse](unsupportedRaw)
-	if errDecode != nil || unsupported.Status != pluginapi.HostAffinityStatusUnsupported || unsupported.ObservedAt.IsZero() {
+	if errDecode != nil || unsupported.Status != pluginapi.HostAffinityStatusUnsupported ||
+		unsupported.ObservedAt.IsZero() {
 		t.Fatalf("unsupported response = %#v, error=%v", unsupported, errDecode)
 	}
 
 	calls := 0
-	host.SetAffinityManager(affinityLookupFunc(func(provider, model, sessionID string) (*coreauth.Auth, string) {
-		calls++
-		if provider != "openai" || model != "model" || sessionID != "session" {
-			t.Fatalf("lookup arguments = %q %q %q", provider, model, sessionID)
-		}
-		return &coreauth.Auth{
-			ID:          "secret-auth-id",
-			Index:       "auth-index",
-			Provider:    "openai",
-			Disabled:    true,
-			Unavailable: true,
-			Metadata:    map[string]any{"token": "secret-token"},
-		}, pluginapi.HostAffinityStatusBound
-	}))
+	host.SetAffinityManager(
+		affinityLookupFunc(
+			func(provider, model, sessionID string) (*coreauth.Auth, string) {
+				calls++
+				if provider != "openai" || model != "model" || sessionID != "session" {
+					t.Fatalf("lookup arguments = %q %q %q", provider, model, sessionID)
+				}
+				return &coreauth.Auth{
+					ID:          "secret-auth-id",
+					Index:       "auth-index",
+					Provider:    "openai",
+					Disabled:    true,
+					Unavailable: true,
+					Metadata:    map[string]any{"token": "secret-token"},
+				}, pluginapi.HostAffinityStatusBound
+			},
+		),
+	)
 	boundRaw, errBound := host.callFromPlugin(
 		context.Background(),
 		pluginabi.MethodHostAffinityLookup,
@@ -164,9 +176,13 @@ func TestHostAffinityLookupReturnsReadOnlyStatusContract(t *testing.T) {
 	}
 
 	missingIndexAuth := &coreauth.Auth{ID: "derivable-auth-id", Provider: "openai"}
-	host.SetAffinityManager(affinityLookupFunc(func(string, string, string) (*coreauth.Auth, string) {
-		return missingIndexAuth, pluginapi.HostAffinityStatusBound
-	}))
+	host.SetAffinityManager(
+		affinityLookupFunc(
+			func(string, string, string) (*coreauth.Auth, string) {
+				return missingIndexAuth, pluginapi.HostAffinityStatusBound
+			},
+		),
+	)
 	if _, errMissingIndex := host.callHostAffinityLookup(
 		context.Background(), []byte(`{"provider":"p","model":"m","session_id":"s"}`),
 	); errMissingIndex == nil || !strings.Contains(errMissingIndex.Error(), "without auth index") {
@@ -181,9 +197,13 @@ func TestHostAffinityLookupReturnsReadOnlyStatusContract(t *testing.T) {
 		pluginapi.HostAffinityStatusAmbiguous,
 		pluginapi.HostAffinityStatusUnsupported,
 	} {
-		host.SetAffinityManager(affinityLookupFunc(func(string, string, string) (*coreauth.Auth, string) {
-			return nil, status
-		}))
+		host.SetAffinityManager(
+			affinityLookupFunc(
+				func(string, string, string) (*coreauth.Auth, string) {
+					return nil, status
+				},
+			),
+		)
 		raw, errLookup := host.callHostAffinityLookup(
 			context.Background(), []byte(`{"provider":"p","model":"m","session_id":"s"}`),
 		)
@@ -191,7 +211,8 @@ func TestHostAffinityLookupReturnsReadOnlyStatusContract(t *testing.T) {
 			t.Fatalf("status %q lookup error = %v", status, errLookup)
 		}
 		response, errDecodeStatus := decodeRPCEnvelope[pluginapi.HostAffinityLookupResponse](raw)
-		if errDecodeStatus != nil || response.Status != status || response.AuthIndex != "" || response.ObservedAt.IsZero() {
+		if errDecodeStatus != nil || response.Status != status || response.AuthIndex != "" ||
+			response.ObservedAt.IsZero() {
 			t.Fatalf("status %q response = %#v, error=%v", status, response, errDecodeStatus)
 		}
 	}
@@ -258,9 +279,11 @@ func TestDecodeHostHTTPRequestPrefersNestedWireProfileAndClonesIt(t *testing.T) 
 	}
 
 	profile := &pluginapi.HTTPWireProfile{HTTP1Only: true, HeaderProfile: []string{"Original"}}
-	encoded, errMarshal := json.Marshal(rpcHostHTTPRequest{
-		Request: &httpRequest{Method: http.MethodGet, URL: "http://example.test", WireProfile: profile},
-	})
+	encoded, errMarshal := json.Marshal(
+		rpcHostHTTPRequest{
+			Request: &httpRequest{Method: http.MethodGet, URL: "http://example.test", WireProfile: profile},
+		},
+	)
 	if errMarshal != nil {
 		t.Fatalf("json.Marshal() error = %v", errMarshal)
 	}
@@ -279,7 +302,7 @@ func TestHostHTTPClientAppliesHTTP1HeaderWireProfile(t *testing.T) {
 	if errListen != nil {
 		t.Fatalf("net.Listen() error = %v", errListen)
 	}
-	defer listener.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(listener.Close)
 	type serverResult struct {
 		header string
 		err    error
@@ -291,7 +314,7 @@ func TestHostHTTPClientAppliesHTTP1HeaderWireProfile(t *testing.T) {
 			result <- serverResult{err: errAccept}
 			return
 		}
-		defer connection.Close()
+		defer func(closeResource func() error) { _ = closeResource() }(connection.Close)
 		reader := bufio.NewReader(connection)
 		var raw strings.Builder
 		for {
@@ -305,7 +328,9 @@ func TestHostHTTPClientAppliesHTTP1HeaderWireProfile(t *testing.T) {
 				break
 			}
 		}
-		_, errWrite := connection.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"))
+		_, errWrite := connection.Write(
+			[]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"),
+		)
 		result <- serverResult{header: raw.String(), err: errWrite}
 	}()
 
@@ -314,16 +339,20 @@ func TestHostHTTPClientAppliesHTTP1HeaderWireProfile(t *testing.T) {
 		DisableAutoCompression: true,
 		HeaderProfile:          []string{"x-custom-b", "X-Custom-A", "User-Agent", "Host"},
 	}
-	response, errDo := New().newHTTPClient(nil).Do(context.Background(), pluginapi.HTTPRequest{
-		Method: http.MethodGet,
-		URL:    "http://" + listener.Addr().String() + "/wire",
-		Headers: http.Header{
-			"X-Custom-A": {"a"},
-			"X-Custom-B": {"b"},
-			"User-Agent": {"wire-test"},
+	//goland:noinspection HttpUrlsUsage
+	const localScheme = "http://"
+	response, errDo := New().newHTTPClient(nil).Do(
+		context.Background(), pluginapi.HTTPRequest{
+			Method: http.MethodGet,
+			URL:    localScheme + listener.Addr().String() + "/wire",
+			Headers: http.Header{
+				"X-Custom-A": {"a"},
+				"X-Custom-B": {"b"},
+				"User-Agent": {"wire-test"},
+			},
+			WireProfile: profile,
 		},
-		WireProfile: profile,
-	})
+	)
 	if errDo != nil {
 		t.Fatalf("HostHTTPClient.Do() error = %v", errDo)
 	}
@@ -358,21 +387,27 @@ func TestHostHTTPClientAppliesHTTP1HeaderWireProfile(t *testing.T) {
 
 func TestHostHTTPClientWireProfileUsesPlainHTTPProxy(t *testing.T) {
 	proxyRequest := make(chan string, 1)
-	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		proxyRequest <- request.Method + " " + request.URL.String()
-		_, _ = w.Write([]byte("proxied"))
-	}))
+	proxyServer := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				proxyRequest <- request.Method + " " + request.URL.String()
+				_, _ = w.Write([]byte("proxied"))
+			},
+		),
+	)
 	defer proxyServer.Close()
 	host := New()
 	host.runtimeConfig = &config.Config{ProxyURL: proxyServer.URL}
-	response, errDo := host.newHTTPClient(nil).Do(context.Background(), pluginapi.HTTPRequest{
-		Method: http.MethodGet,
-		URL:    "http://example.test/resource",
-		WireProfile: &pluginapi.HTTPWireProfile{
-			HTTP1Only:     true,
-			HeaderProfile: []string{"Host", "User-Agent"},
+	response, errDo := host.newHTTPClient(nil).Do(
+		context.Background(), pluginapi.HTTPRequest{
+			Method: http.MethodGet,
+			URL:    "http://example.test/resource",
+			WireProfile: &pluginapi.HTTPWireProfile{
+				HTTP1Only:     true,
+				HeaderProfile: []string{"Host", "User-Agent"},
+			},
 		},
-	})
+	)
 	if errDo != nil {
 		t.Fatalf("HostHTTPClient.Do() error = %v", errDo)
 	}
@@ -414,12 +449,14 @@ func TestHostHTTPClientWireProfileRejectsCustomTLSHTTP2(t *testing.T) {
 		},
 	}
 	ctx := util.WithRoundTripper(context.Background(), customTransport)
-	_, errDo := New().newHTTPClient(nil).Do(ctx, pluginapi.HTTPRequest{
-		URL: server.URL,
-		WireProfile: &pluginapi.HTTPWireProfile{
-			HTTP1Only: true,
+	_, errDo := New().newHTTPClient(nil).Do(
+		ctx, pluginapi.HTTPRequest{
+			URL: server.URL,
+			WireProfile: &pluginapi.HTTPWireProfile{
+				HTTP1Only: true,
+			},
 		},
-	})
+	)
 	if errDo == nil || !strings.Contains(errDo.Error(), "requires HTTP/1.1") {
 		t.Fatalf("HostHTTPClient.Do() error = %v, want HTTP/2 rejection", errDo)
 	}
@@ -430,7 +467,7 @@ func TestDialProxyTunnelHTTPConnectCarriesTraffic(t *testing.T) {
 	if errListen != nil {
 		t.Fatalf("net.Listen() error = %v", errListen)
 	}
-	defer listener.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(listener.Close)
 	serverErr := make(chan error, 1)
 	go func() {
 		connection, errAccept := listener.Accept()
@@ -438,7 +475,7 @@ func TestDialProxyTunnelHTTPConnectCarriesTraffic(t *testing.T) {
 			serverErr <- errAccept
 			return
 		}
-		defer connection.Close()
+		defer func(closeResource func() error) { _ = closeResource() }(connection.Close)
 		reader := bufio.NewReader(connection)
 		for {
 			line, errRead := reader.ReadString('\n')
@@ -466,6 +503,7 @@ func TestDialProxyTunnelHTTPConnectCarriesTraffic(t *testing.T) {
 		_, errWrite := connection.Write([]byte("pong"))
 		serverErr <- errWrite
 	}()
+	//goland:noinspection HttpUrlsUsage
 	proxyURL, errParse := url.Parse("http://" + listener.Addr().String())
 	if errParse != nil {
 		t.Fatalf("url.Parse() error = %v", errParse)
@@ -478,7 +516,7 @@ func TestDialProxyTunnelHTTPConnectCarriesTraffic(t *testing.T) {
 	if errTunnel != nil {
 		t.Fatalf("dialProxyTunnel() error = %v", errTunnel)
 	}
-	defer connection.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(connection.Close)
 	if _, errWrite := connection.Write([]byte("ping")); errWrite != nil {
 		t.Fatalf("tunnel write error = %v", errWrite)
 	}
@@ -496,46 +534,50 @@ func TestDialProxyTunnelHTTPConnectCarriesTraffic(t *testing.T) {
 
 func TestDialProxyTunnelHTTPSConnectCarriesTraffic(t *testing.T) {
 	serverErr := make(chan error, 1)
-	proxyServer := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodConnect || request.Host != "target.example:443" {
-			serverErr <- fmt.Errorf("HTTPS proxy request = %s %s", request.Method, request.Host)
-			http.Error(writer, "unexpected CONNECT", http.StatusBadRequest)
-			return
-		}
-		hijacker, ok := writer.(http.Hijacker)
-		if !ok {
-			serverErr <- fmt.Errorf("HTTPS proxy response writer does not support hijacking")
-			return
-		}
-		connection, buffered, errHijack := hijacker.Hijack()
-		if errHijack != nil {
-			serverErr <- errHijack
-			return
-		}
-		defer connection.Close()
-		if _, errWrite := buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
-			serverErr <- errWrite
-			return
-		}
-		if errFlush := buffered.Flush(); errFlush != nil {
-			serverErr <- errFlush
-			return
-		}
-		payload := make([]byte, 4)
-		if _, errRead := io.ReadFull(buffered, payload); errRead != nil {
-			serverErr <- errRead
-			return
-		}
-		if string(payload) != "ping" {
-			serverErr <- fmt.Errorf("HTTPS tunnel payload = %q", payload)
-			return
-		}
-		if _, errWrite := buffered.WriteString("pong"); errWrite != nil {
-			serverErr <- errWrite
-			return
-		}
-		serverErr <- buffered.Flush()
-	}))
+	proxyServer := httptest.NewTLSServer(
+		http.HandlerFunc(
+			func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodConnect || request.Host != "target.example:443" {
+					serverErr <- fmt.Errorf("HTTPS proxy request = %s %s", request.Method, request.Host)
+					http.Error(writer, "unexpected CONNECT", http.StatusBadRequest)
+					return
+				}
+				hijacker, ok := writer.(http.Hijacker)
+				if !ok {
+					serverErr <- fmt.Errorf("HTTPS proxy response writer does not support hijacking")
+					return
+				}
+				connection, buffered, errHijack := hijacker.Hijack()
+				if errHijack != nil {
+					serverErr <- errHijack
+					return
+				}
+				defer func(closeResource func() error) { _ = closeResource() }(connection.Close)
+				if _, errWrite := buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+					serverErr <- errWrite
+					return
+				}
+				if errFlush := buffered.Flush(); errFlush != nil {
+					serverErr <- errFlush
+					return
+				}
+				payload := make([]byte, 4)
+				if _, errRead := io.ReadFull(buffered, payload); errRead != nil {
+					serverErr <- errRead
+					return
+				}
+				if string(payload) != "ping" {
+					serverErr <- fmt.Errorf("HTTPS tunnel payload = %q", payload)
+					return
+				}
+				if _, errWrite := buffered.WriteString("pong"); errWrite != nil {
+					serverErr <- errWrite
+					return
+				}
+				serverErr <- buffered.Flush()
+			},
+		),
+	)
 	defer proxyServer.Close()
 	proxyURL, errParse := url.Parse(proxyServer.URL)
 	if errParse != nil {
@@ -555,7 +597,7 @@ func TestDialProxyTunnelHTTPSConnectCarriesTraffic(t *testing.T) {
 	if errTunnel != nil {
 		t.Fatalf("dialProxyTunnel() error = %v", errTunnel)
 	}
-	defer connection.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(connection.Close)
 	if _, errWrite := connection.Write([]byte("ping")); errWrite != nil {
 		t.Fatalf("HTTPS tunnel write error = %v", errWrite)
 	}
@@ -573,8 +615,8 @@ func TestDialProxyTunnelHTTPSConnectCarriesTraffic(t *testing.T) {
 
 func TestDialProxyTunnelPreservesBufferedPayload(t *testing.T) {
 	clientConnection, proxyConnection := net.Pipe()
-	defer clientConnection.Close()
-	defer proxyConnection.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(clientConnection.Close)
+	defer func(closeResource func() error) { _ = closeResource() }(proxyConnection.Close)
 	serverErr := make(chan error, 1)
 	go func() {
 		reader := bufio.NewReader(proxyConnection)
@@ -588,7 +630,11 @@ func TestDialProxyTunnelPreservesBufferedPayload(t *testing.T) {
 				break
 			}
 		}
-		if _, errWrite := proxyConnection.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\npong")); errWrite != nil {
+		if _, errWrite := proxyConnection.Write(
+			[]byte(("HTTP/1.1 200 Connection " +
+				"Established\r\n\r\npong")),
+		); errWrite !=
+			nil {
 			serverErr <- errWrite
 			return
 		}
@@ -645,7 +691,7 @@ func TestDialProxyTunnelSOCKS5CarriesTraffic(t *testing.T) {
 	if errListen != nil {
 		t.Fatalf("net.Listen() error = %v", errListen)
 	}
-	defer listener.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(listener.Close)
 	serverErr := make(chan error, 1)
 	go func() {
 		connection, errAccept := listener.Accept()
@@ -653,7 +699,7 @@ func TestDialProxyTunnelSOCKS5CarriesTraffic(t *testing.T) {
 			serverErr <- errAccept
 			return
 		}
-		defer connection.Close()
+		defer func(closeResource func() error) { _ = closeResource() }(connection.Close)
 		greeting := make([]byte, 3)
 		if _, errRead := io.ReadFull(connection, greeting); errRead != nil {
 			serverErr <- errRead
@@ -721,7 +767,7 @@ func TestDialProxyTunnelSOCKS5CarriesTraffic(t *testing.T) {
 	if errTunnel != nil {
 		t.Fatalf("dialProxyTunnel() error = %v", errTunnel)
 	}
-	defer connection.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(connection.Close)
 	if _, errWrite := connection.Write([]byte("ping")); errWrite != nil {
 		t.Fatalf("SOCKS tunnel write error = %v", errWrite)
 	}
@@ -742,7 +788,7 @@ func TestDialProxyTunnelCancellationClosesConnection(t *testing.T) {
 	if errListen != nil {
 		t.Fatalf("net.Listen() error = %v", errListen)
 	}
-	defer listener.Close()
+	defer func(closeResource func() error) { _ = closeResource() }(listener.Close)
 	accepted := make(chan struct{})
 	closed := make(chan struct{})
 	go func() {
@@ -752,7 +798,7 @@ func TestDialProxyTunnelCancellationClosesConnection(t *testing.T) {
 			close(closed)
 			return
 		}
-		defer connection.Close()
+		defer func(closeResource func() error) { _ = closeResource() }(connection.Close)
 		close(accepted)
 		reader := bufio.NewReader(connection)
 		for {
@@ -768,6 +814,7 @@ func TestDialProxyTunnelCancellationClosesConnection(t *testing.T) {
 		_, _ = reader.ReadByte()
 		close(closed)
 	}()
+	//goland:noinspection HttpUrlsUsage
 	proxyURL, errParse := url.Parse("http://" + listener.Addr().String())
 	if errParse != nil {
 		t.Fatalf("url.Parse() error = %v", errParse)
@@ -840,25 +887,31 @@ func TestHostHTTPDoAppliesDefaultTimeout(t *testing.T) {
 
 func TestHostHTTPStreamWireProfileCancellationClosesUpstream(t *testing.T) {
 	upstreamCanceled := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			t.Error("response writer does not support flushing")
-			return
-		}
-		_, _ = w.Write([]byte("first"))
-		flusher.Flush()
-		<-request.Context().Done()
-		close(upstreamCanceled)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					t.Error("response writer does not support flushing")
+					return
+				}
+				_, _ = w.Write([]byte("first"))
+				flusher.Flush()
+				<-request.Context().Done()
+				close(upstreamCanceled)
+			},
+		),
+	)
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	response, errDo := New().newHTTPClient(nil).DoStream(ctx, pluginapi.HTTPRequest{
-		URL: server.URL,
-		WireProfile: &pluginapi.HTTPWireProfile{
-			HTTP1Only: true,
+	response, errDo := New().newHTTPClient(nil).DoStream(
+		ctx, pluginapi.HTTPRequest{
+			URL: server.URL,
+			WireProfile: &pluginapi.HTTPWireProfile{
+				HTTP1Only: true,
+			},
 		},
-	})
+	)
 	if errDo != nil {
 		cancel()
 		t.Fatalf("DoStream() error = %v", errDo)
@@ -1156,7 +1209,10 @@ func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 				req handlers.ModelExecutionRequest,
 			) (handlers.ModelExecutionResponse, *handlers.ErrorMessage) {
 				got = req
-				return handlers.ModelExecutionResponse{StatusCode: http.StatusOK, Body: []byte(`{"ok":true}`)}, nil
+				return handlers.ModelExecutionResponse{
+					StatusCode: http.StatusOK,
+					Body:       []byte(`{"ok":true}`),
+				}, nil
 			},
 		},
 	)
@@ -1180,8 +1236,11 @@ func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 	); errCall != nil {
 		t.Fatalf("callFromPlugin() error = %v", errCall)
 	}
-	if got.SkipInterceptorPluginID != "origin-plugin" {
-		t.Fatalf("SkipInterceptorPluginID = %q, want origin-plugin", got.SkipInterceptorPluginID)
+	if got.SkipInterceptorPluginID != "origin-plugin" || got.SkipRouterPluginID != "origin-plugin" {
+		t.Fatalf(
+			"caller skip IDs = interceptor:%q router:%q, want origin-plugin", got.SkipInterceptorPluginID,
+			got.SkipRouterPluginID,
+		)
 	}
 }
 
@@ -1247,13 +1306,16 @@ func TestHostModelExecuteStreamCallbackDoesNotClaimParentDeferredUsage(t *testin
 				if coreusage.DeferRecord(ctx, coreusage.Record{Model: "nested-stream"}) {
 					t.Fatal("nested stream execution claimed the parent deferred record")
 				}
+				if req.SkipInterceptorPluginID != "origin-plugin" {
+					t.Fatalf("stream caller skip=%q, want origin-plugin", req.SkipInterceptorPluginID)
+				}
 				chunks := make(chan handlers.ModelExecutionChunk)
 				close(chunks)
 				return handlers.ModelExecutionStream{StatusCode: http.StatusOK, Chunks: chunks}, nil
 			},
 		},
 	)
-	callbackID, closeCallback := host.openCallbackContext(parentCtx)
+	callbackID, closeCallback := host.openCallbackContextForPlugin(parentCtx, "origin-plugin")
 	defer closeCallback()
 
 	rawReq, errMarshal := json.Marshal(
@@ -1312,7 +1374,11 @@ func TestHostModelStreamClosesWithCallbackScope(t *testing.T) {
 	if errMarshal != nil {
 		t.Fatalf("marshal request: %v", errMarshal)
 	}
-	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawReq)
+	rawResp, errCall := host.callFromPlugin(
+		context.Background(),
+		pluginabi.MethodHostModelExecuteStream,
+		rawReq,
+	)
 	if errCall != nil {
 		t.Fatalf("callFromPlugin() error = %v", errCall)
 	}
@@ -1369,7 +1435,11 @@ func TestHostModelStreamReadAfterCallbackCloseReturnsError(t *testing.T) {
 	if errMarshal != nil {
 		t.Fatalf("marshal request: %v", errMarshal)
 	}
-	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawReq)
+	rawResp, errCall := host.callFromPlugin(
+		context.Background(),
+		pluginabi.MethodHostModelExecuteStream,
+		rawReq,
+	)
 	if errCall != nil {
 		t.Fatalf("execute stream callback error = %v", errCall)
 	}
@@ -1421,7 +1491,11 @@ func TestHostModelExecuteStreamStartupErrorCleansUp(t *testing.T) {
 	if errMarshal != nil {
 		t.Fatalf("marshal request: %v", errMarshal)
 	}
-	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawReq)
+	rawResp, errCall := host.callFromPlugin(
+		context.Background(),
+		pluginabi.MethodHostModelExecuteStream,
+		rawReq,
+	)
 	if errCall == nil {
 		t.Fatalf("execute stream callback error is nil, raw response = %q", rawResp)
 	}
@@ -1536,7 +1610,11 @@ func TestHostModelStreamReadAndCloseValidateStreamID(t *testing.T) {
 	if errMarshal != nil {
 		t.Fatalf("marshal close request: %v", errMarshal)
 	}
-	rawClose, errClose := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelStreamClose, rawCloseReq)
+	rawClose, errClose := host.callFromPlugin(
+		context.Background(),
+		pluginabi.MethodHostModelStreamClose,
+		rawCloseReq,
+	)
 	if errClose != nil {
 		t.Fatalf("close callback error = %v", errClose)
 	}
@@ -1661,7 +1739,11 @@ func openHostModelStreamForTest(t *testing.T, host *Host) string {
 	if errMarshal != nil {
 		t.Fatalf("marshal request: %v", errMarshal)
 	}
-	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawReq)
+	rawResp, errCall := host.callFromPlugin(
+		context.Background(),
+		pluginabi.MethodHostModelExecuteStream,
+		rawReq,
+	)
 	if errCall != nil {
 		t.Fatalf("execute stream callback error = %v", errCall)
 	}

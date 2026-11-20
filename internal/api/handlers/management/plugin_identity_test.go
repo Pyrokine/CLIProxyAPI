@@ -20,7 +20,9 @@ func TestValidatePluginStoreInstallSourceUsesCaseInsensitivePluginID(t *testing.
 	configs := map[string]config.PluginInstanceConfig{
 		"Alpha": pluginConfigFromYAML(
 			t,
-			"enabled: true\nstore:\n  id: alpha\n  source-id: official\n  source-url: https://official.example/registry.json\n",
+			"enabled: true\nstore:\n  id: alpha\n  source-id: official\n  "+
+				"source-url: https://official.example/"+
+				"registry.json\n",
 		),
 	}
 	sources := []pluginstore.Source{
@@ -61,7 +63,11 @@ func TestPluginConfigMutationAndDeletionUseCaseInsensitivePluginID(t *testing.T)
 	patchRecorder := httptest.NewRecorder()
 	patchCtx, _ := gin.CreateTestContext(patchRecorder)
 	patchCtx.Params = []gin.Param{{Key: "id", Value: "ALPHA"}}
-	patchCtx.Request = httptest.NewRequest(http.MethodPatch, "/plugins/ALPHA", strings.NewReader(`{"enabled":false}`))
+	patchCtx.Request = httptest.NewRequest(
+		http.MethodPatch,
+		"/plugins/ALPHA",
+		strings.NewReader(`{"enabled":false}`),
+	)
 	patchCtx.Request.Header.Set("Content-Type", "application/json")
 	handler.PatchPluginEnabled(patchCtx)
 	if patchRecorder.Code != http.StatusOK {

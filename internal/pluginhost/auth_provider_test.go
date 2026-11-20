@@ -59,7 +59,14 @@ func TestAuthProviderDiscovery(t *testing.T) {
 
 func TestRegisteredPluginOAuthProviderMatchesLoginRoute(t *testing.T) {
 	host := newHostWithRecords(
-		capabilityRecord{id: "binary-name", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: fakeAuthProvider{identifier: " Custom-Provider "}}}},
+		capabilityRecord{
+			id: "binary-name",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{identifier: " Custom-Provider "},
+				},
+			},
+		},
 		capabilityRecord{id: "without-auth-provider", plugin: pluginapi.Plugin{}},
 	)
 	plugins := host.RegisteredPlugins()
@@ -68,7 +75,8 @@ func TestRegisteredPluginOAuthProviderMatchesLoginRoute(t *testing.T) {
 	}
 	for _, info := range plugins {
 		if info.ID == "binary-name" {
-			if !info.SupportsOAuth || info.OAuthProvider != "custom-provider" || !host.HasAuthProvider(info.OAuthProvider) {
+			if !info.SupportsOAuth || info.OAuthProvider != "custom-provider" ||
+				!host.HasAuthProvider(info.OAuthProvider) {
 				t.Fatalf("OAuth provider does not match the login route: %#v", info)
 			}
 		} else if info.SupportsOAuth || info.OAuthProvider != "" {
@@ -219,6 +227,49 @@ func TestParseAuthsExpandsMultiplePluginAuths(t *testing.T) {
 	}
 }
 
+func TestParseAuthsOriginalProviderInputs(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "geminicli",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: "gemini-cli",
+						parseAuth: func(context.Context, pluginapi.AuthParseRequest) (
+							pluginapi.AuthParseResponse,
+							error,
+						) {
+							return pluginapi.AuthParseResponse{
+								Handled: true, Auths: []pluginapi.AuthData{
+									{
+										Provider: "gemini-cli", ID: "user.json", FileName: "user.json",
+										StorageJSON: []byte(`{"type":"gemini-cli"}`),
+									},
+									{
+										Provider: "gemini-cli", ID: "user-project-a.json",
+										FileName:    "user-project-a.json",
+										StorageJSON: []byte(`{"type":"gemini-cli","project_id":"project-a"}`),
+										Metadata:    map[string]any{"project_id": "project-a"},
+									},
+								},
+							}, nil
+						},
+					},
+				},
+			},
+		},
+	)
+	host.runtimeConfig = &config.Config{AuthDir: t.TempDir()}
+	auths, handled, err := host.ParseAuths(t.Context(), pluginapi.AuthParseRequest{Provider: "gemini-cli"})
+	if err != nil || !handled || len(auths) != 2 {
+		t.Fatalf("ParseAuths() = %#v, handled = %t, error = %v", auths, handled, err)
+	}
+	if auths[0].ID != "user.json" || auths[1].ID != "user-project-a.json" ||
+		auths[1].Provider != "gemini-cli" || auths[1].Metadata["project_id"] != "project-a" {
+		t.Fatalf("original provider/project identity changed: %#v", auths)
+	}
+}
+
 func TestParseAuthsPreservesLegacyAndExplicitEmptyContracts(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
@@ -234,6 +285,18 @@ func TestParseAuthsPreservesLegacyAndExplicitEmptyContracts(t *testing.T) {
 			wantIDs: []string{"legacy-auth"},
 		},
 		{
+			name: "plural auths override legacy auth",
+			response: pluginapi.AuthParseResponse{
+				Handled: true,
+				Auth:    pluginapi.AuthData{ID: "must-not-fallback"},
+				Auths: []pluginapi.AuthData{
+					{Provider: "plugin-provider", ID: "primary.json"},
+					{Provider: "plugin-provider", ID: "primary-project-a.json"},
+				},
+			},
+			wantIDs: []string{"primary.json", "primary-project-a.json"},
+		},
+		{
 			name: "explicit handled empty",
 			response: pluginapi.AuthParseResponse{
 				Handled: true,
@@ -243,38 +306,40 @@ func TestParseAuthsPreservesLegacyAndExplicitEmptyContracts(t *testing.T) {
 			wantIDs: []string{},
 		},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			host := newHostWithRecords(
-				capabilityRecord{
-					id: "auth-plugin",
-					plugin: pluginapi.Plugin{
-						Capabilities: pluginapi.Capabilities{
-							AuthProvider: fakeAuthProvider{
-								identifier: "plugin-provider",
-								parseAuth: func(
-									context.Context,
-									pluginapi.AuthParseRequest,
-								) (pluginapi.AuthParseResponse, error) {
-									return testCase.response, nil
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				host := newHostWithRecords(
+					capabilityRecord{
+						id: "auth-plugin",
+						plugin: pluginapi.Plugin{
+							Capabilities: pluginapi.Capabilities{
+								AuthProvider: fakeAuthProvider{
+									identifier: "plugin-provider",
+									parseAuth: func(
+										context.Context,
+										pluginapi.AuthParseRequest,
+									) (pluginapi.AuthParseResponse, error) {
+										return testCase.response, nil
+									},
 								},
 							},
 						},
 					},
-				},
-			)
-			auths, handled, errParse := host.ParseAuths(
-				context.Background(),
-				pluginapi.AuthParseRequest{Provider: "plugin-provider"},
-			)
-			if errParse != nil || !handled || len(auths) != len(testCase.wantIDs) {
-				t.Fatalf("ParseAuths() handled=%t len=%d err=%v", handled, len(auths), errParse)
-			}
-			for index, wantID := range testCase.wantIDs {
-				if auths[index].ID != wantID {
-					t.Fatalf("auth %d ID = %q, want %q", index, auths[index].ID, wantID)
+				)
+				auths, handled, errParse := host.ParseAuths(
+					context.Background(),
+					pluginapi.AuthParseRequest{Provider: "plugin-provider"},
+				)
+				if errParse != nil || !handled || len(auths) != len(testCase.wantIDs) {
+					t.Fatalf("ParseAuths() handled=%t len=%d err=%v", handled, len(auths), errParse)
 				}
-			}
-		})
+				for index, wantID := range testCase.wantIDs {
+					if auths[index].ID != wantID {
+						t.Fatalf("auth %d ID = %q, want %q", index, auths[index].ID, wantID)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -294,10 +359,12 @@ func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 							req pluginapi.AuthLoginStartRequest,
 						) (pluginapi.AuthLoginStartResponse, error) {
 							called = true
-							if req.Provider != "plugin-provider" || req.BaseURL != "http://localhost:8080/login" {
+							if req.Provider != "plugin-provider" ||
+								req.BaseURL != "http://localhost:8080/login" {
 								t.Fatalf("StartLogin request = %#v, want provider/baseURL", req)
 							}
-							if req.Host.AuthDir != authDir || req.Host.ProxyURL != "http://proxy.local" || !req.Host.ForceModelPrefix {
+							if req.Host.AuthDir != authDir || req.Host.ProxyURL != "http://proxy.local" ||
+								!req.Host.ForceModelPrefix {
 								t.Fatalf("StartLogin host = %#v, want configured summary", req.Host)
 							}
 							if req.HTTPClient == nil {
@@ -321,14 +388,19 @@ func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 		AuthDir:          authDir,
 	}
 
-	resp, handled, errStart := host.startLogin(context.Background(), " Plugin-Provider ", "http://localhost:8080/login")
+	resp, handled, errStart := host.startLogin(
+		context.Background(),
+		" Plugin-Provider ",
+		"http://localhost:8080/login",
+	)
 	if errStart != nil {
 		t.Fatalf("StartLogin() error = %v", errStart)
 	}
 	if !handled || !called {
 		t.Fatalf("StartLogin() handled=%t called=%t, want handled call", handled, called)
 	}
-	if resp.Provider != "plugin-provider" || resp.URL != "http://provider/login" || resp.State != "state-1" || !resp.ExpiresAt.Equal(expiresAt) {
+	if resp.Provider != "plugin-provider" || resp.URL != "http://provider/login" || resp.State != "state-1" ||
+		!resp.ExpiresAt.Equal(expiresAt) {
 		t.Fatalf("StartLogin() response = %#v, want plugin response", resp)
 	}
 }
@@ -339,23 +411,27 @@ func TestStartLoginPassesSingleAndMultiValueMetadataByDefensiveCopy(t *testing.T
 		"multi":  []string{"first", "second"},
 	}
 	var captured map[string]any
-	host := newHostWithRecords(capabilityRecord{
-		id: "auth-plugin",
-		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-			AuthProvider: fakeAuthProvider{
-				identifier: "plugin-provider",
-				startLogin: func(
-					_ context.Context,
-					req pluginapi.AuthLoginStartRequest,
-				) (pluginapi.AuthLoginStartResponse, error) {
-					captured = req.Metadata
-					req.Metadata["single"] = "mutated"
-					req.Metadata["multi"].([]string)[0] = "mutated"
-					return pluginapi.AuthLoginStartResponse{}, nil
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: "plugin-provider",
+						startLogin: func(
+							_ context.Context,
+							req pluginapi.AuthLoginStartRequest,
+						) (pluginapi.AuthLoginStartResponse, error) {
+							captured = req.Metadata
+							req.Metadata["single"] = "mutated"
+							req.Metadata["multi"].([]string)[0] = "mutated"
+							return pluginapi.AuthLoginStartResponse{}, nil
+						},
+					},
 				},
 			},
-		}},
-	})
+		},
+	)
 
 	_, handled, errStart := host.startLogin(
 		context.Background(), "plugin-provider", "http://localhost/login", metadata,
@@ -434,7 +510,8 @@ func TestPollLoginPassesProviderStateHostAndHTTPClient(t *testing.T) {
 							if req.Provider != "plugin-provider" || req.State != "state-1" {
 								t.Fatalf("PollLogin request = %#v, want provider/state", req)
 							}
-							if req.Host.AuthDir != authDir || req.Host.ProxyURL != "http://proxy.local" || !req.Host.ForceModelPrefix {
+							if req.Host.AuthDir != authDir || req.Host.ProxyURL != "http://proxy.local" ||
+								!req.Host.ForceModelPrefix {
 								t.Fatalf("PollLogin host = %#v, want configured summary", req.Host)
 							}
 							if req.HTTPClient == nil {
@@ -489,9 +566,13 @@ func TestHostAuthDataToCoreAuthRejectsMissingProviderAndUsesAuthDir(t *testing.T
 		t.Fatalf("AuthDataToCoreAuth() auth = %#v, want normalized provider and relative ID", auth)
 	}
 	if auth.Metadata["type"] != "plugin-provider" || auth.Attributes["path"] != path ||
-		auth.Attributes["source"] != path || auth.Attributes[coreauth.AttributeSourceBackend] != coreauth.AuthSourceFile {
+		auth.Attributes["source"] !=
+			path ||
+		auth.Attributes[coreauth.AttributeSourceBackend] !=
+			coreauth.AuthSourceFile {
 		t.Fatalf(
-			"AuthDataToCoreAuth() metadata=%#v attributes=%#v, want file path/source/type", auth.Metadata, auth.Attributes,
+			"AuthDataToCoreAuth() metadata=%#v attributes=%#v, want file path/source/type", auth.Metadata,
+			auth.Attributes,
 		)
 	}
 }
@@ -536,19 +617,30 @@ func TestPluginTokenStorageMergesRawMetadataAndProviderType(t *testing.T) {
 
 func TestRefreshAuthPreservesFilePriorityInMetadataAndStorage(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "plugin.json")
-	host := newHostWithRecords(capabilityRecord{
-		id: "auth-plugin",
-		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: fakeAuthProvider{
-			identifier: "plugin-provider",
-			refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
-				return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{
-					StorageJSON: []byte(`{"priority":0,"access_token":"new"}`),
-					Metadata:    map[string]any{"priority": float64(0), "access_token": "new"},
-					Attributes:  map[string]string{"priority": "0"},
-				}}, nil
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: "plugin-provider",
+						refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+							pluginapi.AuthRefreshResponse,
+							error,
+						) {
+							return pluginapi.AuthRefreshResponse{
+								Auth: pluginapi.AuthData{
+									StorageJSON: []byte(`{"priority":0,"access_token":"new"}`),
+									Metadata:    map[string]any{"priority": float64(0), "access_token": "new"},
+									Attributes:  map[string]string{"priority": "0"},
+								},
+							}, nil
+						},
+					},
+				},
 			},
-		}}},
-	})
+		},
+	)
 	original := &coreauth.Auth{
 		ID: "auth-1", Provider: "plugin-provider", FileName: "plugin.json",
 		Attributes: map[string]string{
@@ -565,7 +657,11 @@ func TestRefreshAuthPreservesFilePriorityInMetadataAndStorage(t *testing.T) {
 		t.Fatalf("refreshAuth() = (%#v, %t, %v)", refreshed, handled, err)
 	}
 	if refreshed.Attributes["priority"] != "1" || refreshed.Metadata["priority"] != float64(1) {
-		t.Fatalf("file priority changed after refresh: attributes=%#v metadata=%#v", refreshed.Attributes, refreshed.Metadata)
+		t.Fatalf(
+			"file priority changed after refresh: attributes=%#v metadata=%#v",
+			refreshed.Attributes,
+			refreshed.Metadata,
+		)
 	}
 	if _, err := sdkauth.NewFileTokenStore().Save(context.Background(), refreshed); err != nil {
 		t.Fatalf("Save() refreshed auth: %v", err)
@@ -595,19 +691,30 @@ func TestRefreshAuthKeepsPluginAttributesAndHostOwnedIdentity(t *testing.T) {
 		coreauth.AttributeFilePriority:  "false",
 		"priority":                      "0",
 	}
-	host := newHostWithRecords(capabilityRecord{
-		id: "auth-plugin",
-		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: fakeAuthProvider{
-			identifier: "plugin-provider",
-			refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
-				return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{
-					StorageJSON: []byte(`{"access_token":"new"}`),
-					Metadata:    map[string]any{"access_token": "new"},
-					Attributes:  pluginAttributes,
-				}}, nil
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: "plugin-provider",
+						refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+							pluginapi.AuthRefreshResponse,
+							error,
+						) {
+							return pluginapi.AuthRefreshResponse{
+								Auth: pluginapi.AuthData{
+									StorageJSON: []byte(`{"access_token":"new"}`),
+									Metadata:    map[string]any{"access_token": "new"},
+									Attributes:  pluginAttributes,
+								},
+							}, nil
+						},
+					},
+				},
 			},
-		}}},
-	})
+		},
+	)
 	original := &coreauth.Auth{
 		ID: "auth-1", Provider: "plugin-provider", FileName: "plugin.json",
 		Attributes: map[string]string{
@@ -642,34 +749,58 @@ func TestRefreshAuthKeepsPluginAttributesAndHostOwnedIdentity(t *testing.T) {
 		t.Fatal("plugin introduced a host-owned virtual auth marker")
 	}
 	if refreshed.Metadata["priority"] != float64(1) || pluginAttributes["client_id"] != "rotated" {
-		t.Fatalf("priority or plugin input mutated: metadata=%#v input=%#v", refreshed.Metadata, pluginAttributes)
+		t.Fatalf(
+			"priority or plugin input mutated: metadata=%#v input=%#v",
+			refreshed.Metadata,
+			pluginAttributes,
+		)
 	}
 }
 
 func TestRefreshAuthAllowsPluginPriorityWithoutFileMarker(t *testing.T) {
-	host := newHostWithRecords(capabilityRecord{
-		id: "auth-plugin",
-		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: fakeAuthProvider{
-			identifier: "plugin-provider",
-			refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
-				return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{
-					Metadata:   map[string]any{"priority": float64(2), "access_token": "new"},
-					Attributes: map[string]string{"priority": "2", coreauth.AttributeFilePriority: "true"},
-				}}, nil
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: "plugin-provider",
+						refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+							pluginapi.AuthRefreshResponse,
+							error,
+						) {
+							return pluginapi.AuthRefreshResponse{
+								Auth: pluginapi.AuthData{
+									Metadata: map[string]any{"priority": float64(2), "access_token": "new"},
+									Attributes: map[string]string{
+										"priority": "2", coreauth.AttributeFilePriority: "true",
+									},
+								},
+							}, nil
+						},
+					},
+				},
 			},
-		}}},
-	})
+		},
+	)
 	original := &coreauth.Auth{
 		ID: "auth-1", Provider: "plugin-provider",
-		Attributes: map[string]string{coreauth.AttributeSourceBackend: coreauth.AuthSourceFile, "priority": "1"},
-		Metadata:   map[string]any{"priority": float64(1)},
+		Attributes: map[string]string{
+			coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+			"priority":                      "1",
+		},
+		Metadata: map[string]any{"priority": float64(1)},
 	}
 	refreshed, handled, errRefresh := host.refreshAuth(context.Background(), original)
 	if errRefresh != nil || !handled || refreshed == nil {
 		t.Fatalf("refreshAuth() = (%#v, %t, %v)", refreshed, handled, errRefresh)
 	}
 	if refreshed.Attributes["priority"] != "2" || refreshed.Metadata["priority"] != float64(2) {
-		t.Fatalf("plugin priority did not update: attributes=%#v metadata=%#v", refreshed.Attributes, refreshed.Metadata)
+		t.Fatalf(
+			"plugin priority did not update: attributes=%#v metadata=%#v",
+			refreshed.Attributes,
+			refreshed.Metadata,
+		)
 	}
 	if _, forged := refreshed.Attributes[coreauth.AttributeFilePriority]; forged {
 		t.Fatal("plugin introduced file priority marker")

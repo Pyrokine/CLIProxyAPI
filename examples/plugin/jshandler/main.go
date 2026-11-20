@@ -22,7 +22,7 @@ func buildPlugin(configYAML []byte, pluginDir string) (pluginapi.Plugin, error) 
 			Name:             pluginName,
 			Version:          "0.1.0",
 			Author:           "router-for-me",
-			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			GitHubRepository: "https://github.com/Pyrokine/CLIProxyAPI",
 			ConfigFields: []pluginapi.ConfigField{
 				{
 					Name:        "enabled",

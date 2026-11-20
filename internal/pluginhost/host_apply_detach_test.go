@@ -18,10 +18,14 @@ func TestApplyConfigDetachesDisabledPlugins(t *testing.T) {
 	host := newForTest(loader)
 	t.Cleanup(func() { _ = host.ShutdownAllContext(context.Background()) })
 	dir := makePluginDir(t, "alpha", "bravo")
-	initial := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true, Dir: dir,
-		Configs: map[string]config.PluginInstanceConfig{"alpha": {}, "bravo": {}},
-	}}
+	initial := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true, Dir: dir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {Enabled: new(true)}, "bravo": {Enabled: new(true)},
+			},
+		},
+	}
 	if err := host.ApplyConfig(context.Background(), initial); err != nil {
 		t.Fatal(err)
 	}
@@ -30,16 +34,23 @@ func TestApplyConfigDetachesDisabledPlugins(t *testing.T) {
 	}
 
 	disabled := false
-	if err := host.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true, Dir: dir,
-		Configs: map[string]config.PluginInstanceConfig{
-			"alpha": {Enabled: &disabled}, "bravo": {},
+	if err := host.ApplyConfig(
+		context.Background(), &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true, Dir: dir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"alpha": {Enabled: &disabled}, "bravo": {Enabled: new(true)},
+				},
+			},
 		},
-	}}); err != nil {
+	); err != nil {
 		t.Fatal(err)
 	}
 	if host.PluginRegistered("alpha") || host.pluginLoaded("alpha") || alphaLookup.shutdownCalls != 1 {
-		t.Fatalf("disabled alpha remains loaded or was not shut down: registered=%v loaded=%v shutdown=%d", host.PluginRegistered("alpha"), host.pluginLoaded("alpha"), alphaLookup.shutdownCalls)
+		t.Fatalf(
+			"disabled alpha remains loaded or was not shut down: registered=%v loaded=%v shutdown=%d",
+			host.PluginRegistered("alpha"), host.pluginLoaded("alpha"), alphaLookup.shutdownCalls,
+		)
 	}
 	if !host.PluginRegistered("bravo") || !host.pluginLoaded("bravo") || bravoLookup.shutdownCalls != 0 {
 		t.Fatal("enabled bravo was detached")
@@ -49,14 +60,57 @@ func TestApplyConfigDetachesDisabledPlugins(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !host.PluginRegistered("alpha") || !host.pluginLoaded("alpha") || alpha.registerCalls != 2 {
-		t.Fatalf("re-enabled alpha not registered again: loaded=%v register=%d", host.pluginLoaded("alpha"), alpha.registerCalls)
+		t.Fatalf(
+			"re-enabled alpha not registered again: loaded=%v register=%d", host.pluginLoaded("alpha"),
+			alpha.registerCalls,
+		)
 	}
 
-	if err := host.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{Dir: dir}}); err != nil {
+	if err := host.ApplyConfig(
+		context.Background(), &config.Config{Plugins: config.PluginsConfig{Dir: dir}},
+	); err != nil {
 		t.Fatal(err)
 	}
-	if host.pluginLoaded("alpha") || host.pluginLoaded("bravo") || alphaLookup.shutdownCalls != 2 || bravoLookup.shutdownCalls != 1 {
-		t.Fatalf("global disable did not stop loaded plugins: alpha=%v/%d bravo=%v/%d", host.pluginLoaded("alpha"), alphaLookup.shutdownCalls, host.pluginLoaded("bravo"), bravoLookup.shutdownCalls)
+	if host.pluginLoaded("alpha") || host.pluginLoaded("bravo") || alphaLookup.shutdownCalls != 2 ||
+		bravoLookup.shutdownCalls != 1 {
+		t.Fatalf(
+			"global disable did not stop loaded plugins: alpha=%v/%d bravo=%v/%d", host.pluginLoaded("alpha"),
+			alphaLookup.shutdownCalls, host.pluginLoaded("bravo"), bravoLookup.shutdownCalls,
+		)
+	}
+}
+
+func TestApplyConfigUnconfiguredPluginsNeverReachLoader(t *testing.T) {
+	loader := newTestSymbolLoader()
+	alpha := &testPlugin{registerResult: validTestPlugin("alpha")}
+	lookup := newTestSymbolLookup(alpha)
+	loader.lookups["alpha"] = lookup
+	host := newForTest(loader)
+	t.Cleanup(func() { _ = host.ShutdownAllContext(context.Background()) })
+	cfg := &config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: makePluginDir(t, "alpha")}}
+	if err := host.ApplyConfig(t.Context(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if loader.openCalls != 0 || alpha.registerCalls != 0 || host.PluginRegistered("alpha") ||
+		host.pluginLoaded("alpha") {
+		t.Fatal("unconfigured plugin reached the loader or runtime")
+	}
+
+	cfg.Plugins.Configs = map[string]config.PluginInstanceConfig{"alpha": {Enabled: new(true)}}
+	if err := host.ApplyConfig(t.Context(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if loader.openCalls != 1 || alpha.registerCalls != 1 || !host.PluginRegistered("alpha") {
+		t.Fatal("explicit enable did not publish the plugin")
+	}
+
+	cfg.Plugins.Configs = nil
+	if err := host.ApplyConfig(t.Context(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if loader.openCalls != 1 || lookup.shutdownCalls != 1 || host.PluginRegistered("alpha") ||
+		host.pluginLoaded("alpha") {
+		t.Fatal("removed plugin configuration retained an active runtime")
 	}
 }
 
@@ -70,12 +124,14 @@ func TestApplyConfigFailurePreservesPreviouslyLoadedPlugins(t *testing.T) {
 	if err := host.ApplyConfig(context.Background(), initial); err != nil {
 		t.Fatal(err)
 	}
-	bad := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true, Dir: initial.Plugins.Dir,
-		Configs: map[string]config.PluginInstanceConfig{
-			"alpha": {}, "ALPHA": {},
+	bad := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true, Dir: initial.Plugins.Dir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {}, "ALPHA": {},
+			},
 		},
-	}}
+	}
 	if err := host.ApplyConfig(context.Background(), bad); err == nil {
 		t.Fatal("expected duplicate config error")
 	}

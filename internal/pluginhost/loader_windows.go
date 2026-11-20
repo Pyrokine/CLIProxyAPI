@@ -22,13 +22,13 @@ import (
 )
 
 type windowsBuffer struct {
-	ptr uintptr
+	ptr *byte
 	len uintptr
 }
 
 type windowsHostAPI struct {
 	abiVersion uint32
-	hostCtx    uintptr
+	hostCtx    uintptr // 回调标识，DLL 仅原样传回
 	call       uintptr
 	freeBuffer uintptr
 }
@@ -60,7 +60,7 @@ type dynamicLibraryClient struct {
 	dll      *syscall.DLL
 	tempPath string
 	hostAPI  *windowsHostAPI
-	hostCtx  *uintptr
+	hostCtx  uintptr
 	host     *Host
 	pluginID string
 	instance *hostCallbackInstance
@@ -90,19 +90,17 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 	id := windowsHostCallbackID.Add(1)
 	instance := &hostCallbackInstance{id: id}
 	host.registerHostCallbackInstance(file.ID, instance)
-	hostCtx := new(uintptr)
-	*hostCtx = id
 	windowsHostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID, instance: instance})
 	client := &dynamicLibraryClient{
 		dll:      dll,
 		tempPath: loadPath,
-		hostCtx:  hostCtx,
+		hostCtx:  id,
 		host:     host,
 		pluginID: file.ID,
 		instance: instance,
 		hostAPI: &windowsHostAPI{
 			abiVersion: pluginHostABIVersion,
-			hostCtx:    uintptr(unsafe.Pointer(hostCtx)),
+			hostCtx:    id,
 			call:       windowsHostCallCallback,
 			freeBuffer: windowsHostFreeCallback,
 		},
@@ -235,9 +233,9 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 	if errMethod != nil {
 		return nil, errMethod
 	}
-	var requestPtr uintptr
+	var requestPtr *byte
 	if len(request) > 0 {
-		requestPtr = uintptr(unsafe.Pointer(&request[0]))
+		requestPtr = &request[0]
 	}
 	responseMem, errAlloc := windows.LocalAlloc(
 		windows.LMEM_FIXED|windows.LMEM_ZEROINIT,
@@ -252,23 +250,24 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 	defer func() {
 		_, _ = windows.LocalFree(windows.Handle(responseMem))
 	}()
+	// LocalAlloc 返回固定的原生内存，在延迟调用 LocalFree 前有效
 	response := (*windowsBuffer)(unsafe.Pointer(responseMem))
 	rc, _, _ := syscall.SyscallN(
 		c.api.call,
 		uintptr(unsafe.Pointer(methodBytes)),
-		requestPtr,
+		uintptr(unsafe.Pointer(requestPtr)),
 		uintptr(len(request)),
 		responseMem,
 	)
 	runtime.KeepAlive(methodBytes)
 	runtime.KeepAlive(request)
 	var out []byte
-	if response.ptr != 0 && response.len > 0 {
-		out = unsafe.Slice((*byte)(unsafe.Pointer(response.ptr)), response.len)
+	if response.ptr != nil && response.len > 0 {
+		out = unsafe.Slice(response.ptr, response.len)
 		out = append([]byte(nil), out...)
 	}
-	if response.ptr != 0 {
-		_, _, _ = syscall.SyscallN(c.api.freeBuffer, response.ptr, response.len)
+	if response.ptr != nil {
+		_, _, _ = syscall.SyscallN(c.api.freeBuffer, uintptr(unsafe.Pointer(response.ptr)), response.len)
 	}
 	if rc != 0 {
 		if isPluginErrorEnvelope(out) {
@@ -314,9 +313,9 @@ func (c *dynamicLibraryClient) close(releaseDLL bool) {
 		_, _, _ = syscall.SyscallN(c.api.shutdown)
 		c.api.shutdown = 0
 	}
-	if c.hostCtx != nil {
-		windowsHostCallbackEntries.Delete(*c.hostCtx)
-		c.hostCtx = nil
+	if c.hostCtx != 0 {
+		windowsHostCallbackEntries.Delete(c.hostCtx)
+		c.hostCtx = 0
 	}
 	if c.dll != nil {
 		if releaseDLL {
@@ -330,21 +329,19 @@ func (c *dynamicLibraryClient) close(releaseDLL bool) {
 
 func windowsHostCall(
 	hostCtx uintptr,
-	methodPtr uintptr,
-	requestPtr uintptr,
+	methodPtr *byte,
+	requestPtr *byte,
 	requestLen uintptr,
-	responsePtr uintptr,
+	response *windowsBuffer,
 ) uintptr {
-	if responsePtr != 0 {
-		response := (*windowsBuffer)(unsafe.Pointer(responsePtr))
-		response.ptr = 0
+	if response != nil {
+		response.ptr = nil
 		response.len = 0
 	}
-	if hostCtx == 0 || methodPtr == 0 {
+	if hostCtx == 0 || methodPtr == nil {
 		return 1
 	}
-	id := *(*uintptr)(unsafe.Pointer(hostCtx))
-	rawHost, okHost := windowsHostCallbackEntries.Load(id)
+	rawHost, okHost := windowsHostCallbackEntries.Load(hostCtx)
 	if !okHost {
 		return 1
 	}
@@ -353,48 +350,33 @@ func windowsHostCall(
 		return 1
 	}
 	var request []byte
-	if requestPtr != 0 && requestLen > 0 {
-		request = unsafe.Slice((*byte)(unsafe.Pointer(requestPtr)), requestLen)
+	if requestPtr != nil && requestLen > 0 {
+		request = unsafe.Slice(requestPtr, requestLen)
 		request = append([]byte(nil), request...)
 	}
 	ctx := withHostCallbackPluginID(context.Background(), entry.pluginID)
-	ctx = withHostCallbackInstanceID(withHostCallbackInstance(ctx, entry.instance), id)
-	resp, errCall := entry.host.callFromPlugin(ctx, windowsString(methodPtr), request)
+	ctx = withHostCallbackInstanceID(withHostCallbackInstance(ctx, entry.instance), hostCtx)
+	resp, errCall := entry.host.callFromPlugin(ctx, windows.BytePtrToString(methodPtr), request)
 	if errCall != nil {
 		resp = marshalRPCError("host_call_failed", errCall.Error(), clienterror.HTTPStatusFromError(errCall))
 	}
-	if len(resp) == 0 || responsePtr == 0 {
+	if len(resp) == 0 || response == nil {
 		return 0
 	}
 	mem, errAlloc := windows.LocalAlloc(windows.LMEM_FIXED, uint32(len(resp)))
 	if errAlloc != nil || mem == 0 {
 		return 1
 	}
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(mem)), len(resp)), resp)
-	response := (*windowsBuffer)(unsafe.Pointer(responsePtr))
-	response.ptr = mem
+	// 插件通过 windowsHostFree 释放此原生分配
+	response.ptr = (*byte)(unsafe.Pointer(mem))
+	copy(unsafe.Slice(response.ptr, len(resp)), resp)
 	response.len = uintptr(len(resp))
 	return 0
 }
 
-func windowsHostFree(ptr uintptr, len uintptr) uintptr {
+func windowsHostFree(ptr uintptr, _ uintptr) uintptr {
 	if ptr != 0 {
 		_, _ = windows.LocalFree(windows.Handle(ptr))
 	}
 	return 0
-}
-
-func windowsString(ptr uintptr) string {
-	if ptr == 0 {
-		return ""
-	}
-	bytes := make([]byte, 0)
-	for offset := uintptr(0); ; offset++ {
-		b := *(*byte)(unsafe.Pointer(ptr + offset))
-		if b == 0 {
-			break
-		}
-		bytes = append(bytes, b)
-	}
-	return string(bytes)
 }

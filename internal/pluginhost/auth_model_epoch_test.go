@@ -33,37 +33,39 @@ func TestAuthModelResultInvalidAfterPluginFuse(t *testing.T) {
 
 func TestPublishAuthModelsRejectsStaleSnapshotAndOperation(t *testing.T) {
 	for _, scenario := range []string{"snapshot", "operation"} {
-		t.Run(scenario, func(t *testing.T) {
-			host := New()
-			host.mu.Lock()
-			host.applyGeneration = 1
-			host.mu.Unlock()
-			token, ok := host.capturePluginOperationToken(capabilityRecord{id: "sample"}, 1)
-			if !ok {
-				t.Fatal("could not capture model publication ownership")
-			}
-			result := AuthModelResult{Snapshot: host.Snapshot(), operationToken: token, Handled: true}
-			calls := 0
-			publish := func() bool { calls++; return true }
-			if !host.PublishAuthModelsIfCurrent(result, publish) || calls != 1 {
-				t.Fatal("current model publication was rejected")
-			}
-			if scenario == "snapshot" {
-				host.InvalidateRuntime()
-			} else {
-				host.publicationMu.Lock()
+		t.Run(
+			scenario, func(t *testing.T) {
+				host := New()
 				host.mu.Lock()
-				host.advancePluginOperationLocked("sample")
+				host.applyGeneration = 1
 				host.mu.Unlock()
-				host.publicationMu.Unlock()
-				if host.Snapshot() != result.Snapshot {
-					t.Fatal("operation invalidation changed the snapshot unexpectedly")
+				token, ok := host.capturePluginOperationToken(capabilityRecord{id: "sample"}, 1)
+				if !ok {
+					t.Fatal("could not capture model publication ownership")
 				}
-			}
-			if host.PublishAuthModelsIfCurrent(result, publish) || calls != 1 {
-				t.Fatal("stale plugin ownership published credential models")
-			}
-		})
+				result := AuthModelResult{Snapshot: host.Snapshot(), operationToken: token, Handled: true}
+				calls := 0
+				publish := func() bool { calls++; return true }
+				if !host.PublishAuthModelsIfCurrent(result, publish) || calls != 1 {
+					t.Fatal("current model publication was rejected")
+				}
+				if scenario == "snapshot" {
+					host.InvalidateRuntime()
+				} else {
+					host.publicationMu.Lock()
+					host.mu.Lock()
+					host.advancePluginOperationLocked("sample")
+					host.mu.Unlock()
+					host.publicationMu.Unlock()
+					if host.Snapshot() != result.Snapshot {
+						t.Fatal("operation invalidation changed the snapshot unexpectedly")
+					}
+				}
+				if host.PublishAuthModelsIfCurrent(result, publish) || calls != 1 {
+					t.Fatal("stale plugin ownership published credential models")
+				}
+			},
+		)
 	}
 }
 
@@ -72,11 +74,13 @@ func TestPublishAuthModelsSerializesRuntimeInvalidation(t *testing.T) {
 	result := AuthModelResult{Snapshot: host.Snapshot()}
 	started, release, published := make(chan struct{}), make(chan struct{}), make(chan bool, 1)
 	go func() {
-		published <- host.PublishAuthModelsIfCurrent(result, func() bool {
-			close(started)
-			<-release
-			return host.AuthModelResultCurrent(result)
-		})
+		published <- host.PublishAuthModelsIfCurrent(
+			result, func() bool {
+				close(started)
+				<-release
+				return host.AuthModelResultCurrent(result)
+			},
+		)
 	}()
 	select {
 	case <-started:

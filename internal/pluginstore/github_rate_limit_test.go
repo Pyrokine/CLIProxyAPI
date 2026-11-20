@@ -65,25 +65,27 @@ func TestGitHubRateLimitResponses(t *testing.T) {
 		{name: "not found", status: http.StatusNotFound},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			limiter := &GitHubRateLimiter{nowFunc: func() time.Time { return now }}
-			errLimit := limiter.observe("quota", tt.status, githubTestHeaders(tt.headers), []byte(tt.body))
-			if tt.wait == 0 {
-				if errLimit != nil || limiter.check("quota") != nil {
-					t.Fatalf("non-rate-limit response started cooldown: %v", errLimit)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				t.Parallel()
+				limiter := &GitHubRateLimiter{nowFunc: func() time.Time { return now }}
+				errLimit := limiter.observe("quota", tt.status, githubTestHeaders(tt.headers), []byte(tt.body))
+				if tt.wait == 0 {
+					if errLimit != nil || limiter.check("quota") != nil {
+						t.Fatalf("non-rate-limit response started cooldown: %v", errLimit)
+					}
+					return
 				}
-				return
-			}
-			var rateLimit *RateLimitError
-			if !errors.As(errLimit, &rateLimit) || rateLimit.StatusCode != tt.status ||
-				!rateLimit.RetryAt.Equal(now.Add(tt.wait)) {
-				t.Fatalf("error=%v, want status=%d retry=%s", errLimit, tt.status, now.Add(tt.wait))
-			}
-			if errCheck := limiter.check("quota"); !errors.As(errCheck, &rateLimit) {
-				t.Fatalf("check=%v, want cooldown", errCheck)
-			}
-		})
+				var rateLimit *RateLimitError
+				if !errors.As(errLimit, &rateLimit) || rateLimit.StatusCode != tt.status ||
+					!rateLimit.RetryAt.Equal(now.Add(tt.wait)) {
+					t.Fatalf("error=%v, want status=%d retry=%s", errLimit, tt.status, now.Add(tt.wait))
+				}
+				if errCheck := limiter.check("quota"); !errors.As(errCheck, &rateLimit) {
+					t.Fatalf("check=%v, want cooldown", errCheck)
+				}
+			},
+		)
 	}
 }
 
@@ -98,6 +100,7 @@ func TestGitHubRateLimitKeyCanonicalHost(t *testing.T) {
 			t.Fatalf("key for %s = %q, want %q", requestURL, got, want)
 		}
 	}
+	//goland:noinspection HttpUrlsUsage
 	for _, requestURL := range []string{
 		"https://api.github.com:444/repos/owner/repo",
 		"http://api.github.com/",
@@ -124,10 +127,12 @@ func TestGitHubRateLimitBackoffRecoveryAndLateSuccess(t *testing.T) {
 	}
 	_ = limiter.observe("quota", http.StatusOK, nil, nil)
 	reset := now.Add(time.Hour)
-	headers := githubTestHeaders(map[string]string{
-		"X-RateLimit-Remaining": "0",
-		"X-RateLimit-Reset":     strconv.FormatInt(reset.Unix(), 10),
-	})
+	headers := githubTestHeaders(
+		map[string]string{
+			"X-RateLimit-Remaining": "0",
+			"X-RateLimit-Reset":     strconv.FormatInt(reset.Unix(), 10),
+		},
+	)
 	if errObserve := limiter.observe("quota", http.StatusOK, headers, nil); errObserve != nil {
 		t.Fatalf("final successful request failed: %v", errObserve)
 	}
@@ -150,21 +155,23 @@ func TestGitHubCooldownSharedAcrossClientsRepositoriesAndAssets(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	limiter := &GitHubRateLimiter{nowFunc: func() time.Time { return now }}
 	calls := 0
-	doer := pluginIdentityDoerFunc(func(*http.Request) (*http.Response, error) {
-		calls++
-		if calls == 1 {
+	doer := pluginIdentityDoerFunc(
+		func(*http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     githubTestHeaders(map[string]string{"Retry-After": "60"}),
+					Body:       io.NopCloser(strings.NewReader("limited")),
+				}, nil
+			}
 			return &http.Response{
-				StatusCode: http.StatusTooManyRequests,
-				Header:     githubTestHeaders(map[string]string{"Retry-After": "60"}),
-				Body:       io.NopCloser(strings.NewReader("limited")),
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v1.0.0"}`)),
 			}, nil
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v1.0.0"}`)),
-		}, nil
-	})
+		},
+	)
 	first := Client{HTTPClient: doer, RateLimiter: limiter}
 	second := Client{HTTPClient: doer, RateLimiter: limiter}
 	ctx := context.Background()
@@ -175,8 +182,7 @@ func TestGitHubCooldownSharedAcrossClientsRepositoriesAndAssets(t *testing.T) {
 		ReleaseAsset{APIURL: "https://api.github.com:443/repos/other/second/releases/assets/1"},
 	)
 	for _, errRequest := range []error{errFirst, errSecond, errAsset} {
-		var rateLimit *RateLimitError
-		if !errors.As(errRequest, &rateLimit) {
+		if _, ok := errors.AsType[*RateLimitError](errRequest); !ok {
 			t.Fatalf("request error=%v, want rate limit", errRequest)
 		}
 	}
@@ -204,24 +210,28 @@ func TestGitHubCooldownSharedAcrossClientsRepositoriesAndAssets(t *testing.T) {
 func TestGitHubCooldownSeparatesCredentialsAndNetworkScope(t *testing.T) {
 	limiter := &GitHubRateLimiter{}
 	calls := 0
-	doer := pluginIdentityDoerFunc(func(*http.Request) (*http.Response, error) {
-		calls++
-		return &http.Response{
-			StatusCode: http.StatusTooManyRequests,
-			Header:     githubTestHeaders(map[string]string{"Retry-After": "3600"}),
-			Body:       io.NopCloser(strings.NewReader("limited")),
-		}, nil
-	})
+	doer := pluginIdentityDoerFunc(
+		func(*http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header:     githubTestHeaders(map[string]string{"Retry-After": "3600"}),
+				Body:       io.NopCloser(strings.NewReader("limited")),
+			}, nil
+		},
+	)
 	plugin := Plugin{Repository: "https://github.com/owner/repo"}
 	unauthenticated := Client{HTTPClient: doer, RateLimiter: limiter}
 	_, _ = unauthenticated.FetchLatestRelease(context.Background(), plugin)
 	authenticated := Client{
 		HTTPClient:  doer,
 		RateLimiter: limiter,
-		Auth: []AuthConfig{{
-			Match: "https://api.github.com/", Type: AuthTypeGitHubToken,
-			TokenEnv: "PLUGIN_STORE_RATE_LIMIT_TOKEN",
-		}},
+		Auth: []AuthConfig{
+			{
+				Match: "https://api.github.com/", Type: AuthTypeGitHubToken,
+				TokenEnv: "PLUGIN_STORE_RATE_LIMIT_TOKEN",
+			},
+		},
 	}
 	for _, token := range []string{"token-a", "token-b", "token-a"} {
 		t.Setenv("PLUGIN_STORE_RATE_LIMIT_TOKEN", token)
@@ -259,13 +269,15 @@ func TestGitHubHeaderCooldownClosesBodyWithoutReading(t *testing.T) {
 	body := &githubHeaderOnlyBody{}
 	client := Client{
 		RateLimiter: &GitHubRateLimiter{},
-		HTTPClient: pluginIdentityDoerFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusTooManyRequests,
-				Header:     githubTestHeaders(map[string]string{"Retry-After": "60"}),
-				Body:       body,
-			}, nil
-		}),
+		HTTPClient: pluginIdentityDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     githubTestHeaders(map[string]string{"Retry-After": "60"}),
+					Body:       body,
+				}, nil
+			},
+		),
 	}
 	_, errRelease := client.FetchLatestRelease(
 		context.Background(),
@@ -281,37 +293,40 @@ func TestGitHubDefaultCooldownBlocksNewClients(t *testing.T) {
 	var calls atomic.Int32
 	client := Client{
 		NetworkScope: t.Name(),
-		HTTPClient: pluginIdentityDoerFunc(func(*http.Request) (*http.Response, error) {
-			calls.Add(1)
-			return &http.Response{
-				StatusCode: http.StatusTooManyRequests,
-				Header:     githubTestHeaders(map[string]string{"Retry-After": "3600"}),
-				Body:       io.NopCloser(strings.NewReader("limited")),
-			}, nil
-		}),
+		HTTPClient: pluginIdentityDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     githubTestHeaders(map[string]string{"Retry-After": "3600"}),
+					Body:       io.NopCloser(strings.NewReader("limited")),
+				}, nil
+			},
+		),
 	}
 	key := githubRateLimitKey("https://api.github.com/", client.NetworkScope, nil, false)
-	t.Cleanup(func() {
-		defaultGitHubRateLimiter.mu.Lock()
-		delete(defaultGitHubRateLimiter.entries, key)
-		defaultGitHubRateLimiter.mu.Unlock()
-	})
+	t.Cleanup(
+		func() {
+			defaultGitHubRateLimiter.mu.Lock()
+			delete(defaultGitHubRateLimiter.entries, key)
+			defaultGitHubRateLimiter.mu.Unlock()
+		},
+	)
 	_, _ = client.FetchLatestRelease(context.Background(), Plugin{Repository: "https://github.com/owner/first"})
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			copyClient := Client{NetworkScope: client.NetworkScope, HTTPClient: client.HTTPClient}
-			_, errRelease := copyClient.FetchLatestRelease(
-				context.Background(),
-				Plugin{Repository: "https://github.com/other/second"},
-			)
-			var rateLimit *RateLimitError
-			if !errors.As(errRelease, &rateLimit) {
-				t.Errorf("request error = %v", errRelease)
-			}
-		}()
+		wg.Go(
+			func() {
+				copyClient := Client{NetworkScope: client.NetworkScope, HTTPClient: client.HTTPClient}
+				_, errRelease := copyClient.FetchLatestRelease(
+					context.Background(),
+					Plugin{Repository: "https://github.com/other/second"},
+				)
+				if _, ok := errors.AsType[*RateLimitError](errRelease); !ok {
+					t.Errorf("request error = %v", errRelease)
+				}
+			},
+		)
 	}
 	wg.Wait()
 	if calls.Load() != 1 {

@@ -70,7 +70,9 @@ func (b *hostHTTPStreamBridge) read(
 	if b == nil || strings.TrimSpace(id) == "" {
 		return pluginapi.HTTPStreamChunk{}, true, fmt.Errorf("http stream id is required")
 	}
-	key := hostHTTPStreamKey{pluginID: strings.TrimSpace(pluginID), instanceID: instanceID, streamID: strings.TrimSpace(id)}
+	key := hostHTTPStreamKey{
+		pluginID: strings.TrimSpace(pluginID), instanceID: instanceID, streamID: strings.TrimSpace(id),
+	}
 	b.mu.Lock()
 	entry := b.streams[key]
 	b.mu.Unlock()
@@ -101,7 +103,9 @@ func (b *hostHTTPStreamBridge) close(pluginID string, instanceID uintptr, id str
 	if b == nil || strings.TrimSpace(id) == "" {
 		return
 	}
-	key := hostHTTPStreamKey{pluginID: strings.TrimSpace(pluginID), instanceID: instanceID, streamID: strings.TrimSpace(id)}
+	key := hostHTTPStreamKey{
+		pluginID: strings.TrimSpace(pluginID), instanceID: instanceID, streamID: strings.TrimSpace(id),
+	}
 	b.mu.Lock()
 	entry := b.streams[key]
 	delete(b.streams, key)
@@ -110,15 +114,19 @@ func (b *hostHTTPStreamBridge) close(pluginID string, instanceID uintptr, id str
 }
 
 func (b *hostHTTPStreamBridge) closeInstance(pluginID string, instanceID uintptr) {
-	b.closeMatching(func(key hostHTTPStreamKey) bool {
-		return key.pluginID == strings.TrimSpace(pluginID) && key.instanceID == instanceID
-	})
+	b.closeMatching(
+		func(key hostHTTPStreamKey) bool {
+			return key.pluginID == strings.TrimSpace(pluginID) && key.instanceID == instanceID
+		},
+	)
 }
 
 func (b *hostHTTPStreamBridge) closePlugin(pluginID string) {
-	b.closeMatching(func(key hostHTTPStreamKey) bool {
-		return key.pluginID == strings.TrimSpace(pluginID)
-	})
+	b.closeMatching(
+		func(key hostHTTPStreamKey) bool {
+			return key.pluginID == strings.TrimSpace(pluginID)
+		},
+	)
 }
 
 func (b *hostHTTPStreamBridge) closeAll() {

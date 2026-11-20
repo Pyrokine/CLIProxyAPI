@@ -161,7 +161,8 @@ func TestAuthMultiRecordResponsesPreserveNativeAndRPCCompatibility(t *testing.T)
 			newValue: func() any { return &AuthParseResponse{} },
 			assertWire: func(t *testing.T, value any) {
 				response := value.(*AuthParseResponse)
-				if response.Auths == nil || len(response.Auths) != 0 || response.Auth.ID != "must-not-fallback" {
+				if response.Auths == nil || len(response.Auths) != 0 ||
+					response.Auth.ID != "must-not-fallback" {
 					t.Fatalf("explicit empty parse response = %#v", response)
 				}
 			},
@@ -181,6 +182,44 @@ func TestAuthMultiRecordResponsesPreserveNativeAndRPCCompatibility(t *testing.T)
 			},
 		},
 		{
+			name: "parse original batch auths",
+			value: AuthParseResponse{
+				Handled: true,
+				Auth:    AuthData{Provider: "gemini-cli", ID: "primary.json"},
+				Auths: []AuthData{
+					{Provider: "gemini-cli", ID: "primary.json"},
+					{Provider: "gemini-cli", ID: "primary-project-a.json"},
+				},
+			},
+			newValue: func() any { return &AuthParseResponse{} },
+			assertWire: func(t *testing.T, value any) {
+				response := value.(*AuthParseResponse)
+				if !response.Handled || response.Auth.ID != "primary.json" || len(response.Auths) != 2 ||
+					response.Auths[1].ID != "primary-project-a.json" {
+					t.Fatalf("original parse response = %#v", response)
+				}
+			},
+		},
+		{
+			name: "poll original batch auths",
+			value: AuthLoginPollResponse{
+				Status: AuthLoginStatusSuccess,
+				Auth:   AuthData{Provider: "gemini-cli", ID: "primary.json"},
+				Auths: []AuthData{
+					{Provider: "gemini-cli", ID: "primary.json"},
+					{Provider: "gemini-cli", ID: "primary-project-a.json"},
+				},
+			},
+			newValue: func() any { return &AuthLoginPollResponse{} },
+			assertWire: func(t *testing.T, value any) {
+				response := value.(*AuthLoginPollResponse)
+				if response.Status != AuthLoginStatusSuccess || response.Auth.ID != "primary.json" ||
+					len(response.Auths) != 2 || response.Auths[1].ID != "primary-project-a.json" {
+					t.Fatalf("original poll response = %#v", response)
+				}
+			},
+		},
+		{
 			name: "poll batch auths",
 			value: AuthLoginPollResponse{
 				Status: AuthLoginStatusSuccess,
@@ -190,7 +229,8 @@ func TestAuthMultiRecordResponsesPreserveNativeAndRPCCompatibility(t *testing.T)
 			newValue: func() any { return &AuthLoginPollResponse{} },
 			assertWire: func(t *testing.T, value any) {
 				response := value.(*AuthLoginPollResponse)
-				if response.Status != AuthLoginStatusSuccess || len(response.Auths) != 2 || response.Auth.ID != "legacy" {
+				if response.Status != AuthLoginStatusSuccess || len(response.Auths) != 2 ||
+					response.Auth.ID != "legacy" {
 					t.Fatalf("batch poll response = %#v", response)
 				}
 			},
@@ -198,17 +238,19 @@ func TestAuthMultiRecordResponsesPreserveNativeAndRPCCompatibility(t *testing.T)
 	}
 
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			raw, errMarshal := json.Marshal(testCase.value)
-			if errMarshal != nil {
-				t.Fatal(errMarshal)
-			}
-			decoded := testCase.newValue()
-			if errUnmarshal := json.Unmarshal(raw, decoded); errUnmarshal != nil {
-				t.Fatal(errUnmarshal)
-			}
-			testCase.assertWire(t, decoded)
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				raw, errMarshal := json.Marshal(testCase.value)
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+				decoded := testCase.newValue()
+				if errUnmarshal := json.Unmarshal(raw, decoded); errUnmarshal != nil {
+					t.Fatal(errUnmarshal)
+				}
+				testCase.assertWire(t, decoded)
+			},
+		)
 	}
 }
 
@@ -443,7 +485,8 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 		t.Fatalf("Candidates = %#v", request.Candidates)
 	}
 	candidate := request.Candidates[0]
-	if candidate.ID != "auth-1" || candidate.Provider != "openai" || candidate.Priority != 10 || candidate.Status != "ready" {
+	if candidate.ID != "auth-1" || candidate.Provider != "openai" || candidate.Priority != 10 ||
+		candidate.Status != "ready" {
 		t.Fatalf("Candidate = %#v", candidate)
 	}
 	if candidate.Attributes["region"] != "us" {
@@ -452,7 +495,8 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	if candidate.Metadata["load"] != 0.5 {
 		t.Fatalf("Candidate.Metadata = %#v", candidate.Metadata)
 	}
-	if response.AuthID != "auth-1" || response.DelegateBuiltin != SchedulerBuiltinRoundRobin || !response.Handled {
+	if response.AuthID != "auth-1" || response.DelegateBuiltin != SchedulerBuiltinRoundRobin ||
+		!response.Handled {
 		t.Fatalf("SchedulerPickResponse = %#v", response)
 	}
 }
@@ -464,12 +508,26 @@ func TestSchedulerPickResponseAcceptsLegacyAndSnakeCase(t *testing.T) {
 	}{
 		{`{"AuthID":"legacy","Handled":true}`, SchedulerPickResponse{AuthID: "legacy", Handled: true}},
 		{`{"auth_id":"snake","handled":true}`, SchedulerPickResponse{AuthID: "snake", Handled: true}},
-		{`{"DelegateBuiltin":"round-robin","Handled":true}`, SchedulerPickResponse{DelegateBuiltin: "round-robin", Handled: true}},
-		{`{"delegate_builtin":"fill-first","handled":true}`, SchedulerPickResponse{DelegateBuiltin: "fill-first", Handled: true}},
-		{`{"AuthID":"legacy","Handled":true,"Reject":true,"RejectCode":"policy","RejectReason":"blocked"}`,
-			SchedulerPickResponse{AuthID: "legacy", Handled: true, Reject: true, RejectCode: "policy", RejectReason: "blocked"}},
-		{`{"auth_id":"snake","handled":true,"reject":true,"reject_code":"quota","reject_reason":"exhausted"}`,
-			SchedulerPickResponse{AuthID: "snake", Handled: true, Reject: true, RejectCode: "quota", RejectReason: "exhausted"}},
+		{
+			`{"DelegateBuiltin":"round-robin","Handled":true}`,
+			SchedulerPickResponse{DelegateBuiltin: "round-robin", Handled: true},
+		},
+		{
+			`{"delegate_builtin":"fill-first","handled":true}`,
+			SchedulerPickResponse{DelegateBuiltin: "fill-first", Handled: true},
+		},
+		{
+			`{"AuthID":"legacy","Handled":true,"Reject":true,"RejectCode":"policy","RejectReason":"blocked"}`,
+			SchedulerPickResponse{
+				AuthID: "legacy", Handled: true, Reject: true, RejectCode: "policy", RejectReason: "blocked",
+			},
+		},
+		{
+			`{"auth_id":"snake","handled":true,"reject":true,"reject_code":"quota","reject_reason":"exhausted"}`,
+			SchedulerPickResponse{
+				AuthID: "snake", Handled: true, Reject: true, RejectCode: "quota", RejectReason: "exhausted",
+			},
+		},
 	} {
 		var response SchedulerPickResponse
 		if err := json.Unmarshal([]byte(tc.payload), &response); err != nil {
@@ -483,14 +541,21 @@ func TestSchedulerPickResponseAcceptsLegacyAndSnakeCase(t *testing.T) {
 		AuthID: "old", DelegateBuiltin: "round-robin", Handled: true,
 		Reject: true, RejectCode: "old", RejectReason: "old",
 	}
-	if err := json.Unmarshal([]byte(`{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":""}`), &response); err != nil {
+	if err := json.Unmarshal(
+		[]byte((`{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"",` +
+			`"reject_code":"","reject_reason":` +
+			`""}`)),
+		&response,
+	); err != nil {
 		t.Fatalf("decode explicit false: %v", err)
 	}
 	if response != (SchedulerPickResponse{}) {
 		t.Fatalf("explicit false and empty values did not overwrite prior decision: %#v", response)
 	}
 
-	response = SchedulerPickResponse{AuthID: "keep", DelegateBuiltin: "fill-first", Handled: true, RejectCode: "keep", RejectReason: "keep"}
+	response = SchedulerPickResponse{
+		AuthID: "keep", DelegateBuiltin: "fill-first", Handled: true, RejectCode: "keep", RejectReason: "keep",
+	}
 	want := response
 	want.Reject = true
 	if err := json.Unmarshal([]byte(`{"reject":true}`), &response); err != nil {
@@ -531,34 +596,42 @@ func TestQuotaPayloadAcceptsCamelAndSnakeCase(t *testing.T) {
 			}`,
 		},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			var response QuotaFetchResponse
-			if errUnmarshal := json.Unmarshal([]byte(testCase.raw), &response); errUnmarshal != nil {
-				t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
-			}
-			if response.Subscription == nil || response.Subscription.Plan != "pro" ||
-				response.Subscription.TierName != "Pro" || response.Subscription.TierID != "tier-pro" ||
-				response.ServerTimeOffsetMs != 123 || len(response.Groups) != 1 ||
-				response.Groups[0].DisplayName != "Requests" || len(response.Groups[0].Buckets) != 1 ||
-				response.Groups[0].Buckets[0].RemainingFraction != 0.8 ||
-				response.Groups[0].Buckets[0].ResetTime != "2026-09-23T00:00:00Z" {
-				t.Fatalf("quota response = %#v", response)
-			}
-			if testCase.name == "camel case" {
-				want := []QuotaMetric{
-					{Key: "credits_used", Label: "Credits used", Value: 1740.28, Unit: "credits", Format: "number"},
-					{Key: "charged", Label: "Charged", Value: 29.61, Format: "currency", Currency: "USD"},
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				var response QuotaFetchResponse
+				if errUnmarshal := json.Unmarshal([]byte(testCase.raw), &response); errUnmarshal != nil {
+					t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
 				}
-				if len(response.Summary) != len(want) {
-					t.Fatalf("quota summary = %#v, want %#v", response.Summary, want)
+				if response.Subscription == nil || response.Subscription.Plan != "pro" ||
+					response.Subscription.TierName != "Pro" || response.Subscription.TierID != "tier-pro" ||
+					response.ServerTimeOffsetMs != 123 || len(response.Groups) != 1 ||
+					response.Groups[0].DisplayName != "Requests" || len(response.Groups[0].Buckets) != 1 ||
+					response.Groups[0].Buckets[0].RemainingFraction != 0.8 ||
+					response.Groups[0].Buckets[0].ResetTime != "2026-09-23T00:00:00Z" {
+					t.Fatalf("quota response = %#v", response)
 				}
-				for i, metric := range want {
-					if response.Summary[i] != metric {
-						t.Fatalf("quota summary metric %d = %#v, want %#v", i, response.Summary[i], metric)
+				if testCase.name == "camel case" {
+					want := []QuotaMetric{
+						{
+							Key:    "credits_used",
+							Label:  "Credits used",
+							Value:  1740.28,
+							Unit:   "credits",
+							Format: "number",
+						},
+						{Key: "charged", Label: "Charged", Value: 29.61, Format: "currency", Currency: "USD"},
+					}
+					if len(response.Summary) != len(want) {
+						t.Fatalf("quota summary = %#v, want %#v", response.Summary, want)
+					}
+					for i, metric := range want {
+						if response.Summary[i] != metric {
+							t.Fatalf("quota summary metric %d = %#v, want %#v", i, response.Summary[i], metric)
+						}
 					}
 				}
-			}
-		})
+			},
+		)
 	}
 
 	var exhausted QuotaBucket
@@ -572,6 +645,7 @@ func TestQuotaPayloadAcceptsCamelAndSnakeCase(t *testing.T) {
 	}
 }
 
+// noinspection GoBoolExpressions
 func TestQuotaProbeContractRoundTrip(t *testing.T) {
 	probe := QuotaProbe{
 		URL:    "https://quota.example.test/v1/usage",
@@ -640,7 +714,10 @@ func TestModelDiscoveryOutcomeWireValues(t *testing.T) {
 	}
 }
 
-func (compileTimePlugin) RegisterModels(context.Context, ModelRegistrationRequest) (ModelRegistrationResponse, error) {
+func (compileTimePlugin) RegisterModels(
+	context.Context,
+	ModelRegistrationRequest,
+) (ModelRegistrationResponse, error) {
 	return ModelRegistrationResponse{}, nil
 }
 

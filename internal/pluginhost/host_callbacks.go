@@ -258,21 +258,27 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 		return nil, fmt.Errorf("host http stream bridge is unavailable")
 	}
 	instanceID := hostCallbackInstanceIDFromContext(ctx)
-	streamID = h.httpStreams.open(streamCtx, operation.pluginID, instanceID, resp.Chunks, cancelStream, operation.finish)
+	streamID = h.httpStreams.open(
+		streamCtx, operation.pluginID, instanceID, resp.Chunks, cancelStream, operation.finish,
+	)
 	if streamID == "" {
 		return nil, fmt.Errorf("host http stream bridge is unavailable")
 	}
-	rawResp, errMarshal := marshalRPCResult(rpcHostHTTPStreamResponse{
-		StatusCode: resp.StatusCode,
-		Headers:    httpHeader(resp.Headers),
-		StreamID:   streamID,
-	})
+	rawResp, errMarshal := marshalRPCResult(
+		rpcHostHTTPStreamResponse{
+			StatusCode: resp.StatusCode,
+			Headers:    httpHeader(resp.Headers),
+			StreamID:   streamID,
+		},
+	)
 	if errMarshal != nil {
 		return nil, errMarshal
 	}
-	if !h.httpOperations.setStreamCleanup(operation.pluginID, operation.operationID, operation.entry, func() {
-		h.httpStreams.close(operation.pluginID, instanceID, streamID)
-	}) {
+	if !h.httpOperations.setStreamCleanup(
+		operation.pluginID, operation.operationID, operation.entry, func() {
+			h.httpStreams.close(operation.pluginID, instanceID, streamID)
+		},
+	) {
 		return nil, context.Canceled
 	}
 	keepStream = true
@@ -427,6 +433,7 @@ func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte
 	if errResolve != nil {
 		return nil, errResolve
 	}
+	ctx = withDelegatedExecutorUsage(ctx)
 	ctx = coreusage.WithoutDeferredRecord(ctx)
 	resp, errMsg := executor.ExecuteModel(
 		ctx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID),
@@ -463,6 +470,7 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	if errResolve != nil {
 		return nil, errResolve
 	}
+	ctx = withDelegatedExecutorUsage(ctx)
 	ctx = coreusage.WithoutDeferredRecord(ctx)
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer func() {
@@ -476,11 +484,11 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	if errMsg != nil {
 		return nil, modelExecutionError(errMsg)
 	}
-	streamID := ""
-	if h != nil && h.modelStreams != nil {
-		streamID = h.modelStreams.open(streamCtx, stream.Chunks, cancel)
-		cancel = nil
+	if h == nil || h.modelStreams == nil {
+		return nil, fmt.Errorf("host model stream bridge is unavailable")
 	}
+	streamID := h.modelStreams.open(streamCtx, stream.Chunks, cancel)
+	cancel = nil
 	if streamID == "" {
 		return nil, fmt.Errorf("host model stream bridge is unavailable")
 	}
@@ -551,6 +559,7 @@ func modelExecutionRequestFromPlugin(
 		Query:                   cloneValues(req.Query),
 		Alt:                     req.Alt,
 		SkipInterceptorPluginID: skipPluginID,
+		SkipRouterPluginID:      skipPluginID,
 		ForcedProvider:          req.ForcedProvider,
 		AuthID:                  req.AuthID,
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
@@ -581,6 +590,7 @@ func (e *modelExecutionStatusError) StatusCode() int {
 	return e.statusCode
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *modelExecutionStatusError) Unwrap() error {
 	return e.err
 }

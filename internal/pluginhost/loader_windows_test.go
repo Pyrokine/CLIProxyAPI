@@ -124,10 +124,14 @@ func TestHostWindowsRejectedCandidateRequiresRestartBeforeRetry(t *testing.T) {
 	lookup.registerOverride = func([]byte) pluginapi.Plugin { return pluginapi.Plugin{} }
 	loader.lookups["alpha"] = lookup
 	host := newForTest(loader)
+	enabled := true
 	cfg := &config.Config{
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {Enabled: &enabled},
+			},
 		},
 	}
 	if errApply := host.ApplyConfig(context.Background(), cfg); errApply != nil {
@@ -146,17 +150,20 @@ func TestHostWindowsActivePluginRequiresRestartForReplacement(t *testing.T) {
 	loader := newTestSymbolLoader()
 	loader.lookups["alpha"] = newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("alpha")})
 	host := newForTest(loader)
+	enabled := true
 	cfg := &config.Config{
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {Enabled: &enabled},
+			},
 		},
 	}
 	if errApply := host.ApplyConfig(context.Background(), cfg); errApply != nil {
 		t.Fatalf("initial ApplyConfig() error = %v", errApply)
 	}
 	t.Cleanup(host.shutdownAll)
-	enabled := true
 	cfg.Plugins.Configs = map[string]config.PluginInstanceConfig{
 		"alpha": {Enabled: &enabled, Priority: 1},
 	}
@@ -179,10 +186,14 @@ func TestHostWindowsLoadAttemptIsSharedAcrossHosts(t *testing.T) {
 	)
 	firstHost := New()
 	firstHost.loader = firstLoader
+	enabled := true
 	cfg := &config.Config{
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, pluginID),
+			Configs: map[string]config.PluginInstanceConfig{
+				pluginID: {Enabled: &enabled},
+			},
 		},
 	}
 	if errApply := firstHost.ApplyConfig(context.Background(), cfg); errApply != nil {
@@ -250,14 +261,62 @@ func countShadowPluginFiles(t *testing.T, dir string) int {
 	return count
 }
 
+func TestWindowsHostCallbackABIAndLifetime(t *testing.T) {
+	if unsafe.Sizeof(windowsBuffer{}) != 2*unsafe.Sizeof(uintptr(0)) ||
+		unsafe.Offsetof(windowsBuffer{}.len) != unsafe.Sizeof(uintptr(0)) {
+		t.Fatal("plugin buffer does not match the native pointer/size_t layout")
+	}
+	host := New()
+	id := windowsHostCallbackID.Add(1)
+	instance := &hostCallbackInstance{id: id}
+	client := &dynamicLibraryClient{host: host, pluginID: "callback-fixture", instance: instance, hostCtx: id}
+	windowsHostCallbackEntries.Store(
+		id, dynamicHostCallbackEntry{host: host, pluginID: client.pluginID, instance: instance},
+	)
+	t.Cleanup(client.Shutdown)
+	method, err := windows.BytePtrFromString(pluginabi.MethodHostHTTPCancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := []byte(`{"operation_id":"unused-fixture-operation"}`)
+	var response windowsBuffer
+	rc, _, _ := syscall.SyscallN(
+		windowsHostCallCallback, id, uintptr(unsafe.Pointer(method)),
+		uintptr(unsafe.Pointer(&request[0])), uintptr(len(request)), uintptr(unsafe.Pointer(&response)),
+	)
+	defer windowsHostFree(uintptr(unsafe.Pointer(response.ptr)), response.len)
+	if rc != 0 || response.ptr == nil {
+		t.Fatalf("host callback returned %d, response = %+v", rc, response)
+	}
+	if got := string(unsafe.Slice(response.ptr, response.len)); got != `{"ok":true,"result":{}}` {
+		t.Fatalf("host callback response = %s", got)
+	}
+	client.Shutdown()
+	if _, exists := windowsHostCallbackEntries.Load(id); exists || client.hostCtx != 0 || !instance.closed.Load() {
+		t.Fatal("shutdown retained the host callback context")
+	}
+	runtime.GC()
+	response = windowsBuffer{len: 1}
+	rc, _, _ = syscall.SyscallN(
+		windowsHostCallCallback, id, uintptr(unsafe.Pointer(method)), 0, 0, uintptr(unsafe.Pointer(&response)),
+	)
+	if rc != 1 || response.ptr != nil || response.len != 0 {
+		t.Fatalf("retired callback returned %d, response = %+v", rc, response)
+	}
+}
+
 var testReentrantHostCallback uintptr
 
 func TestDynamicLibraryClientCallSurvivesReentrantCallbackStackGrowth(t *testing.T) {
 	testReentrantHostCallback = syscall.NewCallback(testGrowHostCallbackStack)
-	client := newGuardedPluginClient(&dynamicLibraryClient{api: windowsPluginAPI{
-		call:       syscall.NewCallback(testReentrantPluginCall),
-		freeBuffer: syscall.NewCallback(testReentrantPluginFree),
-	}})
+	client := newGuardedPluginClient(
+		&dynamicLibraryClient{
+			api: windowsPluginAPI{
+				call:       syscall.NewCallback(testReentrantPluginCall),
+				freeBuffer: syscall.NewCallback(testReentrantPluginFree),
+			},
+		},
+	)
 	t.Cleanup(client.Shutdown)
 
 	got, errCall := client.Call(context.Background(), "model.route", []byte(`{}`))
@@ -270,20 +329,22 @@ func TestDynamicLibraryClientCallSurvivesReentrantCallbackStackGrowth(t *testing
 	}
 }
 
-func testReentrantPluginCall(_, _, _, responsePtr uintptr) uintptr {
-	if testReentrantHostCallback == 0 || responsePtr == 0 {
+func testReentrantPluginCall(method, request *byte, requestLen uintptr, response *windowsBuffer) uintptr {
+	if testReentrantHostCallback == 0 || method == nil || request == nil || response == nil {
 		return 1
 	}
 	_, _, _ = syscall.SyscallN(testReentrantHostCallback)
+	if windows.BytePtrToString(method) != "model.route" || string(unsafe.Slice(request, requestLen)) != `{}` {
+		return 2
+	}
 
 	raw := []byte(`{"ok":true,"result":{"Handled":true}}`)
 	mem, errAlloc := windows.LocalAlloc(windows.LMEM_FIXED, uint32(len(raw)))
 	if errAlloc != nil || mem == 0 {
 		return 1
 	}
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(mem)), len(raw)), raw)
-	response := (*windowsBuffer)(unsafe.Pointer(responsePtr))
-	response.ptr = mem
+	response.ptr = (*byte)(unsafe.Pointer(mem))
+	copy(unsafe.Slice(response.ptr, len(raw)), raw)
 	response.len = uintptr(len(raw))
 	return 0
 }
@@ -312,31 +373,37 @@ func testGrowStack(depth int) int {
 }
 
 var (
-	testLivenessFinalizedDuringCallback atomic.Bool
+	testLivenessCollectedDuringCallback atomic.Bool
 	testLivenessCallbackReadCorrupted   atomic.Bool
 	testLivenessCurrentOwnerID          atomic.Uint64
-	testLivenessFinalizedOwnerID        atomic.Uint64
+	testLivenessCollectedOwnerID        atomic.Uint64
 )
 
 type testLivenessRequestBuffer [2 * 1024 * 1024]byte
 
 func TestDynamicLibraryClientCallKeepsRequestMemoryAlive(t *testing.T) {
-	testLivenessFinalizedDuringCallback.Store(false)
+	testLivenessCollectedDuringCallback.Store(false)
 	testLivenessCallbackReadCorrupted.Store(false)
 
-	client := newGuardedPluginClient(&dynamicLibraryClient{api: windowsPluginAPI{
-		call:       syscall.NewCallback(testLivenessPluginCall),
-		freeBuffer: syscall.NewCallback(testReentrantPluginFree),
-	}})
+	client := newGuardedPluginClient(
+		&dynamicLibraryClient{
+			api: windowsPluginAPI{
+				call:       syscall.NewCallback(testLivenessPluginCall),
+				freeBuffer: syscall.NewCallback(testReentrantPluginFree),
+			},
+		},
+	)
 	t.Cleanup(client.Shutdown)
 
 	req := new(testLivenessRequestBuffer)
 	req[0] = 0xAA
 	req[len(req)-1] = 0x55
 	ownerID := testLivenessCurrentOwnerID.Add(1)
-	runtime.SetFinalizer(req, func(_ *testLivenessRequestBuffer) {
-		testLivenessFinalizedOwnerID.Store(ownerID)
-	})
+	runtime.AddCleanup(
+		req, func(id uint64) {
+			testLivenessCollectedOwnerID.Store(id)
+		}, ownerID,
+	)
 
 	got, errCall := client.Call(context.Background(), "test.liveness", req[:])
 	if errCall != nil {
@@ -346,16 +413,16 @@ func TestDynamicLibraryClientCallKeepsRequestMemoryAlive(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("Call() response = %q, want %q", got, want)
 	}
-	if testLivenessFinalizedDuringCallback.Load() {
-		t.Fatalf("request memory was finalized during native callback execution")
+	if testLivenessCollectedDuringCallback.Load() {
+		t.Fatalf("request memory was collected during native callback execution")
 	}
 	if testLivenessCallbackReadCorrupted.Load() {
 		t.Fatalf("request buffer was corrupted during native callback execution")
 	}
 }
 
-func testLivenessPluginCall(methodPtr, requestPtr, requestLen, responsePtr uintptr) uintptr {
-	if methodPtr == 0 || requestPtr == 0 || requestLen == 0 || responsePtr == 0 {
+func testLivenessPluginCall(methodPtr, requestPtr *byte, requestLen uintptr, response *windowsBuffer) uintptr {
+	if methodPtr == nil || requestPtr == nil || requestLen == 0 || response == nil {
 		return 1
 	}
 	for range 5 {
@@ -363,11 +430,11 @@ func testLivenessPluginCall(methodPtr, requestPtr, requestLen, responsePtr uintp
 		runtime.Gosched()
 	}
 	currentID := testLivenessCurrentOwnerID.Load()
-	if testLivenessFinalizedOwnerID.Load() == currentID {
-		testLivenessFinalizedDuringCallback.Store(true)
+	if testLivenessCollectedOwnerID.Load() == currentID {
+		testLivenessCollectedDuringCallback.Store(true)
 		return 2
 	}
-	buf := unsafe.Slice((*byte)(unsafe.Pointer(requestPtr)), requestLen)
+	buf := unsafe.Slice(requestPtr, requestLen)
 	if buf[0] != 0xAA || buf[requestLen-1] != 0x55 {
 		testLivenessCallbackReadCorrupted.Store(true)
 		return 3
@@ -377,20 +444,25 @@ func testLivenessPluginCall(methodPtr, requestPtr, requestLen, responsePtr uintp
 	if errAlloc != nil || mem == 0 {
 		return 1
 	}
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(mem)), len(raw)), raw)
-	response := (*windowsBuffer)(unsafe.Pointer(responsePtr))
-	response.ptr = mem
+	response.ptr = (*byte)(unsafe.Pointer(mem))
+	copy(unsafe.Slice(response.ptr, len(raw)), raw)
 	response.len = uintptr(len(raw))
 	return 0
 }
 
 func TestDynamicLibraryClientCallPreservesPluginErrorEnvelope(t *testing.T) {
-	client := newGuardedPluginClient(&dynamicLibraryClient{api: windowsPluginAPI{
-		call:       syscall.NewCallback(testPluginErrorCall),
-		freeBuffer: syscall.NewCallback(testReentrantPluginFree),
-	}})
+	client := newGuardedPluginClient(
+		&dynamicLibraryClient{
+			api: windowsPluginAPI{
+				call:       syscall.NewCallback(testPluginErrorCall),
+				freeBuffer: syscall.NewCallback(testReentrantPluginFree),
+			},
+		},
+	)
 	t.Cleanup(client.Shutdown)
-	_, err := callPlugin[rpcEmptyResponse](context.Background(), client, pluginabi.MethodExecutorExecute, rpcEmptyResponse{})
+	_, err := callPlugin[rpcEmptyResponse](
+		context.Background(), client, pluginabi.MethodExecutorExecute, rpcEmptyResponse{},
+	)
 	if err == nil || err.Error() != "plan limit reached" {
 		t.Fatalf("plugin error = %v, want plan limit reached", err)
 	}
@@ -400,18 +472,17 @@ func TestDynamicLibraryClientCallPreservesPluginErrorEnvelope(t *testing.T) {
 	}
 }
 
-func testPluginErrorCall(_, _, _, responsePtr uintptr) uintptr {
+func testPluginErrorCall(_, _ *byte, _ uintptr, response *windowsBuffer) uintptr {
 	raw, err := pluginabi.NewErrorEnvelope("insufficient_quota", "plan limit reached", 403)
-	if err != nil || responsePtr == 0 {
+	if err != nil || response == nil {
 		return 1
 	}
 	mem, err := windows.LocalAlloc(windows.LMEM_FIXED, uint32(len(raw)))
 	if err != nil || mem == 0 {
 		return 1
 	}
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(mem)), len(raw)), raw)
-	response := (*windowsBuffer)(unsafe.Pointer(responsePtr))
-	response.ptr = mem
+	response.ptr = (*byte)(unsafe.Pointer(mem))
+	copy(unsafe.Slice(response.ptr, len(raw)), raw)
 	response.len = uintptr(len(raw))
 	return 1
 }

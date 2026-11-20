@@ -66,7 +66,7 @@ type pluginMenuInfo struct {
 
 // ListPlugins returns discovered, configured, and registered plugin entries.
 func (h *Handler) ListPlugins(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil {
 		c.JSON(
 			http.StatusOK, pluginListResponse{
 				PluginsDir: "plugins",
@@ -77,14 +77,20 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	}
 
 	h.mu.Lock()
-	pluginsEnabled := h.cfg.Plugins.Enabled
-	pluginsDir := h.cfg.Plugins.Dir
-	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg.Plugins.Configs))
-	for id, item := range h.cfg.Plugins.Configs {
-		configs[pluginstore.CanonicalPluginID(id)] = item
-	}
+	snapshot := pluginRuntimeConfigSnapshot(h.cfg)
 	host := h.pluginHost
 	h.mu.Unlock()
+	if snapshot == nil {
+		c.JSON(http.StatusOK, pluginListResponse{PluginsDir: "plugins", Plugins: []pluginListEntry{}})
+		return
+	}
+	configs, errRedact := redactedPluginConfigs(snapshot)
+	if errRedact != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_config_encode_failed"})
+		return
+	}
+	pluginsEnabled := snapshot.Plugins.Enabled
+	pluginsDir := snapshot.Plugins.Dir
 
 	quotaProvidersByPlugin := make(map[string]pluginhost.RegisteredQuotaProviderInfo)
 	if quotaHost, okQuotaHost := host.(quotaPluginHost); okQuotaHost && quotaHost != nil {
@@ -117,7 +123,6 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 		entries[file.ID] = pluginListEntry{
 			ID:           file.ID,
 			Path:         file.Path,
-			Enabled:      true,
 			Config:       map[string]any{},
 			ConfigFields: []pluginConfigFieldInfo{},
 			Menus:        []pluginMenuInfo{},
@@ -157,9 +162,6 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			}
 			entry.Menus = pluginMenus(info.Menus)
 			entry.Metadata = pluginMetadata(info.Metadata)
-			if !configured && !entry.Enabled {
-				entry.Enabled = true
-			}
 			entries[id] = entry
 		}
 	}
@@ -275,6 +277,10 @@ func (h *Handler) PutPluginConfig(c *gin.Context) {
 				}
 				candidate = preserved
 			}
+			candidate, errRestore := restorePluginConfigPlaceholders(next, id, candidate)
+			if errRestore != nil {
+				return newConfigMutationError(http.StatusBadRequest, errRestore.Error())
+			}
 			setPluginConfigByID(next.Plugins.Configs, id, candidate)
 			return nil
 		},
@@ -334,6 +340,10 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 					fmt.Sprintf("invalid plugin config: %v", errConfig),
 				)
 			}
+			updated, errRestore := restorePluginConfigPlaceholders(next, id, updated)
+			if errRestore != nil {
+				return newConfigMutationError(http.StatusBadRequest, errRestore.Error())
+			}
 			setPluginConfigByID(next.Plugins.Configs, id, updated)
 			return nil
 		},
@@ -357,16 +367,21 @@ func (h *Handler) mutatePluginConfig(
 
 	h.commitMu.Lock()
 	h.mu.Lock()
-	commit, callback, ok := h.mutateConfigLocked(c, mutate)
+	commit, callback, err := h.mutateConfigLocked(mutationRequestContext(c), mutate)
 	h.mu.Unlock()
 	h.commitMu.Unlock()
-	if !ok {
+	if err != nil {
+		respondConfigMutationError(c, err)
 		return false
 	}
 	if !h.notifyConfigCommitted(c, callback, commit) {
 		return false
 	}
 	if callback != nil {
+		if h.configCommitCurrent(commit) {
+			RecordMutationEffect(mutationRequestContext(c), "plugin.runtime_applied", "plugin")
+			CompleteMutation(mutationRequestContext(c))
+		}
 		return true
 	}
 
@@ -375,9 +390,13 @@ func (h *Handler) mutatePluginConfig(
 		ctx = context.WithoutCancel(c.Request.Context())
 	}
 	if err := h.runPluginRuntimeSyncForCommit(ctx, commit, h.pluginRuntimeSync); err != nil {
+		failMutation(ctx)
 		log.WithError(err).Error("plugin config committed but runtime sync failed")
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "plugin_runtime_sync_failed"})
 		return false
+	}
+	if h.pluginRuntimeSync == nil {
+		CompleteMutation(ctx)
 	}
 	return true
 }
@@ -418,7 +437,7 @@ func pluginRuntimeConfigSnapshot(cfg *config.Config) *config.Config {
 
 func pluginInstanceEnabled(item config.PluginInstanceConfig) bool {
 	if item.Enabled == nil {
-		return true
+		return false
 	}
 	return *item.Enabled
 }
@@ -453,36 +472,8 @@ func pluginConfigObject(item config.PluginInstanceConfig, fields []pluginapi.Con
 }
 
 func yamlNodeJSONValue(node *yaml.Node) (any, bool) {
-	var value any
-	if node == nil || node.Decode(&value) != nil {
-		return nil, false
-	}
-	return normalizeJSONValue(value), true
-}
-
-func normalizeJSONValue(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(typed))
-		for key, item := range typed {
-			out[key] = normalizeJSONValue(item)
-		}
-		return out
-	case map[any]any:
-		out := make(map[string]any, len(typed))
-		for key, item := range typed {
-			out[fmt.Sprint(key)] = normalizeJSONValue(item)
-		}
-		return out
-	case []any:
-		out := make([]any, 0, len(typed))
-		for _, item := range typed {
-			out = append(out, normalizeJSONValue(item))
-		}
-		return out
-	default:
-		return typed
-	}
+	value, err := yamlNodeToJSONValue(node)
+	return value, err == nil
 }
 
 func pluginConfigFields(fields []pluginapi.ConfigField) []pluginConfigFieldInfo {
@@ -723,15 +714,25 @@ func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
 }
 
 func cloneYAMLNode(node *yaml.Node) *yaml.Node {
-	if node == nil {
-		return nil
-	}
-	out := *node
-	if len(node.Content) > 0 {
-		out.Content = make([]*yaml.Node, 0, len(node.Content))
-		for _, child := range node.Content {
-			out.Content = append(out.Content, cloneYAMLNode(child))
+	copies := make(map[*yaml.Node]*yaml.Node)
+	var clone func(*yaml.Node) *yaml.Node
+	clone = func(source *yaml.Node) *yaml.Node {
+		if source == nil {
+			return nil
 		}
+		if copied := copies[source]; copied != nil {
+			return copied
+		}
+		copied := *source
+		copies[source] = &copied
+		if source.Content != nil {
+			copied.Content = make([]*yaml.Node, len(source.Content))
+			for index, child := range source.Content {
+				copied.Content[index] = clone(child)
+			}
+		}
+		copied.Alias = clone(source.Alias)
+		return &copied
 	}
-	return &out
+	return clone(node)
 }

@@ -13,6 +13,49 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestGetOAuthCallbackOriginalPluginProviders(t *testing.T) {
+	for _, tc := range []struct{ provider, state string }{
+		{"gemini-cli", "test-geminicli-state"},
+		{"openai", "test-openai-plugin-state"},
+	} {
+		t.Run(
+			tc.provider, func(t *testing.T) {
+				authDir := filepath.Join(t.TempDir(), "missing-auth")
+				if err := registerPluginOAuthSession(tc.state, tc.provider, "", authDir, nil); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { completeOAuthSession(tc.state) })
+				handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+				t.Cleanup(func() { _ = handler.Close() })
+				router := gin.New()
+				router.GET("/v0/management/oauth-callback", handler.GetOAuthCallback)
+				request := httptest.NewRequest(
+					http.MethodGet,
+					"/v0/management/oauth-callback?state="+tc.state+"&code=test-code", nil,
+				)
+				recorder := httptest.NewRecorder()
+				router.ServeHTTP(recorder, request)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("callback status = %d, body = %s", recorder.Code, recorder.Body.String())
+				}
+				path := filepath.Join(authDir, ".oauth-"+tc.provider+"-"+tc.state+".oauth")
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var payload oauthCallbackFilePayload
+				if err := json.Unmarshal(raw, &payload); err != nil || payload.State != tc.state ||
+					payload.Code != "test-code" || payload.Error != "" {
+					t.Fatalf("callback payload = %+v, error = %v", payload, err)
+				}
+				if _, err := os.Stat(filepath.Join(authDir, ".oauth-codex-"+tc.state+".oauth")); !os.IsNotExist(err) {
+					t.Fatalf("plugin provider was aliased to codex: %v", err)
+				}
+			},
+		)
+	}
+}
+
 func TestGetOAuthCallbackUsesPendingPluginSessionWithoutManagementCredentials(t *testing.T) {
 	previousSessions := oauthSessions
 	oauthSessions = newOAuthSessionStore(time.Minute)
@@ -43,14 +86,18 @@ func TestGetOAuthCallbackUsesPendingPluginSessionWithoutManagementCredentials(t 
 	}
 	accepted := get("?state=plugin-state&code=callback-code")
 	if accepted.Code != http.StatusOK || accepted.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("callback response = %d headers = %v body = %s", accepted.Code, accepted.Header(), accepted.Body.String())
+		t.Fatalf(
+			"callback response = %d headers = %v body = %s", accepted.Code, accepted.Header(), accepted.Body.String(),
+		)
 	}
 	payload, err := os.ReadFile(callbackPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var data oauthCallbackFilePayload
-	if err := json.Unmarshal(payload, &data); err != nil || data.Code != "callback-code" || data.State != "plugin-state" {
+	if err := json.Unmarshal(
+		payload, &data,
+	); err != nil || data.Code != "callback-code" || data.State != "plugin-state" {
 		t.Fatalf("callback file = %+v, error = %v", data, err)
 	}
 	if replay := get("?state=plugin-state&code=other"); replay.Code != http.StatusNotFound {

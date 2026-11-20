@@ -45,7 +45,10 @@ static const char* jshandler_shared_object_path() {
 	return info.dli_fname;
 }
 
-static int jshandler_call_host(cliproxy_host_api* api, const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
+static int jshandler_call_host(
+	cliproxy_host_api* api, const char* method, const uint8_t* request,
+	size_t request_len, cliproxy_buffer* response
+) {
 	return api->call(api->host_ctx, method, request, request_len, response);
 }
 
@@ -140,6 +143,7 @@ func inferPluginDir() string {
 // The exported name is fixed by the plugin C ABI.
 //
 //export cliproxy_plugin_init
+//goland:noinspection GoUnusedFunction,GoSnakeCaseUsage
 func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
 	if host == nil || plugin == nil {
 		return 1
@@ -157,6 +161,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 }
 
 //export JSHandlerPluginCall
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func JSHandlerPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
 	if response != nil {
 		response.ptr = nil
@@ -184,6 +189,7 @@ func JSHandlerPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t
 }
 
 //export JSHandlerPluginFree
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func JSHandlerPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 	if ptr != nil {
 		C.free(ptr)
@@ -191,6 +197,7 @@ func JSHandlerPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 }
 
 //export JSHandlerPluginShutdown
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func JSHandlerPluginShutdown() {
 	jsHandlerABIState.Lock()
 	jsHandlerABIState.shuttingDown = true
@@ -266,7 +273,8 @@ func handleJSHandlerRegister(request []byte) ([]byte, error) {
 	jsHandlerABIState.Unlock()
 	return abiOKEnvelope(
 		abiRegistration{
-			SchemaVersion: pluginabi.SchemaVersion,
+			// 每个 hook 使用独立 VM，需要宿主传入请求正文与历史块
+			SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitRequestBody - 1,
 			Metadata:      plugin.Metadata,
 			Capabilities: abiCapabilities{
 				RequestInterceptor:     plugin.Capabilities.RequestInterceptor != nil,

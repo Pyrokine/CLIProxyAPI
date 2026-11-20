@@ -53,13 +53,13 @@ type Plugin struct {
 	Homepage     string      `json:"homepage,omitempty"`
 	License      string      `json:"license,omitempty"`
 	Tags         []string    `json:"tags,omitempty"`
-	Install      InstallPlan `json:"install,omitempty"`
+	Install      InstallPlan `json:"install"`
 	AuthRequired bool        `json:"auth_required,omitempty"`
 }
 
 type Version struct {
 	Version string      `json:"version"`
-	Install InstallPlan `json:"install,omitempty"`
+	Install InstallPlan `json:"install"`
 }
 
 type InstallPlan struct {

@@ -64,16 +64,40 @@ func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T)
 	}
 
 	got := pluginModelInfoToRegistryModelInfo(model)
-	if got.ID != model.ID || got.Object != model.Object || got.Created != model.Created || got.OwnedBy != model.OwnedBy || got.Type != model.Type ||
-		got.DisplayName != model.DisplayName || got.CatalogName != model.Name || got.Name != model.Name || got.Version != model.Version || got.Description != model.Description ||
-		got.InputTokenLimit != int(model.InputTokenLimit) || got.OutputTokenLimit != int(model.OutputTokenLimit) ||
-		got.ContextLength != int(model.ContextLength) || got.MaxCompletionTokens != int(model.MaxCompletionTokens) || !got.UserDefined {
+	if got.ID !=
+		model.ID ||
+		got.Object !=
+			model.Object ||
+		got.Created !=
+			model.Created ||
+		got.OwnedBy !=
+			model.OwnedBy ||
+		got.Type !=
+			model.Type ||
+		got.DisplayName !=
+			model.DisplayName ||
+		got.CatalogName !=
+			model.Name ||
+		got.Name !=
+			model.Name ||
+		got.Version !=
+			model.Version ||
+		got.Description !=
+			model.Description ||
+		got.InputTokenLimit != int(
+			model.InputTokenLimit,
+		) || got.OutputTokenLimit != int(model.OutputTokenLimit) ||
+		got.ContextLength != int(model.ContextLength) ||
+		got.MaxCompletionTokens != int(model.MaxCompletionTokens) ||
+		!got.UserDefined {
 		t.Fatalf("converted model = %#v, want fields copied from %#v", got, model)
 	}
 	if got.Thinking == nil {
 		t.Fatal("Thinking = nil, want converted thinking support")
 	}
-	if got.Thinking.Min != 1 || got.Thinking.Max != 2 || !got.Thinking.ZeroAllowed || !got.Thinking.DynamicAllowed || fmt.Sprint(got.Thinking.Levels) != "[low high]" {
+	if got.Thinking.Min != 1 || got.Thinking.Max != 2 || !got.Thinking.ZeroAllowed ||
+		!got.Thinking.DynamicAllowed ||
+		fmt.Sprint(got.Thinking.Levels) != "[low high]" {
 		t.Fatalf("Thinking = %#v, want copied thinking support", got.Thinking)
 	}
 
@@ -186,26 +210,57 @@ func TestRegisterModelsRegistersProviderModelsAndClientID(t *testing.T) {
 
 	host.RegisterModels(context.Background(), modelRegistry)
 
+	//goland:noinspection SpellCheckingInspection
 	reg := modelRegistry.clients["plugin:alpha:mixedprovider"]
 	if reg == nil {
+		//goland:noinspection SpellCheckingInspection
 		t.Fatal("plugin:alpha:mixedprovider was not registered")
 	}
+	//goland:noinspection SpellCheckingInspection
 	if reg.provider != "mixedprovider" {
+		//goland:noinspection SpellCheckingInspection
 		t.Fatalf("registered provider = %q, want mixedprovider", reg.provider)
 	}
 	if len(reg.models) != 1 {
 		t.Fatalf("registered model count = %d, want 1", len(reg.models))
 	}
 	model := reg.models[0]
-	if model.ID != "model-1" || model.Object != "model" || model.Created != 123 || model.OwnedBy != "owner" || model.Type != "chat" ||
-		model.DisplayName != "Model One" || model.Name != "native-model-1" || model.Version != "v1" || model.Description != "description" ||
-		model.InputTokenLimit != 100 || model.OutputTokenLimit != 200 || model.ContextLength != 300 || model.MaxCompletionTokens != 400 ||
+	if model.ID !=
+		"model-1" ||
+		model.Object !=
+			"model" ||
+		model.Created !=
+			123 ||
+		model.OwnedBy !=
+			"owner" ||
+		model.Type !=
+			"chat" ||
+		model.DisplayName !=
+			("Model "+
+				"One") ||
+		model.Name !=
+			"native-model-1" ||
+		model.Version !=
+			"v1" ||
+		model.Description !=
+			"description" ||
+		model.InputTokenLimit !=
+			100 ||
+		model.OutputTokenLimit !=
+			200 ||
+		model.ContextLength !=
+			300 ||
+		model.MaxCompletionTokens !=
+			400 ||
 		model.SupportedGenerationMethods[0] != "generate" || model.SupportedParameters[0] != "temperature" ||
-		model.SupportedInputModalities[0] != "text" || model.SupportedOutputModalities[0] != "text" || !model.UserDefined {
+		model.SupportedInputModalities[0] != "text" ||
+		model.SupportedOutputModalities[0] != "text" ||
+		!model.UserDefined {
 		t.Fatalf("registered model = %#v, want converted fields", model)
 	}
 	if model.Thinking == nil || model.Thinking.Min != 1 || model.Thinking.Max != 2 || !model.Thinking.ZeroAllowed ||
-		!model.Thinking.DynamicAllowed || model.Thinking.Levels[0] != "low" {
+		!model.Thinking.DynamicAllowed ||
+		model.Thinking.Levels[0] != "low" {
 		t.Fatalf("registered thinking = %#v, want converted thinking", model.Thinking)
 	}
 }
@@ -228,16 +283,20 @@ func TestRegisterModelsUsesModelProviderStaticModels(t *testing.T) {
 							if req.Plugin.Name != "Alpha" || req.Plugin.Version != "1.0.0" {
 								t.Fatalf("StaticModels request plugin = %#v, want Alpha metadata", req.Plugin)
 							}
-							if req.Host.AuthDir != "/tmp/plugin-auth" || req.Host.ProxyURL != "http://proxy.local" || !req.Host.ForceModelPrefix {
+							if req.Host.AuthDir != "/tmp/plugin-auth" ||
+								req.Host.ProxyURL != "http://proxy.local" ||
+								!req.Host.ForceModelPrefix {
 								t.Fatalf("StaticModels host = %#v, want configured summary", req.Host)
 							}
-							if len(req.Host.OAuthModelAlias["plugin-provider"]) != 1 || req.Host.OAuthModelAlias["plugin-provider"][0].Alias != "alias-model" {
+							if len(req.Host.OAuthModelAlias["plugin-provider"]) != 1 ||
+								req.Host.OAuthModelAlias["plugin-provider"][0].Alias != "alias-model" {
 								t.Fatalf(
 									"StaticModels OAuthModelAlias = %#v, want configured alias",
 									req.Host.OAuthModelAlias,
 								)
 							}
-							if len(req.Host.ExcludedModels["plugin-provider"]) != 1 || req.Host.ExcludedModels["plugin-provider"][0] != "hidden-model" {
+							if len(req.Host.ExcludedModels["plugin-provider"]) != 1 ||
+								req.Host.ExcludedModels["plugin-provider"][0] != "hidden-model" {
 								t.Fatalf(
 									"StaticModels ExcludedModels = %#v, want configured exclusion",
 									req.Host.ExcludedModels,
@@ -284,7 +343,8 @@ func TestRegisterModelsUsesModelProviderStaticModels(t *testing.T) {
 	if reg.provider != "plugin-provider" {
 		t.Fatalf("registered provider = %q, want plugin-provider", reg.provider)
 	}
-	if len(reg.models) != 1 || reg.models[0].ID != "model-static" || reg.models[0].DisplayName != "Static Model" {
+	if len(reg.models) != 1 || reg.models[0].ID != "model-static" ||
+		reg.models[0].DisplayName != "Static Model" {
 		t.Fatalf("registered models = %#v, want static model", reg.models)
 	}
 	if _, okLegacy := modelRegistry.clients["plugin:alpha:legacy-provider"]; okLegacy {
@@ -957,7 +1017,8 @@ func TestRegisterExecutorsExposesExecutorModelsForUserAuthBinding(t *testing.T) 
 	if reg.provider != "plugin-provider" || len(reg.models) != 1 || reg.models[0].ID != "plugin-model" {
 		t.Fatalf("executor model registry client = %#v, want plugin-provider/plugin-model", reg)
 	}
-	if providers := modelRegistry.GetModelProviders("plugin-model"); len(providers) != 1 || providers[0] != "plugin-provider" {
+	if providers := modelRegistry.GetModelProviders("plugin-model"); len(providers) != 1 ||
+		providers[0] != "plugin-provider" {
 		t.Fatalf("providers for plugin-model = %#v, want plugin-provider", providers)
 	}
 }
@@ -1022,7 +1083,8 @@ func TestRegisterExecutorsOAuthScopeSkipsStaticModelClientButRegistersExecutor(t
 			Provider: "qoder",
 		},
 	)
-	if !result.Handled || result.Provider != "qoder" || len(result.Models) != 1 || result.Models[0].ID != "oauth-model" {
+	if !result.Handled || result.Provider != "qoder" || len(result.Models) != 1 ||
+		result.Models[0].ID != "oauth-model" {
 		t.Fatalf("OAuth model result = %#v, want oauth-model", result)
 	}
 	if result.Outcome != pluginapi.ModelDiscoveryComplete {
@@ -1125,13 +1187,15 @@ func TestModelsForAuthCompleteEmptyAndInconclusiveRemainHandled(t *testing.T) {
 	auth := &coreauth.Auth{ID: "empty-auth", Provider: "empty-provider"}
 
 	result := host.ModelsForAuth(context.Background(), auth)
-	if !result.Handled || result.Err != nil || result.Outcome != pluginapi.ModelDiscoveryComplete || len(result.Models) != 0 {
+	if !result.Handled || result.Err != nil || result.Outcome != pluginapi.ModelDiscoveryComplete ||
+		len(result.Models) != 0 {
 		t.Fatalf("complete empty result = %#v", result)
 	}
 
 	outcome = pluginapi.ModelDiscoveryInconclusive
 	result = host.ModelsForAuth(context.Background(), auth)
-	if !result.Handled || result.Err != nil || result.Outcome != pluginapi.ModelDiscoveryInconclusive || len(result.Models) != 0 {
+	if !result.Handled || result.Err != nil || result.Outcome != pluginapi.ModelDiscoveryInconclusive ||
+		len(result.Models) != 0 {
 		t.Fatalf("inconclusive result = %#v", result)
 	}
 }
@@ -1376,7 +1440,8 @@ func TestModelsForAuthOAuthScopeFallsBackToExecutorIdentifier(t *testing.T) {
 		},
 	)
 
-	if !result.Handled || result.Provider != "plugin-provider" || len(result.Models) != 1 || result.Models[0].ID != "oauth-model" {
+	if !result.Handled || result.Provider != "plugin-provider" || len(result.Models) != 1 ||
+		result.Models[0].ID != "oauth-model" {
 		t.Fatalf("OAuth model result = %#v, want executor-identifier match", result)
 	}
 }
@@ -1424,7 +1489,8 @@ func TestRegisterExecutorsStaticScopeSkipsModelsForAuth(t *testing.T) {
 
 	clientID := pluginExecutorModelClientID("alpha", "plugin-provider")
 	reg := modelRegistry.clients[clientID]
-	if reg == nil || reg.provider != "plugin-provider" || len(reg.models) != 1 || reg.models[0].ID != "static-model" {
+	if reg == nil || reg.provider != "plugin-provider" || len(reg.models) != 1 ||
+		reg.models[0].ID != "static-model" {
 		t.Fatalf("static executor model client = %#v, want static-model", reg)
 	}
 	result := host.ModelsForAuth(
@@ -1482,7 +1548,8 @@ func TestRegisterExecutorsBothScopeKeepsStaticAndOAuthModels(t *testing.T) {
 
 	clientID := pluginExecutorModelClientID("alpha", "plugin-provider")
 	reg := modelRegistry.clients[clientID]
-	if reg == nil || reg.provider != "plugin-provider" || len(reg.models) != 1 || reg.models[0].ID != "static-model" {
+	if reg == nil || reg.provider != "plugin-provider" || len(reg.models) != 1 ||
+		reg.models[0].ID != "static-model" {
 		t.Fatalf("both-scope static model client = %#v, want static-model", reg)
 	}
 	result := host.ModelsForAuth(
@@ -1491,7 +1558,8 @@ func TestRegisterExecutorsBothScopeKeepsStaticAndOAuthModels(t *testing.T) {
 			Provider: "plugin-provider",
 		},
 	)
-	if !result.Handled || result.Provider != "plugin-provider" || len(result.Models) != 1 || result.Models[0].ID != "oauth-model" {
+	if !result.Handled || result.Provider != "plugin-provider" || len(result.Models) != 1 ||
+		result.Models[0].ID != "oauth-model" {
 		t.Fatalf("both-scope OAuth model result = %#v, want oauth-model", result)
 	}
 }
@@ -1541,7 +1609,10 @@ func TestRegisterExecutorsDropsResultsAfterRuntimeInvalidation(t *testing.T) {
 		t.Fatal("provider-a executor was registered from a stale snapshot")
 	}
 	if manager.executors["stale-provider"] != staleExecutor {
-		t.Fatalf("stale-provider executor = %#v, want existing executor preserved", manager.executors["stale-provider"])
+		t.Fatalf(
+			"stale-provider executor = %#v, want existing executor preserved",
+			manager.executors["stale-provider"],
+		)
 	}
 	if _, okProvider := host.executorProviders["stale-provider"]; okProvider {
 		t.Fatal("runtime invalidation retained stale-provider ownership")
@@ -1549,6 +1620,8 @@ func TestRegisterExecutorsDropsResultsAfterRuntimeInvalidation(t *testing.T) {
 }
 
 func TestRegisterExecutorsFallbackUsesExecutorIdentifier(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
+	const normalizedProvider = "fallbackprovider"
 	manager := newFakeExecutorManager()
 	exec := &fakeExecutor{identifier: "  FallbackProvider  "}
 	host := newHostWithRecords(
@@ -1564,11 +1637,11 @@ func TestRegisterExecutorsFallbackUsesExecutorIdentifier(t *testing.T) {
 
 	host.RegisterExecutors(manager, nil)
 
-	adapter, okAdapter := manager.executors["fallbackprovider"].(*executorAdapter)
+	adapter, okAdapter := manager.executors[normalizedProvider].(*executorAdapter)
 	if !okAdapter {
-		t.Fatalf("registered executor = %#v, want fallback executorAdapter", manager.executors["fallbackprovider"])
+		t.Fatalf("registered executor = %#v, want fallback executorAdapter", manager.executors[normalizedProvider])
 	}
-	if adapter.provider != "fallbackprovider" || adapter.executor != exec {
+	if adapter.provider != normalizedProvider || adapter.executor != exec {
 		t.Fatalf("adapter = %#v, want fallback provider executor", adapter)
 	}
 }
@@ -1696,7 +1769,12 @@ func TestNormalizeRequestChainsByPriority(t *testing.T) {
 	)
 
 	got := host.NormalizeRequest(
-		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("start"), false,
+		context.Background(),
+		sdktranslator.FormatOpenAI,
+		sdktranslator.FormatClaude,
+		"model",
+		[]byte("start"),
+		false,
 	)
 	if string(got) != "start|high|low" {
 		t.Fatalf("NormalizeRequest() = %q, want %q", got, "start|high|low")
@@ -1743,7 +1821,12 @@ func TestTranslateRequestStopsAtFirstSuccessfulCandidate(t *testing.T) {
 	)
 
 	got, ok := host.TranslateRequest(
-		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("input"), false,
+		context.Background(),
+		sdktranslator.FormatOpenAI,
+		sdktranslator.FormatClaude,
+		"model",
+		[]byte("input"),
+		false,
 	)
 	if !ok {
 		t.Fatal("TranslateRequest() ok = false, want true")
@@ -1809,7 +1892,11 @@ func TestAdaptersKeepPayloadOrTryNextOnErrorAndEmptyBody(t *testing.T) {
 	)
 
 	normalized := host.NormalizeRequest(
-		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"),
+		context.Background(),
+		sdktranslator.FormatOpenAI,
+		sdktranslator.FormatClaude,
+		"model",
+		[]byte("original"),
 		false,
 	)
 	if string(normalized) != "kept-then-success" {
@@ -1868,7 +1955,11 @@ func TestAdaptersKeepPayloadOrTryNextOnErrorAndEmptyBody(t *testing.T) {
 	)
 
 	translated, ok := translatorHost.TranslateRequest(
-		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"),
+		context.Background(),
+		sdktranslator.FormatOpenAI,
+		sdktranslator.FormatClaude,
+		"model",
+		[]byte("original"),
 		false,
 	)
 	if !ok {
@@ -1916,7 +2007,11 @@ func TestTranslatorPanicFusesPlugin(t *testing.T) {
 	)
 
 	got := host.NormalizeRequest(
-		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"),
+		context.Background(),
+		sdktranslator.FormatOpenAI,
+		sdktranslator.FormatClaude,
+		"model",
+		[]byte("original"),
 		false,
 	)
 	if string(got) != "original|next" {
@@ -1992,8 +2087,14 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 					},
 				)
 				return host.NormalizeResponseBefore(
-					context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", nil, nil,
-					[]byte("body"), false,
+					context.Background(),
+					sdktranslator.FormatOpenAI,
+					sdktranslator.FormatClaude,
+					"model",
+					nil,
+					nil,
+					[]byte("body"),
+					false,
 				), false
 			},
 		},
@@ -2024,8 +2125,14 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 					},
 				)
 				return host.TranslateResponse(
-					context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", nil, nil,
-					[]byte("body"), false,
+					context.Background(),
+					sdktranslator.FormatOpenAI,
+					sdktranslator.FormatClaude,
+					"model",
+					nil,
+					nil,
+					[]byte("body"),
+					false,
 				)
 			},
 		},
@@ -2056,8 +2163,14 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 					},
 				)
 				return host.NormalizeResponseAfter(
-					context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", nil, nil,
-					[]byte("body"), false,
+					context.Background(),
+					sdktranslator.FormatOpenAI,
+					sdktranslator.FormatClaude,
+					"model",
+					nil,
+					nil,
+					[]byte("body"),
+					false,
 				), false
 			},
 		},
@@ -2091,7 +2204,9 @@ func TestResponseNormalizersChainByPriority(t *testing.T) {
 							pluginapi.PayloadResponse,
 							error,
 						) {
-							return pluginapi.PayloadResponse{Body: append(req.Body, []byte("|before-high")...)}, nil
+							return pluginapi.PayloadResponse{
+								Body: append(req.Body, []byte("|before-high")...),
+							}, nil
 						},
 					),
 					ResponseAfterTranslator: responseNormalizerFunc(
@@ -2099,7 +2214,9 @@ func TestResponseNormalizersChainByPriority(t *testing.T) {
 							pluginapi.PayloadResponse,
 							error,
 						) {
-							return pluginapi.PayloadResponse{Body: append(req.Body, []byte("|after-high")...)}, nil
+							return pluginapi.PayloadResponse{
+								Body: append(req.Body, []byte("|after-high")...),
+							}, nil
 						},
 					),
 				},
@@ -2115,7 +2232,9 @@ func TestResponseNormalizersChainByPriority(t *testing.T) {
 							pluginapi.PayloadResponse,
 							error,
 						) {
-							return pluginapi.PayloadResponse{Body: append(req.Body, []byte("|before-low")...)}, nil
+							return pluginapi.PayloadResponse{
+								Body: append(req.Body, []byte("|before-low")...),
+							}, nil
 						},
 					),
 					ResponseAfterTranslator: responseNormalizerFunc(
@@ -2123,7 +2242,9 @@ func TestResponseNormalizersChainByPriority(t *testing.T) {
 							pluginapi.PayloadResponse,
 							error,
 						) {
-							return pluginapi.PayloadResponse{Body: append(req.Body, []byte("|after-low")...)}, nil
+							return pluginapi.PayloadResponse{
+								Body: append(req.Body, []byte("|after-low")...),
+							}, nil
 						},
 					),
 				},
@@ -2213,7 +2334,8 @@ func TestInterceptRequestChainsByPriorityAndHeaders(t *testing.T) {
 							ctx context.Context,
 							req pluginapi.RequestInterceptRequest,
 						) (pluginapi.RequestInterceptResponse, error) {
-							if req.SourceFormat != "openai" || req.Model != "normalized" || req.RequestedModel != "requested" {
+							if req.SourceFormat != "openai" || req.Model != "normalized" ||
+								req.RequestedModel != "requested" {
 								t.Fatalf("unexpected request context: %#v", req)
 							}
 							return pluginapi.RequestInterceptResponse{
@@ -2262,7 +2384,8 @@ func TestInterceptRequestChainsByPriorityAndHeaders(t *testing.T) {
 	if string(got.Body) != "start|high|low" {
 		t.Fatalf("body = %q, want %q", got.Body, "start|high|low")
 	}
-	if got.Headers.Get("X-Plugin") != "low" || got.Headers.Get("X-Low") != "1" || got.Headers.Get("X-Remove") != "" {
+	if got.Headers.Get("X-Plugin") != "low" || got.Headers.Get("X-Low") != "1" ||
+		got.Headers.Get("X-Remove") != "" {
 		t.Fatalf("headers = %#v", got.Headers)
 	}
 	if headers.Get("X-Plugin") != "" {
@@ -2306,7 +2429,11 @@ func TestInterceptRequestWithoutBodyChangePreservesOriginalBody(t *testing.T) {
 							req pluginapi.RequestInterceptRequest,
 						) (pluginapi.RequestInterceptResponse, error) {
 							if string(req.Body) != "original" || req.Headers.Get("X-Plugin") != "yes" {
-								t.Fatalf("unexpected next request: body = %q, headers = %#v", req.Body, req.Headers)
+								t.Fatalf(
+									"unexpected next request: body = %q, headers = %#v",
+									req.Body,
+									req.Headers,
+								)
 							}
 							return pluginapi.RequestInterceptResponse{}, nil
 						},
@@ -2316,9 +2443,11 @@ func TestInterceptRequestWithoutBodyChangePreservesOriginalBody(t *testing.T) {
 		},
 	)
 
-	got := host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{
-		Body: body,
-	})
+	got := host.InterceptRequestAfterAuth(
+		context.Background(), pluginapi.RequestInterceptRequest{
+			Body: body,
+		},
+	)
 	if got.Body != nil || string(body) != "original" || got.Headers.Get("X-Plugin") != "yes" {
 		t.Fatalf("unexpected response: body = %q, headers = %#v, original = %q", got.Body, got.Headers, body)
 	}
@@ -2337,10 +2466,14 @@ func TestInterceptRequestAfterAuthPassesTargetFormat(t *testing.T) {
 						) (pluginapi.RequestInterceptResponse, error) {
 							if req.SourceFormat != "openai" || req.ToFormat != "codex" {
 								t.Fatalf(
-									"request formats = %q -> %q, want openai -> codex", req.SourceFormat, req.ToFormat,
+									"request formats = %q -> %q, want openai -> codex",
+									req.SourceFormat,
+									req.ToFormat,
 								)
 							}
-							return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|after")...)}, nil
+							return pluginapi.RequestInterceptResponse{
+								Body: append(req.Body, []byte("|after")...),
+							}, nil
 						},
 					),
 				},
@@ -2365,26 +2498,47 @@ func TestInterceptRequestAfterAuthPassesTargetFormat(t *testing.T) {
 func TestInterceptRequestChainsPathWithoutMutatingInput(t *testing.T) {
 	metadata := map[string]any{coreexecutor.RequestPathMetadataKey: "/v1/chat/completions"}
 	host := newHostWithRecords(
-		capabilityRecord{id: "first", priority: 20, plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-			RequestInterceptor: requestInterceptorFunc(func(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
-				if req.Metadata[coreexecutor.RequestPathMetadataKey] != "/v1/chat/completions" {
-					t.Fatalf("initial interceptor metadata = %#v", req.Metadata)
-				}
-				return pluginapi.RequestInterceptResponse{Path: " /v1/images/generations "}, nil
-			}),
-		}}},
-		capabilityRecord{id: "second", priority: 10, plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-			RequestInterceptor: requestInterceptorFunc(func(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
-				if req.Metadata[coreexecutor.RequestPathMetadataKey] != "/v1/images/generations" {
-					t.Fatalf("path not propagated to next interceptor: %#v", req.Metadata)
-				}
-				req.Metadata[coreexecutor.RequestPathMetadataKey] = "/mutated"
-				return pluginapi.RequestInterceptResponse{Path: "/v1/images/edits"}, nil
-			}),
-		}}},
+		capabilityRecord{
+			id: "first", priority: 20, plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor: requestInterceptorFunc(
+						func(
+							_ context.Context,
+							req pluginapi.RequestInterceptRequest,
+						) (pluginapi.RequestInterceptResponse, error) {
+							if req.Metadata[coreexecutor.RequestPathMetadataKey] != "/v1/chat/completions" {
+								t.Fatalf("initial interceptor metadata = %#v", req.Metadata)
+							}
+							return pluginapi.RequestInterceptResponse{Path: " /v1/images/generations "}, nil
+						},
+					),
+				},
+			},
+		},
+		capabilityRecord{
+			id: "second", priority: 10, plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor: requestInterceptorFunc(
+						func(
+							_ context.Context,
+							req pluginapi.RequestInterceptRequest,
+						) (pluginapi.RequestInterceptResponse, error) {
+							if req.Metadata[coreexecutor.RequestPathMetadataKey] != "/v1/images/generations" {
+								t.Fatalf("path not propagated to next interceptor: %#v", req.Metadata)
+							}
+							req.Metadata[coreexecutor.RequestPathMetadataKey] = "/mutated"
+							return pluginapi.RequestInterceptResponse{Path: "/v1/images/edits"}, nil
+						},
+					),
+				},
+			},
+		},
 	)
-	result := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Metadata: metadata})
-	if result.Path != "/v1/images/edits" || result.Body != nil || metadata[coreexecutor.RequestPathMetadataKey] != "/v1/chat/completions" {
+	result := host.InterceptRequestBeforeAuth(
+		context.Background(), pluginapi.RequestInterceptRequest{Metadata: metadata},
+	)
+	if result.Path != "/v1/images/edits" || result.Body != nil ||
+		metadata[coreexecutor.RequestPathMetadataKey] != "/v1/chat/completions" {
 		t.Fatalf("interceptor path = %q, body = %q, input metadata = %#v", result.Path, result.Body, metadata)
 	}
 }
@@ -2573,12 +2727,16 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 							}
 							if req.ResponseHeaders.Get("X-Response") != "high" {
 								t.Fatalf(
-									"second response interceptor headers = %#v, want high header", req.ResponseHeaders,
+									"second response interceptor headers = %#v, want high header",
+									req.ResponseHeaders,
 								)
 							}
 							sawSecondResponse = true
 							return pluginapi.ResponseInterceptResponse{
-								Headers:      http.Header{"X-Response": []string{"low"}, "X-Low": []string{"1"}},
+								Headers: http.Header{
+									"X-Response": []string{"low"},
+									"X-Low":      []string{"1"},
+								},
 								ClearHeaders: []string{"X-Remove"},
 								Body:         append(req.Body, []byte("|low")...),
 							}, nil
@@ -2594,7 +2752,8 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 							}
 							if req.ResponseHeaders.Get("X-Stream") != "high" {
 								t.Fatalf(
-									"second stream interceptor headers = %#v, want high header", req.ResponseHeaders,
+									"second stream interceptor headers = %#v, want high header",
+									req.ResponseHeaders,
 								)
 							}
 							if len(req.HistoryChunks) != 1 || string(req.HistoryChunks[0]) != "first" {
@@ -2616,15 +2775,19 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 
 	nonStream := host.InterceptResponse(
 		context.Background(), pluginapi.ResponseInterceptRequest{
-			SourceFormat:    "openai",
-			Model:           "normalized",
-			RequestedModel:  "requested",
-			ResponseHeaders: http.Header{"Content-Type": []string{"application/json"}, "X-Remove": []string{"yes"}},
-			Body:            []byte("body"),
-			StatusCode:      http.StatusOK,
+			SourceFormat:   "openai",
+			Model:          "normalized",
+			RequestedModel: "requested",
+			ResponseHeaders: http.Header{
+				"Content-Type": []string{"application/json"},
+				"X-Remove":     []string{"yes"},
+			},
+			Body:       []byte("body"),
+			StatusCode: http.StatusOK,
 		},
 	)
-	if string(nonStream.Body) != "body|high|low" || nonStream.Headers.Get("X-Response") != "low" || nonStream.Headers.Get("X-Low") != "1" {
+	if string(nonStream.Body) != "body|high|low" || nonStream.Headers.Get("X-Response") != "low" ||
+		nonStream.Headers.Get("X-Low") != "1" {
 		t.Fatalf("non-stream result = %#v", nonStream)
 	}
 	if nonStream.Headers.Get("X-Remove") != "" {
@@ -2636,16 +2799,20 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 
 	stream := host.InterceptStreamChunk(
 		context.Background(), pluginapi.StreamChunkInterceptRequest{
-			SourceFormat:    "openai",
-			Model:           "normalized",
-			RequestedModel:  "requested",
-			ResponseHeaders: http.Header{"Content-Type": []string{"text/event-stream"}, "X-Remove": []string{"yes"}},
-			Body:            []byte("chunk"),
-			HistoryChunks:   [][]byte{[]byte("first")},
-			ChunkIndex:      1,
+			SourceFormat:   "openai",
+			Model:          "normalized",
+			RequestedModel: "requested",
+			ResponseHeaders: http.Header{
+				"Content-Type": []string{"text/event-stream"},
+				"X-Remove":     []string{"yes"},
+			},
+			Body:          []byte("chunk"),
+			HistoryChunks: [][]byte{[]byte("first")},
+			ChunkIndex:    1,
 		},
 	)
-	if string(stream.Body) != "chunk|high|low" || stream.Headers.Get("X-Stream") != "low" || stream.Headers.Get("X-Low") != "1" {
+	if string(stream.Body) != "chunk|high|low" || stream.Headers.Get("X-Stream") != "low" ||
+		stream.Headers.Get("X-Low") != "1" {
 		t.Fatalf("stream result = %#v", stream)
 	}
 	if stream.Headers.Get("X-Remove") != "" {
@@ -2661,72 +2828,90 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 
 func TestStreamChunkSchemaPayloadAndHeaderContracts(t *testing.T) {
 	for schemaVersion := uint32(0); schemaVersion <= pluginabi.SchemaVersion; schemaVersion++ {
-		t.Run(fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
-			originalRequest := []byte("original")
-			requestBody := []byte("request")
-			history := [][]byte{[]byte("history")}
-			var captured []pluginapi.StreamChunkInterceptRequest
-			interceptor := responseInterceptorFunc{
-				interceptStreamChunk: func(
-					_ context.Context,
-					req pluginapi.StreamChunkInterceptRequest,
-				) (pluginapi.StreamChunkInterceptResponse, error) {
-					captured = append(captured, req)
-					if len(req.OriginalRequest) > 0 {
-						req.OriginalRequest[0] = 'X'
-					}
-					if len(req.RequestBody) > 0 {
-						req.RequestBody[0] = 'X'
-					}
-					if len(req.HistoryChunks) > 0 && len(req.HistoryChunks[0]) > 0 {
-						req.HistoryChunks[0][0] = 'X'
-					}
-					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
-				},
-			}
-			host := newHostWithRecords(capabilityRecord{
-				id: "stream",
-				plugin: pluginapi.Plugin{
-					SchemaVersion: schemaVersion,
-					Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: interceptor},
-				},
-			})
+		t.Run(
+			fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
+				originalRequest := []byte("original")
+				requestBody := []byte("request")
+				history := [][]byte{[]byte("history")}
+				var captured []pluginapi.StreamChunkInterceptRequest
+				interceptor := responseInterceptorFunc{
+					interceptStreamChunk: func(
+						_ context.Context,
+						req pluginapi.StreamChunkInterceptRequest,
+					) (pluginapi.StreamChunkInterceptResponse, error) {
+						captured = append(captured, req)
+						if len(req.OriginalRequest) > 0 {
+							req.OriginalRequest[0] = 'X'
+						}
+						if len(req.RequestBody) > 0 {
+							req.RequestBody[0] = 'X'
+						}
+						if len(req.HistoryChunks) > 0 && len(req.HistoryChunks[0]) > 0 {
+							req.HistoryChunks[0][0] = 'X'
+						}
+						return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+					},
+				}
+				host := newHostWithRecords(
+					capabilityRecord{
+						id: "stream",
+						plugin: pluginapi.Plugin{
+							SchemaVersion: schemaVersion,
+							Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: interceptor},
+						},
+					},
+				)
 
-			baseRequest := pluginapi.StreamChunkInterceptRequest{
-				OriginalRequest: originalRequest,
-				RequestBody:     requestBody,
-				Body:            []byte("chunk"),
-				HistoryChunks:   history,
-			}
-			payloadRequest := baseRequest
-			payloadRequest.ChunkIndex = 0
-			host.InterceptStreamChunk(context.Background(), payloadRequest)
-			headerRequest := baseRequest
-			headerRequest.ChunkIndex = pluginapi.StreamChunkHeaderInitIndex
-			host.InterceptStreamChunk(context.Background(), headerRequest)
+				baseRequest := pluginapi.StreamChunkInterceptRequest{
+					OriginalRequest: originalRequest,
+					RequestBody:     requestBody,
+					Body:            []byte("chunk"),
+					HistoryChunks:   history,
+				}
+				payloadRequest := baseRequest
+				payloadRequest.ChunkIndex = 0
+				host.InterceptStreamChunk(context.Background(), payloadRequest)
+				headerRequest := baseRequest
+				headerRequest.ChunkIndex = pluginapi.StreamChunkHeaderInitIndex
+				host.InterceptStreamChunk(context.Background(), headerRequest)
 
-			if len(captured) != 2 {
-				t.Fatalf("interceptor calls = %d, want 2", len(captured))
-			}
-			normalizedSchema := normalizedPluginSchemaVersion(schemaVersion)
-			payload := captured[0]
-			if got, want := len(payload.OriginalRequest) > 0, normalizedSchema < pluginabi.SchemaVersionStreamChunkOmitRequestBody; got != want {
-				t.Fatalf("payload OriginalRequest present = %t, want %t", got, want)
-			}
-			if got, want := len(payload.RequestBody) > 0, normalizedSchema < pluginabi.SchemaVersionStreamChunkOmitRequestBody; got != want {
-				t.Fatalf("payload RequestBody present = %t, want %t", got, want)
-			}
-			if got, want := len(payload.HistoryChunks) > 0, normalizedSchema < pluginabi.SchemaVersionStreamChunkOmitHistory; got != want {
-				t.Fatalf("payload HistoryChunks present = %t, want %t", got, want)
-			}
-			header := captured[1]
-			if len(header.OriginalRequest) == 0 || len(header.RequestBody) == 0 || len(header.HistoryChunks) == 0 {
-				t.Fatalf("header-init request omitted retained fields: %#v", header)
-			}
-			if string(originalRequest) != "original" || string(requestBody) != "request" || string(history[0]) != "history" {
-				t.Fatalf("interceptor mutated caller input: original=%q request=%q history=%q", originalRequest, requestBody, history[0])
-			}
-		})
+				if len(captured) != 2 {
+					t.Fatalf("interceptor calls = %d, want 2", len(captured))
+				}
+				normalizedSchema := normalizedPluginSchemaVersion(schemaVersion)
+				payload := captured[0]
+				if got, want := len(payload.OriginalRequest) >
+					0, normalizedSchema <
+					pluginabi.SchemaVersionStreamChunkOmitRequestBody; got !=
+					want {
+					t.Fatalf("payload OriginalRequest present = %t, want %t", got, want)
+				}
+				if got, want := len(payload.RequestBody) >
+					0, normalizedSchema <
+					pluginabi.SchemaVersionStreamChunkOmitRequestBody; got !=
+					want {
+					t.Fatalf("payload RequestBody present = %t, want %t", got, want)
+				}
+				if got, want := len(payload.HistoryChunks) >
+					0, normalizedSchema <
+					pluginabi.SchemaVersionStreamChunkOmitHistory; got !=
+					want {
+					t.Fatalf("payload HistoryChunks present = %t, want %t", got, want)
+				}
+				header := captured[1]
+				if len(header.OriginalRequest) == 0 || len(header.RequestBody) == 0 ||
+					len(header.HistoryChunks) == 0 {
+					t.Fatalf("header-init request omitted retained fields: %#v", header)
+				}
+				if string(originalRequest) != "original" || string(requestBody) != "request" ||
+					string(history[0]) != "history" {
+					t.Fatalf(
+						"interceptor mutated caller input: original=%q request=%q history=%q", originalRequest,
+						requestBody, history[0],
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -2783,9 +2968,13 @@ func TestStreamChunkSchemaClonesAreIsolatedPerLegacyPlugin(t *testing.T) {
 	}
 	host.InterceptStreamChunk(context.Background(), req)
 	if secondOriginal != "original" || secondRequest != "request" || secondHistory != "history" {
-		t.Fatalf("second plugin observed mutation: original=%q request=%q history=%q", secondOriginal, secondRequest, secondHistory)
+		t.Fatalf(
+			"second plugin observed mutation: original=%q request=%q history=%q", secondOriginal, secondRequest,
+			secondHistory,
+		)
 	}
-	if string(req.OriginalRequest) != "original" || string(req.RequestBody) != "request" || string(req.HistoryChunks[0]) != "history" {
+	if string(req.OriginalRequest) != "original" || string(req.RequestBody) != "request" ||
+		string(req.HistoryChunks[0]) != "history" {
 		t.Fatalf("caller request was mutated: %#v", req)
 	}
 }
@@ -2825,13 +3014,15 @@ func TestStreamChunkPayloadPolicyReflectsMixedPluginSchemas(t *testing.T) {
 		t.Fatal("fused legacy plugin must not keep payload request bodies or history enabled")
 	}
 
-	schemaThree := newHostWithRecords(capabilityRecord{
-		id: "schema-three",
-		plugin: pluginapi.Plugin{
-			SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitRequestBody,
-			Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: interceptor},
+	schemaThree := newHostWithRecords(
+		capabilityRecord{
+			id: "schema-three",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitRequestBody,
+				Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: interceptor},
+			},
 		},
-	})
+	)
 	if schemaThree.StreamChunkPayloadIncludesRequestBody() || !schemaThree.StreamChunkPayloadIncludesHistory() {
 		t.Fatal("schema 3 should omit payload request bodies and retain history")
 	}
@@ -2841,24 +3032,32 @@ func TestWebSocketObserversCloneSanitizeSkipAndFuse(t *testing.T) {
 	originCalls := 0
 	secondCalls := 0
 	var secondEvent pluginapi.WebSocketResponseEvent
-	origin := webSocketObserverFunc(func(context.Context, pluginapi.WebSocketResponseEvent) error {
-		originCalls++
-		return nil
-	})
-	mutating := webSocketObserverFunc(func(_ context.Context, event pluginapi.WebSocketResponseEvent) error {
-		event.Payload[0] = 'X'
-		event.Metadata["safe"] = "mutated"
-		event.Metadata["nested"].(map[string]any)["value"] = "mutated"
-		return nil
-	})
-	second := webSocketObserverFunc(func(_ context.Context, event pluginapi.WebSocketResponseEvent) error {
-		secondCalls++
-		secondEvent = event
-		return nil
-	})
-	panicking := webSocketObserverFunc(func(context.Context, pluginapi.WebSocketResponseEvent) error {
-		panic("observer panic")
-	})
+	origin := webSocketObserverFunc(
+		func(context.Context, pluginapi.WebSocketResponseEvent) error {
+			originCalls++
+			return nil
+		},
+	)
+	mutating := webSocketObserverFunc(
+		func(_ context.Context, event pluginapi.WebSocketResponseEvent) error {
+			event.Payload[0] = 'X'
+			event.Metadata["safe"] = "mutated"
+			event.Metadata["nested"].(map[string]any)["value"] = "mutated"
+			return nil
+		},
+	)
+	second := webSocketObserverFunc(
+		func(_ context.Context, event pluginapi.WebSocketResponseEvent) error {
+			secondCalls++
+			secondEvent = event
+			return nil
+		},
+	)
+	panicking := webSocketObserverFunc(
+		func(context.Context, pluginapi.WebSocketResponseEvent) error {
+			panic("observer panic")
+		},
+	)
 	host := newHostWithRecords(
 		capabilityRecord{
 			id: "origin", priority: 40,
@@ -2870,7 +3069,9 @@ func TestWebSocketObserversCloneSanitizeSkipAndFuse(t *testing.T) {
 		},
 		capabilityRecord{
 			id: "panic", priority: 20,
-			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{WebSocketResponseObserver: panicking}},
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{WebSocketResponseObserver: panicking},
+			},
 		},
 		capabilityRecord{
 			id: "second", priority: 10,
@@ -2894,7 +3095,8 @@ func TestWebSocketObserversCloneSanitizeSkipAndFuse(t *testing.T) {
 	if originCalls != 0 {
 		t.Fatalf("initiating observer calls = %d, want 0", originCalls)
 	}
-	if secondCalls != 1 || string(secondEvent.Payload) != "payload" || secondEvent.Metadata["safe"] != "original" ||
+	if secondCalls != 1 || string(secondEvent.Payload) != "payload" ||
+		secondEvent.Metadata["safe"] != "original" ||
 		secondEvent.Metadata["nested"].(map[string]any)["value"] != "original" {
 		t.Fatalf("second observer event = %#v, calls=%d", secondEvent, secondCalls)
 	}
@@ -2918,15 +3120,21 @@ func TestWebSocketObserversCloneSanitizeSkipAndFuse(t *testing.T) {
 
 func TestWebSocketResponseCallbackExpiresOnCloseAndRequestCancellation(t *testing.T) {
 	calls := 0
-	host := newHostWithRecords(capabilityRecord{
-		id: "observer",
-		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-			WebSocketResponseObserver: webSocketObserverFunc(func(context.Context, pluginapi.WebSocketResponseEvent) error {
-				calls++
-				return nil
-			}),
-		}},
-	})
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "observer",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					WebSocketResponseObserver: webSocketObserverFunc(
+						func(context.Context, pluginapi.WebSocketResponseEvent) error {
+							calls++
+							return nil
+						},
+					),
+				},
+			},
+		},
+	)
 	ctx, cancel := context.WithCancel(context.Background())
 	callback, closeCallback := host.OpenWebSocketResponseCallback(ctx, "")
 	if callback == nil {
@@ -2995,7 +3203,8 @@ func TestRPCWebSocketObserverRequiresSchemaFourAndSanitizesEvent(t *testing.T) {
 	); errObserve != nil {
 		t.Fatalf("ObserveWebSocketResponseEvent() error = %v", errObserve)
 	}
-	if captured.HostCallbackID == "" || string(captured.Payload) != "payload" || captured.Metadata["safe"] != "value" {
+	if captured.HostCallbackID == "" || string(captured.Payload) != "payload" ||
+		captured.Metadata["safe"] != "value" {
 		t.Fatalf("RPC websocket event = %#v", captured)
 	}
 	if _, ok := captured.Metadata["token"]; ok {
@@ -3004,7 +3213,9 @@ func TestRPCWebSocketObserverRequiresSchemaFourAndSanitizesEvent(t *testing.T) {
 }
 
 func TestQuotaResponseSummaryIsNotAliased(t *testing.T) {
-	response := pluginapi.QuotaFetchResponse{Summary: []pluginapi.QuotaMetric{{Key: "credits_used", Value: 1740.28}}}
+	response := pluginapi.QuotaFetchResponse{
+		Summary: []pluginapi.QuotaMetric{{Key: "credits_used", Value: 1740.28}},
+	}
 	copied := cloneQuotaFetchResponse(response)
 	copied.Summary[0].Value = 0
 	if response.Summary[0].Value != 1740.28 {
@@ -3015,12 +3226,16 @@ func TestQuotaResponseSummaryIsNotAliased(t *testing.T) {
 func TestQuotaProviderListFetchResetAndUnsupportedContracts(t *testing.T) {
 	sharedResponse := pluginapi.QuotaFetchResponse{
 		Subscription: &pluginapi.QuotaSubscription{Plan: "pro", TierName: "Pro"},
-		Groups: []pluginapi.QuotaGroup{{
-			DisplayName: "Requests",
-			Buckets: []pluginapi.QuotaBucket{{
-				Window: "daily", RemainingFraction: 0.75,
-			}},
-		}},
+		Groups: []pluginapi.QuotaGroup{
+			{
+				DisplayName: "Requests",
+				Buckets: []pluginapi.QuotaBucket{
+					{
+						Window: "daily", RemainingFraction: 0.75,
+					},
+				},
+			},
+		},
 	}
 	fetchCalls := 0
 	resetCalls := 0
@@ -3051,22 +3266,29 @@ func TestQuotaProviderListFetchResetAndUnsupportedContracts(t *testing.T) {
 			return pluginapi.QuotaResetResponse{Success: true, Message: "reset"}, nil
 		},
 	}
-	host := newHostWithRecords(capabilityRecord{
-		id:   "quota-plugin",
-		meta: pluginapi.Metadata{Name: "Metadata Name"},
-		plugin: pluginapi.Plugin{
-			Capabilities: pluginapi.Capabilities{QuotaProvider: provider},
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:   "quota-plugin",
+			meta: pluginapi.Metadata{Name: "Metadata Name"},
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{QuotaProvider: provider},
+			},
 		},
-	})
+	)
 	host.runtimeConfig = &config.Config{AuthDir: "/tmp/auth"}
 
 	providers := host.QuotaProviders(context.Background())
 	if len(providers) != 1 || providers[0].PluginID != "quota-plugin" ||
 		providers[0].Provider != "quota-plugin" || providers[0].DisplayName != "Quota Plugin" ||
-		!providers[0].SupportsReset || !reflect.DeepEqual(providers[0].SupportedProviders, []string{"claude", "openai"}) {
+		!providers[0].SupportsReset || !reflect.DeepEqual(
+		providers[0].SupportedProviders, []string{"claude", "openai"},
+	) {
 		t.Fatalf("QuotaProviders() = %#v", providers)
 	}
-	if identifiers := host.QuotaProviderIdentifiers(); !reflect.DeepEqual(identifiers, []string{"quota-plugin"}) {
+	if identifiers := host.QuotaProviderIdentifiers(); !reflect.DeepEqual(
+		identifiers,
+		[]string{"quota-plugin"},
+	) {
 		t.Fatalf("QuotaProviderIdentifiers() = %#v", identifiers)
 	}
 	if !host.HasQuotaProvider("openai") || !host.HasQuotaProviderForPlugin("quota-plugin") {
@@ -3082,7 +3304,13 @@ func TestQuotaProviderListFetchResetAndUnsupportedContracts(t *testing.T) {
 	response, handled, errFetch := host.FetchQuota(context.Background(), request)
 	if errFetch != nil || !handled || fetchCalls != 1 || response.Subscription == nil ||
 		response.Subscription.Plan != "pro" || response.Groups[0].Buckets[0].RemainingFraction != 0.75 {
-		t.Fatalf("FetchQuota() response=%#v handled=%t calls=%d error=%v", response, handled, fetchCalls, errFetch)
+		t.Fatalf(
+			"FetchQuota() response=%#v handled=%t calls=%d error=%v",
+			response,
+			handled,
+			fetchCalls,
+			errFetch,
+		)
 	}
 	if request.StorageJSON[0] != '{' || request.Metadata["nested"].(map[string]any)["value"] != "original" ||
 		request.Attributes["region"] != "original" {
@@ -3090,7 +3318,8 @@ func TestQuotaProviderListFetchResetAndUnsupportedContracts(t *testing.T) {
 	}
 	response.Subscription.Plan = "mutated"
 	response.Groups[0].Buckets[0].RemainingFraction = 0
-	if sharedResponse.Subscription.Plan != "pro" || sharedResponse.Groups[0].Buckets[0].RemainingFraction != 0.75 {
+	if sharedResponse.Subscription.Plan != "pro" ||
+		sharedResponse.Groups[0].Buckets[0].RemainingFraction != 0.75 {
 		t.Fatalf("FetchQuota() returned aliased plugin response: %#v", sharedResponse)
 	}
 
@@ -3098,7 +3327,13 @@ func TestQuotaProviderListFetchResetAndUnsupportedContracts(t *testing.T) {
 		context.Background(), pluginapi.QuotaResetRequest{Provider: "openai"},
 	)
 	if errReset != nil || !resetHandled || resetCalls != 1 || !reset.Success || reset.Message != "reset" {
-		t.Fatalf("ResetQuota() response=%#v handled=%t calls=%d error=%v", reset, resetHandled, resetCalls, errReset)
+		t.Fatalf(
+			"ResetQuota() response=%#v handled=%t calls=%d error=%v",
+			reset,
+			resetHandled,
+			resetCalls,
+			errReset,
+		)
 	}
 
 	unsupported := quotaProviderStub{
@@ -3113,14 +3348,17 @@ func TestQuotaProviderListFetchResetAndUnsupportedContracts(t *testing.T) {
 			return pluginapi.QuotaResetResponse{}, pluginapi.ErrQuotaUnsupported
 		},
 	}
-	unsupportedHost := newHostWithRecords(capabilityRecord{
-		id: "unsupported",
-		plugin: pluginapi.Plugin{
-			Metadata:     pluginapi.Metadata{Name: "Unsupported"},
-			Capabilities: pluginapi.Capabilities{QuotaProvider: unsupported},
+	unsupportedHost := newHostWithRecords(
+		capabilityRecord{
+			id: "unsupported",
+			plugin: pluginapi.Plugin{
+				Metadata:     pluginapi.Metadata{Name: "Unsupported"},
+				Capabilities: pluginapi.Capabilities{QuotaProvider: unsupported},
+			},
 		},
-	})
-	if listed := unsupportedHost.QuotaProviders(context.Background()); len(listed) != 1 || listed[0].Provider != "unsupported" {
+	)
+	if listed := unsupportedHost.QuotaProviders(context.Background()); len(listed) != 1 ||
+		listed[0].Provider != "unsupported" {
 		t.Fatalf("unsupported provider list = %#v, want identifier fallback", listed)
 	}
 	if _, unsupportedHandled, errUnsupported := unsupportedHost.FetchQuota(
@@ -3143,13 +3381,15 @@ func TestQuotaProviderPluginIDFallbackDoesNotRequireIdentifier(t *testing.T) {
 			return pluginapi.QuotaFetchResponse{}, nil
 		},
 	}
-	host := newHostWithRecords(capabilityRecord{
-		id: "quota-no-identifier",
-		plugin: pluginapi.Plugin{
-			Metadata:     pluginapi.Metadata{Name: "Quota without identifier"},
-			Capabilities: pluginapi.Capabilities{QuotaProvider: provider},
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "quota-no-identifier",
+			plugin: pluginapi.Plugin{
+				Metadata:     pluginapi.Metadata{Name: "Quota without identifier"},
+				Capabilities: pluginapi.Capabilities{QuotaProvider: provider},
+			},
 		},
-	})
+	)
 	if providers := host.QuotaProviders(context.Background()); len(providers) != 1 ||
 		providers[0].Provider != "quota-no-identifier" {
 		t.Fatalf("QuotaProviders() = %#v, want plugin ID fallback", providers)
@@ -3177,9 +3417,11 @@ func TestQuotaProviderRPCContract(t *testing.T) {
 			if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
 				return nil, errUnmarshal
 			}
-			return marshalRPCResult(pluginapi.QuotaDescribeResponse{
-				SupportedProviders: []string{"openai"}, SupportsReset: true,
-			})
+			return marshalRPCResult(
+				pluginapi.QuotaDescribeResponse{
+					SupportedProviders: []string{"openai"}, SupportsReset: true,
+				},
+			)
 		},
 		pluginabi.MethodQuotaFetch: func(_ context.Context, raw []byte) ([]byte, error) {
 			var req rpcQuotaFetchRequest
@@ -3189,9 +3431,13 @@ func TestQuotaProviderRPCContract(t *testing.T) {
 			if req.Provider != "openai" || req.HostCallbackID == "" || req.HTTPClient != nil {
 				t.Fatalf("RPC FetchQuota request = %#v", req)
 			}
-			return marshalRPCResult(pluginapi.QuotaFetchResponse{
-				Groups: []pluginapi.QuotaGroup{{Buckets: []pluginapi.QuotaBucket{{RemainingFraction: 0.5}}}},
-			})
+			return marshalRPCResult(
+				pluginapi.QuotaFetchResponse{
+					Groups: []pluginapi.QuotaGroup{
+						{Buckets: []pluginapi.QuotaBucket{{RemainingFraction: 0.5}}},
+					},
+				},
+			)
 		},
 		pluginabi.MethodQuotaReset: func(_ context.Context, raw []byte) ([]byte, error) {
 			var req rpcQuotaResetRequest
@@ -3215,17 +3461,21 @@ func TestQuotaProviderRPCContract(t *testing.T) {
 		t.Fatalf("registered quota provider = %#v", provider)
 	}
 	description, errDescribe := provider.DescribeQuota(context.Background(), pluginapi.QuotaDescribeRequest{})
-	if errDescribe != nil || !description.SupportsReset || !reflect.DeepEqual(description.SupportedProviders, []string{"openai"}) {
+	if errDescribe != nil || !description.SupportsReset || !reflect.DeepEqual(
+		description.SupportedProviders, []string{"openai"},
+	) {
 		t.Fatalf("DescribeQuota() = %#v, error=%v", description, errDescribe)
 	}
 	response, errFetch := provider.FetchQuota(
-		context.Background(), pluginapi.QuotaFetchRequest{Provider: "openai", HTTPClient: New().newHTTPClient(nil)},
+		context.Background(),
+		pluginapi.QuotaFetchRequest{Provider: "openai", HTTPClient: New().newHTTPClient(nil)},
 	)
 	if errFetch != nil || response.Groups[0].Buckets[0].RemainingFraction != 0.5 {
 		t.Fatalf("FetchQuota() = %#v, error=%v", response, errFetch)
 	}
 	reset, errReset := provider.ResetQuota(
-		context.Background(), pluginapi.QuotaResetRequest{Provider: "openai", HTTPClient: New().newHTTPClient(nil)},
+		context.Background(),
+		pluginapi.QuotaResetRequest{Provider: "openai", HTTPClient: New().newHTTPClient(nil)},
 	)
 	if errReset != nil || !reset.Success {
 		t.Fatalf("ResetQuota() = %#v, error=%v", reset, errReset)
@@ -3254,7 +3504,9 @@ func TestQuotaProviderRPCExplicitUnsupportedAllowsFallback(t *testing.T) {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}
 	host := newHostWithRecords(capabilityRecord{id: "rpc-quota-unsupported", plugin: registered})
-	if _, handled, errDescribe := host.DescribeQuota(context.Background(), "rpc-quota-unsupported"); errDescribe != nil || handled {
+	if _, handled, errDescribe := host.DescribeQuota(
+		context.Background(), "rpc-quota-unsupported",
+	); errDescribe != nil || handled {
 		t.Fatalf("DescribeQuota() handled=%t error=%v", handled, errDescribe)
 	}
 	if _, handled, errFetch := host.FetchQuotaByPlugin(
@@ -3594,16 +3846,22 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			if metadata["key"] != "value" {
 				t.Fatalf("request metadata mutated: %#v", metadata)
 			}
-			if metadata["nested"].(map[string]any)["value"] != "original" || metadata["items"].([]any)[0].(map[string]any)["value"] != "original" {
+			if metadata["nested"].(map[string]any)["value"] != "original" ||
+				metadata["items"].([]any)[0].(map[string]any)["value"] != "original" {
 				t.Fatalf("request nested metadata mutated: %#v", metadata)
 			}
-			if metadata["strings"].([]string)[0] != "original" || string(metadata["bytes"].([]byte)) != "original" || metadata["labels"].(map[string]string)["name"] != "original" {
+			if metadata["strings"].([]string)[0] != "original" ||
+				string(metadata["bytes"].([]byte)) != "original" ||
+				metadata["labels"].(map[string]string)["name"] != "original" {
 				t.Fatalf("request nested metadata aliases mutated: %#v", metadata)
 			}
-			if metadata["values"].(url.Values)["name"][0] != "original" || metadata["mapSlice"].(map[string][]string)["name"][0] != "original" {
+			if metadata["values"].(url.Values)["name"][0] != "original" ||
+				metadata["mapSlice"].(map[string][]string)["name"][0] != "original" {
 				t.Fatalf("request map/slice metadata mutated: %#v", metadata)
 			}
-			if metadata["sliceMap"].([]map[string]string)[0]["name"] != "original" || metadata["aliasMap"].(stringSliceAlias)[0] != "original" || metadata["aliasList"].(mapSliceAlias)[0]["name"] != "original" {
+			if metadata["sliceMap"].([]map[string]string)[0]["name"] != "original" ||
+				metadata["aliasMap"].(stringSliceAlias)[0] != "original" ||
+				metadata["aliasList"].(mapSliceAlias)[0]["name"] != "original" {
 				t.Fatalf("request alias metadata mutated: %#v", metadata)
 			}
 			if !strings.HasSuffix(string(got.Body), "|ok") {
@@ -3698,16 +3956,22 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			if metadata["key"] != "value" {
 				t.Fatalf("response metadata mutated: %#v", metadata)
 			}
-			if metadata["nested"].(map[string]any)["value"] != "original" || metadata["items"].([]any)[0].(map[string]any)["value"] != "original" {
+			if metadata["nested"].(map[string]any)["value"] != "original" ||
+				metadata["items"].([]any)[0].(map[string]any)["value"] != "original" {
 				t.Fatalf("response nested metadata mutated: %#v", metadata)
 			}
-			if metadata["strings"].([]string)[0] != "original" || string(metadata["bytes"].([]byte)) != "original" || metadata["labels"].(map[string]string)["name"] != "original" {
+			if metadata["strings"].([]string)[0] != "original" ||
+				string(metadata["bytes"].([]byte)) != "original" ||
+				metadata["labels"].(map[string]string)["name"] != "original" {
 				t.Fatalf("response nested metadata aliases mutated: %#v", metadata)
 			}
-			if metadata["values"].(url.Values)["name"][0] != "original" || metadata["mapSlice"].(map[string][]string)["name"][0] != "original" {
+			if metadata["values"].(url.Values)["name"][0] != "original" ||
+				metadata["mapSlice"].(map[string][]string)["name"][0] != "original" {
 				t.Fatalf("response map/slice metadata mutated: %#v", metadata)
 			}
-			if metadata["sliceMap"].([]map[string]string)[0]["name"] != "original" || metadata["aliasMap"].(stringSliceAlias)[0] != "original" || metadata["aliasList"].(mapSliceAlias)[0]["name"] != "original" {
+			if metadata["sliceMap"].([]map[string]string)[0]["name"] != "original" ||
+				metadata["aliasMap"].(stringSliceAlias)[0] != "original" ||
+				metadata["aliasList"].(mapSliceAlias)[0]["name"] != "original" {
 				t.Fatalf("response alias metadata mutated: %#v", metadata)
 			}
 			if !strings.HasSuffix(string(got.Body), "|ok") {
@@ -3808,16 +4072,22 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			if metadata["key"] != "value" {
 				t.Fatalf("stream metadata mutated: %#v", metadata)
 			}
-			if metadata["nested"].(map[string]any)["value"] != "original" || metadata["items"].([]any)[0].(map[string]any)["value"] != "original" {
+			if metadata["nested"].(map[string]any)["value"] != "original" ||
+				metadata["items"].([]any)[0].(map[string]any)["value"] != "original" {
 				t.Fatalf("stream nested metadata mutated: %#v", metadata)
 			}
-			if metadata["strings"].([]string)[0] != "original" || string(metadata["bytes"].([]byte)) != "original" || metadata["labels"].(map[string]string)["name"] != "original" {
+			if metadata["strings"].([]string)[0] != "original" ||
+				string(metadata["bytes"].([]byte)) != "original" ||
+				metadata["labels"].(map[string]string)["name"] != "original" {
 				t.Fatalf("stream nested metadata aliases mutated: %#v", metadata)
 			}
-			if metadata["values"].(url.Values)["name"][0] != "original" || metadata["mapSlice"].(map[string][]string)["name"][0] != "original" {
+			if metadata["values"].(url.Values)["name"][0] != "original" ||
+				metadata["mapSlice"].(map[string][]string)["name"][0] != "original" {
 				t.Fatalf("stream map/slice metadata mutated: %#v", metadata)
 			}
-			if metadata["sliceMap"].([]map[string]string)[0]["name"] != "original" || metadata["aliasMap"].(stringSliceAlias)[0] != "original" || metadata["aliasList"].(mapSliceAlias)[0]["name"] != "original" {
+			if metadata["sliceMap"].([]map[string]string)[0]["name"] != "original" ||
+				metadata["aliasMap"].(stringSliceAlias)[0] != "original" ||
+				metadata["aliasList"].(mapSliceAlias)[0]["name"] != "original" {
 				t.Fatalf("stream alias metadata mutated: %#v", metadata)
 			}
 			if !strings.HasSuffix(string(got.Body), "|ok") {
@@ -3837,17 +4107,19 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			mapValue := &map[string][]string{"names": {"original"}}
 			sliceValue := &[]string{"original"}
 			aliasMapValue := &mapSliceAlias{{"name": "original"}}
-			var ifaceValue any = &pointerMetadata{Value: "original", Items: []string{"original"}}
+			var interfaceValue any = &pointerMetadata{Value: "original", Items: []string{"original"}}
+			//goland:noinspection SpellCheckingInspection
+			const interfacePointerKey = "iface_ptr"
 			cycle := map[string]any{}
 			cycle["self"] = cycle
 
 			metadata := map[string]any{
-				"struct_ptr": structValue,
-				"map_ptr":    mapValue,
-				"slice_ptr":  sliceValue,
-				"alias_ptr":  aliasMapValue,
-				"iface_ptr":  ifaceValue,
-				"cycle":      cycle,
+				"struct_ptr":        structValue,
+				"map_ptr":           mapValue,
+				"slice_ptr":         sliceValue,
+				"alias_ptr":         aliasMapValue,
+				interfacePointerKey: interfaceValue,
+				"cycle":             cycle,
 			}
 
 			host := newHostWithRecords(
@@ -3865,7 +4137,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 									(*req.Metadata["map_ptr"].(*map[string][]string))["names"][0] = "mutated"
 									(*req.Metadata["slice_ptr"].(*[]string))[0] = "mutated"
 									(*req.Metadata["alias_ptr"].(*mapSliceAlias))[0]["name"] = "mutated"
-									req.Metadata["iface_ptr"].(*pointerMetadata).Value = "mutated"
+									req.Metadata[interfacePointerKey].(*pointerMetadata).Value = "mutated"
 									if clonedCycle, ok := req.Metadata["cycle"].(map[string]any); ok {
 										clonedCycle["marker"] = "mutated"
 										clonedCycle["self"] = "mutated"
@@ -3894,8 +4166,9 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			if (*aliasMapValue)[0]["name"] != "original" {
 				t.Fatalf("alias pointer metadata mutated: %#v", aliasMapValue)
 			}
-			if ifaceStruct, ok := ifaceValue.(*pointerMetadata); !ok || ifaceStruct.Value != "original" || ifaceStruct.Items[0] != "original" {
-				t.Fatalf("interface pointer metadata mutated: %#v", ifaceValue)
+			if interfaceStruct, ok := interfaceValue.(*pointerMetadata); !ok || interfaceStruct.Value != "original" ||
+				interfaceStruct.Items[0] != "original" {
+				t.Fatalf("interface pointer metadata mutated: %#v", interfaceValue)
 			}
 			if _, ok := cycle["self"].(map[string]any); !ok {
 				t.Fatalf("cycle metadata structure changed unexpectedly: %#v", cycle)
@@ -4064,9 +4337,11 @@ func TestResponseHooksKeepPayloadOrTryNextOnErrorAndEmptyBody(t *testing.T) {
 func TestUsageAdapterSeparatesExecutionIDAndHTTPTraceID(t *testing.T) {
 	var captured pluginapi.UsageRecord
 	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) { captured = record })
-	host := newHostWithRecords(capabilityRecord{
-		id: "usage-identity", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{UsagePlugin: plugin}},
-	})
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "usage-identity", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{UsagePlugin: plugin}},
+		},
+	)
 	record := coreusage.Record{
 		ExecutionID: "b5db448b-3d6d-495c-9c71-f925b68926cb",
 		RequestID:   "http-parent-1",
@@ -4191,15 +4466,19 @@ func TestUsageAdapterPropagatesServiceTiers(t *testing.T) {
 
 func TestUsageAdapterPropagatesDeliveryTarget(t *testing.T) {
 	var captured pluginapi.UsageRecord
-	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
-		captured = record
-	})
+	plugin := usagePluginFunc(
+		func(_ context.Context, record pluginapi.UsageRecord) {
+			captured = record
+		},
+	)
 	adapter := &usageAdapter{pluginID: "usage-target", plugin: plugin}
 
-	adapter.HandleUsage(context.Background(), coreusage.Record{
-		BaseURL: "https://upstream.example/v1",
-		Stream:  true,
-	})
+	adapter.HandleUsage(
+		context.Background(), coreusage.Record{
+			BaseURL: "https://upstream.example/v1",
+			Stream:  true,
+		},
+	)
 
 	if captured.BaseURL != "https://upstream.example/v1" || !captured.Stream {
 		t.Fatalf("captured target = baseURL:%q stream:%t", captured.BaseURL, captured.Stream)
@@ -4208,15 +4487,19 @@ func TestUsageAdapterPropagatesDeliveryTarget(t *testing.T) {
 
 func TestUsageAdapterPreservesResponseModel(t *testing.T) {
 	var captured pluginapi.UsageRecord
-	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
-		captured = record
-	})
+	plugin := usagePluginFunc(
+		func(_ context.Context, record pluginapi.UsageRecord) {
+			captured = record
+		},
+	)
 	adapter := &usageAdapter{pluginID: "usage-response-model", plugin: plugin}
 
-	adapter.HandleUsage(context.Background(), coreusage.Record{
-		Model:         "client-model",
-		ResponseModel: "provider-model",
-	})
+	adapter.HandleUsage(
+		context.Background(), coreusage.Record{
+			Model:         "client-model",
+			ResponseModel: "provider-model",
+		},
+	)
 	if captured.Model != "client-model" || captured.ResponseModel != "provider-model" {
 		t.Fatalf("captured models = (%q, %q)", captured.Model, captured.ResponseModel)
 	}
@@ -4229,14 +4512,18 @@ func TestUsageAdapterPreservesResponseModel(t *testing.T) {
 
 func TestUsageAdapterPropagatesSessionHierarchy(t *testing.T) {
 	var captured pluginapi.UsageRecord
-	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
-		captured = record
-	})
+	plugin := usagePluginFunc(
+		func(_ context.Context, record pluginapi.UsageRecord) {
+			captured = record
+		},
+	)
 	adapter := &usageAdapter{pluginID: "usage-session", plugin: plugin}
-	ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
-		SessionID:       "session:child",
-		ParentSessionID: "session:parent",
-	})
+	ctx := internallogging.WithClientRequestMetadata(
+		context.Background(), internallogging.ClientRequestMetadata{
+			SessionID:       "session:child",
+			ParentSessionID: "session:parent",
+		},
+	)
 
 	adapter.HandleUsage(ctx, coreusage.Record{})
 	if captured.SessionID != "session:child" || captured.ParentSessionID != "session:parent" {
@@ -4258,13 +4545,17 @@ func TestUsageAdapterDeliveryContextPreservesValuesAfterRequestCancellation(t *t
 	type contextKey struct{}
 	var capturedValue string
 	var capturedErr error
-	plugin := usagePluginFunc(func(ctx context.Context, _ pluginapi.UsageRecord) {
-		capturedValue, _ = ctx.Value(contextKey{}).(string)
-		capturedErr = ctx.Err()
-	})
+	plugin := usagePluginFunc(
+		func(ctx context.Context, _ pluginapi.UsageRecord) {
+			capturedValue, _ = ctx.Value(contextKey{}).(string)
+			capturedErr = ctx.Err()
+		},
+	)
 	host := New()
 	adapter := &usageAdapter{host: host, pluginID: "usage", plugin: plugin}
-	requestCtx, cancelRequest := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "preserved"))
+	requestCtx, cancelRequest := context.WithCancel(
+		context.WithValue(context.Background(), contextKey{}, "preserved"),
+	)
 	cancelRequest()
 	adapter.HandleUsage(requestCtx, coreusage.Record{})
 	if capturedValue != "preserved" || capturedErr != nil {
@@ -4275,11 +4566,13 @@ func TestUsageAdapterDeliveryContextPreservesValuesAfterRequestCancellation(t *t
 func TestUsageAdapterDeliveryStopsOnHostShutdown(t *testing.T) {
 	started := make(chan struct{})
 	finished := make(chan error, 1)
-	plugin := usagePluginFunc(func(ctx context.Context, _ pluginapi.UsageRecord) {
-		close(started)
-		<-ctx.Done()
-		finished <- ctx.Err()
-	})
+	plugin := usagePluginFunc(
+		func(ctx context.Context, _ pluginapi.UsageRecord) {
+			close(started)
+			<-ctx.Done()
+			finished <- ctx.Err()
+		},
+	)
 	host := New()
 	adapter := &usageAdapter{host: host, pluginID: "usage", plugin: plugin}
 	deliveryDone := make(chan struct{})
@@ -4317,10 +4610,12 @@ func TestUsageAdapterDeliveryDeadlineStopsBlockingPlugin(t *testing.T) {
 		pluginUsageDeliveryTimeout = previousTimeout
 	}()
 	var deliveryErr error
-	plugin := usagePluginFunc(func(ctx context.Context, _ pluginapi.UsageRecord) {
-		<-ctx.Done()
-		deliveryErr = ctx.Err()
-	})
+	plugin := usagePluginFunc(
+		func(ctx context.Context, _ pluginapi.UsageRecord) {
+			<-ctx.Done()
+			deliveryErr = ctx.Err()
+		},
+	)
 	adapter := &usageAdapter{host: New(), pluginID: "usage", plugin: plugin}
 	adapter.HandleUsage(context.Background(), coreusage.Record{})
 	if !errors.Is(deliveryErr, context.DeadlineExceeded) {
@@ -5330,7 +5625,11 @@ func TestExecutorAdapterRefreshPreservesHostRuntimeState(t *testing.T) {
 				StatusMessage:  "rate limited",
 				Unavailable:    true,
 				NextRetryAfter: retryAfter,
-				Quota:          coreauth.QuotaState{Exceeded: true, Reason: "rate limited", NextRecoverAt: retryAfter},
+				Quota: coreauth.QuotaState{
+					Exceeded:      true,
+					Reason:        "rate limited",
+					NextRecoverAt: retryAfter,
+				},
 			},
 		},
 		Metadata: map[string]any{"token": "old"},
@@ -5341,7 +5640,10 @@ func TestExecutorAdapterRefreshPreservesHostRuntimeState(t *testing.T) {
 	}
 	if refreshed == nil || refreshed.Index != original.Index || refreshed.Status != original.Status ||
 		refreshed.StatusMessage != original.StatusMessage || refreshed.Unavailable != original.Unavailable ||
-		!reflect.DeepEqual(refreshed.Quota, original.Quota) || refreshed.NextRetryAfter != original.NextRetryAfter ||
+		!reflect.DeepEqual(
+			refreshed.Quota,
+			original.Quota,
+		) || refreshed.NextRetryAfter != original.NextRetryAfter ||
 		refreshed.LastError == nil || refreshed.LastError.Code != original.LastError.Code {
 		t.Fatalf("Refresh() lost host runtime state: %#v", refreshed)
 	}
@@ -5354,7 +5656,9 @@ func TestExecutorAdapterRefreshPreservesHostRuntimeState(t *testing.T) {
 		storageJSONFromAuth(refreshed), []byte(`"token":"new"`),
 	) {
 		t.Fatalf(
-			"Refresh() provider state = metadata %#v storage %s", refreshed.Metadata, storageJSONFromAuth(refreshed),
+			"Refresh() provider state = metadata %#v storage %s",
+			refreshed.Metadata,
+			storageJSONFromAuth(refreshed),
 		)
 	}
 }
@@ -5559,7 +5863,8 @@ func TestExecutorAdapterMethods(t *testing.T) {
 			pluginapi.AuthRefreshResponse,
 			error,
 		) {
-			if req.AuthID != "auth-1" || req.AuthProvider != "plugin-provider" || req.Metadata["old"] != "value" {
+			if req.AuthID != "auth-1" || req.AuthProvider != "plugin-provider" ||
+				req.Metadata["old"] != "value" {
 				t.Fatalf("refresh request = %#v, want auth metadata", req)
 			}
 			if req.HTTPClient == nil {
@@ -5613,8 +5918,15 @@ func TestExecutorAdapterMethods(t *testing.T) {
 			pluginapi.ExecutorHTTPResponse,
 			error,
 		) {
-			if req.AuthID != "auth-1" || req.AuthProvider != "plugin-provider" || req.Method != http.MethodPatch ||
-				req.URL != "http://example.test/v1/raw?x=1" || req.Headers.Get("X-Raw") != "yes" || string(req.Body) != "raw-body" {
+			if req.AuthID != "auth-1" || req.AuthProvider != "plugin-provider" ||
+				req.Method != http.MethodPatch ||
+				req.URL !=
+					("http://example.test/v1/"+
+						"raw?x=1") ||
+				req.Headers.Get("X-Raw") !=
+					"yes" ||
+				string(req.Body) !=
+					"raw-body" {
 				t.Fatalf("http request = %#v, want mapped raw HTTP request", req)
 			}
 			if req.HTTPClient == nil {
@@ -5666,7 +5978,8 @@ func TestExecutorAdapterMethods(t *testing.T) {
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if string(resp.Payload) != "execute-response" || resp.Headers.Get("X-Execute") != "1" || resp.Metadata["phase"] != "execute" {
+	if string(resp.Payload) != "execute-response" || resp.Headers.Get("X-Execute") != "1" ||
+		resp.Metadata["phase"] != "execute" {
 		t.Fatalf("Execute() = %#v, want mapped response", resp)
 	}
 
@@ -5722,7 +6035,8 @@ func TestExecutorAdapterMethods(t *testing.T) {
 	if errHTTPRequest != nil {
 		t.Fatalf("HttpRequest() error = %v", errHTTPRequest)
 	}
-	if httpResp.StatusCode != http.StatusAccepted || httpResp.Status != "202 Accepted" || httpResp.Header.Get("X-Http") != "1" {
+	if httpResp.StatusCode != http.StatusAccepted || httpResp.Status != "202 Accepted" ||
+		httpResp.Header.Get("X-Http") != "1" {
 		t.Fatalf("HttpRequest() response = %#v, want mapped status/header", httpResp)
 	}
 	pluginHTTPBody[0] = 'X'
@@ -5732,7 +6046,11 @@ func TestExecutorAdapterMethods(t *testing.T) {
 		t.Fatalf("ReadAll(HttpRequest body) error = %v", errReadBody)
 	}
 	if string(body) != "http-response" || httpResp.Header.Get("X-Http") != "1" {
-		t.Fatalf("HttpRequest() response aliases plugin data: body=%q header=%q", body, httpResp.Header.Get("X-Http"))
+		t.Fatalf(
+			"HttpRequest() response aliases plugin data: body=%q header=%q",
+			body,
+			httpResp.Header.Get("X-Http"),
+		)
 	}
 	restoredRawBody, errReadRawBody := io.ReadAll(rawReq.Body)
 	if errReadRawBody != nil {
@@ -5754,9 +6072,13 @@ func TestExecutorAdapterMethods(t *testing.T) {
 func registerExecutorUsageCapture(t *testing.T) <-chan coreusage.Record {
 	t.Helper()
 	records := make(chan coreusage.Record, 4)
-	coreusage.RegisterNamedPlugin(t.Name(), coreUsagePluginFunc(func(_ context.Context, record coreusage.Record) {
-		records <- record
-	}))
+	coreusage.RegisterNamedPlugin(
+		t.Name(), coreUsagePluginFunc(
+			func(_ context.Context, record coreusage.Record) {
+				records <- record
+			},
+		),
+	)
 	t.Cleanup(func() { coreusage.UnregisterNamedPlugin(t.Name()).Wait() })
 	return records
 }
@@ -5784,11 +6106,13 @@ func assertNoSecondExecutorUsage(t *testing.T, records <-chan coreusage.Record) 
 func TestExecutorAdapterManagerEmptyStreamPublishesOneFailedRecord(t *testing.T) {
 	const requestedFormat sdktranslator.Format = "pluginhost-empty-stream-request"
 	const nativeFormat sdktranslator.Format = "pluginhost-empty-stream-native"
-	sdktranslator.Register(requestedFormat, nativeFormat, nil, sdktranslator.ResponseTransform{
-		Stream: func(context.Context, string, []byte, []byte, []byte, *any) [][]byte {
-			return nil
+	sdktranslator.Register(
+		requestedFormat, nativeFormat, nil, sdktranslator.ResponseTransform{
+			Stream: func(context.Context, string, []byte, []byte, []byte, *any) [][]byte {
+				return nil
+			},
 		},
-	})
+	)
 
 	for _, testCase := range []struct {
 		name       string
@@ -5796,80 +6120,109 @@ func TestExecutorAdapterManagerEmptyStreamPublishesOneFailedRecord(t *testing.T)
 		input      func() <-chan pluginapi.ExecutorStreamChunk
 	}{
 		{name: "nil channel", input: func() <-chan pluginapi.ExecutorStreamChunk { return nil }},
-		{name: "closed channel", input: func() <-chan pluginapi.ExecutorStreamChunk {
-			chunks := make(chan pluginapi.ExecutorStreamChunk)
-			close(chunks)
-			return chunks
-		}},
-		{name: "translated empty", translated: true, input: func() <-chan pluginapi.ExecutorStreamChunk {
-			chunks := make(chan pluginapi.ExecutorStreamChunk, 1)
-			chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}\n\n")}
-			close(chunks)
-			return chunks
-		}},
+		{
+			name: "closed channel", input: func() <-chan pluginapi.ExecutorStreamChunk {
+				chunks := make(chan pluginapi.ExecutorStreamChunk)
+				close(chunks)
+				return chunks
+			},
+		},
+		{
+			name: "translated empty", translated: true, input: func() <-chan pluginapi.ExecutorStreamChunk {
+				chunks := make(chan pluginapi.ExecutorStreamChunk, 1)
+				chunks <- pluginapi.ExecutorStreamChunk{
+					Payload: []byte(("data: {\"usage\":{\"input_tokens\":" +
+						"3,\"output_tokens\":" +
+						"4}}\n\n")),
+				}
+				close(chunks)
+				return chunks
+			},
+		},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			records := registerExecutorUsageCapture(t)
-			model := "plugin-usage-empty-" + strings.ReplaceAll(testCase.name, " ", "-")
-			auth := &coreauth.Auth{ID: "selected-" + model, Provider: "plugin-provider", Status: coreauth.StatusActive}
-			format := sdktranslator.FormatOpenAI
-			adapter := &executorAdapter{host: New(), pluginID: "empty-stream", provider: auth.Provider}
-			if testCase.translated {
-				format = requestedFormat
-				adapter.inputFormats = []sdktranslator.Format{requestedFormat}
-				adapter.outputFormats = []sdktranslator.Format{nativeFormat}
-			} else {
-				adapter.inputFormats = []sdktranslator.Format{format}
-				adapter.outputFormats = []sdktranslator.Format{format}
-			}
-			calls := 0
-			adapter.executor = &fakeExecutor{executeStream: func(_ context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-				calls++
-				if req.AuthID != auth.ID {
-					t.Fatalf("executor auth = %q, want %q", req.AuthID, auth.ID)
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				records := registerExecutorUsageCapture(t)
+				model := "plugin-usage-empty-" + strings.ReplaceAll(testCase.name, " ", "-")
+				auth := &coreauth.Auth{
+					ID: "selected-" + model, Provider: "plugin-provider", Status: coreauth.StatusActive,
 				}
-				return pluginapi.ExecutorStreamResponse{Chunks: testCase.input()}, nil
-			}}
-			manager := coreauth.NewManager(nil, nil, nil)
-			manager.SetRetryConfig(0, 0, 1)
-			manager.RegisterExecutor(adapter)
-			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
-				t.Fatalf("register selected credential: %v", errRegister)
-			}
-			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
-			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				format := sdktranslator.FormatOpenAI
+				adapter := &executorAdapter{host: New(), pluginID: "empty-stream", provider: auth.Provider}
+				if testCase.translated {
+					format = requestedFormat
+					adapter.inputFormats = []sdktranslator.Format{requestedFormat}
+					adapter.outputFormats = []sdktranslator.Format{nativeFormat}
+				} else {
+					adapter.inputFormats = []sdktranslator.Format{format}
+					adapter.outputFormats = []sdktranslator.Format{format}
+				}
+				calls := 0
+				adapter.executor = &fakeExecutor{
+					executeStream: func(
+						_ context.Context,
+						req pluginapi.ExecutorRequest,
+					) (pluginapi.ExecutorStreamResponse, error) {
+						calls++
+						if req.AuthID != auth.ID {
+							t.Fatalf("executor auth = %q, want %q", req.AuthID, auth.ID)
+						}
+						return pluginapi.ExecutorStreamResponse{Chunks: testCase.input()}, nil
+					},
+				}
+				manager := coreauth.NewManager(nil, nil, nil)
+				manager.SetRetryConfig(0, 0, 1)
+				manager.RegisterExecutor(adapter)
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatalf("register selected credential: %v", errRegister)
+				}
+				registry.GetGlobalRegistry().
+					RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 
-			result, errExecute := manager.ExecuteStream(context.Background(), []string{auth.Provider},
-				coreexecutor.Request{Model: model, Format: format, Payload: []byte(`{"model":"` + model + `"}`)},
-				coreexecutor.Options{Stream: true, SourceFormat: format, ResponseFormat: format})
-			if errExecute != nil || result == nil || result.Chunks == nil {
-				t.Fatalf("Manager.ExecuteStream() = %#v, %v", result, errExecute)
-			}
-			select {
-			case chunk, ok := <-result.Chunks:
-				var bootstrapErr *coreauth.Error
-				if !ok || !errors.As(chunk.Err, &bootstrapErr) || bootstrapErr.Code != "empty_stream" {
-					t.Fatalf("manager empty stream result = %#v, want empty_stream", chunk)
+				result, errExecute := manager.ExecuteStream(
+					context.Background(),
+					[]string{auth.Provider},
+					coreexecutor.Request{
+						Model:   model,
+						Format:  format,
+						Payload: []byte(`{"model":"` + model + `"}`),
+					},
+					coreexecutor.Options{Stream: true, SourceFormat: format, ResponseFormat: format},
+				)
+				if errExecute != nil || result == nil || result.Chunks == nil {
+					t.Fatalf("Manager.ExecuteStream() = %#v, %v", result, errExecute)
 				}
-			case <-time.After(time.Second):
-				t.Fatal("manager did not return empty_stream")
-			}
-			if calls != 1 {
-				t.Fatalf("plugin called %d times, want one selected attempt", calls)
-			}
-			selected, found := manager.GetByID(auth.ID)
-			if !found || selected == nil {
-				t.Fatal("selected credential missing after stream attempt")
-			}
-			record := readExecutorUsageRecord(t, records)
-			if !record.Failed || !record.Stream || record.AuthID != auth.ID || record.AuthIndex != selected.Index {
-				t.Fatalf("empty stream usage = %#v, want one failed record attributed to selected auth", record)
-			}
-			if testCase.translated && (record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4) {
-				t.Fatalf("translated empty stream discarded native usage: %#v", record.Detail)
-			}
-			assertNoSecondExecutorUsage(t, records)
-		})
+				select {
+				case chunk, ok := <-result.Chunks:
+					var bootstrapErr *coreauth.Error
+					if !ok || !errors.As(chunk.Err, &bootstrapErr) || bootstrapErr.Code != "empty_stream" {
+						t.Fatalf("manager empty stream result = %#v, want empty_stream", chunk)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("manager did not return empty_stream")
+				}
+				if calls != 1 {
+					t.Fatalf("plugin called %d times, want one selected attempt", calls)
+				}
+				selected, found := manager.GetByID(auth.ID)
+				if !found || selected == nil {
+					t.Fatal("selected credential missing after stream attempt")
+				}
+				record := readExecutorUsageRecord(t, records)
+				if !record.Failed || !record.Stream || record.AuthID != auth.ID ||
+					record.AuthIndex != selected.Index {
+					t.Fatalf(
+						"empty stream usage = %#v, want one failed record attributed to selected auth",
+						record,
+					)
+				}
+				if testCase.translated && (record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4) {
+					t.Fatalf("translated empty stream discarded native usage: %#v", record.Detail)
+				}
+				assertNoSecondExecutorUsage(t, records)
+			},
+		)
 	}
 }
 
@@ -5883,25 +6236,40 @@ func TestExecutorAdapterPublishesSelectedAuthResponsesUsage(t *testing.T) {
 				if req.AuthID != auth.ID {
 					t.Fatalf("plugin received auth %q, want %q", req.AuthID, auth.ID)
 				}
-				return pluginapi.ExecutorResponse{Payload: []byte(`{"usage":{"input_tokens":7,"output_tokens":9,"output_tokens_details":{"reasoning_tokens":2}},"service_tier":"priority"}`)}, nil
+				return pluginapi.ExecutorResponse{
+					Payload: []byte((`{"usage":{"input_tokens":7,"output_tokens":9,"output_tokens_details":{` +
+						`"reasoning_tokens":2}},"service_tier":"priority"}`)),
+				}, nil
 			},
 		},
-		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
 	}
-	req := coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1","service_tier":"flex"}`)}
+	req := coreexecutor.Request{
+		Model: "model-1", Format: sdktranslator.FormatOpenAIResponse,
+		Payload: []byte(`{"model":"model-1","service_tier":"flex"}`),
+	}
 	resp, err := adapter.Execute(context.Background(), auth, req, coreexecutor.Options{})
 	if err != nil || len(resp.Payload) == 0 {
 		t.Fatalf("Execute() = %#v, %v", resp, err)
 	}
 	record := readExecutorUsageRecord(t, records)
-	if record.Provider != "plugin-provider" || record.AuthID != auth.ID || record.AuthIndex != auth.Index || record.Stream || record.Failed {
+	if record.Provider != "plugin-provider" || record.AuthID != auth.ID || record.AuthIndex != auth.Index ||
+		record.Stream ||
+		record.Failed {
 		t.Fatalf("usage identity/outcome = %#v", record)
 	}
-	if record.Detail.InputTokens != 7 || record.Detail.OutputTokens != 9 || record.Detail.ReasoningTokens != 2 || record.Detail.TotalTokens != 16 {
+	if record.Detail.InputTokens != 7 || record.Detail.OutputTokens != 9 ||
+		record.Detail.ReasoningTokens != 2 ||
+		record.Detail.TotalTokens != 16 {
 		t.Fatalf("usage detail = %#v, want 7 input and 9 output tokens", record.Detail)
 	}
 	if record.RequestServiceTier != "flex" || record.ResponseServiceTier != "priority" {
-		t.Fatalf("usage service tiers = %q/%q, want flex/priority", record.RequestServiceTier, record.ResponseServiceTier)
+		t.Fatalf(
+			"usage service tiers = %q/%q, want flex/priority",
+			record.RequestServiceTier,
+			record.ResponseServiceTier,
+		)
 	}
 	assertNoSecondExecutorUsage(t, records)
 }
@@ -5909,20 +6277,36 @@ func TestExecutorAdapterPublishesSelectedAuthResponsesUsage(t *testing.T) {
 func TestExecutorAdapterPublishesStreamUsageAcrossChunks(t *testing.T) {
 	records := registerExecutorUsageCapture(t)
 	chunks := make(chan pluginapi.ExecutorStreamChunk, 4)
-	chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte(`data: {"type":"response.completed","usage":{"input_tokens":`)}
-	chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("5,\"output_tokens\":8},\"service_tier\":\"priority\"}\n\n")}
+	chunks <- pluginapi.ExecutorStreamChunk{
+		Payload: []byte((`data: {"type":"response.completed","usage":` +
+			`{"input_tokens":`)),
+	}
+	chunks <- pluginapi.ExecutorStreamChunk{
+		Payload: []byte(("5,\"output_tokens\":8},\"service_tier\":" +
+			"\"priority\"}\n\n")),
+	}
 	close(chunks)
 	adapter := &executorAdapter{
 		host: New(), pluginID: "stream-usage", provider: "plugin-provider",
-		executor: &fakeExecutor{executeStream: func(_ context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-			return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
-		}},
-		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		executor: &fakeExecutor{
+			executeStream: func(_ context.Context, _ pluginapi.ExecutorRequest) (
+				pluginapi.ExecutorStreamResponse,
+				error,
+			) {
+				return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
+			},
+		},
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
 	}
 	auth := &coreauth.Auth{ID: "stream-selected", Provider: "plugin-provider", Index: "stream-index"}
-	result, err := adapter.ExecuteStream(context.Background(), auth,
-		coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1"}`)},
-		coreexecutor.Options{Stream: true})
+	result, err := adapter.ExecuteStream(
+		context.Background(), auth,
+		coreexecutor.Request{
+			Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1"}`),
+		},
+		coreexecutor.Options{Stream: true},
+	)
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
 	}
@@ -5938,7 +6322,14 @@ func TestExecutorAdapterPublishesStreamUsageAcrossChunks(t *testing.T) {
 	}
 	record := readExecutorUsageRecord(t, records)
 	if record.AuthID != auth.ID || record.AuthIndex != auth.Index || !record.Stream || record.Failed ||
-		record.Detail.InputTokens != 5 || record.Detail.OutputTokens != 8 || record.Detail.TotalTokens != 13 || record.ResponseServiceTier != "priority" {
+		record.Detail.InputTokens !=
+			5 ||
+		record.Detail.OutputTokens !=
+			8 ||
+		record.Detail.TotalTokens !=
+			13 ||
+		record.ResponseServiceTier !=
+			"priority" {
 		t.Fatalf("stream usage = %#v, want selected credential and upstream token usage", record)
 	}
 	assertNoSecondExecutorUsage(t, records)
@@ -5948,20 +6339,34 @@ func TestExecutorAdapterPublishesPartialStreamUsageOnError(t *testing.T) {
 	records := registerExecutorUsageCapture(t)
 	streamErr := errors.New("plugin stream failed")
 	chunks := make(chan pluginapi.ExecutorStreamChunk, 3)
-	chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"usage\":{\"input_tokens\":3,\"output_tokens\":4},\"service_tier\":\"flex\"}\n\n")}
+	chunks <- pluginapi.ExecutorStreamChunk{
+		Payload: []byte(("data: {\"usage\":{\"input_tokens\":3," +
+			"\"output_tokens\":4},\"service_tier\":" +
+			"\"flex\"}\n\n")),
+	}
 	chunks <- pluginapi.ExecutorStreamChunk{Err: streamErr}
 	close(chunks)
 	adapter := &executorAdapter{
 		host: New(), pluginID: "stream-failure", provider: "plugin-provider",
-		executor: &fakeExecutor{executeStream: func(_ context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-			return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
-		}},
-		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		executor: &fakeExecutor{
+			executeStream: func(_ context.Context, _ pluginapi.ExecutorRequest) (
+				pluginapi.ExecutorStreamResponse,
+				error,
+			) {
+				return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
+			},
+		},
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
 	}
 	auth := &coreauth.Auth{ID: "failure-selected", Provider: "plugin-provider", Index: "failure-index"}
-	result, err := adapter.ExecuteStream(context.Background(), auth,
-		coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1"}`)},
-		coreexecutor.Options{Stream: true})
+	result, err := adapter.ExecuteStream(
+		context.Background(), auth,
+		coreexecutor.Request{
+			Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1"}`),
+		},
+		coreexecutor.Options{Stream: true},
+	)
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
 	}
@@ -5987,17 +6392,27 @@ func TestExecutorAdapterPublishesCanceledStreamUsage(t *testing.T) {
 	chunks := make(chan pluginapi.ExecutorStreamChunk)
 	adapter := &executorAdapter{
 		host: New(), pluginID: "stream-cancellation", provider: "plugin-provider",
-		executor: &fakeExecutor{executeStream: func(_ context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-			return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
-		}},
-		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		executor: &fakeExecutor{
+			executeStream: func(_ context.Context, _ pluginapi.ExecutorRequest) (
+				pluginapi.ExecutorStreamResponse,
+				error,
+			) {
+				return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
+			},
+		},
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	auth := &coreauth.Auth{ID: "cancel-selected", Provider: "plugin-provider", Index: "cancel-index"}
-	result, err := adapter.ExecuteStream(ctx, auth,
-		coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1"}`)},
-		coreexecutor.Options{Stream: true})
+	result, err := adapter.ExecuteStream(
+		ctx, auth,
+		coreexecutor.Request{
+			Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1"}`),
+		},
+		coreexecutor.Options{Stream: true},
+	)
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
 	}
@@ -6019,20 +6434,28 @@ func TestExecutorAdapterPublishesSelectedAuthFailure(t *testing.T) {
 	execErr := errors.New("plugin execution failed")
 	adapter := &executorAdapter{
 		host: New(), pluginID: "usage-failure", provider: "plugin-provider",
-		executor: &fakeExecutor{execute: func(_ context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-			return pluginapi.ExecutorResponse{}, execErr
-		}},
-		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
+		executor: &fakeExecutor{
+			execute: func(_ context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				return pluginapi.ExecutorResponse{}, execErr
+			},
+		},
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
 	}
 	auth := &coreauth.Auth{ID: "failed-selected", Provider: "plugin-provider", Index: "failed-index"}
-	_, err := adapter.Execute(context.Background(), auth,
-		coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAI, Payload: []byte(`{"model":"model-1"}`)},
-		coreexecutor.Options{})
+	_, err := adapter.Execute(
+		context.Background(), auth,
+		coreexecutor.Request{
+			Model: "model-1", Format: sdktranslator.FormatOpenAI, Payload: []byte(`{"model":"model-1"}`),
+		},
+		coreexecutor.Options{},
+	)
 	if !errors.Is(err, execErr) {
 		t.Fatalf("Execute() error = %v, want %v", err, execErr)
 	}
 	record := readExecutorUsageRecord(t, records)
-	if record.AuthID != auth.ID || record.AuthIndex != auth.Index || !record.Failed || record.Detail.TotalTokens != 0 {
+	if record.AuthID != auth.ID || record.AuthIndex != auth.Index || !record.Failed ||
+		record.Detail.TotalTokens != 0 {
 		t.Fatalf("failed executor usage = %#v, want failed selected credential", record)
 	}
 	assertNoSecondExecutorUsage(t, records)
@@ -6042,17 +6465,21 @@ func TestExecutorAdapterReturnsCheckedRequestTranslationFailure(t *testing.T) {
 	const source sdktranslator.Format = "pluginhost-checked-error-source"
 	const target sdktranslator.Format = "pluginhost-checked-error-target"
 	rejected := errors.New("unsupported request content")
-	sdktranslator.RegisterCheckedRequest(source, target, func(string, []byte, bool) ([]byte, error) {
-		return nil, rejected
-	})
+	sdktranslator.RegisterCheckedRequest(
+		source, target, func(string, []byte, bool) ([]byte, error) {
+			return nil, rejected
+		},
+	)
 	called := false
 	adapter := &executorAdapter{
 		host: New(), pluginID: "checked-translation", provider: "test",
 		inputFormats: []sdktranslator.Format{target}, outputFormats: []sdktranslator.Format{target},
-		executor: &fakeExecutor{execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-			called = true
-			return pluginapi.ExecutorResponse{}, nil
-		}},
+		executor: &fakeExecutor{
+			execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				called = true
+				return pluginapi.ExecutorResponse{}, nil
+			},
+		},
 	}
 	req := coreexecutor.Request{Model: "m", Format: source, Payload: []byte(`{"input":[]}`)}
 	opts := coreexecutor.Options{SourceFormat: source, ResponseFormat: target}
@@ -6062,7 +6489,8 @@ func TestExecutorAdapterReturnsCheckedRequestTranslationFailure(t *testing.T) {
 }
 
 func TestExecutorAdapterUsesResponseFormatForOutputTranslation(t *testing.T) {
-	claudeResponse := []byte(`{"id":"msg_1","type":"message","model":"claude-test","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	claudeResponse := []byte(`{"id":"msg_1","type":"message","model":"claude-test","role":"assistant",` +
+		`"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
 	openAIRequest := []byte(`{"model":"model-1","messages":[{"role":"user","content":"hi"}]}`)
 
 	var captured pluginapi.ExecutorRequest
@@ -6099,7 +6527,8 @@ func TestExecutorAdapterUsesResponseFormatForOutputTranslation(t *testing.T) {
 	if captured.Format != sdktranslator.FormatClaude.String() {
 		t.Fatalf("executor Format = %q, want %q", captured.Format, sdktranslator.FormatClaude)
 	}
-	if bytes.Equal(captured.Payload, openAIRequest) || !bytes.Contains(captured.Payload, []byte(`"max_tokens":32000`)) {
+	if bytes.Equal(captured.Payload, openAIRequest) ||
+		!bytes.Contains(captured.Payload, []byte(`"max_tokens":32000`)) {
 		t.Fatalf("executor payload = %s, want translated Claude request", captured.Payload)
 	}
 	if !bytes.Equal(resp.Payload, claudeResponse) {
@@ -6173,7 +6602,10 @@ func TestExecutorAdapterSelectsCustomOutputWithHostResponseTranslator(t *testing
 	}
 	if captured.FromFormat != customOutputFormat.String() || captured.ToFormat != requestedFormat.String() {
 		t.Fatalf(
-			"translator formats = %q -> %q, want %q -> %q", captured.FromFormat, captured.ToFormat, customOutputFormat,
+			"translator formats = %q -> %q, want %q -> %q",
+			captured.FromFormat,
+			captured.ToFormat,
+			customOutputFormat,
 			requestedFormat,
 		)
 	}
@@ -6187,10 +6619,12 @@ func TestExecutorAdapterSelectsCustomOutputWithHostResponseTranslator(t *testing
 
 func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T) {
 	adapter := &executorAdapter{}
-	request := []byte(`{"model":"qmodel_latest","stream":true,"tool_choice":"auto","parallel_tool_calls":true}`)
+	//goland:noinspection SpellCheckingInspection
+	const model = "qmodel_latest"
+	request := []byte(`{"model":"` + model + `","stream":true,"tool_choice":"auto","parallel_tool_calls":true}`)
 	prepared := preparedExecutorCall{
 		req: coreexecutor.Request{
-			Model:   "qmodel_latest",
+			Model:   model,
 			Payload: request,
 		},
 		opts: coreexecutor.Options{
@@ -6201,28 +6635,37 @@ func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T
 	}
 	var param any
 
-	startPayload := []byte(`{"choices":[{"delta":{"content":"","tool_calls":[{"function":{"arguments":"","name":"get_weather"},"id":"call_69755759d70640e3b7a42805","index":0,"type":"function"}]},"index":0}],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk"}`)
+	startPayload := []byte(`{"choices":[{"delta":{"content":"","tool_calls":[{"function":` +
+		`{"arguments":"","name":"get_weather"},"id":"call_69755759d70640e3b7a42805","index":0,"type":"function"}]},` +
+		`"index":0}],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa",` +
+		`"model":"auto","object":"chat.completion.chunk"}`)
 	if got := adapter.translateExecutorStreamPayload(
 		context.Background(), prepared, startPayload, &param,
 	); len(got) == 0 {
 		t.Fatal("tool call start payload was not translated")
 	}
 
-	emptyArgumentsPayload := []byte(`{"choices":[{"delta":{"content":"","tool_calls":[{"function":{"arguments":""},"id":"","index":0,"type":"function"}]},"index":0}],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk"}`)
+	emptyArgumentsPayload := []byte(`{"choices":[{"delta":{"content":"","tool_calls":[{"function":{"arguments":""},` +
+		`"id":"","index":0,"type":"function"}]},"index":0}],"created":1780767281,` +
+		`"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk"}`)
 	if got := adapter.translateExecutorStreamPayload(
 		context.Background(), prepared, emptyArgumentsPayload, &param,
 	); len(got) != 0 {
 		t.Fatalf("empty arguments payload leaked through translation fallback: %q", got[0])
 	}
 
-	finishPayload := []byte(`{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk"}`)
+	finishPayload := []byte(`{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"created":1780767281,` +
+		`"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk"}`)
 	if got := adapter.translateExecutorStreamPayload(
 		context.Background(), prepared, finishPayload, &param,
 	); len(got) == 0 {
 		t.Fatal("finish payload was not translated")
 	}
 
-	usagePayload := []byte(`{"choices":[],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk","usage":{"completion_tokens":179,"completion_tokens_details":{"reasoning_tokens":121},"prompt_tokens":331,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":510}}`)
+	usagePayload := []byte(`{"choices":[],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa",` +
+		`"model":"auto","object":"chat.completion.chunk","usage":{"completion_tokens":179,` +
+		`"completion_tokens_details":{"reasoning_tokens":121},"prompt_tokens":331,` +
+		`"prompt_tokens_details":{"cached_tokens":0},"total_tokens":510}}`)
 	if got := adapter.translateExecutorStreamPayload(
 		context.Background(), prepared, usagePayload, &param,
 	); len(got) != 0 {
@@ -6258,7 +6701,8 @@ func TestExecutorAdapterClosedStreamEmitsSuccessTail(t *testing.T) {
 	}
 	input := make(chan pluginapi.ExecutorStreamChunk, 1)
 	input <- pluginapi.ExecutorStreamChunk{
-		Payload: []byte(`{"choices":[{"delta":{"content":"hello"},"index":0}],"model":"model-1","object":"chat.completion.chunk"}`),
+		Payload: []byte((`{"choices":[{"delta":{"content":"hello"},"index":0}],"model":` +
+			`"model-1","object":"chat.completion.chunk"}`)),
 	}
 	close(input)
 
@@ -6889,7 +7333,10 @@ func (e *fakeExecutor) Identifier() string {
 	return e.identifier
 }
 
-func (e *fakeExecutor) Execute(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+func (e *fakeExecutor) Execute(
+	ctx context.Context,
+	req pluginapi.ExecutorRequest,
+) (pluginapi.ExecutorResponse, error) {
 	return e.execute(ctx, req)
 }
 
@@ -6919,10 +7366,25 @@ func (e *fakeExecutor) HttpRequest(
 
 func assertExecutorRequest(t *testing.T, req pluginapi.ExecutorRequest) {
 	t.Helper()
-	if req.AuthID != "auth-1" || req.AuthProvider != "plugin-provider" || req.Model != "model-1" || req.Format != sdktranslator.FormatOpenAI.String() ||
-		!req.Stream || req.Alt != "alt" || req.Headers.Get("X-Request") != "yes" || string(req.OriginalRequest) != "original" ||
-		req.SourceFormat != sdktranslator.FormatOpenAI.String() || string(req.Payload) != "payload" ||
-		req.Metadata["req"] != "metadata" || req.Metadata["opt"] != "metadata" {
+	if req.AuthID !=
+		"auth-1" ||
+		req.AuthProvider !=
+			"plugin-provider" ||
+		req.Model !=
+			"model-1" ||
+		req.Format !=
+			sdktranslator.FormatOpenAI.String() ||
+		!req.Stream ||
+		req.Alt !=
+			"alt" ||
+		req.Headers.Get("X-Request") !=
+			"yes" ||
+		string(req.OriginalRequest) !=
+			"original" ||
+		req.SourceFormat != sdktranslator.FormatOpenAI.String() ||
+		string(req.Payload) != "payload" ||
+		req.Metadata["req"] != "metadata" ||
+		req.Metadata["opt"] != "metadata" {
 		t.Fatalf("executor request = %#v, want mapped request", req)
 	}
 }
@@ -6939,63 +7401,93 @@ func (failingReadCloser) Close() error {
 }
 
 func TestHasAuthModelProviderDoesNotRunDiscovery(t *testing.T) {
-	for _, mode := range []string{"auth", "executor", "registered", "static-only", "fused", "unloaded", "no-model-provider"} {
-		t.Run(mode, func(t *testing.T) {
-			calls := 0
-			caps := pluginapi.Capabilities{
-				ModelProvider: modelProviderFunc{
-					staticModels: func(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
-						t.Error("ownership lookup called StaticModels")
-						return pluginapi.ModelResponse{}, nil
+	for _, mode := range []string{
+		"auth", "executor", "registered", "static-only", "fused", "unloaded", "no-model-provider",
+	} {
+		t.Run(
+			mode, func(t *testing.T) {
+				calls := 0
+				caps := pluginapi.Capabilities{
+					ModelProvider: modelProviderFunc{
+						staticModels: func(context.Context, pluginapi.StaticModelRequest) (
+							pluginapi.ModelResponse,
+							error,
+						) {
+							t.Error("ownership lookup called StaticModels")
+							return pluginapi.ModelResponse{}, nil
+						},
+						modelsForAuth: func(context.Context, pluginapi.AuthModelRequest) (
+							pluginapi.ModelResponse,
+							error,
+						) {
+							calls++
+							return pluginapi.ModelResponse{
+								Provider: "antigravity", Models: []pluginapi.ModelInfo{{ID: "plugin-model"}},
+								AuthUpdate: pluginapi.AuthData{
+									Metadata: map[string]any{"access_token": "rotated"},
+								},
+							}, nil
+						},
 					},
-					modelsForAuth: func(context.Context, pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
-						calls++
-						return pluginapi.ModelResponse{Provider: "antigravity", Models: []pluginapi.ModelInfo{{ID: "plugin-model"}}, AuthUpdate: pluginapi.AuthData{Metadata: map[string]any{"access_token": "rotated"}}}, nil
+				}
+				switch mode {
+				case "executor", "static-only":
+					caps.Executor = &fakeExecutor{identifier: "antigravity"}
+					caps.ExecutorModelScope = pluginapi.ExecutorModelScopeOAuth
+					if mode == "static-only" {
+						caps.ExecutorModelScope = pluginapi.ExecutorModelScopeStatic
+					}
+				case "registered":
+				default:
+					caps.AuthProvider = fakeAuthProvider{identifier: "antigravity"}
+				}
+				if mode == "no-model-provider" {
+					caps.ModelProvider = nil
+				}
+				host := newHostWithRecords(
+					capabilityRecord{
+						id: "ownership", plugin: pluginapi.Plugin{Capabilities: caps},
 					},
-				},
-			}
-			switch mode {
-			case "executor", "static-only":
-				caps.Executor = &fakeExecutor{identifier: "antigravity"}
-				caps.ExecutorModelScope = pluginapi.ExecutorModelScopeOAuth
-				if mode == "static-only" {
-					caps.ExecutorModelScope = pluginapi.ExecutorModelScopeStatic
+				)
+				if mode == "registered" {
+					host.modelProviders["ownership"] = "antigravity"
 				}
-			case "registered":
-			default:
-				caps.AuthProvider = fakeAuthProvider{identifier: "antigravity"}
-			}
-			if mode == "no-model-provider" {
-				caps.ModelProvider = nil
-			}
-			host := newHostWithRecords(capabilityRecord{id: "ownership", plugin: pluginapi.Plugin{Capabilities: caps}})
-			if mode == "registered" {
-				host.modelProviders["ownership"] = "antigravity"
-			}
-			if mode == "fused" {
-				host.fused["ownership"] = "test"
-			}
-			if mode == "unloaded" {
-				host.snapshot.Store(emptySnapshot())
-			}
-			want := mode == "auth" || mode == "executor" || mode == "registered"
-			for range 100 {
-				if got := host.HasOAuthModelProvider(" ANTIGRAVITY "); got != want {
-					t.Fatalf("ownership=%v, want %v", got, want)
+				if mode == "fused" {
+					host.fused["ownership"] = "test"
 				}
-			}
-			if calls != 0 || host.HasOAuthModelProvider("claude") || host.HasOAuthModelProvider("") {
-				t.Fatal("ownership lookup executed discovery or matched an unrelated provider")
-			}
-			// The normal registration path must still consume discovery and auth updates.
-			result := host.ModelsForAuth(t.Context(), &coreauth.Auth{ID: "account", Provider: "antigravity"})
-			if result.Handled != want {
-				t.Fatal("ownership lookup disagrees with per-auth dispatch")
-			}
-			if want && (calls != 1 || result.Auth == nil || result.Auth.Metadata["access_token"] != "rotated" || len(result.Models) != 1) {
-				t.Fatal("normal discovery lost model or credential updates")
-			}
-		})
+				if mode == "unloaded" {
+					host.snapshot.Store(emptySnapshot())
+				}
+				want := mode == "auth" || mode == "executor" || mode == "registered"
+				for range 100 {
+					if got := host.HasOAuthModelProvider(" ANTIGRAVITY "); got != want {
+						t.Fatalf("ownership=%v, want %v", got, want)
+					}
+				}
+				if calls != 0 || host.HasOAuthModelProvider("claude") || host.HasOAuthModelProvider("") {
+					t.Fatal("ownership lookup executed discovery or matched an unrelated provider")
+				}
+				// The normal registration path must still consume discovery and auth updates.
+				result := host.ModelsForAuth(
+					t.Context(),
+					&coreauth.Auth{ID: "account", Provider: "antigravity"},
+				)
+				if result.Handled != want {
+					t.Fatal("ownership lookup disagrees with per-auth dispatch")
+				}
+				if want &&
+					(calls !=
+						1 ||
+						result.Auth ==
+							nil ||
+						result.Auth.Metadata["access_token"] !=
+							"rotated" ||
+						len(result.Models) !=
+							1) {
+					t.Fatal("normal discovery lost model or credential updates")
+				}
+			},
+		)
 	}
 	var host *Host
 	if host.HasOAuthModelProvider("antigravity") {
@@ -7003,6 +7495,7 @@ func TestHasAuthModelProviderDoesNotRunDiscovery(t *testing.T) {
 	}
 }
 
+// noinspection GoTypeAssertionOnErrors
 func TestExecutorAdapterResponseTranslationOutcome(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
@@ -7022,122 +7515,198 @@ func TestExecutorAdapterResponseTranslationOutcome(t *testing.T) {
 				name = mode + "/valid"
 				arguments = `{"input":"*** Begin Patch\n*** End Patch"}`
 			}
-			t.Run(name, func(t *testing.T) {
-				records := registerExecutorUsageCapture(t)
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				request := []byte(`{"model":"model-1","input":[{"role":"user","content":"synthetic"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
-				auth := &coreauth.Auth{ID: "synthetic-translation", Provider: "plugin-provider", Index: "synthetic-index"}
-				function := map[string]any{"name": "apply_patch", "arguments": arguments}
-				message := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "call_1", "type": "function", "function": function}}}
-				usage := map[string]any{"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
-				payload, err := json.Marshal(map[string]any{"id": "chatcmpl_synthetic", "model": "model-1", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "tool_calls"}}, "usage": usage})
-				if err != nil {
-					t.Fatal(err)
-				}
-				var producerContext context.Context
-				adapter := &executorAdapter{
-					host: New(), pluginID: "synthetic-translation", provider: auth.Provider,
-					inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
-					executor: &fakeExecutor{
-						execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-							return pluginapi.ExecutorResponse{Payload: payload}, nil
+			t.Run(
+				name, func(t *testing.T) {
+					records := registerExecutorUsageCapture(t)
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					request := []byte(
+						(`{"model":"model-1","input":[{"role":"user","content":"synthetic"}],` +
+							`"tools":[{"type":"custom","name":` +
+							`"apply_patch"}]}`),
+					)
+					auth := &coreauth.Auth{
+						ID: "synthetic-translation", Provider: "plugin-provider", Index: "synthetic-index",
+					}
+					function := map[string]any{"name": "apply_patch", "arguments": arguments}
+					message := map[string]any{
+						"role": "assistant",
+						"tool_calls": []any{
+							map[string]any{"id": "call_1", "type": "function", "function": function},
 						},
-						executeStream: func(sourceCtx context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-							producerContext = sourceCtx
-							chunks := make(chan pluginapi.ExecutorStreamChunk, 3)
-							call := map[string]any{"index": 0, "id": "call_1", "type": "function", "function": function}
-							first, errMarshal := json.Marshal(map[string]any{"id": "chatcmpl_synthetic", "model": "model-1", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "tool_calls": []any{call}}, "finish_reason": nil}}, "usage": usage})
-							if errMarshal != nil {
-								t.Fatal(errMarshal)
-							}
-							last, errMarshal := json.Marshal(map[string]any{"id": "chatcmpl_synthetic", "model": "model-1", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}}, "usage": usage})
-							if errMarshal != nil {
-								t.Fatal(errMarshal)
-							}
-							chunks <- pluginapi.ExecutorStreamChunk{Payload: append(append([]byte("data: "), first...), '\n', '\n')}
-							chunks <- pluginapi.ExecutorStreamChunk{Payload: append(append([]byte("data: "), last...), '\n', '\n')}
-							chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
-							close(chunks)
-							return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
+					}
+					usage := map[string]any{"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
+					payload, err := json.Marshal(
+						map[string]any{
+							"id": "chatcmpl_synthetic", "model": "model-1", "choices": []any{
+								map[string]any{
+									"index": 0, "message": message, "finish_reason": "tool_calls",
+								},
+							}, "usage": usage,
 						},
-					},
-				}
-				req := coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: request}
-				opts := coreexecutor.Options{Stream: stream, SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: request}
-				if !testCase.original {
-					opts.OriginalRequest = nil
-				}
-				var executionErr error
-				if stream {
-					result, errExecute := adapter.ExecuteStream(ctx, auth, req, opts)
-					executionErr = errExecute
-					if errExecute == nil {
-						for chunk := range result.Chunks {
-							if chunk.Err != nil {
-								executionErr = chunk.Err
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var producerContext context.Context
+					adapter := &executorAdapter{
+						host: New(), pluginID: "synthetic-translation", provider: auth.Provider,
+						inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
+						outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
+						executor: &fakeExecutor{
+							execute: func(context.Context, pluginapi.ExecutorRequest) (
+								pluginapi.ExecutorResponse,
+								error,
+							) {
+								return pluginapi.ExecutorResponse{Payload: payload}, nil
+							},
+							executeStream: func(
+								sourceCtx context.Context,
+								_ pluginapi.ExecutorRequest,
+							) (pluginapi.ExecutorStreamResponse, error) {
+								producerContext = sourceCtx
+								chunks := make(chan pluginapi.ExecutorStreamChunk, 3)
+								call := map[string]any{
+									"index": 0, "id": "call_1", "type": "function", "function": function,
+								}
+								first, errMarshal := json.Marshal(
+									map[string]any{
+										"id": "chatcmpl_synthetic", "model": "model-1", "choices": []any{
+											map[string]any{
+												"index": 0,
+												"delta": map[string]any{
+													"role":       "assistant",
+													"tool_calls": []any{call},
+												},
+												"finish_reason": nil,
+											},
+										}, "usage": usage,
+									},
+								)
+								if errMarshal != nil {
+									t.Fatal(errMarshal)
+								}
+								last, errMarshal := json.Marshal(
+									map[string]any{
+										"id": "chatcmpl_synthetic", "model": "model-1", "choices": []any{
+											map[string]any{
+												"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls",
+											},
+										}, "usage": usage,
+									},
+								)
+								if errMarshal != nil {
+									t.Fatal(errMarshal)
+								}
+								chunks <- pluginapi.ExecutorStreamChunk{
+									Payload: append(
+										append(
+											[]byte("data: "), first...,
+										), '\n', '\n',
+									),
+								}
+								chunks <- pluginapi.ExecutorStreamChunk{
+									Payload: append(
+										append(
+											[]byte("data: "), last...,
+										), '\n', '\n',
+									),
+								}
+								chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+								close(chunks)
+								return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
+							},
+						},
+					}
+					req := coreexecutor.Request{
+						Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: request,
+					}
+					opts := coreexecutor.Options{
+						Stream: stream, SourceFormat: sdktranslator.FormatOpenAIResponse,
+						ResponseFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: request,
+					}
+					if !testCase.original {
+						opts.OriginalRequest = nil
+					}
+					var executionErr error
+					if stream {
+						result, errExecute := adapter.ExecuteStream(ctx, auth, req, opts)
+						executionErr = errExecute
+						if errExecute == nil {
+							for chunk := range result.Chunks {
+								if chunk.Err != nil {
+									executionErr = chunk.Err
+								}
 							}
 						}
+					} else {
+						_, executionErr = adapter.Execute(ctx, auth, req, opts)
 					}
-				} else {
-					_, executionErr = adapter.Execute(ctx, auth, req, opts)
-				}
-				if stream {
-					select {
-					case <-producerContext.Done():
-					case <-time.After(time.Second):
-						t.Error("plugin source context remains active after stream completion")
+					if stream {
+						select {
+						case <-producerContext.Done():
+						case <-time.After(time.Second):
+							t.Error("plugin source context remains active after stream completion")
+						}
+						if ctx.Err() != nil {
+							t.Errorf("stream completion canceled caller context: %v", ctx.Err())
+						}
 					}
-					if ctx.Err() != nil {
-						t.Errorf("stream completion canceled caller context: %v", ctx.Err())
+					if valid && executionErr != nil {
+						t.Errorf("valid translated response failed: %v", executionErr)
 					}
-				}
-				if valid && executionErr != nil {
-					t.Errorf("valid translated response failed: %v", executionErr)
-				}
-				if !valid {
-					statusError, ok := executionErr.(interface{ StatusCode() int })
-					if !ok || statusError.StatusCode() != http.StatusBadGateway {
-						t.Errorf("invalid tool translation error = %v, want SDK 502", executionErr)
+					if !valid {
+						statusError, ok := executionErr.(interface{ StatusCode() int })
+						if !ok || statusError.StatusCode() != http.StatusBadGateway {
+							t.Errorf("invalid tool translation error = %v, want SDK 502", executionErr)
+						}
+						if scoped, ok := executionErr.(coreexecutor.RequestScopedError); !ok ||
+							!scoped.IsRequestScoped() {
+							t.Errorf("translation error can affect credential availability: %v", executionErr)
+						}
 					}
-					if scoped, ok := executionErr.(coreexecutor.RequestScopedError); !ok || !scoped.IsRequestScoped() {
-						t.Errorf("translation error can affect credential availability: %v", executionErr)
+					record := readExecutorUsageRecord(t, records)
+					if record.Failed == valid || record.AuthID != auth.ID || record.Stream != stream {
+						t.Errorf("translation usage outcome = %#v, valid=%v stream=%v", record, valid, stream)
 					}
-				}
-				record := readExecutorUsageRecord(t, records)
-				if record.Failed == valid || record.AuthID != auth.ID || record.Stream != stream {
-					t.Errorf("translation usage outcome = %#v, valid=%v stream=%v", record, valid, stream)
-				}
-				if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 {
-					t.Errorf("translation discarded observed usage: %#v", record.Detail)
-				}
-				assertNoSecondExecutorUsage(t, records)
-			})
+					if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 {
+						t.Errorf("translation discarded observed usage: %#v", record.Detail)
+					}
+					assertNoSecondExecutorUsage(t, records)
+				},
+			)
 		}
 	}
 }
 
+// noinspection GoDfaErrorMayBeNotNil,GoTypeAssertionOnErrors
 func TestExecutorAdapterCountReturnsResponseTranslationFailure(t *testing.T) {
 	const requested sdktranslator.Format = "plugin-count-translation-client"
 	const native sdktranslator.Format = "plugin-count-translation-native"
-	sdktranslator.Register(requested, native, nil, sdktranslator.ResponseTransform{
-		NonStream: func(_ context.Context, _ string, _, _, _ []byte, param *any) []byte {
-			if param != nil {
-				*param = executorResponseFailureState{}
-			}
-			return []byte(`{"count":7}`)
+	sdktranslator.Register(
+		requested, native, nil, sdktranslator.ResponseTransform{
+			NonStream: func(_ context.Context, _ string, _, _, _ []byte, param *any) []byte {
+				if param != nil {
+					*param = executorResponseFailureState{}
+				}
+				return []byte(`{"count":7}`)
+			},
 		},
-	})
+	)
 	adapter := &executorAdapter{
 		host: New(), pluginID: "synthetic-count-translation", provider: "plugin-provider",
 		inputFormats: []sdktranslator.Format{requested}, outputFormats: []sdktranslator.Format{native},
-		executor: &fakeExecutor{countTokens: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-			return pluginapi.ExecutorResponse{Payload: []byte(`{"count":7}`)}, nil
-		}},
+		executor: &fakeExecutor{
+			countTokens: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				return pluginapi.ExecutorResponse{Payload: []byte(`{"count":7}`)}, nil
+			},
+		},
 	}
-	response, err := adapter.CountTokens(context.Background(), &coreauth.Auth{},
+	response, err := adapter.CountTokens(
+		context.Background(), &coreauth.Auth{},
 		coreexecutor.Request{Model: "model-1", Payload: []byte(`{"input":"synthetic"}`)},
-		coreexecutor.Options{SourceFormat: requested, ResponseFormat: requested})
+		coreexecutor.Options{SourceFormat: requested, ResponseFormat: requested},
+	)
 	status, ok := err.(interface{ StatusCode() int })
 	if !ok || status.StatusCode() != http.StatusBadGateway || len(response.Payload) != 0 {
 		t.Fatalf("count translation result = %#v, %v; want empty response and SDK 502", response, err)

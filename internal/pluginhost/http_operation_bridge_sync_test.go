@@ -41,25 +41,37 @@ func testHostHTTPCancel(t *testing.T, host *Host, caller context.Context, operat
 func TestHostHTTPCancelBeforeStreamHeaders(t *testing.T) {
 	started := make(chan struct{})
 	upstreamDone := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
-		close(started)
-		<-request.Context().Done()
-		close(upstreamDone)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(_ http.ResponseWriter, request *http.Request) {
+				close(started)
+				<-request.Context().Done()
+				close(upstreamDone)
+			},
+		),
+	)
 	defer server.Close()
 
 	host := New()
-	parent, cancelParent := context.WithCancel(context.Background())
+	parent, cancelParent := context.WithCancel(t.Context())
 	defer cancelParent()
 	instance := &hostCallbackInstance{}
-	caller := withHostCallbackInstance(withHostCallbackInstanceID(withHostCallbackPluginID(context.Background(), "first"), 7), instance)
+	caller := withHostCallbackInstance(
+		withHostCallbackInstanceID(
+			withHostCallbackPluginID(
+				context.Background(), "first",
+			), 7,
+		), instance,
+	)
 	callbackID, closeCallback := host.openCallbackContextForPluginInstance(parent, "first", instance)
 	defer closeCallback()
 	operationID := testHostHTTPOperation(t, host, caller, callbackID)
 
-	request, errMarshal := json.Marshal(map[string]string{
-		"host_callback_id": callbackID, "operation_id": operationID, "url": server.URL,
-	})
+	request, errMarshal := json.Marshal(
+		map[string]string{
+			"host_callback_id": callbackID, "operation_id": operationID, "url": server.URL,
+		},
+	)
 	if errMarshal != nil {
 		t.Fatal(errMarshal)
 	}
@@ -96,12 +108,30 @@ func TestHostHTTPCancelBeforeStreamHeaders(t *testing.T) {
 func TestHostHTTPOperationRejectsForeignOwnerAndClosesWithCallback(t *testing.T) {
 	host := New()
 	instance := &hostCallbackInstance{}
-	caller := withHostCallbackInstance(withHostCallbackInstanceID(withHostCallbackPluginID(context.Background(), "first"), 7), instance)
+	caller := withHostCallbackInstance(
+		withHostCallbackInstanceID(
+			withHostCallbackPluginID(
+				context.Background(), "first",
+			), 7,
+		), instance,
+	)
 	callbackID, closeCallback := host.openCallbackContextForPluginInstance(context.Background(), "first", instance)
 	defer closeCallback()
 	operationID := testHostHTTPOperation(t, host, caller, callbackID)
-	foreignPlugin := withHostCallbackInstance(withHostCallbackInstanceID(withHostCallbackPluginID(context.Background(), "second"), 7), instance)
-	foreignInstance := withHostCallbackInstance(withHostCallbackInstanceID(withHostCallbackPluginID(context.Background(), "first"), 8), &hostCallbackInstance{})
+	foreignPlugin := withHostCallbackInstance(
+		withHostCallbackInstanceID(
+			withHostCallbackPluginID(
+				context.Background(), "second",
+			), 7,
+		), instance,
+	)
+	foreignInstance := withHostCallbackInstance(
+		withHostCallbackInstanceID(
+			withHostCallbackPluginID(
+				context.Background(), "first",
+			), 8,
+		), &hostCallbackInstance{},
+	)
 	for _, other := range []context.Context{foreignPlugin, foreignInstance} {
 		testHostHTTPCancel(t, host, other, operationID)
 	}
@@ -129,7 +159,13 @@ func TestHostHTTPOperationRejectsForeignOwnerAndClosesWithCallback(t *testing.T)
 func TestHostHTTPOperationCloseInstanceRejectsLateOpen(t *testing.T) {
 	host := New()
 	instance := &hostCallbackInstance{}
-	caller := withHostCallbackInstance(withHostCallbackInstanceID(withHostCallbackPluginID(context.Background(), "first"), 7), instance)
+	caller := withHostCallbackInstance(
+		withHostCallbackInstanceID(
+			withHostCallbackPluginID(
+				context.Background(), "first",
+			), 7,
+		), instance,
+	)
 	firstID := testHostHTTPOperation(t, host, caller, "")
 	host.httpOperations.closeInstance("first", instance)
 	request, errMarshal := json.Marshal(map[string]string{"operation_id": firstID})
@@ -143,7 +179,13 @@ func TestHostHTTPOperationCloseInstanceRejectsLateOpen(t *testing.T) {
 		!strings.Contains(errCall.Error(), "closed") {
 		t.Fatalf("late operation open error = %v, want closed instance", errCall)
 	}
-	fresh := withHostCallbackInstance(withHostCallbackInstanceID(withHostCallbackPluginID(context.Background(), "first"), 8), &hostCallbackInstance{})
+	fresh := withHostCallbackInstance(
+		withHostCallbackInstanceID(
+			withHostCallbackPluginID(
+				context.Background(), "first",
+			), 8,
+		), &hostCallbackInstance{},
+	)
 	freshID := testHostHTTPOperation(t, host, fresh, "")
 	testHostHTTPCancel(t, host, fresh, freshID)
 }
@@ -151,26 +193,32 @@ func TestHostHTTPOperationCloseInstanceRejectsLateOpen(t *testing.T) {
 func TestHostHTTPCancelWhileReadingBody(t *testing.T) {
 	started := make(chan struct{})
 	upstreamDone := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		_, _ = w.Write([]byte("partial"))
-		w.(http.Flusher).Flush()
-		close(started)
-		<-request.Context().Done()
-		close(upstreamDone)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				_, _ = w.Write([]byte("partial"))
+				w.(http.Flusher).Flush()
+				close(started)
+				<-request.Context().Done()
+				close(upstreamDone)
+			},
+		),
+	)
 	defer server.Close()
 
 	host := New()
-	parent, cancelParent := context.WithCancel(context.Background())
+	parent, cancelParent := context.WithCancel(t.Context())
 	defer cancelParent()
 	instance := &hostCallbackInstance{}
 	caller := withHostCallbackInstance(withHostCallbackPluginID(context.Background(), "first"), instance)
 	callbackID, closeCallback := host.openCallbackContextForPluginInstance(parent, "first", instance)
 	defer closeCallback()
 	operationID := testHostHTTPOperation(t, host, caller, callbackID)
-	request, errMarshal := json.Marshal(map[string]string{
-		"host_callback_id": callbackID, "operation_id": operationID, "url": server.URL,
-	})
+	request, errMarshal := json.Marshal(
+		map[string]string{
+			"host_callback_id": callbackID, "operation_id": operationID, "url": server.URL,
+		},
+	)
 	if errMarshal != nil {
 		t.Fatal(errMarshal)
 	}
@@ -202,24 +250,36 @@ func TestHostHTTPCancelWhileReadingBody(t *testing.T) {
 
 func TestHostHTTPCancelAfterStreamHeadersReleasesResources(t *testing.T) {
 	upstreamDone := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("ready"))
-		w.(http.Flusher).Flush()
-		<-request.Context().Done()
-		close(upstreamDone)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("ready"))
+				w.(http.Flusher).Flush()
+				<-request.Context().Done()
+				close(upstreamDone)
+			},
+		),
+	)
 	defer server.Close()
 
 	host := New()
 	instance := &hostCallbackInstance{}
-	caller := withHostCallbackInstance(withHostCallbackInstanceID(withHostCallbackPluginID(context.Background(), "first"), 7), instance)
+	caller := withHostCallbackInstance(
+		withHostCallbackInstanceID(
+			withHostCallbackPluginID(
+				context.Background(), "first",
+			), 7,
+		), instance,
+	)
 	callbackID, closeCallback := host.openCallbackContextForPluginInstance(context.Background(), "first", instance)
 	defer closeCallback()
 	operationID := testHostHTTPOperation(t, host, caller, callbackID)
-	request, errMarshal := json.Marshal(map[string]string{
-		"host_callback_id": callbackID, "operation_id": operationID, "url": server.URL,
-	})
+	request, errMarshal := json.Marshal(
+		map[string]string{
+			"host_callback_id": callbackID, "operation_id": operationID, "url": server.URL,
+		},
+	)
 	if errMarshal != nil {
 		t.Fatal(errMarshal)
 	}
@@ -256,9 +316,13 @@ func TestHostHTTPCancelAfterStreamHeadersReleasesResources(t *testing.T) {
 }
 
 func TestHostHTTPOperationFinishesWithoutAccumulatingCallbackCleanups(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("ok"))
+			},
+		),
+	)
 	defer server.Close()
 
 	host := New()
@@ -273,9 +337,11 @@ func TestHostHTTPOperationFinishesWithoutAccumulatingCallbackCleanups(t *testing
 			t.Fatalf("reused completed operation ID %q", operationID)
 		}
 		seen[operationID] = struct{}{}
-		request, errMarshal := json.Marshal(map[string]string{
-			"host_callback_id": callbackID, "operation_id": operationID, "url": server.URL,
-		})
+		request, errMarshal := json.Marshal(
+			map[string]string{
+				"host_callback_id": callbackID, "operation_id": operationID, "url": server.URL,
+			},
+		)
 		if errMarshal != nil {
 			t.Fatal(errMarshal)
 		}

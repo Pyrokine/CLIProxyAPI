@@ -39,14 +39,14 @@ type InstallOptions struct {
 	writeFile     func(string, []byte, os.FileMode) error
 }
 
-// ErrLoadedPluginLocked is returned when an install would overwrite a plugin
+// ErrLoadedPluginLocked is returned when an installation would overwrite a plugin
 // library that is loaded by the running process on Windows.
 var ErrLoadedPluginLocked = errors.New("loaded plugin library cannot be overwritten while the server is running")
 
 // ErrPendingDeletion is returned when an unfinished deletion owns the plugin ID.
 var ErrPendingDeletion = errors.New("plugin has a pending deletion transaction")
 
-// ErrPendingInstall is returned when an unfinished install owns the plugin ID.
+// ErrPendingInstall is returned when an unfinished installation owns the plugin ID.
 var ErrPendingInstall = errors.New("plugin has a pending install transaction")
 
 const maxPluginLibraryBytes = maxPluginStoreArtifactBytes
@@ -141,7 +141,7 @@ func (p *PreparedInstall) Install(options InstallOptions) (InstallResult, error)
 		return InstallResult{}, fmt.Errorf("prepared plugin archive is empty")
 	}
 	result, errInstall := installArchive(archiveData, p.plugin, options)
-	// InstallArchive returns target metadata with write failures so callers can reconcile partial installs.
+	// InstallArchive returns target metadata with write failures so callers can reconcile partial installations.
 	// noinspection GoDfaErrorMayBeNotNil
 	result.InstallType = p.installType
 	result.ReleaseTag = p.releaseTag

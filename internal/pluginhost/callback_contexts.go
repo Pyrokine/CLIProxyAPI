@@ -32,7 +32,10 @@ func newCallbackContextRegistry() *callbackContextRegistry {
 	return &callbackContextRegistry{contexts: make(map[string]callbackContextEntry)}
 }
 
-func (r *callbackContextRegistry) open(ctx context.Context, pluginID string, instance *hostCallbackInstance) (string, func()) {
+func (r *callbackContextRegistry) open(ctx context.Context, pluginID string, instance *hostCallbackInstance) (
+	string,
+	func(),
+) {
 	if r == nil {
 		return "", func() {}
 	}
@@ -51,17 +54,19 @@ func (r *callbackContextRegistry) open(ctx context.Context, pluginID string, ins
 
 	var once sync.Once
 	return id, func() {
-		once.Do(func() {
-			r.mu.Lock()
-			entry := r.contexts[id]
-			delete(r.contexts, id)
-			r.mu.Unlock()
-			for _, item := range entry.cleanup {
-				if item.fn != nil {
-					item.fn()
+		once.Do(
+			func() {
+				r.mu.Lock()
+				entry := r.contexts[id]
+				delete(r.contexts, id)
+				r.mu.Unlock()
+				for _, item := range entry.cleanup {
+					if item.fn != nil {
+						item.fn()
+					}
 				}
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -94,20 +99,22 @@ func (r *callbackContextRegistry) addCleanupHandle(id string, cleanup func()) (f
 	}
 	var once sync.Once
 	return func() {
-		once.Do(func() {
-			r.mu.Lock()
-			entry, exists := r.contexts[id]
-			if exists {
-				for index, item := range entry.cleanup {
-					if item.id == cleanupID {
-						entry.cleanup = append(entry.cleanup[:index], entry.cleanup[index+1:]...)
-						r.contexts[id] = entry
-						break
+		once.Do(
+			func() {
+				r.mu.Lock()
+				entry, exists := r.contexts[id]
+				if exists {
+					for index, item := range entry.cleanup {
+						if item.id == cleanupID {
+							entry.cleanup = append(entry.cleanup[:index], entry.cleanup[index+1:]...)
+							r.contexts[id] = entry
+							break
+						}
 					}
 				}
-			}
-			r.mu.Unlock()
-		})
+				r.mu.Unlock()
+			},
+		)
 	}, true
 }
 
@@ -132,7 +139,11 @@ func (h *Host) openCallbackContextForPlugin(ctx context.Context, pluginID string
 	return h.openCallbackContextForPluginInstance(ctx, pluginID, nil)
 }
 
-func (h *Host) openCallbackContextForPluginInstance(ctx context.Context, pluginID string, instance *hostCallbackInstance) (string, func()) {
+func (h *Host) openCallbackContextForPluginInstance(
+	ctx context.Context,
+	pluginID string,
+	instance *hostCallbackInstance,
+) (string, func()) {
 	if h == nil || h.callbackContexts == nil {
 		return "", func() {}
 	}

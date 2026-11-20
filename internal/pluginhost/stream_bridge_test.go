@@ -71,6 +71,88 @@ func TestStreamBridgeCloseUnblocksEmitterWithoutPanic(t *testing.T) {
 	}
 }
 
+func TestStreamBridgeEmitUsesAcceptedPumpResultAfterContextCancellation(t *testing.T) {
+	for range 1000 {
+		ctx, cancel := context.WithCancel(context.Background())
+		entry := &streamEntry{input: make(chan streamInput), done: make(chan struct{}), abort: make(chan struct{})}
+		published := make(chan struct{})
+		go func() {
+			request := <-entry.input
+			cancel()
+			request.accepted <- true
+			close(published)
+		}()
+		err := entry.emit(ctx, pluginapi.ExecutorStreamChunk{Payload: []byte("accepted")})
+		<-published
+		if err != nil {
+			t.Fatalf("accepted emit returned error: %v", err)
+		}
+	}
+}
+
+func TestStreamEntryAcceptedResultSurvivesStopSignals(t *testing.T) {
+	for _, mode := range []string{"close", "abort"} {
+		t.Run(
+			mode, func(t *testing.T) {
+				for range 1000 {
+					entry := &streamEntry{
+						input: make(chan streamInput), done: make(chan struct{}), abort: make(chan struct{}),
+					}
+					published := make(chan struct{})
+					go func() {
+						request := <-entry.input
+						request.accepted <- true
+						if mode == "close" {
+							close(entry.done)
+						} else {
+							close(entry.abort)
+						}
+						close(published)
+					}()
+					err := entry.emit(context.Background(), pluginapi.ExecutorStreamChunk{Payload: []byte("accepted")})
+					<-published
+					if err != nil {
+						t.Fatalf("accepted emit returned %s error: %v", mode, err)
+					}
+				}
+			},
+		)
+	}
+}
+
+func TestStreamEntryPumpRejectionRemainsVisible(t *testing.T) {
+	for _, mode := range []string{"cancel", "close", "abort"} {
+		t.Run(
+			mode, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				entry := &streamEntry{
+					input: make(chan streamInput), done: make(chan struct{}), abort: make(chan struct{}),
+				}
+				published := make(chan struct{})
+				go func() {
+					request := <-entry.input
+					request.accepted <- false
+					switch mode {
+					case "cancel":
+						cancel()
+					case "close":
+						close(entry.done)
+					case "abort":
+						close(entry.abort)
+					}
+					close(published)
+				}()
+				err := entry.emit(ctx, pluginapi.ExecutorStreamChunk{})
+				<-published
+				if err == nil {
+					t.Fatal("rejected emit returned success")
+				}
+			},
+		)
+	}
+}
+
 func TestStreamBridgeConcurrentCloseIsIdempotent(t *testing.T) {
 	bridge := newStreamBridge()
 	id, chunks, _ := bridge.open(context.Background())

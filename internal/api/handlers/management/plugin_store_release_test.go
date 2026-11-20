@@ -41,15 +41,19 @@ func TestPluginReleaseCacheRetainsSuccessAndUsesCompletionTime(t *testing.T) {
 	started := make(chan struct{})
 	releaseRequest := make(chan struct{})
 	var calls atomic.Int32
-	client := pluginstore.Client{HTTPClient: pluginReleaseDoerFunc(func(*http.Request) (*http.Response, error) {
-		call := calls.Add(1)
-		if call == 1 {
-			close(started)
-			<-releaseRequest
-			return pluginReleaseResponse("v1.0.0"), nil
-		}
-		return nil, errors.New("offline")
-	})}
+	client := pluginstore.Client{
+		HTTPClient: pluginReleaseDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				call := calls.Add(1)
+				if call == 1 {
+					close(started)
+					<-releaseRequest
+					return pluginReleaseResponse("v1.0.0"), nil
+				}
+				return nil, errors.New("offline")
+			},
+		),
+	}
 	h := &Handler{pluginReleaseCache: make(map[string]pluginReleaseCacheEntry)}
 	plugin := pluginstore.Plugin{Repository: "https://github.com/test/plugin"}
 	begin := time.Now()
@@ -82,7 +86,8 @@ func TestPluginReleaseCacheRetainsSuccessAndUsesCompletionTime(t *testing.T) {
 	h.pluginReleaseCacheMu.Lock()
 	entry = h.pluginReleaseCache[key]
 	h.pluginReleaseCacheMu.Unlock()
-	if entry.version != "1.0.0" || entry.nextCheckAt.Before(failureStarted.Add(pluginReleaseFailureCacheTTL-time.Second)) {
+	if entry.version != "1.0.0" ||
+		entry.nextCheckAt.Before(failureStarted.Add(pluginReleaseFailureCacheTTL-time.Second)) {
 		t.Fatalf("failure cache entry = %#v", entry)
 	}
 	if got := h.latestPluginVersion(context.Background(), client, plugin); got != "1.0.0" || calls.Load() != 2 {
@@ -105,13 +110,17 @@ func TestPluginReleaseCacheCoalescesConcurrentLookups(t *testing.T) {
 	started := make(chan struct{})
 	releaseRequest := make(chan struct{})
 	var calls atomic.Int32
-	client := pluginstore.Client{HTTPClient: pluginReleaseDoerFunc(func(*http.Request) (*http.Response, error) {
-		if calls.Add(1) == 1 {
-			close(started)
-		}
-		<-releaseRequest
-		return pluginReleaseResponse("v1.0.0"), nil
-	})}
+	client := pluginstore.Client{
+		HTTPClient: pluginReleaseDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				if calls.Add(1) == 1 {
+					close(started)
+				}
+				<-releaseRequest
+				return pluginReleaseResponse("v1.0.0"), nil
+			},
+		),
+	}
 	h := &Handler{}
 	plugin := pluginstore.Plugin{Repository: "https://github.com/test/plugin"}
 	results := make(chan string, 21)
@@ -136,14 +145,18 @@ func TestPluginReleaseCacheCoalescesConcurrentLookups(t *testing.T) {
 func TestPluginReleaseCacheCanceledLeaderHandsOff(t *testing.T) {
 	started := make(chan struct{})
 	var calls atomic.Int32
-	client := pluginstore.Client{HTTPClient: pluginReleaseDoerFunc(func(request *http.Request) (*http.Response, error) {
-		if calls.Add(1) == 1 {
-			close(started)
-			<-request.Context().Done()
-			return nil, request.Context().Err()
-		}
-		return pluginReleaseResponse("v1.0.0"), nil
-	})}
+	client := pluginstore.Client{
+		HTTPClient: pluginReleaseDoerFunc(
+			func(request *http.Request) (*http.Response, error) {
+				if calls.Add(1) == 1 {
+					close(started)
+					<-request.Context().Done()
+					return nil, request.Context().Err()
+				}
+				return pluginReleaseResponse("v1.0.0"), nil
+			},
+		),
+	}
 	h := &Handler{}
 	plugin := pluginstore.Plugin{Repository: "https://github.com/test/plugin"}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -167,12 +180,16 @@ func TestPluginReleaseCacheSharesTwoSlotsAndDoesNotCacheCanceledQueue(t *testing
 	started := make(chan struct{}, 3)
 	releaseRequests := make(chan struct{})
 	var calls atomic.Int32
-	client := pluginstore.Client{HTTPClient: pluginReleaseDoerFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		started <- struct{}{}
-		<-releaseRequests
-		return pluginReleaseResponse("v1.0.0"), nil
-	})}
+	client := pluginstore.Client{
+		HTTPClient: pluginReleaseDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				started <- struct{}{}
+				<-releaseRequests
+				return pluginReleaseResponse("v1.0.0"), nil
+			},
+		),
+	}
 	h := &Handler{}
 	results := make(chan string, pluginReleaseLookupConcurrency)
 	for index := range pluginReleaseLookupConcurrency {
@@ -206,19 +223,25 @@ func TestPluginReleaseCacheSharesTwoSlotsAndDoesNotCacheCanceledQueue(t *testing
 
 func TestPluginReleaseCacheSeparatesCredentialsAndNetworkScope(t *testing.T) {
 	var calls atomic.Int32
-	client := pluginstore.Client{HTTPClient: pluginReleaseDoerFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return pluginReleaseResponse("v1.0.0"), nil
-	})}
+	client := pluginstore.Client{
+		HTTPClient: pluginReleaseDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return pluginReleaseResponse("v1.0.0"), nil
+			},
+		),
+	}
 	h := &Handler{}
 	plugin := pluginstore.Plugin{Repository: "https://github.com/test/plugin"}
 	if got := h.latestPluginVersion(context.Background(), client, plugin); got != "1.0.0" {
 		t.Fatalf("unauthenticated version = %q", got)
 	}
-	client.Auth = []pluginstore.AuthConfig{{
-		Match: "https://api.github.com/", Type: pluginstore.AuthTypeGitHubToken,
-		TokenEnv: "PLUGIN_RELEASE_CACHE_TOKEN",
-	}}
+	client.Auth = []pluginstore.AuthConfig{
+		{
+			Match: "https://api.github.com/", Type: pluginstore.AuthTypeGitHubToken,
+			TokenEnv: "PLUGIN_RELEASE_CACHE_TOKEN",
+		},
+	}
 	for _, token := range []string{"token-a", "token-b", "token-a"} {
 		t.Setenv("PLUGIN_RELEASE_CACHE_TOKEN", token)
 		if got := h.latestPluginVersion(context.Background(), client, plugin); got != "1.0.0" {
@@ -257,39 +280,43 @@ func TestListPluginStoreRefreshesInstalledMatchingSourceOnly(t *testing.T) {
 	var defaultCalls atomic.Int32
 	var customCalls atomic.Int32
 	h := &Handler{
-		cfg: &config.Config{Plugins: config.PluginsConfig{
-			Dir:          pluginsDir,
-			StoreSources: []string{customURL},
-			Configs: map[string]config.PluginInstanceConfig{
-				"sample-provider": pluginConfigFromYAML(
-					t,
-					"enabled: true\nstore:\n  id: sample-provider\n  source-id: "+
-						pluginstore.DefaultSourceID+"\n  source-url: "+pluginstore.DefaultRegistryURL+"\n",
-				),
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Dir:          pluginsDir,
+				StoreSources: []string{customURL},
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(
+						t,
+						"enabled: true\nstore:\n  id: sample-provider\n  source-id: "+
+							pluginstore.DefaultSourceID+"\n  source-url: "+pluginstore.DefaultRegistryURL+"\n",
+					),
+				},
 			},
-		}},
-		pluginStoreHTTPClient: pluginReleaseDoerFunc(func(request *http.Request) (*http.Response, error) {
-			var body string
-			switch request.URL.String() {
-			case pluginstore.DefaultRegistryURL:
-				body = defaultRegistry
-			case customURL:
-				body = customRegistry
-			case "https://api.github.com/repos/owner/default-plugin/releases/latest":
-				defaultCalls.Add(1)
-				body = `{"tag_name":"v2.0.0"}`
-			case "https://api.github.com/repos/owner/custom-plugin/releases/latest":
-				customCalls.Add(1)
-				body = `{"tag_name":"v3.0.0"}`
-			default:
-				t.Fatalf("unexpected URL %s", request.URL)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(body)),
-			}, nil
-		}),
+		},
+		pluginStoreHTTPClient: pluginReleaseDoerFunc(
+			func(request *http.Request) (*http.Response, error) {
+				var body string
+				switch request.URL.String() {
+				case pluginstore.DefaultRegistryURL:
+					body = defaultRegistry
+				case customURL:
+					body = customRegistry
+				case "https://api.github.com/repos/owner/default-plugin/releases/latest":
+					defaultCalls.Add(1)
+					body = `{"tag_name":"v2.0.0"}`
+				case "https://api.github.com/repos/owner/custom-plugin/releases/latest":
+					customCalls.Add(1)
+					body = `{"tag_name":"v3.0.0"}`
+				default:
+					t.Fatalf("unexpected URL %s", request.URL)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(body)),
+				}, nil
+			},
+		),
 	}
 	response := listPluginStoreReleaseTest(t, h)
 	if len(response.Plugins) != 2 || response.Plugins[0].Version != "2.0.0" ||
@@ -307,16 +334,18 @@ func TestListPluginStoreUsesCachedVersionWithoutRefreshingUninstalled(t *testing
 	var releaseCalls atomic.Int32
 	h := &Handler{
 		cfg: &config.Config{Plugins: config.PluginsConfig{Dir: t.TempDir()}},
-		pluginStoreHTTPClient: pluginReleaseDoerFunc(func(request *http.Request) (*http.Response, error) {
-			if request.URL.String() != pluginstore.DefaultRegistryURL {
-				releaseCalls.Add(1)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(registry)),
-			}, nil
-		}),
+		pluginStoreHTTPClient: pluginReleaseDoerFunc(
+			func(request *http.Request) (*http.Response, error) {
+				if request.URL.String() != pluginstore.DefaultRegistryURL {
+					releaseCalls.Add(1)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(registry)),
+				}, nil
+			},
+		),
 		pluginReleaseCache: make(map[string]pluginReleaseCacheEntry),
 	}
 	plugin := pluginstore.Plugin{Repository: "https://github.com/owner/plugin"}
@@ -345,13 +374,17 @@ func TestPluginStoreRateLimitResponseAndTagTraversal(t *testing.T) {
 	}
 
 	calls := 0
-	client := pluginstore.Client{HTTPClient: pluginReleaseDoerFunc(func(*http.Request) (*http.Response, error) {
-		calls++
-		return nil, &pluginstore.RateLimitError{
-			StatusCode: http.StatusTooManyRequests,
-			RetryAt:    retryAt,
-		}
-	})}
+	client := pluginstore.Client{
+		HTTPClient: pluginReleaseDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				calls++
+				return nil, &pluginstore.RateLimitError{
+					StatusCode: http.StatusTooManyRequests,
+					RetryAt:    retryAt,
+				}
+			},
+		),
+	}
 	_, errPrepare := preparePluginStoreGitHubRelease(
 		context.Background(),
 		client,
@@ -373,13 +406,15 @@ func TestListPluginStorePropagatesRegistryRateLimit(t *testing.T) {
 	h := &Handler{
 		cfg:                    &config.Config{ProxyURL: t.Name(), Plugins: config.PluginsConfig{Dir: t.TempDir()}},
 		pluginStoreRegistryURL: "https://api.github.com/repos/owner/store/contents/registry.json",
-		pluginStoreHTTPClient: pluginReleaseDoerFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusTooManyRequests,
-				Header:     http.Header{"Retry-After": []string{"3600"}},
-				Body:       io.NopCloser(strings.NewReader("limited")),
-			}, nil
-		}),
+		pluginStoreHTTPClient: pluginReleaseDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     http.Header{"Retry-After": []string{"3600"}},
+					Body:       io.NopCloser(strings.NewReader("limited")),
+				}, nil
+			},
+		),
 	}
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -392,31 +427,39 @@ func TestListPluginStorePropagatesRegistryRateLimit(t *testing.T) {
 
 func TestManagementPluginClientSharesCooldownByCredentialAndScope(t *testing.T) {
 	t.Setenv("PLUGIN_MANAGEMENT_COOLDOWN_TOKEN", t.Name())
-	auth := []pluginstore.AuthConfig{{
-		Match: "https://api.github.com/", Type: pluginstore.AuthTypeGitHubToken,
-		TokenEnv: "PLUGIN_MANAGEMENT_COOLDOWN_TOKEN",
-	}}
+	auth := []pluginstore.AuthConfig{
+		{
+			Match: "https://api.github.com/", Type: pluginstore.AuthTypeGitHubToken,
+			TokenEnv: "PLUGIN_MANAGEMENT_COOLDOWN_TOKEN",
+		},
+	}
 	scope := "scope-" + t.Name()
 	seedCalls := 0
 	seed := pluginstore.Client{
 		NetworkScope: scope,
 		Auth:         auth,
-		HTTPClient: pluginReleaseDoerFunc(func(*http.Request) (*http.Response, error) {
-			seedCalls++
-			return &http.Response{
-				StatusCode: http.StatusTooManyRequests,
-				Header:     http.Header{"Retry-After": []string{"3600"}},
-				Body:       io.NopCloser(strings.NewReader("limited")),
-			}, nil
-		}),
+		HTTPClient: pluginReleaseDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				seedCalls++
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     http.Header{"Retry-After": []string{"3600"}},
+					Body:       io.NopCloser(strings.NewReader("limited")),
+				}, nil
+			},
+		),
 	}
 	plugin := pluginstore.Plugin{Repository: "https://github.com/owner/seed"}
 	_, _ = seed.FetchLatestRelease(context.Background(), plugin)
 	managementCalls := 0
-	h := &Handler{pluginStoreHTTPClient: pluginReleaseDoerFunc(func(*http.Request) (*http.Response, error) {
-		managementCalls++
-		return pluginReleaseResponse("v1.0.0"), nil
-	})}
+	h := &Handler{
+		pluginStoreHTTPClient: pluginReleaseDoerFunc(
+			func(*http.Request) (*http.Response, error) {
+				managementCalls++
+				return pluginReleaseResponse("v1.0.0"), nil
+			},
+		),
+	}
 	client := h.newPluginStoreClient(scope, "", auth)
 	_, errRelease := client.FetchLatestRelease(
 		context.Background(),
@@ -446,7 +489,8 @@ func listPluginStoreReleaseTest(t *testing.T, h *Handler) pluginStoreListRespons
 
 func pluginStoreReleaseRegistryJSON(repository, version string) string {
 	return fmt.Sprintf(
-		`{"schema_version":2,"plugins":[{"id":"sample-provider","name":"Sample Provider","description":"Sample","author":"owner","version":%q,"repository":%q,"install":{"type":"github-release"}}]}`,
+		`{"schema_version":2,"plugins":[{"id":"sample-provider","name":"Sample Provider","description":"`+
+			`Sample","author":"owner","version":%q,"repository":%q,"install":{"type":"github-release"}}]}`,
 		version,
 		repository,
 	)

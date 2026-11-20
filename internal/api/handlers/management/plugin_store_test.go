@@ -240,7 +240,8 @@ func TestListPluginStoreReleasesUsesConfiguredGitHubAuth(t *testing.T) {
 	if releases[0].TagName != "v0.2.0" || releases[0].Name != "Version 0.2.0" {
 		t.Fatalf("release = %#v", releases[0])
 	}
-	if len(releases[0].AssetNames) != 1 || releases[0].AssetNames[0] != "sample-provider_0.2.0_linux_amd64.zip" {
+	if len(releases[0].AssetNames) != 1 ||
+		releases[0].AssetNames[0] != "sample-provider_0.2.0_linux_amd64.zip" {
 		t.Fatalf("release assets = %#v", releases[0].AssetNames)
 	}
 }
@@ -271,7 +272,8 @@ func TestPluginStoreManifestYAMLNodeRoundTrip(t *testing.T) {
 	if err := node.Decode(&decoded); err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if decoded.ID != manifest.ID || decoded.Version != manifest.Version || decoded.SourceURL != manifest.SourceURL {
+	if decoded.ID != manifest.ID || decoded.Version != manifest.Version ||
+		decoded.SourceURL != manifest.SourceURL {
 		t.Fatalf("decoded manifest = %#v, want %#v", decoded, manifest)
 	}
 }
@@ -316,7 +318,10 @@ func TestPluginStoreInstallSourceStatusTracksConfiguredSource(t *testing.T) {
 func TestInstallPluginFromStoreRejectsImplicitSourceSwitch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	communityURL := "https://community.example/registry.json"
-	registryJSON := `{"schema_version":2,"plugins":[{"id":"sample-provider","name":"Sample Provider","description":"Sample provider","author":"author-name","version":"0.2.0","install":{"type":"direct","artifacts":[{"goos":"linux","goarch":"amd64","url":"https://community.example/sample.zip","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]}}]}`
+	registryJSON := `{"schema_version":2,"plugins":[{"id":"sample-provider","name":"Sample Provider","` +
+		`description":"Sample provider","author":"author-name","version":"0.2.0","install":{"type":"direct","` +
+		`artifacts":[{"goos":"linux","goarch":"amd64","url":"https://community.example/sample.zip","sha256":"` +
+		`0000000000000000000000000000000000000000000000000000000000000000"}]}}]}`
 	cfg := &config.Config{
 		Plugins: config.PluginsConfig{
 			Enabled:      true,
@@ -406,7 +411,9 @@ func TestInstallPluginFromStoreRejectsConfigChangeAfterArtifactPreparation(t *te
 	archiveData := pluginStoreTestArchive(t, "sample-provider.so", "plugin-data")
 	checksum := sha256.Sum256(archiveData)
 	registryJSON := fmt.Sprintf(
-		`{"schema_version":2,"plugins":[{"id":"sample-provider","name":"Sample Provider","description":"Sample provider","author":"author-name","version":"0.2.0","install":{"type":"direct","artifacts":[{"goos":"linux","goarch":"amd64","url":%q,"sha256":%q}]}}]}`,
+		`{"schema_version":2,"plugins":[{"id":"sample-provider","name":"Sample Provider","description":"`+
+			`Sample provider","author":"author-name","version":"0.2.0","install":{"type":"direct","artifacts"`+
+			`:[{"goos":"linux","goarch":"amd64","url":%q,"sha256":%q}]}}]}`,
 		artifactURL,
 		hex.EncodeToString(checksum[:]),
 	)
@@ -936,8 +943,18 @@ func TestDeletePluginDoesNotUnloadRuntimeFromSupersedingRoot(t *testing.T) {
 			t.Fatalf("WriteFile(%s) error = %v", pluginPath, errWrite)
 		}
 	}
-	rootAPath := filepath.Join(rootA, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.2.0"+testPluginExtension())
-	rootBPath := filepath.Join(rootB, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.2.0"+testPluginExtension())
+	rootAPath := filepath.Join(
+		rootA,
+		runtime.GOOS,
+		runtime.GOARCH,
+		"sample-provider-v0.2.0"+testPluginExtension(),
+	)
+	rootBPath := filepath.Join(
+		rootB,
+		runtime.GOOS,
+		runtime.GOARCH,
+		"sample-provider-v0.2.0"+testPluginExtension(),
+	)
 	configPath := filepath.Join(root, "config.yaml")
 	if errWrite := os.WriteFile(
 		configPath, []byte("plugins:\n  enabled: true\n  dir: "+rootA+"\n"), 0o600,
@@ -1057,7 +1074,8 @@ func TestDeletePluginDoesNotUnloadSupersedingRuntimeIdentity(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample-provider", nil)
 	h.DeletePlugin(c)
 
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "plugin_delete_requires_restart") {
+	if rec.Code != http.StatusConflict ||
+		!strings.Contains(rec.Body.String(), "plugin_delete_requires_restart") {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	if host.unloadCalls != 0 {
@@ -1313,7 +1331,10 @@ func TestInstallPluginRollsBackArtifactWhenConfigPersistenceFails(t *testing.T) 
 				registryURL := "https://registry.example/registry.json"
 				artifactURL := "https://registry.example/sample-provider-v0.2.0.zip"
 				registry := fmt.Sprintf(
-					`{"schema_version":2,"plugins":[{"id":"sample-provider","name":"Sample Provider","description":"Sample provider","author":"author-name","version":"0.2.0","install":{"type":"direct","artifacts":[{"goos":"linux","goarch":"amd64","url":%q,"sha256":%q}]}}]}`,
+					`{"schema_version":2,"plugins":[{"id":"sample-provider","name":"Sample Provider","`+
+						`description":"Sample provider","author":"author-name","version":"0.2.0","install":{"`+
+						`type":"direct","artifacts":[{"goos":"linux","goarch":"amd64","url":%q,"sha256":%q}]}`+
+						`}]}`,
 					artifactURL,
 					hex.EncodeToString(checksum[:]),
 				)
@@ -1341,7 +1362,9 @@ func TestInstallPluginRollsBackArtifactWhenConfigPersistenceFails(t *testing.T) 
 					configs["sample-provider"] = pluginConfigFromYAML(
 						t,
 						fmt.Sprintf(
-							"enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n  source-id: %s\n  source-url: %s\n",
+							"enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n  "+
+								"source-id: %s\n  source-url: "+
+								"%s\n",
 							pluginstore.DefaultSourceID,
 							registryURL,
 						),
@@ -1369,7 +1392,11 @@ func TestInstallPluginRollsBackArtifactWhenConfigPersistenceFails(t *testing.T) 
 				rec := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(rec)
 				c.Params = []gin.Param{{Key: "id", Value: "sample-provider"}}
-				c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider", nil)
+				c.Request = httptest.NewRequest(
+					http.MethodPost,
+					"/v0/management/plugin-store/sample-provider",
+					nil,
+				)
 
 				h.installPluginFromStore(c, "linux", "amd64")
 

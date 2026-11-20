@@ -20,7 +20,8 @@ const (
 )
 
 // These method names are part of the public plugin ABI.
-// noinspection GoUnusedConst
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedConst
 const (
 	MethodPluginRegister    = "plugin.register"
 	MethodPluginQuiesce     = "plugin.quiesce"
@@ -102,6 +103,7 @@ type Envelope struct {
 	Error  *Error          `json:"error,omitempty"`
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Error struct {
 	Code       string `json:"code"`
 	Message    string `json:"message"`

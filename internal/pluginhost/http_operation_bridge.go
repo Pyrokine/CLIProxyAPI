@@ -54,8 +54,12 @@ func (b *hostHTTPOperationBridge) open(
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	key := hostHTTPOperationKey{pluginID: strings.TrimSpace(pluginID), operationID: strconv.FormatUint(b.next.Add(1), 10)}
-	entry := &hostHTTPOperation{ctx: ctx, cancel: cancel, instance: instance, callbackID: strings.TrimSpace(callbackID), started: started}
+	key := hostHTTPOperationKey{
+		pluginID: strings.TrimSpace(pluginID), operationID: strconv.FormatUint(b.next.Add(1), 10),
+	}
+	entry := &hostHTTPOperation{
+		ctx: ctx, cancel: cancel, instance: instance, callbackID: strings.TrimSpace(callbackID), started: started,
+	}
 	b.mu.Lock()
 	if ctx.Err() != nil || instance != nil && instance.closed.Load() {
 		b.mu.Unlock()
@@ -63,9 +67,11 @@ func (b *hostHTTPOperationBridge) open(
 		return "", nil, false
 	}
 	b.operations[key] = entry
-	entry.stopCancel = context.AfterFunc(ctx, func() {
-		b.cancel(key.pluginID, instance, key.operationID)
-	})
+	entry.stopCancel = context.AfterFunc(
+		ctx, func() {
+			b.cancel(key.pluginID, instance, key.operationID)
+		},
+	)
 	b.mu.Unlock()
 	return key.operationID, entry, true
 }
@@ -80,7 +86,9 @@ func (b *hostHTTPOperationBridge) claim(
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	entry := b.operations[key]
-	if entry == nil || entry.started || entry.instance != instance || entry.callbackID != strings.TrimSpace(callbackID) || entry.ctx.Err() != nil {
+	if entry == nil || entry.started || entry.instance != instance ||
+		entry.callbackID != strings.TrimSpace(callbackID) ||
+		entry.ctx.Err() != nil {
 		return nil, false
 	}
 	entry.started = true
@@ -169,27 +177,33 @@ func (b *hostHTTPOperationBridge) closeInstance(pluginID string, instance *hostC
 		return
 	}
 	instance.closed.Store(true)
-	b.cancelMatching(func(key hostHTTPOperationKey, entry *hostHTTPOperation) bool {
-		return key.pluginID == strings.TrimSpace(pluginID) && entry.instance == instance
-	})
+	b.cancelMatching(
+		func(key hostHTTPOperationKey, entry *hostHTTPOperation) bool {
+			return key.pluginID == strings.TrimSpace(pluginID) && entry.instance == instance
+		},
+	)
 }
 
 func (b *hostHTTPOperationBridge) cancelPlugin(pluginID string) {
 	if strings.TrimSpace(pluginID) == "" {
 		return
 	}
-	b.cancelMatching(func(key hostHTTPOperationKey, _ *hostHTTPOperation) bool {
-		return key.pluginID == strings.TrimSpace(pluginID)
-	})
+	b.cancelMatching(
+		func(key hostHTTPOperationKey, _ *hostHTTPOperation) bool {
+			return key.pluginID == strings.TrimSpace(pluginID)
+		},
+	)
 }
 
 func (b *hostHTTPOperationBridge) cancelAll() {
-	b.cancelMatching(func(_ hostHTTPOperationKey, entry *hostHTTPOperation) bool {
-		if entry.instance != nil {
-			entry.instance.closed.Store(true)
-		}
-		return true
-	})
+	b.cancelMatching(
+		func(_ hostHTTPOperationKey, entry *hostHTTPOperation) bool {
+			if entry.instance != nil {
+				entry.instance.closed.Store(true)
+			}
+			return true
+		},
+	)
 }
 
 func (b *hostHTTPOperationBridge) cancelMatching(matches func(hostHTTPOperationKey, *hostHTTPOperation) bool) {
@@ -266,9 +280,11 @@ func (h *Host) createHostHTTPOperation(
 		return "", nil, "", nil, fmt.Errorf("host http operation cannot be opened for closed context or instance")
 	}
 	if strings.TrimSpace(callbackID) != "" {
-		stopCleanup, attached := h.addCallbackCleanupHandle(callbackID, func() {
-			h.httpOperations.cancel(pluginID, instance, operationID)
-		})
+		stopCleanup, attached := h.addCallbackCleanupHandle(
+			callbackID, func() {
+				h.httpOperations.cancel(pluginID, instance, operationID)
+			},
+		)
 		if !attached || !h.httpOperations.setScopeCleanup(pluginID, operationID, entry, stopCleanup) {
 			h.httpOperations.cancel(pluginID, instance, operationID)
 			return "", nil, "", nil, fmt.Errorf("host callback context closed while opening HTTP operation")

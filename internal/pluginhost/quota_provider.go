@@ -22,6 +22,8 @@ type RegisteredQuotaProviderInfo struct {
 }
 
 // QuotaProviderIdentifiers returns unique active quota provider identifiers.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *Host) QuotaProviderIdentifiers() []string {
 	if h == nil {
 		return nil
@@ -90,13 +92,15 @@ func (h *Host) QuotaProviders(ctx context.Context) []RegisteredQuotaProviderInfo
 		if displayName == "" {
 			displayName = identifier
 		}
-		out = append(out, RegisteredQuotaProviderInfo{
-			PluginID:           record.id,
-			Provider:           identifier,
-			DisplayName:        displayName,
-			SupportedProviders: append([]string(nil), supported...),
-			SupportsReset:      description.SupportsReset,
-		})
+		out = append(
+			out, RegisteredQuotaProviderInfo{
+				PluginID:           record.id,
+				Provider:           identifier,
+				DisplayName:        displayName,
+				SupportedProviders: append([]string(nil), supported...),
+				SupportsReset:      description.SupportsReset,
+			},
+		)
 	}
 	return out
 }
@@ -120,6 +124,8 @@ func normalizedQuotaProviders(providers []string) []string {
 }
 
 // HasQuotaProvider reports whether an active plugin handles a provider key.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *Host) HasQuotaProvider(provider string) bool {
 	return h.HasQuotaProviderContext(context.Background(), provider)
 }
@@ -135,6 +141,8 @@ func (h *Host) HasQuotaProviderForPlugin(pluginID string) bool {
 }
 
 // QuotaSupportedProvidersSet returns all provider keys declared by active quota plugins.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (h *Host) QuotaSupportedProvidersSet(ctx context.Context) map[string]struct{} {
 	if h == nil {
 		return nil
@@ -347,9 +355,11 @@ func (h *Host) callQuotaDescribe(
 			err = fmt.Errorf("plugin %s panicked during DescribeQuota: %v", record.id, recovered)
 		}
 	}()
-	response, errDescribe := provider.DescribeQuota(ctx, pluginapi.QuotaDescribeRequest{
-		Plugin: clonePluginMetadata(record.meta),
-	})
+	response, errDescribe := provider.DescribeQuota(
+		ctx, pluginapi.QuotaDescribeRequest{
+			Plugin: clonePluginMetadata(record.meta),
+		},
+	)
 	if quotaOperationUnsupported(errDescribe) {
 		return pluginapi.QuotaDescribeResponse{}, false, nil
 	}
@@ -443,8 +453,7 @@ func quotaOperationUnsupported(err error) bool {
 	if errors.Is(err, pluginapi.ErrQuotaUnsupported) || errors.Is(err, errors.ErrUnsupported) {
 		return true
 	}
-	var rpcErr rpcError
-	if errors.As(err, &rpcErr) {
+	if rpcErr, ok := errors.AsType[rpcError](err); ok {
 		switch strings.ToLower(strings.TrimSpace(rpcErr.Code)) {
 		case "unsupported", "not_supported", "unsupported_method", "method_not_found", "unknown_method":
 			return true

@@ -116,7 +116,7 @@ type accessProviderManager interface {
 
 type Host struct {
 	mu                           sync.Mutex
-	applyMu                      sync.Mutex
+	applyGate                    chan struct{}
 	publicationMu                sync.Mutex
 	usageMu                      sync.Mutex
 	usageManagerMu               sync.RWMutex
@@ -236,7 +236,8 @@ func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallb
 		}
 		initialization.callbackInstances[instance] = struct{}{}
 	}
-	closed := initialization != nil && initialization.closed || h.shutdownContext != nil && h.shutdownContext.Err() != nil
+	closed := initialization != nil && initialization.closed ||
+		h.shutdownContext != nil && h.shutdownContext.Err() != nil
 	if closed {
 		instance.closed.Store(true)
 	}
@@ -498,12 +499,29 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		ctx = context.Background()
 	}
 
-	h.applyMu.Lock()
-	defer h.applyMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	if h.applyGate == nil {
+		h.applyGate = make(chan struct{}, 1)
+	}
+	applyGate := h.applyGate
+	h.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case applyGate <- struct{}{}:
+	}
+	defer func() { <-applyGate }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
+	disabled := cfg == nil || !cfg.Plugins.Enabled
 	generation, previousRuntimeConfig := h.beginConfigApply(cfg)
 	defer func() {
-		if err == nil {
+		if err == nil || disabled {
 			return
 		}
 		h.mu.Lock()
@@ -512,6 +530,11 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		}
 		h.mu.Unlock()
 	}()
+	if disabled {
+		if h.clearRuntimeRoutesForApply(generation) {
+			h.detachUnselectedPlugins(ctx, generation, nil)
+		}
+	}
 	rc, errRuntimeConfig := runtimeConfigFromConfig(cfg)
 	if errRuntimeConfig != nil {
 		return fmt.Errorf("pluginhost: resolve runtime config: %w", errRuntimeConfig)
@@ -542,18 +565,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 	if errRecover := pluginstore.RecoverDeletionTransactions(rc.Dir, configuredPluginIDs); errRecover != nil {
 		return fmt.Errorf("pluginhost: recover plugin deletion transactions: %w", errRecover)
 	}
-	if !rc.Enabled {
-		h.mu.Lock()
-		if h.configApplyCurrentLocked(generation) {
-			h.runtimeConfig = cfg
-		}
-		h.mu.Unlock()
-		if h.clearRuntimeRoutesForApply(generation) {
-			h.detachUnselectedPlugins(ctx, generation, nil)
-		}
+	if disabled {
 		return nil
 	}
-
 	files, cleanupCandidates, errSelect := selectPluginFilesWithCandidates(rc.Dir, desiredVersions)
 	if errSelect != nil {
 		return fmt.Errorf("pluginhost: select plugin files: %w", errSelect)
@@ -654,15 +668,17 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		initialization := &pluginInitialization{done: make(chan struct{})}
 		h.initializing[file.ID] = initialization
 		h.mu.Unlock()
-		stopInitializationCancel := context.AfterFunc(ctx, func() {
-			h.mu.Lock()
-			var instances []*hostCallbackInstance
-			if h.initializing[file.ID] == initialization {
-				instances = closePluginInitializationLocked(initialization)
-			}
-			h.mu.Unlock()
-			h.closeHostCallbackInstances(file.ID, instances)
-		})
+		stopInitializationCancel := context.AfterFunc(
+			ctx, func() {
+				h.mu.Lock()
+				var instances []*hostCallbackInstance
+				if h.initializing[file.ID] == initialization {
+					instances = closePluginInitializationLocked(initialization)
+				}
+				h.mu.Unlock()
+				h.closeHostCallbackInstances(file.ID, instances)
+			},
+		)
 
 		if previous != nil {
 			restoreRequired, errQuiesce := h.callQuiesce(ctx, previous)
@@ -1042,13 +1058,15 @@ func (h *Host) detachUnselectedPlugins(ctx context.Context, generation uint64, s
 		if _, keep := selected[id]; keep {
 			continue
 		}
-		identities = append(identities, PluginRuntimeIdentity{
-			ID:               id,
-			Path:             h.activePluginPaths[id],
-			Version:          h.activePluginVersions[id],
-			PluginGeneration: h.pluginGenerations[id],
-			OperationEpoch:   h.pluginOperationEpochLocked(id),
-		})
+		identities = append(
+			identities, PluginRuntimeIdentity{
+				ID:               id,
+				Path:             h.activePluginPaths[id],
+				Version:          h.activePluginVersions[id],
+				PluginGeneration: h.pluginGenerations[id],
+				OperationEpoch:   h.pluginOperationEpochLocked(id),
+			},
+		)
 	}
 	h.mu.Unlock()
 	sort.Slice(identities, func(i, j int) bool { return identities[i].ID < identities[j].ID })
@@ -1345,6 +1363,19 @@ func (h *Host) UnloadPluginWithError(id string) (bool, error) {
 	return h.unloadPluginContext(shutdownCtx, id, nil)
 }
 
+// UnloadPluginContext 按调用方的取消信号和期限卸载插件
+func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
+	shutdownCtx, cancelShutdown := boundedPluginShutdownContext(ctx)
+	defer cancelShutdown()
+	unloaded, errUnload := h.unloadPluginContext(shutdownCtx, id, nil)
+	if errUnload != nil {
+		log.WithError(errUnload).WithField("plugin_id", strings.TrimSpace(id)).Warn(
+			"pluginhost: plugin shutdown deferred",
+		)
+	}
+	return unloaded
+}
+
 // UnloadPluginIfCurrentWithError removes a plugin only while identity still owns the runtime.
 func (h *Host) UnloadPluginIfCurrentWithError(identity PluginRuntimeIdentity) (bool, error) {
 	shutdownCtx, cancelShutdown := boundedPluginShutdownContext(context.Background())
@@ -1367,11 +1398,19 @@ func (h *Host) unloadPluginContext(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false, errContext
+	}
 
 	h.publicationMu.Lock()
 	targets := make([]pluginUnloadTarget, 0)
 	var initializationInstances []*hostCallbackInstance
 	h.mu.Lock()
+	if errContext := ctx.Err(); errContext != nil {
+		h.mu.Unlock()
+		h.publicationMu.Unlock()
+		return false, errContext
+	}
 	if expectedIdentity != nil && !h.pluginRuntimeIdentityCurrentLocked(*expectedIdentity) {
 		h.mu.Unlock()
 		h.publicationMu.Unlock()
@@ -1852,11 +1891,15 @@ func (h *Host) callQuiesce(ctx context.Context, lp *loadedPlugin) (bool, error) 
 		return false, nil
 	}
 	actionStarted := false
-	errQuiesce, okCall := h.safePluginAction(ctx, lp.id, pluginabi.MethodPluginQuiesce, func() error {
-		actionStarted = true
-		_, errCall := callPlugin[rpcEmptyResponse](ctx, lp.client, pluginabi.MethodPluginQuiesce, rpcEmptyResponse{})
-		return errCall
-	})
+	errQuiesce, okCall := h.safePluginAction(
+		ctx, lp.id, pluginabi.MethodPluginQuiesce, func() error {
+			actionStarted = true
+			_, errCall := callPlugin[rpcEmptyResponse](
+				ctx, lp.client, pluginabi.MethodPluginQuiesce, rpcEmptyResponse{},
+			)
+			return errCall
+		},
+	)
 	if !okCall {
 		return actionStarted, errQuiesce
 	}
@@ -1883,8 +1926,7 @@ func quiesceUnsupported(errQuiesce error) bool {
 	if errors.Is(errQuiesce, errors.ErrUnsupported) {
 		return true
 	}
-	var errRPC rpcError
-	if errors.As(errQuiesce, &errRPC) {
+	if errRPC, ok := errors.AsType[rpcError](errQuiesce); ok {
 		switch strings.ToLower(strings.TrimSpace(errRPC.Code)) {
 		case "unknown_method", "method_not_found", "unsupported_method":
 			return true

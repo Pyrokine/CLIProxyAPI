@@ -73,7 +73,7 @@ func (engine *jsEngine) runProgram(program *goja.Program, timeout time.Duration)
 	return nil
 }
 
-var ErrFunctionNotFound = errors.New("function not found")
+var errFunctionNotFound = errors.New("function not found")
 var errJSTimeout = errors.New("javascript execution timeout")
 
 func (engine *jsEngine) startInterruptTimer(timeout time.Duration) (*time.Timer, <-chan struct{}) {
@@ -122,7 +122,7 @@ func (engine *jsEngine) frozenStringArray(values []string) (goja.Value, error) {
 func (engine *jsEngine) callFunction(name string, timeout time.Duration, args ...any) (goja.Value, error) {
 	jsVal := engine.vm.Get(name)
 	if jsVal == nil || goja.IsUndefined(jsVal) {
-		return nil, fmt.Errorf("%w: function '%s' does not exist", ErrFunctionNotFound, name)
+		return nil, fmt.Errorf("%w: function '%s' does not exist", errFunctionNotFound, name)
 	}
 	jsFunc, ok := goja.AssertFunction(jsVal)
 	if !ok {

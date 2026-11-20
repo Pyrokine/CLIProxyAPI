@@ -82,7 +82,8 @@ func TestManifestFromPluginBuildsDirectManifest(t *testing.T) {
 	if errValidate := manifest.Validate(); errValidate != nil {
 		t.Fatalf("Validate() error = %v", errValidate)
 	}
-	if manifest.SchemaVersion != SchemaVersionV2 || manifest.InstallType() != InstallTypeDirect || manifest.ReleaseTag != "" {
+	if manifest.SchemaVersion != SchemaVersionV2 || manifest.InstallType() != InstallTypeDirect ||
+		manifest.ReleaseTag != "" {
 		t.Fatalf("manifest = %#v, want v2 direct without release tag", manifest)
 	}
 	if manifest.SourceURL != DefaultRegistryURL || len(manifest.Install.Artifacts) != 0 {

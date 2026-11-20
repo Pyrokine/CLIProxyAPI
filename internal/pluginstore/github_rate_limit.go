@@ -148,10 +148,7 @@ func (limiter *GitHubRateLimiter) observe(
 		if !rateLimited {
 			return nil
 		}
-		delay := time.Minute * time.Duration(1<<entry.failures)
-		if delay > time.Hour {
-			delay = time.Hour
-		}
+		delay := min(time.Minute*time.Duration(1<<entry.failures), time.Hour)
 		retryAt = now.Add(delay)
 		if entry.failures < 6 {
 			entry.failures++

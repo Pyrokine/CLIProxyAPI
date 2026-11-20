@@ -184,6 +184,7 @@ func main() {}
 // The exported name is fixed by the plugin C ABI.
 //
 //export cliproxy_plugin_init
+//goland:noinspection GoUnusedFunction,GoSnakeCaseUsage
 func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
 	if plugin == nil {
 		return 1
@@ -220,11 +221,10 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 }
 
 //export cliproxyPluginFree
-func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
+func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 	if ptr != nil {
 		C.free(ptr)
 	}
-	_ = len
 }
 
 //export cliproxyPluginShutdown
@@ -260,7 +260,7 @@ func pluginRegistration() registration {
 			Name:             pluginName,
 			Version:          "0.1.0",
 			Author:           "router-for-me",
-			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			GitHubRepository: "https://github.com/Pyrokine/CLIProxyAPI",
 			Logo:             "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/docs/logo.png",
 			ConfigFields:     []pluginapi.ConfigField{},
 		},
@@ -642,7 +642,12 @@ func renderPage(
 ) []byte {
 	var out bytes.Buffer
 	out.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>Host Model Callback</title>")
-	out.WriteString("<style>body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;margin:2rem;line-height:1.45;color:#1f2933}code,pre{background:#f3f4f6;border-radius:6px}code{padding:.1rem .3rem}pre{padding:1rem;overflow:auto;white-space:pre-wrap}dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem}dt{font-weight:600}dd{margin:0}.error{color:#b42318}</style>")
+	out.WriteString(
+		"<style>body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;margin:" +
+			"2rem;line-height:1.45;color:#1f2933}code,pre{background:#f3f4f6;border-radius:6px}code{padding:." +
+			"1rem .3rem}pre{padding:1rem;overflow:auto;white-space:pre-wrap}dl{display:grid;grid-template-" +
+			"columns:max-content 1fr;gap:.35rem 1rem}dt{font-weight:600}dd{margin:0}.error{color:#b42318}</style>",
+	)
 	out.WriteString("</head><body><main>")
 	out.WriteString("<h1>Host Model Callback</h1>")
 	out.WriteString("<dl>")

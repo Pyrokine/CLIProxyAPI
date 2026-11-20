@@ -13,12 +13,12 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 	bool,
 	error,
 ) {
-	record := h.schedulerRecord()
+	record, snapshot := h.schedulerRecord()
 	if record == nil {
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 
-	resp, handled, errPick := h.callScheduler(ctx, *record, req)
+	resp, handled, errPick := h.callScheduler(ctx, *record, snapshot, req)
 	if errPick != nil || !handled {
 		return resp, handled, errPick
 	}
@@ -34,32 +34,40 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 	return resp, true, nil
 }
 
+func (h *Host) HasScheduler() bool {
+	record, _ := h.schedulerRecord()
+	return record != nil
+}
+
 func (h *Host) SchedulerWantsAcrossPriorities() bool {
-	record := h.schedulerRecord()
+	record, _ := h.schedulerRecord()
 	return record != nil && schedulerWantsAcrossPriorities(record.plugin.Capabilities)
 }
 
-func (h *Host) schedulerRecord() *capabilityRecord {
+func (h *Host) schedulerRecord() (*capabilityRecord, *Snapshot) {
 	if h == nil {
-		return nil
+		return nil, nil
 	}
-	for _, record := range h.activeRecords() {
+	snapshot := h.Snapshot()
+	for _, record := range h.activeRecordsFromSnapshot(snapshot) {
 		if h.isPluginFused(record.id) || record.plugin.Capabilities.Scheduler == nil {
 			continue
 		}
 		copyRecord := record
-		return &copyRecord
+		return &copyRecord, snapshot
 	}
-	return nil
+	return nil, snapshot
 }
 
 func (h *Host) callScheduler(
 	ctx context.Context,
 	record capabilityRecord,
+	snapshot *Snapshot,
 	req pluginapi.SchedulerPickRequest,
 ) (resp pluginapi.SchedulerPickResponse, handled bool, err error) {
 	scheduler := record.plugin.Capabilities.Scheduler
-	if h == nil || scheduler == nil || h.isPluginFused(record.id) {
+	if h == nil || scheduler == nil || h.isPluginFused(record.id) || h.Snapshot() != snapshot ||
+		!h.recordCurrent(record) {
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 	defer func() {

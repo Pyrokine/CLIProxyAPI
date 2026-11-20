@@ -46,7 +46,11 @@ func (h *Host) newHTTPClient(auth *coreauth.Auth, providers ...string) pluginapi
 	return h.newHTTPClientWithProxy(auth, "", providers...)
 }
 
-func (h *Host) newHTTPClientWithProxy(auth *coreauth.Auth, requestProxyURL string, providers ...string) pluginapi.HostHTTPClient {
+func (h *Host) newHTTPClientWithProxy(
+	auth *coreauth.Auth,
+	requestProxyURL string,
+	providers ...string,
+) pluginapi.HostHTTPClient {
 	provider := ""
 	if len(providers) > 0 {
 		provider = providers[0]
@@ -83,7 +87,7 @@ func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (plu
 			cleanup()
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header)
+	helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header, resp)
 	body, errReadAll := readPluginHTTPResponse(resp.Body, resp.ContentLength, maxPluginHTTPResponseBytes)
 	if errReadAll != nil {
 		helps.RecordAPIResponseError(ctx, cfg, errReadAll)
@@ -123,7 +127,7 @@ func (c *hostHTTPClient) DoStream(ctx context.Context, req pluginapi.HTTPRequest
 		helps.RecordAPIResponseError(ctx, cfg, errDo)
 		return pluginapi.HTTPStreamResponse{}, errDo
 	}
-	helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header)
+	helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header, resp)
 	chunks := make(chan pluginapi.HTTPStreamChunk)
 	go func() {
 		defer close(chunks)
@@ -259,12 +263,14 @@ func (c *hostHTTPClient) newHTTPClientForRequest(
 	var baseTransport *http.Transport
 	explicitDirect := false
 	configuredSOCKS := false
-	builtByProxyutil := false
+	builtByProxyUtil := false
 	if proxyString != "" {
 		setting, errParse := proxyutil.Parse(proxyString)
 		if errParse != nil {
 			return nil, nil, fmt.Errorf("pluginhost: parse proxy %s: %w", redactedProxyURL(proxyString), errParse)
 		}
+		// Parse returns ModeInvalid with an error, handled above.
+		//goland:noinspection GoSwitchMissingCasesForIotaConsts
 		switch setting.Mode {
 		case proxyutil.ModeDirect:
 			explicitDirect = true
@@ -280,7 +286,7 @@ func (c *hostHTTPClient) newHTTPClientForRequest(
 				)
 			}
 			baseTransport = builtTransport
-			builtByProxyutil = true
+			builtByProxyUtil = true
 			configuredSOCKS = setting.URL != nil &&
 				(strings.EqualFold(setting.URL.Scheme, "socks5") || strings.EqualFold(setting.URL.Scheme, "socks5h"))
 		case proxyutil.ModeInherit:
@@ -329,6 +335,8 @@ func (c *hostHTTPClient) newHTTPClientForRequest(
 	forceHTTP1 := profile.HTTP1Only || hasHeaderProfile
 	if forceHTTP1 {
 		baseTransport.ForceAttemptHTTP2 = false
+		baseTransport.Protocols = &http.Protocols{}
+		baseTransport.Protocols.SetHTTP1(true)
 		baseTransport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 		if baseTransport.TLSClientConfig == nil {
 			baseTransport.TLSClientConfig = &tls.Config{}
@@ -339,7 +347,7 @@ func (c *hostHTTPClient) newHTTPClientForRequest(
 	}
 
 	callerTLSDialer := transportTLSDialer(contextTransport)
-	if callerTLSDialer == nil && !builtByProxyutil {
+	if callerTLSDialer == nil && !builtByProxyUtil {
 		callerTLSDialer = transportTLSDialer(baseTransport)
 	}
 	if forceHTTP1 && !hasHeaderProfile && callerTLSDialer != nil {
@@ -377,9 +385,13 @@ func (c *hostHTTPClient) newHTTPClientForRequest(
 		}
 		baseTransport.DialTLSContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
 			currentRequest := requestState.get()
-			targetProxy, errProxy := resolveProxyForRequest(currentRequest, c.auth, cfg, originalProxy)
-			if errProxy != nil {
-				return nil, errProxy
+			var targetProxy *url.URL
+			if originalProxy != nil && currentRequest != nil {
+				var errProxy error
+				targetProxy, errProxy = originalProxy(currentRequest)
+				if errProxy != nil {
+					return nil, errProxy
+				}
 			}
 			targetHTTPS := currentRequest != nil && currentRequest.URL != nil && currentRequest.URL.Scheme == "https"
 			if !targetHTTPS {
@@ -452,6 +464,7 @@ func (c *hostHTTPClient) newHTTPClientForRequest(
 	return client, cleanup, nil
 }
 
+// noinspection GoDeprecation
 func transportDialer(transport *http.Transport) func(context.Context, string, string) (net.Conn, error) {
 	if transport != nil {
 		if transport.DialContext != nil {
@@ -468,6 +481,7 @@ func transportDialer(transport *http.Transport) func(context.Context, string, st
 	return (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 }
 
+// noinspection GoDeprecation
 func transportTLSDialer(transport *http.Transport) func(context.Context, string, string) (net.Conn, error) {
 	if transport == nil {
 		return nil
@@ -540,19 +554,20 @@ func clientTLSConnection(
 	if rawConn == nil {
 		return nil, fmt.Errorf("pluginhost: TLS connection is nil")
 	}
-	config := &tls.Config{}
+	tlsConfig := &tls.Config{}
 	if baseConfig != nil {
-		config = baseConfig.Clone()
+		tlsConfig = baseConfig.Clone()
 	}
 	host, _, errSplit := net.SplitHostPort(address)
 	if errSplit != nil {
 		host = address
 	}
-	if config.ServerName == "" {
-		config.ServerName = host
+	if tlsConfig.ServerName == "" {
+		tlsConfig.ServerName = host
 	}
-	config.NextProtos = []string{"http/1.1"}
-	tlsConn := tls.Client(rawConn, config)
+	tlsConfig.NextProtos = []string{"http/1.1"}
+	//noinspection GoResourceLeak
+	tlsConn := tls.Client(rawConn, tlsConfig)
 	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("pluginhost TLS handshake: %w", errHandshake)
@@ -584,42 +599,6 @@ func (h *requestHolder) set(req *http.Request) {
 	h.mu.Lock()
 	h.req = req
 	h.mu.Unlock()
-}
-
-func resolveProxyForRequest(
-	request *http.Request,
-	auth *coreauth.Auth,
-	cfg *config.Config,
-	proxyFunction func(*http.Request) (*url.URL, error),
-) (*url.URL, error) {
-	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
-		setting, errParse := proxyutil.Parse(strings.TrimSpace(auth.ProxyURL))
-		if errParse != nil {
-			return nil, fmt.Errorf("pluginhost: parse auth proxy: %w", errParse)
-		}
-		switch setting.Mode {
-		case proxyutil.ModeDirect:
-			return nil, nil
-		case proxyutil.ModeProxy:
-			return setting.URL, nil
-		}
-	}
-	if cfg != nil && strings.TrimSpace(cfg.ProxyURL) != "" {
-		setting, errParse := proxyutil.Parse(strings.TrimSpace(cfg.ProxyURL))
-		if errParse != nil {
-			return nil, fmt.Errorf("pluginhost: parse config proxy: %w", errParse)
-		}
-		switch setting.Mode {
-		case proxyutil.ModeDirect:
-			return nil, nil
-		case proxyutil.ModeProxy:
-			return setting.URL, nil
-		}
-	}
-	if proxyFunction != nil && request != nil {
-		return proxyFunction(request)
-	}
-	return nil, nil
 }
 
 func dialProxyTunnel(
@@ -696,10 +675,12 @@ func dialProxyTunnel(
 	}
 
 	cancelComplete := make(chan struct{})
-	stopCancellation := context.AfterFunc(ctx, func() {
-		_ = conn.Close()
-		close(cancelComplete)
-	})
+	stopCancellation := context.AfterFunc(
+		ctx, func() {
+			_ = conn.Close()
+			close(cancelComplete)
+		},
+	)
 	defer func() {
 		if !stopCancellation() {
 			<-cancelComplete
@@ -734,13 +715,16 @@ func dialProxyTunnel(
 		return nil, fmt.Errorf("write CONNECT request: %w", errWrite)
 	}
 	buffered := bufio.NewReader(conn)
+	//noinspection GoResourceLeak
 	response, errResponse := http.ReadResponse(buffered, connectRequest)
 	if errResponse != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("read CONNECT response: %w", errResponse)
 	}
 	if transport != nil && transport.OnProxyConnectResponse != nil {
-		if errCallback := transport.OnProxyConnectResponse(ctx, proxyURL, connectRequest, response); errCallback != nil {
+		if errCallback := transport.OnProxyConnectResponse(
+			ctx, proxyURL, connectRequest, response,
+		); errCallback != nil {
 			_ = response.Body.Close()
 			_ = conn.Close()
 			return nil, fmt.Errorf("on proxy connect response: %w", errCallback)

@@ -28,12 +28,14 @@ func TestPluginRefreshCompatApplyPatchCapability(t *testing.T) {
 		{name: "enabled", inner: &patchAwareCompatExecutor{supported: true}, want: true},
 		{name: "nil receiver", inner: (*patchAwareCompatExecutor)(nil)},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			wrapped := &pluginRefreshCompatExecutor{inner: tc.inner}
-			if got := wrapped.SupportsApplyPatch(); got != tc.want {
-				t.Fatalf("support = %t, want %t", got, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				wrapped := &pluginRefreshCompatExecutor{inner: tc.inner}
+				if got := wrapped.SupportsApplyPatch(); got != tc.want {
+					t.Fatalf("support = %t, want %t", got, tc.want)
+				}
+			},
+		)
 	}
 	inner := &patchAwareCompatExecutor{supported: true, scoped: &patchAwareCompatExecutor{supported: false}}
 	wrapped := &pluginRefreshCompatExecutor{inner: inner, host: New()}

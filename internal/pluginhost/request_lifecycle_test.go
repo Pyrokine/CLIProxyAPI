@@ -208,24 +208,91 @@ func TestRPCCapabilitiesAndAdapterIncludeRequestLifecycle(t *testing.T) {
 	if registered.Capabilities.RequestLifecyclePlugin == nil {
 		t.Fatal("RequestLifecyclePlugin = nil, want RPC adapter")
 	}
+	channel := make(chan struct{})
+	metadata := map[string]any{"keep": "value", "channel": channel, "function": func() {}}
 	if errComplete := registered.Capabilities.RequestLifecyclePlugin.HandleRequestComplete(
 		context.Background(),
 		pluginapi.RequestCompletion{
 			RequestID: "request-rpc",
 			Outcome:   pluginapi.RequestCompletionSucceeded,
+			Metadata:  metadata,
 		},
 	); errComplete != nil {
 		t.Fatalf("HandleRequestComplete() error = %v", errComplete)
 	}
-	if got.RequestID != "request-rpc" || got.Outcome != pluginapi.RequestCompletionSucceeded {
+	if got.RequestID != "request-rpc" || got.Outcome != pluginapi.RequestCompletionSucceeded ||
+		len(got.Metadata) != 1 || got.Metadata["keep"] != "value" {
 		t.Fatalf("RPC completion = %#v", got)
+	}
+	if len(metadata) != 3 || metadata["channel"] != channel {
+		t.Fatal("RPC completion sanitization changed the original metadata")
+	}
+	if _, ok := metadata["function"].(func()); !ok {
+		t.Fatal("RPC completion sanitization removed the caller's function")
+	}
+}
+
+func TestRequestCompletionMetadataPreservesRPCEnvelopeAndCaller(t *testing.T) {
+	for _, wrapped := range []bool{false, true} {
+		t.Run(
+			fmt.Sprint(wrapped), func(t *testing.T) {
+				channel := make(chan struct{})
+				nested := map[string]any{"keep": "nested", "channel": channel}
+				metadata := map[string]any{
+					"keep":     "value",
+					"channel":  channel,
+					"function": func() {},
+					"nested":   nested,
+				}
+				completion := pluginapi.RequestCompletion{
+					RequestID: "request-1", Outcome: pluginapi.RequestCompletionSucceeded, Metadata: metadata,
+				}
+				var request any = completion
+				callbackID := ""
+				if wrapped {
+					callbackID = "callback-1"
+					request = rpcRequestCompletion{RequestCompletion: completion, HostCallbackID: callbackID}
+				}
+				raw, err := json.Marshal(sanitizePluginRequest(request))
+				if err != nil {
+					t.Fatalf("completion metadata could not cross the JSON envelope: %v", err)
+				}
+				var decoded rpcRequestCompletion
+				if err := json.Unmarshal(raw, &decoded); err != nil {
+					t.Fatal(err)
+				}
+				if decoded.RequestID !=
+					completion.RequestID ||
+					decoded.Outcome !=
+						completion.Outcome ||
+					decoded.HostCallbackID !=
+						callbackID ||
+					len(decoded.Metadata) != 2 ||
+					decoded.Metadata["keep"] != "value" {
+					t.Fatalf("completion envelope = %s", raw)
+				}
+				if child, ok := decoded.Metadata["nested"].(map[string]any); !ok || len(child) != 1 ||
+					child["keep"] != "nested" {
+					t.Fatalf("nested completion metadata = %s", raw)
+				}
+				if len(metadata) != 4 || metadata["channel"] != channel || len(nested) != 2 ||
+					nested["channel"] != channel {
+					t.Fatal("completion sanitization mutated the caller's metadata")
+				}
+				if _, ok := metadata["function"].(func()); !ok {
+					t.Fatal("completion sanitization removed the caller's function")
+				}
+			},
+		)
 	}
 }
 
 func TestValidPluginAcceptsRequestLifecycleOnly(t *testing.T) {
 	plugin := validTestPlugin("request-lifecycle-only")
 	plugin.Capabilities = pluginapi.Capabilities{
-		RequestLifecyclePlugin: requestLifecyclePluginFunc(func(context.Context, pluginapi.RequestCompletion) {}),
+		RequestLifecyclePlugin: requestLifecyclePluginFunc(
+			func(context.Context, pluginapi.RequestCompletion) {},
+		),
 	}
 	if !validPlugin(plugin) {
 		t.Fatal("request-lifecycle-only plugin was rejected")
@@ -234,24 +301,26 @@ func TestValidPluginAcceptsRequestLifecycleOnly(t *testing.T) {
 
 func TestRPCRegistrationNegotiatesSchemaVersionsZeroThroughSix(t *testing.T) {
 	for schemaVersion := uint32(0); schemaVersion <= pluginabi.SchemaVersion; schemaVersion++ {
-		t.Run(fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
-			lookup := newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("schema")})
-			lookup.schemaVersion = schemaVersion
-			lookup.schemaVersionSet = true
-			registered, errRegister := registerRPCPlugin(
-				context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, nil,
-			)
-			if errRegister != nil {
-				t.Fatalf("registerRPCPlugin() error = %v", errRegister)
-			}
-			want := schemaVersion
-			if want == 0 {
-				want = 1
-			}
-			if registered.SchemaVersion != want {
-				t.Fatalf("SchemaVersion = %d, want %d", registered.SchemaVersion, want)
-			}
-		})
+		t.Run(
+			fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
+				lookup := newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("schema")})
+				lookup.schemaVersion = schemaVersion
+				lookup.schemaVersionSet = true
+				registered, errRegister := registerRPCPlugin(
+					context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, nil,
+				)
+				if errRegister != nil {
+					t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+				}
+				want := schemaVersion
+				if want == 0 {
+					want = 1
+				}
+				if registered.SchemaVersion != want {
+					t.Fatalf("SchemaVersion = %d, want %d", registered.SchemaVersion, want)
+				}
+			},
+		)
 	}
 }
 

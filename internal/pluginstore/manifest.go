@@ -22,7 +22,7 @@ type Manifest struct {
 	SourceID      string      `yaml:"source-id,omitempty" json:"source_id,omitempty"`
 	SourceName    string      `yaml:"source-name,omitempty" json:"source_name,omitempty"`
 	SourceURL     string      `yaml:"source-url,omitempty" json:"source_url,omitempty"`
-	Install       InstallPlan `yaml:"install,omitempty" json:"install,omitempty"`
+	Install       InstallPlan `yaml:"install,omitempty" json:"install"`
 }
 
 func ManifestFromRelease(source Source, plugin Plugin, release Release) (Manifest, error) {

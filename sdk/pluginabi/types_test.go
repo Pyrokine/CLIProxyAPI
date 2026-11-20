@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// noinspection GoBoolExpressions
 func TestSchemaVersionCapabilities(t *testing.T) {
 	// These contract tests intentionally compare compile-time ABI constants.
 	// noinspection GoBoolExpressions

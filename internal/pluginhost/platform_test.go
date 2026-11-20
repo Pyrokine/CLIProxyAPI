@@ -173,56 +173,60 @@ func TestApplyConfigQuiescesBeforePublishingReplacement(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			root := makePluginDir(t, "alpha")
-			loader := newTestSymbolLoader()
-			oldPlugin := reloadTestPlugin("old")
-			newPlugin := reloadTestPlugin("new")
-			oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
-			loader.lookups["alpha"] = oldLookup
-			host := newForTest(loader)
-			t.Cleanup(func() {
-				_ = host.ShutdownAllContext(context.Background())
-			})
-			initialConfig := pluginRuntimeConfigForTest(root, 1)
-			if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
-				t.Fatalf("initial ApplyConfig() error = %v", errApply)
-			}
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				root := makePluginDir(t, "alpha")
+				loader := newTestSymbolLoader()
+				oldPlugin := reloadTestPlugin("old")
+				newPlugin := reloadTestPlugin("new")
+				oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
+				loader.lookups["alpha"] = oldLookup
+				host := newForTest(loader)
+				t.Cleanup(
+					func() {
+						_ = host.ShutdownAllContext(context.Background())
+					},
+				)
+				initialConfig := pluginRuntimeConfigForTest(root, 1)
+				if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
+					t.Fatalf("initial ApplyConfig() error = %v", errApply)
+				}
 
-			events := make([]string, 0, 3)
-			oldLookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
-				pluginabi.MethodPluginQuiesce: func(ctx context.Context, raw []byte) ([]byte, error) {
-					events = append(events, "old-quiesce")
-					return testCase.quiesceResult(ctx, raw)
-				},
-			}
-			oldLookup.shutdownHook = func() {
-				events = append(events, "old-shutdown")
-			}
-			newLookup := newTestSymbolLookup(&testPlugin{registerResult: newPlugin, reconfigureResult: newPlugin})
-			newLookup.registerOverride = func([]byte) pluginapi.Plugin {
-				events = append(events, "candidate-register")
-				return newPlugin
-			}
-			loader.lookups["alpha"] = newLookup
+				events := make([]string, 0, 3)
+				oldLookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+					pluginabi.MethodPluginQuiesce: func(ctx context.Context, raw []byte) ([]byte, error) {
+						events = append(events, "old-quiesce")
+						return testCase.quiesceResult(ctx, raw)
+					},
+				}
+				oldLookup.shutdownHook = func() {
+					events = append(events, "old-shutdown")
+				}
+				newLookup := newTestSymbolLookup(&testPlugin{registerResult: newPlugin, reconfigureResult: newPlugin})
+				newLookup.registerOverride = func([]byte) pluginapi.Plugin {
+					events = append(events, "candidate-register")
+					return newPlugin
+				}
+				loader.lookups["alpha"] = newLookup
 
-			if errApply := host.ApplyConfig(
-				context.Background(), pluginRuntimeConfigForTest(root, 2),
-			); errApply != nil {
-				t.Fatalf("replacement ApplyConfig() error = %v", errApply)
-			}
-			wantEvents := "old-quiesce,candidate-register,old-shutdown"
-			if strings.Join(events, ",") != wantEvents {
-				t.Fatalf("replacement events = %q, want %q", strings.Join(events, ","), wantEvents)
-			}
-			records := host.activeRecords()
-			if len(records) != 1 || records[0].plugin.Metadata.Name != "new" {
-				t.Fatalf("published records = %#v", records)
-			}
-			if newLookup.shutdownCalls != 0 {
-				t.Fatalf("new plugin shutdown calls = %d before host cleanup", newLookup.shutdownCalls)
-			}
-		})
+				if errApply := host.ApplyConfig(
+					context.Background(), pluginRuntimeConfigForTest(root, 2),
+				); errApply != nil {
+					t.Fatalf("replacement ApplyConfig() error = %v", errApply)
+				}
+				wantEvents := "old-quiesce,candidate-register,old-shutdown"
+				if strings.Join(events, ",") != wantEvents {
+					t.Fatalf("replacement events = %q, want %q", strings.Join(events, ","), wantEvents)
+				}
+				records := host.activeRecords()
+				if len(records) != 1 || records[0].plugin.Metadata.Name != "new" {
+					t.Fatalf("published records = %#v", records)
+				}
+				if newLookup.shutdownCalls != 0 {
+					t.Fatalf("new plugin shutdown calls = %d before host cleanup", newLookup.shutdownCalls)
+				}
+			},
+		)
 	}
 }
 
@@ -233,9 +237,11 @@ func TestApplyConfigClosesFailedCandidateBeforeRestoringQuiescedPlugin(t *testin
 	oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
 	loader.lookups["alpha"] = oldLookup
 	host := newForTest(loader)
-	t.Cleanup(func() {
-		_ = host.ShutdownAllContext(context.Background())
-	})
+	t.Cleanup(
+		func() {
+			_ = host.ShutdownAllContext(context.Background())
+		},
+	)
 	initialConfig := pluginRuntimeConfigForTest(root, 1)
 	if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
 		t.Fatalf("initial ApplyConfig() error = %v", errApply)
@@ -286,7 +292,10 @@ func TestApplyConfigClosesFailedCandidateBeforeRestoringQuiescedPlugin(t *testin
 		)
 	}
 	if host.currentRuntimeConfig() != initialConfig || host.isPluginFused("alpha") {
-		t.Fatalf("old runtime was not restored: config=%p want=%p fused=%t", host.currentRuntimeConfig(), initialConfig, host.isPluginFused("alpha"))
+		t.Fatalf(
+			"old runtime was not restored: config=%p want=%p fused=%t", host.currentRuntimeConfig(), initialConfig,
+			host.isPluginFused("alpha"),
+		)
 	}
 	records := host.activeRecords()
 	if len(records) != 1 || records[0].plugin.Metadata.Name != "old" {
@@ -308,9 +317,11 @@ func TestApplyConfigCancellationAfterQuiesceRestoresOldPluginWithoutLoadingCandi
 	oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
 	loader.lookups["alpha"] = oldLookup
 	host := newForTest(loader)
-	t.Cleanup(func() {
-		_ = host.ShutdownAllContext(context.Background())
-	})
+	t.Cleanup(
+		func() {
+			_ = host.ShutdownAllContext(context.Background())
+		},
+	)
 	initialConfig := pluginRuntimeConfigForTest(root, 1)
 	if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
 		t.Fatalf("initial ApplyConfig() error = %v", errApply)
@@ -354,9 +365,11 @@ func TestApplyConfigCancellationDuringQuiesceRestoresOldPlugin(t *testing.T) {
 	oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
 	loader.lookups["alpha"] = oldLookup
 	host := newForTest(loader)
-	t.Cleanup(func() {
-		_ = host.ShutdownAllContext(context.Background())
-	})
+	t.Cleanup(
+		func() {
+			_ = host.ShutdownAllContext(context.Background())
+		},
+	)
 	initialConfig := pluginRuntimeConfigForTest(root, 1)
 	if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
 		t.Fatalf("initial ApplyConfig() error = %v", errApply)
@@ -402,9 +415,11 @@ func TestApplyConfigCancellationDuringCandidateRegistrationClosesCandidateBefore
 	oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
 	loader.lookups["alpha"] = oldLookup
 	host := newForTest(loader)
-	t.Cleanup(func() {
-		_ = host.ShutdownAllContext(context.Background())
-	})
+	t.Cleanup(
+		func() {
+			_ = host.ShutdownAllContext(context.Background())
+		},
+	)
 	initialConfig := pluginRuntimeConfigForTest(root, 1)
 	if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
 		t.Fatalf("initial ApplyConfig() error = %v", errApply)
@@ -460,24 +475,28 @@ func TestApplyConfigCancellationDuringCandidateRegistrationClosesCandidateBefore
 
 func pluginRuntimeConfigForTest(root string, priority int) *config.Config {
 	enabled := true
-	return &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     root,
-		Configs: map[string]config.PluginInstanceConfig{
-			"alpha": {Enabled: &enabled, Priority: priority},
+	return &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     root,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {Enabled: &enabled, Priority: priority},
+			},
 		},
-	}}
+	}
 }
 
 func reloadTestPlugin(name string) pluginapi.Plugin {
 	plugin := validTestPlugin(name)
 	plugin.Capabilities = pluginapi.Capabilities{
-		RequestInterceptor: requestInterceptorFunc(func(
-			_ context.Context,
-			req pluginapi.RequestInterceptRequest,
-		) (pluginapi.RequestInterceptResponse, error) {
-			return pluginapi.RequestInterceptResponse{Body: req.Body}, nil
-		}),
+		RequestInterceptor: requestInterceptorFunc(
+			func(
+				_ context.Context,
+				req pluginapi.RequestInterceptRequest,
+			) (pluginapi.RequestInterceptResponse, error) {
+				return pluginapi.RequestInterceptResponse{Body: req.Body}, nil
+			},
+		),
 	}
 	return plugin
 }

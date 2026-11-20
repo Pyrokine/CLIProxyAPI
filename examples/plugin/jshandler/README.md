@@ -104,7 +104,9 @@ Called after a non-streaming response is received from upstream.
 
 ### `on_after_stream_response(ctx)`
 
-Called after each streaming response chunk is received from upstream.
+Called after each streaming response chunk is received from upstream. Each hook runs in a separate JavaScript VM and
+receives the request body in `ctx.req.body` and bounded prior delivered chunks in the frozen `ctx.history_chunks` array.
+The plugin advertises schema 2 to retain these inputs on every chunk.
 
 **ctx structure:**
 

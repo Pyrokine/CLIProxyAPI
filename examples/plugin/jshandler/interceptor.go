@@ -261,7 +261,7 @@ func (p *jsHandlerPlugin) applyJSRequestHook(
 
 	jsVal, errCall := engine.callFunction(hookName, p.cfg.Timeout, jsCtx)
 	if errCall != nil {
-		if errors.Is(errCall, ErrFunctionNotFound) {
+		if errors.Is(errCall, errFunctionNotFound) {
 			return payloadBytes, nil, nil
 		}
 		return nil, nil, fmt.Errorf("%s failed for %s: %w", hookName, scriptPath, errCall)
@@ -378,7 +378,7 @@ func (p *jsHandlerPlugin) applyJSAfterResponse(
 	}
 	jsVal, errCall := engine.callFunction(hookName, p.cfg.Timeout, jsCtx)
 	if errCall != nil {
-		if errors.Is(errCall, ErrFunctionNotFound) {
+		if errors.Is(errCall, errFunctionNotFound) {
 			return bodyStr, nil, false, nil
 		}
 		return bodyStr, nil, false, fmt.Errorf("%s failed for %s: %w", hookName, scriptPath, errCall)

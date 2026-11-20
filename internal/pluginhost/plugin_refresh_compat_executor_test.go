@@ -75,8 +75,8 @@ func (e *scopedRefreshCompatExecutor) ForAPIKey() coreauth.ProviderExecutor {
 func TestPluginRefreshCompatExecutorForAPIKeyKeepsRefreshOwner(t *testing.T) {
 	apiKey := &stubRefreshCompatExecutor{id: "provider"}
 	inner := &scopedRefreshCompatExecutor{
-		stubRefreshCompatExecutor: stubRefreshCompatExecutor{id: "provider"},
-		apiKey:                    apiKey,
+		id:     "provider",
+		apiKey: apiKey,
 	}
 	host := New()
 	wrapped := NewPluginRefreshCompatExecutor(inner, host).(*pluginRefreshCompatExecutor)
@@ -87,7 +87,9 @@ func TestPluginRefreshCompatExecutorForAPIKeyKeepsRefreshOwner(t *testing.T) {
 	if wrapped.inner != inner {
 		t.Fatal("ForAPIKey() changed the original executor")
 	}
-	if _, err := selected.Execute(context.Background(), nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
+	if _, err := selected.Execute(
+		context.Background(), nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{},
+	); err != nil {
 		t.Fatal(err)
 	}
 	if apiKey.executeCalls != 1 || inner.executeCalls != 0 {

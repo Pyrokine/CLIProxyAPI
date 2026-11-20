@@ -26,6 +26,7 @@ type streamEntry struct {
 	chunks    chan pluginapi.ExecutorStreamChunk
 	done      chan struct{}
 	abort     chan struct{}
+	finished  chan struct{}
 	closeOnce sync.Once
 	abortOnce sync.Once
 	onDone    func()
@@ -51,31 +52,40 @@ func newStreamBridge() *streamBridge {
 
 func newStreamEntry(onDone func()) *streamEntry {
 	entry := &streamEntry{
-		input:  make(chan streamInput),
-		chunks: make(chan pluginapi.ExecutorStreamChunk, 16),
-		done:   make(chan struct{}),
-		abort:  make(chan struct{}),
-		onDone: onDone,
+		input:    make(chan streamInput),
+		chunks:   make(chan pluginapi.ExecutorStreamChunk),
+		done:     make(chan struct{}),
+		abort:    make(chan struct{}),
+		finished: make(chan struct{}),
+		onDone:   onDone,
 	}
 	go entry.forward()
 	return entry
 }
 
 func (e *streamEntry) forward() {
+	defer close(e.finished)
 	defer close(e.chunks)
 	defer func() {
 		if e.onDone != nil {
 			e.onDone()
 		}
 	}()
-	pending := make([]pluginapi.ExecutorStreamChunk, 0, 16)
+	// Keep accepted chunks private so cancellation can discard undelivered data.
+	const queueCapacity = 17
+	pending := make([]pluginapi.ExecutorStreamChunk, 0, queueCapacity)
 	closing := false
 	for {
+		select {
+		case <-e.abort:
+			return
+		default:
+		}
 		if closing && len(pending) == 0 {
 			return
 		}
 		var input chan streamInput
-		if len(pending) < 1 {
+		if len(pending) < queueCapacity {
 			input = e.input
 		}
 		var output chan pluginapi.ExecutorStreamChunk
@@ -134,26 +144,10 @@ func (e *streamEntry) emit(ctx context.Context, chunk pluginapi.ExecutorStreamCh
 		return fmt.Errorf("stream is closed")
 	case e.input <- request:
 	}
-	select {
-	case accepted := <-request.accepted:
-		if accepted {
-			return nil
-		}
-		return fmt.Errorf("stream is closed")
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-e.abort:
-		return fmt.Errorf("stream is closed")
-	case <-e.done:
-		select {
-		case accepted := <-request.accepted:
-			if accepted {
-				return nil
-			}
-		default:
-		}
-		return fmt.Errorf("stream is closed")
+	if <-request.accepted {
+		return nil
 	}
+	return fmt.Errorf("stream is closed")
 }
 
 func (e *streamEntry) close(errorMessage string) {
@@ -179,9 +173,13 @@ func (e *streamEntry) cancel() {
 	}
 	e.abortOnce.Do(
 		func() {
+			e.mu.Lock()
+			e.closed = true
 			close(e.abort)
+			e.mu.Unlock()
 		},
 	)
+	<-e.finished
 }
 
 func (b *streamBridge) open(
@@ -197,10 +195,10 @@ func (b *streamBridge) open(
 	var entry *streamEntry
 	entry = newStreamEntry(
 		func() {
-			b.remove(id, entry)
 			if len(onDone) > 0 && onDone[0] != nil {
 				onDone[0]()
 			}
+			b.remove(id, entry)
 		},
 	)
 	b.mu.Lock()
@@ -211,8 +209,11 @@ func (b *streamBridge) open(
 	}
 	if ctx != nil && ctx.Done() != nil {
 		go func() {
-			<-ctx.Done()
-			b.abort(id)
+			select {
+			case <-ctx.Done():
+				b.abort(id)
+			case <-entry.finished:
+			}
 		}()
 	}
 	return id, entry.chunks, cleanup
@@ -250,7 +251,6 @@ func (b *streamBridge) abort(id string) {
 	}
 	b.mu.Lock()
 	entry := b.streams[id]
-	delete(b.streams, id)
 	b.mu.Unlock()
 	entry.cancel()
 }
