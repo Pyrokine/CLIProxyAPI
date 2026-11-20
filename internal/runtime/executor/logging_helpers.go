@@ -7,6 +7,7 @@ import (
 	"html"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -137,8 +138,14 @@ func RecordAPIWebsocketRequest(
 }
 
 // RecordAPIWebsocketHandshake stores upstream WebSocket handshake metadata.
-func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
-	recordAPIWebsocketHandshake(ctx, cfg, status, headers)
+func RecordAPIWebsocketHandshake(
+	ctx context.Context,
+	cfg *config.Config,
+	status int,
+	headers http.Header,
+	responses ...*http.Response,
+) {
+	recordAPIWebsocketHandshake(ctx, cfg, status, headers, responses...)
 }
 
 // AppendAPIWebsocketResponse 记录上游 WebSocket 响应正文
@@ -152,13 +159,19 @@ func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 }
 
 // RecordAPIResponseMetadata captures upstream response status/header information for request logging.
-func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
-	recordAPIResponseMetadata(ctx, cfg, status, headers)
+func RecordAPIResponseMetadata(
+	ctx context.Context,
+	cfg *config.Config,
+	status int,
+	headers http.Header,
+	responses ...*http.Response,
+) {
+	recordAPIResponseMetadata(ctx, cfg, status, headers, responses...)
 }
 
 // RecordAPIResponseError adds an upstream response error entry for request logging.
-func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	recordAPIResponseError(ctx, cfg, err)
+func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error, responses ...*http.Response) {
+	recordAPIResponseError(ctx, cfg, err, responses...)
 }
 
 // AppendAPIResponseChunk appends an upstream response body chunk for request logging.
@@ -172,6 +185,8 @@ func requestLogCaptureEnabled(cfg *config.Config) bool {
 }
 
 func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
+	usageReporterFromContext(ctx).observeUpstreamRequest(info)
+	info.URL = util.SanitizeUpstreamURL(info.URL)
 	if cfg == nil || cfg.CommercialMode {
 		return
 	}
@@ -287,7 +302,15 @@ func newAPIRequestLogBuilder(index int, info upstreamRequestLog, timestamp time.
 }
 
 // recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
-func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+func recordAPIResponseMetadata(
+	ctx context.Context,
+	cfg *config.Config,
+	status int,
+	headers http.Header,
+	responses ...*http.Response,
+) {
+	usageReporterFromContext(ctx).observeHTTPResponseURL(responses, "http_response_request_url")
+	usageReporterFromContext(ctx).observeUpstreamHeaders(headers)
 	logging.SetResponseHeaders(ctx, headers)
 	cliproxyauth.RecordUpstreamResponseHeaders(ctx, headers)
 	if !requestLogCaptureEnabled(cfg) {
@@ -317,8 +340,12 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	}
 }
 
-// recordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
-func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
+// recordAPIResponseError retains an HTTP response returned with a failed upstream operation.
+func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error, responses ...*http.Response) {
+	if len(responses) > 0 && responses[0] != nil {
+		response := responses[0]
+		recordAPIResponseMetadata(ctx, cfg, response.StatusCode, response.Header.Clone(), response)
+	}
 	if !requestLogCaptureEnabled(cfg) || err == nil {
 		return
 	}
@@ -343,6 +370,7 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // appendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+	usageReporterFromContext(ctx).observeResponseChunk(chunk)
 	logging.MarkFirstResponseByte(ctx)
 	if !requestLogCaptureEnabled(cfg) {
 		return
@@ -379,6 +407,8 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 }
 
 func recordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
+	usageReporterFromContext(ctx).observeUpstreamRequest(info)
+	info.URL = util.SanitizeUpstreamURL(info.URL)
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -410,7 +440,15 @@ func recordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info ups
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
 }
 
-func recordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+func recordAPIWebsocketHandshake(
+	ctx context.Context,
+	cfg *config.Config,
+	status int,
+	headers http.Header,
+	responses ...*http.Response,
+) {
+	usageReporterFromContext(ctx).observeHTTPResponseURL(responses, "ws_handshake_request_url")
+	usageReporterFromContext(ctx).observeUpstreamHeaders(headers)
 	logging.SetResponseHeaders(ctx, headers)
 	cliproxyauth.RecordUpstreamResponseHeaders(ctx, headers)
 	if !requestLogCaptureEnabled(cfg) {
@@ -442,7 +480,13 @@ func recordAPIWebsocketUpgradeRejection(
 	status int,
 	headers http.Header,
 	body []byte,
+	responses ...*http.Response,
 ) {
+	defer func() {
+		reporter := usageReporterFromContext(ctx)
+		reporter.observeHTTPResponseURL(responses, "ws_handshake_request_url")
+		reporter.observeUpstreamHeaders(headers)
+	}()
 	logging.SetResponseHeaders(ctx, headers)
 	if !requestLogCaptureEnabled(cfg) {
 		return
@@ -452,8 +496,10 @@ func recordAPIWebsocketUpgradeRejection(
 		return
 	}
 
-	recordAPIRequest(ctx, cfg, info)
-	recordAPIResponseMetadata(ctx, cfg, status, headers)
+	// The HTTP upgrade log describes the same attempt and must retain its request observations.
+	logCtx := context.WithValue(ctx, usageReporterContextKey{}, (*usageReporter)(nil))
+	recordAPIRequest(logCtx, cfg, info)
+	recordAPIResponseMetadata(ctx, cfg, status, headers, responses...)
 	appendAPIResponseChunk(ctx, cfg, body)
 }
 
@@ -476,6 +522,7 @@ func websocketUpgradeRequestURL(rawURL string) string {
 }
 
 func appendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
+	usageReporterFromContext(ctx).observeResponseChunk(payload)
 	logging.MarkFirstResponseByte(ctx)
 	if !requestLogCaptureEnabled(cfg) {
 		return
@@ -522,8 +569,17 @@ func recordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
 }
 
+func markAntigravityCreditsPath(ctx context.Context) {
+	if ginCtx := ginContextFrom(ctx); ginCtx != nil {
+		ginCtx.Set("__antigravity_credits_used__", true)
+	}
+}
+
 func ginContextFrom(ctx context.Context) *gin.Context {
 	ginCtx, _ := util.GinContextValue(ctx).(*gin.Context)
+	if ginCtx == nil {
+		ginCtx, _ = ctx.Value("gin").(*gin.Context)
+	}
 	return ginCtx
 }
 
@@ -627,8 +683,8 @@ func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 		return
 	}
 	attempts := getAttempts(ginCtx)
-	for i := len(attempts) - 1; i >= 0; i-- {
-		previous := attempts[i]
+	for _, previous := range slices.Backward(attempts) {
+
 		if previous == nil || previous == attempt || !previous.responseIntroWritten {
 			continue
 		}

@@ -113,7 +113,9 @@ func validateCodexToolChoiceNames(body []byte, declared map[string]struct{}, req
 }
 
 func invalidXAIToolCallEvent(message string) []byte {
-	event := []byte(`{"type":"response.failed","response":{"status":"failed","status_code":502,"error":{"type":"api_error","code":"invalid_tool_name","message":""}}}`)
+	event := []byte((`{"type":"response.failed","response":{"status":"failed","status_code":` +
+		`502,"error":{"type":"api_error","code":"invalid_tool_name","message":"` +
+		`"}}}`))
 	event, _ = sjson.SetBytes(event, "response.error.message", message)
 	return event
 }

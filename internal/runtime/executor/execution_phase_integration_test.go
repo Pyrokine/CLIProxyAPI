@@ -65,8 +65,13 @@ func newWebsocketReadPhaseServer(t *testing.T, messageType int, payload []byte) 
 	return httptest.NewServer(
 		http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
-				conn, errUpgrade := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(
-					w, r, nil,
+				conn,
+					errUpgrade := (&websocket.Upgrader{
+					CheckOrigin: func(*http.Request) bool { return true },
+				}).Upgrade(
+					w,
+					r,
+					nil,
 				)
 				if errUpgrade != nil {
 					t.Errorf("upgrade websocket: %v", errUpgrade)
@@ -124,8 +129,10 @@ func TestCodexWebsocketReadPhaseTracksFirstUpstreamFrame(t *testing.T) {
 	}{
 		{name: "before first frame"},
 		{
-			name:            "after first frame",
-			payload:         []byte(`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`),
+			name: "after first frame",
+			payload: []byte(
+				`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+			),
 			responseStarted: true,
 		},
 	}
@@ -147,7 +154,10 @@ func TestCodexWebsocketReadPhaseTracksFirstUpstreamFrame(t *testing.T) {
 						Provider:   "codex",
 						Attributes: map[string]string{"api_key": "test-token", "base_url": server.URL},
 					},
-					cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`)},
+					cliproxyexecutor.Request{
+						Model:   "gpt-5.5",
+						Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+					},
 					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: true},
 				)
 				if errExecute != nil {
@@ -172,8 +182,10 @@ func TestXAIWebsocketReadPhaseTracksFirstUpstreamFrame(t *testing.T) {
 	}{
 		{name: "before first frame"},
 		{
-			name:            "after first frame",
-			payload:         []byte(`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`),
+			name: "after first frame",
+			payload: []byte(
+				`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+			),
 			responseStarted: true,
 		},
 	}
@@ -260,8 +272,10 @@ func TestXAIWebsocketTranscriptFailureIsResponseStarted(t *testing.T) {
 			Attributes: map[string]string{"api_key": "test-token", "base_url": server.URL},
 		},
 		cliproxyexecutor.Request{
-			Model:   "grok-4.3",
-			Payload: []byte(`{"model":"grok-4.3","input":[{"type":"message","role":"user","content":"hello"}]}`),
+			Model: "grok-4.3",
+			Payload: []byte(
+				`{"model":"grok-4.3","input":[{"type":"message","role":"user","content":"hello"}]}`,
+			),
 		},
 		cliproxyexecutor.Options{
 			SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse,
@@ -285,7 +299,9 @@ func TestXAIHTTPStreamResponseFailureIsTerminalResponseStartedError(t *testing.T
 		context.Background(), executionPhaseRoundTripper(
 			func(*http.Request) (*http.Response, error) {
 				body := "event: response.failed\n" +
-					`data: {"type":"response.failed","response":{"status":"failed","error":{"type":"server_error","message":"failed"}}}` +
+					(`data: {"type":"response.failed","response":{"status":"failed","error":` +
+						`{"type":"server_error","message":` +
+						`"failed"}}}`) +
 					"\n\n"
 				return &http.Response{
 					StatusCode: http.StatusOK,

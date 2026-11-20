@@ -166,10 +166,14 @@ func TestNewProxyAwareHTTPClientInvalidProxyDoesNotFallback(t *testing.T) {
 }
 
 func TestNewProxyAwareHTTPClientRequestOverride(t *testing.T) {
-	ctx := util.WithRoundTripper(context.Background(), proxyTestRoundTripper(func(*http.Request) (*http.Response, error) {
-		t.Fatal("injected transport must not override the execution proxy")
-		return nil, nil
-	}))
+	ctx := util.WithRoundTripper(
+		context.Background(), proxyTestRoundTripper(
+			func(*http.Request) (*http.Response, error) {
+				t.Fatal("injected transport must not override the execution proxy")
+				return nil, nil
+			},
+		),
+	)
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, "http://request-proxy.example:8081")
 	client := newProxyAwareHTTPClient(
 		ctx,
@@ -205,12 +209,21 @@ func TestNewProxyAwareHTTPClientRequestOverride(t *testing.T) {
 }
 
 func TestNewDevinHTTPClientRequestOverride(t *testing.T) {
-	ctx := util.WithRoundTripper(context.Background(), proxyTestRoundTripper(func(*http.Request) (*http.Response, error) {
-		t.Fatal("Devin request override must bypass injected transport")
-		return nil, nil
-	}))
+	ctx := util.WithRoundTripper(
+		context.Background(), proxyTestRoundTripper(
+			func(*http.Request) (*http.Response, error) {
+				t.Fatal("Devin request override must bypass injected transport")
+				return nil, nil
+			},
+		),
+	)
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, "http://devin-request.example:8081")
-	client := newDevinHTTPClient(ctx, &config.Config{ProxyURL: "direct"}, &cliproxyauth.Auth{ProxyURL: "direct"}, 0)
+	client := newDevinHTTPClient(
+		ctx,
+		&config.Config{ProxyURL: "direct"},
+		&cliproxyauth.Auth{ProxyURL: "direct"},
+		0,
+	)
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok || transport.Proxy == nil || !transport.DisableCompression {
 		t.Fatalf("Devin transport = %T, want no-gzip proxy transport", client.Transport)
@@ -229,36 +242,62 @@ func (f proxyTestRoundTripper) RoundTripperFor(*cliproxyauth.Auth) http.RoundTri
 
 func TestManagerRoundTripperReachesActualExecutor(t *testing.T) {
 	for _, useContext := range []bool{false, true} {
-		t.Run(fmt.Sprint(useContext), func(t *testing.T) {
-			calls := 0
-			transport := proxyTestRoundTripper(func(req *http.Request) (*http.Response, error) {
-				calls++
-				return &http.Response{StatusCode: http.StatusOK, Request: req, Header: http.Header{"Content-Type": {"application/json"}},
-					Body: io.NopCloser(strings.NewReader(`{"id":"memory","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"memory"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))}, nil
-			})
-			executor := NewOpenAICompatExecutor("transport-contract", &config.Config{})
-			manager := cliproxyauth.NewManager(nil, nil, nil)
-			manager.SetRetryConfig(0, 0, 1)
-			manager.RegisterExecutor(executor)
-			manager.SetRoundTripperProvider(transport)
-			auth := &cliproxyauth.Auth{ID: t.Name(), Provider: executor.Identifier(), Status: cliproxyauth.StatusActive,
-				Attributes: map[string]string{"base_url": "http://127.0.0.1:1/v1", "api_key": "synthetic-transport-key"}}
-			if _, err := manager.Register(context.Background(), auth); err != nil {
-				t.Fatal(err)
-			}
-			const model = "transport-contract-model"
-			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
-			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
-			ctx := context.Background()
-			if useContext {
-				ctx = util.WithRoundTripper(ctx, transport)
-			}
-			response, err := manager.Execute(ctx, []string{auth.Provider}, cliproxyexecutor.Request{
-				Model: model, Payload: []byte(`{"model":"transport-contract-model","messages":[{"role":"user","content":"same synthetic payload"}]}`),
-			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
-			if err != nil || calls != 1 || !strings.Contains(string(response.Payload), "memory") {
-				t.Fatalf("Execute() = %s, %v, transport calls = %d", response.Payload, err, calls)
-			}
-		})
+		t.Run(
+			fmt.Sprint(useContext), func(t *testing.T) {
+				calls := 0
+				transport := proxyTestRoundTripper(
+					func(req *http.Request) (*http.Response, error) {
+						calls++
+						return &http.Response{
+							StatusCode: http.StatusOK, Request: req,
+							Header: http.Header{"Content-Type": {"application/json"}},
+							Body: io.NopCloser(
+								strings.NewReader(
+									`{"id":"memory","object":"chat.completion","choices":[{"index":0,"` +
+										`message":{"role":"assistant","content":"memory"},"finish_reason":"` +
+										`stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"` +
+										`total_tokens":2}}`,
+								),
+							),
+						}, nil
+					},
+				)
+				executor := NewOpenAICompatExecutor("transport-contract", &config.Config{})
+				manager := cliproxyauth.NewManager(nil, nil, nil)
+				manager.SetRetryConfig(0, 0, 1)
+				manager.RegisterExecutor(executor)
+				manager.SetRoundTripperProvider(transport)
+				auth := &cliproxyauth.Auth{
+					ID: t.Name(), Provider: executor.Identifier(), Status: cliproxyauth.StatusActive,
+					Attributes: map[string]string{
+						"base_url": "http://127.0.0.1:1/v1", "api_key": "synthetic-transport-key",
+					},
+				}
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+				const model = "transport-contract-model"
+				registry.GetGlobalRegistry().
+					RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				ctx := context.Background()
+				if useContext {
+					ctx = util.WithRoundTripper(ctx, transport)
+				}
+				response, err := manager.Execute(
+					ctx, []string{auth.Provider}, cliproxyexecutor.Request{
+						Model: model,
+						Payload: []byte(
+							`{"model":"transport-contract-model","messages":[{"role":"user",` +
+								`"content":"same synthetic ` +
+								`payload"}]}`,
+						),
+					}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")},
+				)
+				if err != nil || calls != 1 || !strings.Contains(string(response.Payload), "memory") {
+					t.Fatalf("Execute() = %s, %v, transport calls = %d", response.Payload, err, calls)
+				}
+			},
+		)
 	}
 }

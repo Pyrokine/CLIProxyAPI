@@ -2,6 +2,7 @@ package executor
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -43,15 +44,20 @@ func newUpstreamStatusErrMessage(statusCode int, message string, headers http.He
 
 type responseStartedError struct {
 	cause error
+	body  *string
 }
 
 func (e responseStartedError) Error() string {
+	if e.body != nil {
+		return *e.body
+	}
 	if e.cause == nil {
 		return ""
 	}
 	return e.cause.Error()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e responseStartedError) Unwrap() error {
 	return e.cause
 }
@@ -67,6 +73,7 @@ func (e responseStartedError) StatusCode() int {
 	return 0
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e responseStartedError) RetryAfter() *time.Duration {
 	type retryAfterProvider interface {
 		RetryAfter() *time.Duration
@@ -78,6 +85,7 @@ func (e responseStartedError) RetryAfter() *time.Duration {
 	return nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e responseStartedError) Headers() http.Header {
 	type headerProvider interface {
 		Headers() http.Header
@@ -120,7 +128,7 @@ func parseRetryAfterHeader(headers http.Header, now time.Time) *time.Duration {
 		if seconds < 0 {
 			return nil
 		}
-		delay := time.Duration(seconds) * time.Second
+		delay := time.Duration(min(seconds, int64(math.MaxInt64)/int64(time.Second))) * time.Second
 		return &delay
 	}
 	deadline, errTime := http.ParseTime(value)

@@ -25,15 +25,13 @@ func validGrokEncryptedContentForExecutorTest() string {
 
 func TestSanitizeXAIInputEncryptedContentDropsForeignReasoningAndCompaction(t *testing.T) {
 	valid := validGrokEncryptedContentForExecutorTest()
+	//goland:noinspection SpellCheckingInspection
 	body := []byte(fmt.Sprintf(
-		`{
-		"input":[
-			{"type":"reasoning","encrypted_content":"gAAAAforeign-signature","summary":[]},
-			{"type":"compaction","encrypted_content":"claude-foreign-signature"},
-			{"type":"reasoning","encrypted_content":%q,"summary":[]},
-			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
-		]
-	}`, valid,
+		"{\n\t\t\"input\":[\n\t\t\t{\"type\":\"reasoning\",\"encrypted_content\":\"gAAAAforeign-signature\","+
+			"\"summary\":[]},\n\t\t\t{\"type\":\"compaction\",\"encrypted_content\":\"claude-foreign-"+
+			"signature\"},\n\t\t\t{\"type\":\"reasoning\",\"encrypted_content\":%q,\"summary\":[]},\n\t\t\t{"+
+			"\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\""+
+			"continue\"}]}\n\t\t]\n\t}", valid,
 	))
 
 	out := sanitizeXAIInputEncryptedContent(context.Background(), body)
@@ -63,8 +61,12 @@ func TestApplyXAIReasoningReplayCacheInsertsCachedReasoningAndToolCall(t *testin
 		]
 	}`)
 	req := cliproxyexecutor.Request{Model: model, Payload: body}
-	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "xai-session-1"}}
-	wantScope := xaiReasoningReplayScopeFromRequest(context.Background(), xaiReplayTestAuth, sdktranslator.FormatClaude, req, opts, body)
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "xai-session-1"},
+	}
+	wantScope := xaiReasoningReplayScopeFromRequest(
+		context.Background(), xaiReplayTestAuth, sdktranslator.FormatClaude, req, opts, body,
+	)
 	if !wantScope.valid() {
 		t.Fatal("expected credential-scoped replay")
 	}
@@ -104,25 +106,23 @@ func TestAntigravityReasoningReplayCachesFunctionCallBeforeFunctionResponse(t *t
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
 	model := "gemini-3-pro"
-	requestPayload := []byte(`{"sessionId":"ag-session-1","request":{"contents":[{"role":"user","parts":[{"text":"call tool"}]}]}}`)
+	requestPayload := []byte(
+		`{"sessionId":"ag-session-1","request":{"contents":[{"role":"user","parts":[{"text":"call tool"}]}]}}`,
+	)
 	scope := antigravityReasoningReplayScopeFromPayload(model, requestPayload)
 	if !scope.valid() {
 		t.Fatal("expected valid Antigravity replay scope")
 	}
-	responsePayload := []byte(`{
-		"response":{"candidates":[{"finishReason":"STOP","content":{"parts":[
-			{"functionCall":{"id":"call_1","name":"read_file","args":{"path":"a.txt"}},"thoughtSignature":"thought_signature_1234567890"}
-		]}}]}
-	}`)
+	responsePayload := []byte(("{\n\t\t\"response\":{\"candidates\":[{\"finishReason\":\"STOP\",\"cont" +
+		"ent\":{\"parts\":[\n\t\t\t{\"functionCall\":{\"id\":\"call_1\",\"name" +
+		`":"read_file","args":{"path":"a.txt"}},"thoughtSignature":"thought_sig` +
+		"nature_1234567890\"}\n\t\t]}}]}\n\t}"))
 	cacheAntigravityReasoningReplayFromResponse(context.Background(), scope, requestPayload, responsePayload)
 
-	nextPayload := []byte(`{
-		"sessionId":"ag-session-1",
-		"request":{"contents":[
-			{"role":"user","parts":[{"text":"call tool"}]},
-			{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"read_file","response":{"content":"ok"}}}]}
-		]}
-	}`)
+	nextPayload := []byte(("{\n\t\t\"sessionId\":\"ag-session-1\",\n\t\t\"request\":{\"contents\":" +
+		"[\n\t\t\t{\"role\":\"user\",\"parts\":[{\"text\":\"call tool\"}]},\n\t" +
+		`		{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"r` +
+		"ead_file\",\"response\":{\"content\":\"ok\"}}}]}\n\t\t]}\n\t}"))
 	updated, nextScope, errReplay := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: nextPayload},
 		cliproxyexecutor.Options{}, nextPayload,

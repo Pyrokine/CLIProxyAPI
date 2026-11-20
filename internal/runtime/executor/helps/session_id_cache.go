@@ -30,8 +30,21 @@ type claudeIDKVClient interface {
 	KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 }
 
-var currentClaudeIDKVClient = func() (claudeIDKVClient, bool, error) {
-	return homekv.CurrentKVClient()
+type claudeRequestKVClient struct {
+	homekv.KVClient
+}
+
+func (c claudeRequestKVClient) KVSetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
+	opts := homekv.KVSetOptions{NX: true}
+	if ttl > 0 {
+		opts.EX = ttl
+	}
+	return c.KVSet(ctx, key, value, opts)
+}
+
+var currentClaudeIDKVClient = func(ctx context.Context) (claudeIDKVClient, bool, error) {
+	client, homeMode, err := homekv.KVClientFromContext(ctx)
+	return claudeRequestKVClient{client}, homeMode, err
 }
 
 const (
@@ -65,11 +78,18 @@ func sessionIDCacheKey(apiKey string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func claudeLocalCacheKey(ctx context.Context, key string) string {
+	if scope, ok := homekv.ClientScopeFromContext(ctx); ok {
+		return scope.ID + "\x00" + key
+	}
+	return key
+}
+
 func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error) {
 	if apiKey == "" {
 		return uuid.NewString(), nil
 	}
-	client, homeMode, errClient := currentClaudeIDKVClient()
+	client, homeMode, errClient := currentClaudeIDKVClient(ctx)
 	if homeMode {
 		if errClient != nil {
 			return "", errClient
@@ -100,7 +120,7 @@ func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error)
 	}
 
 	sessionIDCacheCleanupOnce.Do(startSessionIDCacheCleanup)
-	key := sessionIDCacheKey(apiKey)
+	key := claudeLocalCacheKey(ctx, sessionIDCacheKey(apiKey))
 	now := time.Now()
 
 	sessionIDCacheMu.RLock()

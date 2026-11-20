@@ -35,14 +35,18 @@ func TestValidateCodexResponsesToolNames(t *testing.T) {
 			requireDeclared: true,
 		},
 		{
-			name:            "invalid history syntax",
-			body:            `{"tools":[{"type":"function","name":"run"}],"input":[{"type":"function_call","name":"bad.name"}]}`,
+			name: "invalid history syntax",
+			body: `{"tools":[{"type":"function","name":"run"}],"input":[{"type":` +
+				`"function_call","name":` +
+				`"bad.name"}]}`,
 			requireDeclared: true,
 			wantError:       "invalid tool name at input[0].name",
 		},
 		{
-			name:            "history call may reference a previous tool set",
-			body:            `{"tools":[{"type":"function","name":"run"}],"input":[{"type":"function_call","name":"mcp__history__get"}]}`,
+			name: "history call may reference a previous tool set",
+			body: `{"tools":[{"type":"function","name":"run"}],"input":[{"type":` +
+				`"function_call","name":` +
+				`"mcp__history__get"}]}`,
 			requireDeclared: true,
 		},
 		{
@@ -51,8 +55,10 @@ func TestValidateCodexResponsesToolNames(t *testing.T) {
 			requireDeclared: true,
 		},
 		{
-			name:            "undeclared current tool choice",
-			body:            `{"tools":[{"type":"function","name":"run"}],"tool_choice":{"type":"function","name":"other"}}`,
+			name: "undeclared current tool choice",
+			body: `{"tools":[{"type":"function","name":"run"}],"tool_choice":{"type":` +
+				`"function","name":` +
+				`"other"}}`,
 			requireDeclared: true,
 			wantError:       "undeclared tool name at tool_choice.name",
 		},
@@ -68,8 +74,9 @@ func TestValidateCodexResponsesToolNames(t *testing.T) {
 			wantError:       "invalid tool name at tools[0].name",
 		},
 		{
-			name:            "overlong name",
-			body:            `{"tools":[{"type":"function","name":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`,
+			name: "overlong name",
+			body: `{"tools":[{"type":"function","name":` +
+				`"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`,
 			requireDeclared: false,
 			wantError:       "expected 1-64 ASCII characters",
 		},
@@ -86,7 +93,11 @@ func TestValidateCodexResponsesToolNames(t *testing.T) {
 					return
 				}
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
-					t.Fatalf("validateCodexResponsesToolNames() error = %v, want substring %q", err, test.wantError)
+					t.Fatalf(
+						"validateCodexResponsesToolNames() error = %v, want substring %q",
+						err,
+						test.wantError,
+					)
 				}
 				if strings.Contains(err.Error(), "bad.name") || strings.Contains(err.Error(), "bad/name") {
 					t.Fatalf("validation error leaked rejected tool name: %v", err)
@@ -98,15 +109,12 @@ func TestValidateCodexResponsesToolNames(t *testing.T) {
 
 func TestCodexResponsesBodyAllowsValidUndeclaredClaudeHistoryToolName(t *testing.T) {
 	const historicalToolName = "mcp__mcp-claude-history__history_get"
-	payload := []byte(`{
-		"model":"gpt-5.6-sol",
-		"messages":[
-			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_history","name":"mcp__mcp-claude-history__history_get","input":{}}]},
-			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_history","content":"done"}]},
-			{"role":"user","content":"continue"}
-		],
-		"tools":[{"name":"Read","input_schema":{"type":"object"}}]
-	}`)
+	payload := []byte(("{\n\t\t\"model\":\"gpt-5.6-sol\",\n\t\t\"messages\":[\n\t\t\t{\"role\":\"assistant\"," +
+		"\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_history\",\"name\":\"mcp__mcp-claude-" +
+		"history__history_get\",\"input\":{}}]},\n\t\t\t{\"role\":\"user\",\"content\":[{\"type\":\"" +
+		"tool_result\",\"tool_use_id\":\"toolu_history\",\"content\":\"done\"}]},\n\t\t\t{\"role\":\"user\"," +
+		"\"content\":\"continue\"}\n\t\t],\n\t\t\"tools\":[{\"name\":\"Read\",\"input_schema\":{\"type\":\"" +
+		"object\"}}]\n\t}"))
 	req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: payload}
 
 	prepared, err := codexResponsesBody(
@@ -207,8 +215,22 @@ func TestGrokToCodexInvalidToolNameReplayStopsAtBothBoundaries(t *testing.T) {
 			func(w http.ResponseWriter, _ *http.Request) {
 				xaiRequests.Add(1)
 				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"" + rejectedName + "\",\"call_id\":\"call-1\",\"arguments\":\"{}\"}}\n\n"))
-				_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"))
+				_, _ = w.Write(
+					[]byte(
+						"data: {\"type\":\"response.output_item.added\",\"output_index\":0," +
+							"\"item\":{\"type\":\"function_call\",\"name\":" +
+							"\"" +
+							rejectedName +
+							"\",\"call_id\":\"call-1\",\"arguments\":\"{}\"}}\n\n",
+					),
+				)
+				_, _ = w.Write(
+					[]byte(
+						"data: {\"type\":\"response.completed\",\"response\":{\"status\":" +
+							"\"completed\",\"output\":" +
+							"[]}}\n\n",
+					),
+				)
 			},
 		),
 	)
@@ -327,7 +349,13 @@ func TestXAIToolIdentityRejectsInvalidAndUndeclaredToolCalls(t *testing.T) {
 		"invalid command-shaped name", func(t *testing.T) {
 			normalizer := newXAIToolIdentityNormalizer(body).newResponseNormalizer(false)
 			rejectedName := "python -c 'print(1)'"
-			event := []byte(`{"type":"response.output_item.added","item":{"type":"function_call","name":"` + rejectedName + `","call_id":"call-1"}}`)
+			event := []byte(
+				`{"type":"response.output_item.added","item":{"type":"function_call",` +
+					`"name":` +
+					`"` +
+					rejectedName +
+					`","call_id":"call-1"}}`,
+			)
 			got := normalizer.normalize(event)
 			if eventType := gjson.GetBytes(got, "type").String(); eventType != "response.failed" {
 				t.Fatalf("event type = %q, want response.failed; event=%s", eventType, got)
@@ -338,7 +366,8 @@ func TestXAIToolIdentityRejectsInvalidAndUndeclaredToolCalls(t *testing.T) {
 			if strings.Contains(string(got), rejectedName) {
 				t.Fatalf("error event leaked rejected tool name: %s", got)
 			}
-			if next := normalizer.normalize([]byte(`{"type":"response.completed","response":{"output":[]}}`)); next != nil {
+			if next := normalizer.normalize([]byte(`{"type":"response.completed","response":{"output":[]}}`)); next !=
+				nil {
 				t.Fatalf("event after terminal failure was preserved: %s", next)
 			}
 		},
@@ -347,7 +376,13 @@ func TestXAIToolIdentityRejectsInvalidAndUndeclaredToolCalls(t *testing.T) {
 	t.Run(
 		"valid but undeclared name", func(t *testing.T) {
 			normalizer := newXAIToolIdentityNormalizer(body).newResponseNormalizer(false)
-			got := normalizer.normalize([]byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"Read","call_id":"call-2"}}`))
+			got := normalizer.normalize(
+				[]byte(
+					`{"type":"response.output_item.done","item":{"type":"function_call",` +
+						`"name":"Read","call_id":` +
+						`"call-2"}}`,
+				),
+			)
 			if message := gjson.GetBytes(got, "response.error.message").String(); !strings.Contains(
 				message, "undeclared tool call",
 			) {
@@ -359,7 +394,9 @@ func TestXAIToolIdentityRejectsInvalidAndUndeclaredToolCalls(t *testing.T) {
 	t.Run(
 		"declared name", func(t *testing.T) {
 			normalizer := newXAIToolIdentityNormalizer(body).newResponseNormalizer(false)
-			event := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"Bash","call_id":"call-3"}}`)
+			event := []byte(
+				`{"type":"response.output_item.done","item":{"type":"function_call","name":"Bash","call_id":"call-3"}}`,
+			)
 			if got := normalizer.normalize(event); string(got) != string(event) {
 				t.Fatalf("declared event changed: got=%s want=%s", got, event)
 			}
@@ -369,7 +406,13 @@ func TestXAIToolIdentityRejectsInvalidAndUndeclaredToolCalls(t *testing.T) {
 	t.Run(
 		"invalid completed output", func(t *testing.T) {
 			normalizer := newXAIToolIdentityNormalizer(body).newResponseNormalizer(false)
-			got := normalizer.normalize([]byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","name":"bad/name","call_id":"call-4"}]}}`))
+			got := normalizer.normalize(
+				[]byte(
+					`{"type":"response.completed","response":{"output":[{"type":` +
+						`"function_call","name":"bad/name","call_id":` +
+						`"call-4"}]}}`,
+				),
+			)
 			if eventType := gjson.GetBytes(got, "type").String(); eventType != "response.failed" {
 				t.Fatalf("event type = %q, want response.failed; event=%s", eventType, got)
 			}

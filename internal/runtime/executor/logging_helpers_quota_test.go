@@ -71,42 +71,46 @@ func TestResponseLoggingHelpersBridgeHeadersToCurrentAuthAttempt(t *testing.T) {
 		{name: "http"},
 		{name: "websocket handshake", websocket: true},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			model := "logging-quota-bridge-" + test.name
-			authID := "logging-quota-auth-" + test.name
-			reg := registry.GetGlobalRegistry()
-			reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
-			t.Cleanup(func() { reg.UnregisterClient(authID) })
+		t.Run(
+			test.name, func(t *testing.T) {
+				model := "logging-quota-bridge-" + test.name
+				authID := "logging-quota-auth-" + test.name
+				reg := registry.GetGlobalRegistry()
+				reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { reg.UnregisterClient(authID) })
 
-			headers := http.Header{
-				"X-Codex-Plan-Type":            {"pro"},
-				"X-Codex-Primary-Used-Percent": {"73"},
-			}
-			executor := &loggingQuotaBridgeExecutor{websocket: test.websocket, headers: headers}
-			manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
-			manager.RegisterExecutor(executor)
-			if _, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
-				ID: authID, Provider: "codex", Status: cliproxyauth.StatusActive,
-			}); errRegister != nil {
-				t.Fatalf("Register() error = %v", errRegister)
-			}
+				headers := http.Header{
+					"X-Codex-Plan-Type":            {"pro"},
+					"X-Codex-Primary-Used-Percent": {"73"},
+				}
+				executor := &loggingQuotaBridgeExecutor{websocket: test.websocket, headers: headers}
+				manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
+				manager.RegisterExecutor(executor)
+				if _, errRegister := manager.Register(
+					context.Background(), &cliproxyauth.Auth{
+						ID: authID, Provider: "codex", Status: cliproxyauth.StatusActive,
+					},
+				); errRegister != nil {
+					t.Fatalf("Register() error = %v", errRegister)
+				}
 
-			if _, errExecute := manager.Execute(
-				context.Background(),
-				[]string{"codex"},
-				cliproxyexecutor.Request{Model: model},
-				cliproxyexecutor.Options{},
-			); errExecute != nil {
-				t.Fatalf("Execute() error = %v", errExecute)
-			}
-			updated, ok := manager.GetByID(authID)
-			if !ok || updated == nil {
-				t.Fatal("auth disappeared after execution")
-			}
-			if updated.Quota.Signals["X-Codex-Plan-Type"] != "pro" ||
-				updated.Quota.Signals["X-Codex-Primary-Used-Percent"] != "73" {
-				t.Fatalf("quota observation = %#v", updated.Quota.Signals)
-			}
-		})
+				if _, errExecute := manager.Execute(
+					context.Background(),
+					[]string{"codex"},
+					cliproxyexecutor.Request{Model: model},
+					cliproxyexecutor.Options{},
+				); errExecute != nil {
+					t.Fatalf("Execute() error = %v", errExecute)
+				}
+				updated, ok := manager.GetByID(authID)
+				if !ok || updated == nil {
+					t.Fatal("auth disappeared after execution")
+				}
+				if updated.Quota.Signals["X-Codex-Plan-Type"] != "pro" ||
+					updated.Quota.Signals["X-Codex-Primary-Used-Percent"] != "73" {
+					t.Fatalf("quota observation = %#v", updated.Quota.Signals)
+				}
+			},
+		)
 	}
 }

@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -25,31 +28,294 @@ import (
 )
 
 type usageReporter struct {
-	provider        string
-	baseURL         string
-	executorType    string
-	model           string
-	stream          bool
-	alias           string
-	authID          string
-	authIndex       string
-	accessTokenHash string
-	authType        string
-	apiKey          string
-	reservationID   string
-	source          string
-	sourceKind      usage.CredentialSourceKind
-	sourceRedacted  bool
-	reasoningEffort string
-	serviceTier     string
-	modelMu         sync.RWMutex
-	responseModel   string
-	upstreamModel   string
-	modelFinal      bool
-	generate        bool
-	thinking        *usage.Thinking
-	requestedAt     time.Time
-	once            sync.Once
+	provider                 string
+	baseURL                  string
+	executorType             string
+	model                    string
+	stream                   bool
+	alias                    string
+	clientModel              string
+	authID                   string
+	authIndex                string
+	accessTokenHash          string
+	authType                 string
+	apiKey                   string
+	reservationID            string
+	source                   string
+	sourceKind               usage.CredentialSourceKind
+	sourceRedacted           bool
+	reasoningEffort          string
+	serviceTier              string
+	requestedTier            string
+	modelMu                  sync.RWMutex
+	responseModel            string
+	upstreamModel            string
+	upstreamURL              string
+	responseURL              string
+	responseURLSource        string
+	responseURLStatus        string
+	upstreamNextHopStatus    string
+	billingMetadata          *usage.BillingMetadata
+	billingTools             []string
+	billingRequestKnown      bool
+	billingCodeExecutionFree bool
+	billingComplete          bool
+	billingMedia             bool
+	cacheWrite5mTokens       *int64
+	cacheWrite1hTokens       *int64
+	responseTier             string
+	requestSpeed             string
+	responseSpeed            string
+	responseProvider         string
+	responseProviderSource   string
+	observationMu            sync.Mutex
+	observationStream        streamUsageBuffer
+	modelFinal               bool
+	generate                 bool
+	thinking                 *usage.Thinking
+	requestedAt              time.Time
+	once                     sync.Once
+}
+
+type usageReporterContextKey struct{}
+
+type bridgeResponseURLContextKey struct{}
+
+func (r *usageReporter) withContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, usageReporterContextKey{}, r)
+}
+
+func usageReporterFromContext(ctx context.Context) *usageReporter {
+	if ctx == nil {
+		return nil
+	}
+	reporter, _ := ctx.Value(usageReporterContextKey{}).(*usageReporter)
+	return reporter
+}
+
+func (r *usageReporter) observeUpstreamRequest(info upstreamRequestLog) {
+	if r == nil {
+		return
+	}
+	model := ""
+	if value := gjson.GetBytes(info.Body, "model"); value.Type == gjson.String &&
+		validResponseModel(strings.TrimSpace(value.String())) {
+		model = strings.TrimSpace(value.String())
+	}
+	if model == "" {
+		if endpoint, err := url.Parse(info.URL); err == nil {
+			if _, suffix, ok := strings.Cut(endpoint.Path, "/models/"); ok {
+				name, _, _ := strings.Cut(suffix, ":")
+				if validResponseModel(name) {
+					model = name
+				}
+			}
+		}
+	}
+	r.observationMu.Lock()
+	r.observationStream = streamUsageBuffer{modelReporter: r}
+	r.observationMu.Unlock()
+	r.modelMu.Lock()
+	defer r.modelMu.Unlock()
+	r.upstreamURL = util.SanitizeUpstreamURL(info.URL)
+	r.responseURL = ""
+	r.responseURLSource = ""
+	r.responseURLStatus = "no_response"
+	r.upstreamNextHopStatus = "not_reported"
+	r.billingMetadata = nil
+	r.billingComplete = false
+	r.billingTools = nil
+	r.billingCodeExecutionFree = false
+	r.cacheWrite5mTokens, r.cacheWrite1hTokens = nil, nil
+	r.billingRequestKnown = gjson.ValidBytes(info.Body) && gjson.ParseBytes(info.Body).IsObject()
+	endpoint, _ := url.Parse(info.URL)
+	r.billingMedia = r.provider == "meta" && endpoint != nil && (strings.HasSuffix(
+		endpoint.Path, "/images/generations",
+	) || strings.HasSuffix(endpoint.Path, "/images/edits"))
+	if r.billingRequestKnown && r.provider == "claude" {
+		for _, tool := range gjson.GetBytes(info.Body, "tools").Array() {
+			kind := tool.Get("type").String()
+			for _, prefix := range []string{"web_search_", "web_fetch_"} {
+				if version, ok := strings.CutPrefix(kind, prefix); ok && len(version) == 8 {
+					if date, err := strconv.Atoi(version); err == nil && date >= 20260209 {
+						r.billingCodeExecutionFree = true
+					}
+				}
+			}
+		}
+	}
+	if r.billingRequestKnown {
+		for _, tool := range gjson.GetBytes(info.Body, "tools").Array() {
+			kind := tool.Get("type").String()
+			if kind == "function" || kind == "custom" || (kind == "" && tool.Get("name").Type == gjson.String) || strings.HasPrefix(
+				kind, "text_editor_",
+			) {
+				continue
+			}
+			if kind != "" {
+				r.requireBillingTool(kind)
+				continue
+			}
+			tool.ForEach(
+				func(key, value gjson.Result) bool {
+					if key.String() != "functionDeclarations" && key.String() != "function_declarations" {
+						r.requireBillingTool(key.String())
+					}
+					return true
+				},
+			)
+		}
+	}
+
+	r.upstreamModel = model
+	r.responseModel = ""
+	r.responseTier = ""
+	r.responseSpeed = ""
+	r.responseProvider = ""
+	r.responseProviderSource = ""
+	r.modelFinal = false
+	r.requestSpeed = ""
+	if speed := gjson.GetBytes(info.Body, "speed"); speed.Type == gjson.String {
+		r.requestSpeed = strings.TrimSpace(speed.String())
+	}
+	r.serviceTier = r.requestedTier
+	if tier, ok := explicitServiceTierFromPayload(info.Body); ok {
+		r.serviceTier = tier
+	}
+}
+
+func (r *usageReporter) observeResponseURL(raw, source, missingStatus string) {
+	if r == nil {
+		return
+	}
+	endpoint := util.SanitizeUpstreamURL(raw)
+	r.modelMu.Lock()
+	defer r.modelMu.Unlock()
+	r.responseURL = endpoint
+	r.responseURLSource = ""
+	r.responseURLStatus = missingStatus
+	if endpoint != "" {
+		r.responseURLSource = source
+		r.responseURLStatus = "observed"
+		if target, err := url.Parse(endpoint); err == nil {
+			region, origin := "", ""
+			host := strings.ToLower(target.Hostname())
+			locationHost, regional := strings.CutSuffix(host, "-aiplatform.googleapis.com")
+			if r.provider == "vertex" && (host == "aiplatform.googleapis.com" || regional && locationHost != "" && !strings.Contains(
+				locationHost, ".",
+			)) {
+				parts := strings.Split(target.Path, "/")
+				for index, part := range parts {
+					if part == "locations" && index+1 < len(parts) && parts[index+1] != "" {
+						region, origin = parts[index+1], "endpoint.locations"
+						break
+					}
+				}
+			}
+			if r.provider == "xai" && host == "us.api.x.ai" {
+				region, origin = "us", "endpoint.host"
+			}
+			if r.provider == "xai" && host == "api.x.ai" {
+				region, origin = "global", "endpoint.host"
+			}
+			if region != "" {
+				if r.billingMetadata == nil {
+					r.billingMetadata = &usage.BillingMetadata{SchemaVersion: 1}
+				}
+				r.billingMetadata.Region, r.billingMetadata.RegionSource = region, origin
+			}
+		}
+
+	} else if strings.TrimSpace(raw) != "" {
+		r.responseURLStatus = "unavailable"
+	}
+}
+
+func (r *usageReporter) observeHTTPResponseURL(responses []*http.Response, source string) {
+	endpoint, missingStatus := "", "unavailable"
+	if len(responses) > 0 && responses[0] != nil && responses[0].Request != nil {
+		request := responses[0].Request
+		if bridge, _ := request.Context().Value(bridgeResponseURLContextKey{}).(bool); bridge {
+			source, missingStatus = "bridge_final_url", "not_provided"
+		}
+		if request.URL != nil {
+			endpoint = request.URL.String()
+		}
+	}
+	r.observeResponseURL(endpoint, source, missingStatus)
+}
+
+func (r *usageReporter) observeUpstreamHeaders(headers http.Header) {
+	if r == nil {
+		return
+	}
+	r.modelMu.Lock()
+	defer r.modelMu.Unlock()
+	if r.provider == "kimi" {
+		for _, field := range []struct {
+			name   string
+			target **int64
+		}{
+			{"Msh-Usage-Cache-Write-Tokens-5m", &r.cacheWrite5mTokens},
+			{"Msh-Usage-Cache-Write-Tokens-1h", &r.cacheWrite1hTokens},
+		} {
+			if raw := strings.TrimSpace(helps.HeaderValueCaseInsensitive(headers, field.name)); raw != "" {
+				value, err := strconv.ParseInt(raw, 10, 64)
+				if err != nil || value < 0 {
+					log.Warnf("usage: ignored invalid %s", field.name)
+				} else {
+					*field.target = &value
+				}
+			}
+		}
+	}
+	for _, name := range []string{"X-Upstream-Provider", "X-Provider"} {
+		if provider := strings.TrimSpace(
+			helps.HeaderValueCaseInsensitive(
+				headers, name,
+			),
+		); validResponseModel(provider) {
+			r.responseProvider = provider
+			r.responseProviderSource = "header." + name
+			break
+		}
+	}
+}
+
+func (r *usageReporter) observeResponseChunk(payload []byte) {
+	if r == nil || len(payload) == 0 {
+		return
+	}
+	if r.provider == "devin" {
+		// Devin logs CPA-generated Interactions; native Connect metrics supply the returned model.
+		return
+	}
+	r.observationMu.Lock()
+	defer r.observationMu.Unlock()
+	r.observationStream.modelReporter = r
+	defer func() {
+		if len(r.observationStream.pending) > maxStreamModelEventBytes {
+			r.observationStream.pending = nil
+			r.observationStream.pendingOverflow = true
+		}
+	}()
+	if len(r.observationStream.pending) > 0 || r.observationStream.pendingOverflow ||
+		len(r.observationStream.modelLines) > 0 {
+		r.observationStream.observeOpenAIStreamChunk(payload)
+		return
+	}
+	if data := jsonPayload(payload); len(data) > 0 && data[0] == '{' && gjson.ValidBytes(data) {
+		r.observeResponseModel(data)
+		return
+	}
+	if data, present, valid := sseDataPayload(payload); present && valid {
+		r.observeResponseModel(data)
+		return
+	}
+	r.observationStream.observeOpenAIStreamChunk(payload)
 }
 
 type usageExecutor interface {
@@ -62,6 +328,11 @@ func newUsageReporter(
 	model string,
 	auth *cliproxyauth.Auth,
 ) *usageReporter {
+	if ctx != nil {
+		if delegated, _ := ctx.Value(pluginExecutorUsageDelegationKey{}).(*atomic.Bool); delegated != nil {
+			delegated.Store(true)
+		}
+	}
 	provider, executorType := usageReporterProvider(providerOrExecutor)
 	rawAPIKey := apiKeyFromContext(ctx)
 	source, sourceKind, sourceRedacted := resolveUsageSource(auth, rawAPIKey)
@@ -70,6 +341,7 @@ func newUsageReporter(
 		apiKeyIdentity = usage.HashAPIKeyIdentity(rawAPIKey)
 	}
 	alias := usage.RequestedModelAliasFromContext(ctx)
+	clientModel := alias
 	if alias == "" {
 		alias = model
 	}
@@ -80,6 +352,7 @@ func newUsageReporter(
 		model:           model,
 		stream:          usage.StreamFromContext(ctx),
 		alias:           strings.TrimSpace(alias),
+		clientModel:     strings.TrimSpace(clientModel),
 		requestedAt:     time.Now(),
 		apiKey:          apiKeyIdentity,
 		reservationID:   usage.APIKeyReservationFromContext(ctx),
@@ -89,6 +362,7 @@ func newUsageReporter(
 		authType:        resolveUsageAuthType(auth),
 		reasoningEffort: usage.ReasoningEffortFromContext(ctx),
 		serviceTier:     usage.ServiceTierFromContext(ctx),
+		requestedTier:   usage.ServiceTierFromContext(ctx),
 		generate:        usage.GenerateFromContext(ctx),
 		thinking:        thinkingFromAlias(alias),
 	}
@@ -98,6 +372,16 @@ func newUsageReporter(
 		reporter.accessTokenHash = cliproxyauth.AccessTokenSHA256(auth)
 	}
 	return reporter
+}
+
+type pluginExecutorUsageDelegationKey struct{}
+
+// WithPluginExecutorUsageDelegation 在实际执行器创建报告时标记外层计量已委派
+func WithPluginExecutorUsageDelegation(ctx context.Context, delegated *atomic.Bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, pluginExecutorUsageDelegationKey{}, delegated)
 }
 
 // PluginExecutorUsageReporter publishes usage for the credential selected by a plugin executor.
@@ -121,6 +405,13 @@ func (r *PluginExecutorUsageReporter) SetTranslatedReasoningEffort(payload []byt
 	if r != nil {
 		r.reporter.setTranslatedReasoningEffort(payload, format)
 	}
+}
+
+func (r *PluginExecutorUsageReporter) WithContext(ctx context.Context) context.Context {
+	if r == nil {
+		return ctx
+	}
+	return r.reporter.withContext(ctx)
 }
 
 func (r *PluginExecutorUsageReporter) MarkStream() {
@@ -154,10 +445,14 @@ func (r *PluginExecutorUsageReporter) EnsurePublished(ctx context.Context) {
 }
 
 func selectedAuthBaseURL(auth *cliproxyauth.Auth) string {
-	if auth == nil || auth.Attributes == nil {
+	if auth == nil {
 		return ""
 	}
-	return strings.TrimSpace(auth.Attributes["base_url"])
+	if endpoint := strings.TrimSpace(auth.Attributes["base_url"]); endpoint != "" {
+		return endpoint
+	}
+	endpoint, _ := auth.Metadata["base_url"].(string)
+	return strings.TrimSpace(endpoint)
 }
 
 func (r *usageReporter) markStream() {
@@ -196,12 +491,33 @@ func (r *usageReporter) observeResponseModel(payload []byte) {
 	if r == nil {
 		return
 	}
-	model, terminal := responseModelEvent(payload, r.provider)
-	if model == "" && !terminal {
+	payload = jsonPayload(payload)
+	if !gjson.ValidBytes(payload) {
 		return
 	}
+	model, terminal := responseModelEvent(payload, r.provider)
 	r.modelMu.Lock()
 	defer r.modelMu.Unlock()
+	if tier := extractResponseServiceTierFromValidJSON(payload); tier != "" {
+		r.responseTier = tier
+	}
+	for _, path := range []string{"usage.speed", "message.usage.speed", "response.usage.speed"} {
+		if speed := gjson.GetBytes(
+			payload, path,
+		); speed.Type == gjson.String && strings.TrimSpace(speed.String()) != "" {
+			r.responseSpeed = strings.TrimSpace(speed.String())
+			break
+		}
+	}
+	for _, path := range []string{"response.provider", "message.provider", "provider", "upstream_provider"} {
+		if provider := gjson.GetBytes(payload, path); provider.Type == gjson.String &&
+			validResponseModel(strings.TrimSpace(provider.String())) {
+			r.responseProvider = strings.TrimSpace(provider.String())
+			r.responseProviderSource = "body." + path
+			break
+		}
+	}
+	r.observeBillingResponse(payload)
 	if r.modelFinal {
 		return
 	}
@@ -209,6 +525,105 @@ func (r *usageReporter) observeResponseModel(payload []byte) {
 		r.responseModel = model
 	}
 	r.modelFinal = terminal
+}
+
+func (r *usageReporter) requireBillingTool(tool string) {
+	if strings.HasPrefix(tool, "code_execution") && r.billingCodeExecutionFree {
+		return
+	}
+	kind := "unreported"
+	if strings.HasPrefix(tool, "web_search") {
+		kind = "web_search"
+	}
+	if strings.HasPrefix(tool, "web_fetch") {
+		kind = "web_fetch"
+	}
+	for _, existing := range r.billingTools {
+		if existing == kind {
+			return
+		}
+	}
+	r.billingTools = append(r.billingTools, kind)
+}
+
+func (r *usageReporter) observeBillingResponse(payload []byte) {
+	root := gjson.ParseBytes(payload)
+	kind := root.Get("type").String()
+	if kind == "response.completed" || kind == "response.done" || kind == "message_stop" ||
+		(kind == "message" && root.Get("stop_reason").String() != "") || root.Get("choices.0.finish_reason").String() != "" ||
+		root.Get("candidates.0.finishReason").String() != "" || root.Get("response.candidates.0.finishReason").String() != "" || root.Get("status").String() == "completed" {
+		status := root.Get("response.status").String()
+		if status != "incomplete" && status != "failed" && status != "cancelled" {
+			r.billingComplete = true
+		}
+	}
+	for _, path := range []string{"candidates", "response.candidates"} {
+		for _, candidate := range root.Get(path).Array() {
+			if len(candidate.Get("groundingMetadata.webSearchQueries").Array()) > 0 {
+				r.requireBillingTool("googleSearch")
+			}
+		}
+	}
+	for _, path := range []string{"output", "response.output"} {
+		for _, item := range root.Get(path).Array() {
+			tool := item.Get("type").String()
+			if strings.HasSuffix(tool, "_call") && tool != "function_call" && tool != "custom_tool_call" {
+				r.requireBillingTool(tool)
+			}
+		}
+	}
+	if r.provider == "claude" || r.provider == "kimi" {
+		node := root.Get("usage")
+		if kind == "message_start" {
+			node = root.Get("message.usage")
+		}
+		if count := firstExistingUsageNode(
+			node, "server_tool_use.code_execution_requests",
+		); count.Exists() && count.Int() > 0 {
+			r.requireBillingTool("code_execution")
+		}
+		for _, field := range []struct{ path, kind, unit string }{
+			{"web_search_requests", "web_search", "request"}, {"web_fetch_requests", "web_fetch", "request"},
+		} {
+			if value := firstExistingUsageNode(node, "server_tool_use."+field.path); value.Exists() {
+				if r.billingMetadata == nil {
+					r.billingMetadata = &usage.BillingMetadata{SchemaVersion: 1}
+				}
+				quantity := usage.BillingQuantity{Kind: field.kind, Unit: field.unit, Quantity: float64(value.Int())}
+				index := -1
+				for i, existing := range r.billingMetadata.Charges {
+					if existing.Kind == field.kind {
+						index = i
+						break
+					}
+				}
+				if index < 0 {
+					r.billingMetadata.Charges = append(r.billingMetadata.Charges, quantity)
+				} else {
+					r.billingMetadata.Charges[index] = quantity
+				}
+			}
+		}
+	}
+	if r.billingMedia && root.Get("data").IsArray() {
+		count := 0
+		for _, image := range root.Get("data").Array() {
+			if image.Get("url").String() != "" || image.Get("b64_json").String() != "" {
+				count++
+			}
+		}
+		if count > 0 {
+			r.billingComplete = true
+			if r.billingMetadata == nil {
+				r.billingMetadata = &usage.BillingMetadata{SchemaVersion: 1}
+			}
+			r.billingMetadata.Charges = []usage.BillingQuantity{
+				{
+					Kind: "generated_image", Unit: "image", Quantity: float64(count),
+				},
+			}
+		}
+	}
 }
 
 func (r *usageReporter) setResponseModel(model string) {
@@ -320,6 +735,13 @@ func usageReporterProvider(value any) (string, string) {
 func executorTypeName(value any) string {
 	if value == nil {
 		return ""
+	}
+	// 原生执行器私有化后，保留已发布的用量标签
+	switch value.(type) {
+	case *codexExecutor:
+		return "CodexExecutor"
+	case *codexWebsocketsExecutor:
+		return "CodexWebsocketsExecutor"
 	}
 	t := reflect.TypeOf(value)
 	for t.Kind() == reflect.Pointer {
@@ -533,6 +955,7 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 					SourceRedacted:     r.sourceRedacted,
 					APIKey:             r.apiKey,
 					AuthID:             r.authID,
+					AccessTokenSHA256:  r.accessTokenHash,
 					AuthIndex:          r.authIndex,
 					AuthType:           r.authType,
 					ReasoningEffort:    r.reasoningEffort,
@@ -553,6 +976,72 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 }
 
 func (r *usageReporter) publishRecord(ctx context.Context, record usage.Record) {
+	r.observationMu.Lock()
+	r.observationStream.observeOpenAIStreamChunk([]byte("\n\n"))
+	r.observationMu.Unlock()
+	r.modelMu.RLock()
+	record.ClientModel = r.clientModel
+	record.UpstreamURL = r.upstreamURL
+	record.ResponseURL = r.responseURL
+	record.ResponseURLSource = r.responseURLSource
+	record.ResponseURLStatus = r.responseURLStatus
+	record.UpstreamNextHopStatus = r.upstreamNextHopStatus
+	metadata := usage.CloneBillingMetadata(record.Detail.BillingMetadata)
+	if metadata == nil {
+		metadata = usage.CloneBillingMetadata(record.BillingMetadata)
+	}
+	if metadata == nil && (r.billingRequestKnown || r.billingMetadata != nil) {
+		metadata = &usage.BillingMetadata{SchemaVersion: 1}
+	}
+	if metadata != nil {
+		if observed := r.billingMetadata; observed != nil {
+			if metadata.Region == "" {
+				metadata.Region, metadata.RegionSource = observed.Region, observed.RegionSource
+			}
+			metadata.Charges = append([]usage.BillingQuantity(nil), observed.Charges...)
+		}
+		metadata.ChargesReported = !record.Failed && r.billingComplete && (r.billingRequestKnown || r.billingMedia)
+		for _, tool := range r.billingTools {
+			reported := false
+			for _, charge := range metadata.Charges {
+				if (strings.HasPrefix(tool, "web_search") && charge.Kind == "web_search") || (strings.HasPrefix(
+					tool, "web_fetch",
+				) && charge.Kind == "web_fetch") {
+					reported = true
+				}
+			}
+			if !reported {
+				metadata.ChargesReported = false
+			}
+		}
+		record.Detail.BillingMetadata = metadata
+		record.BillingMetadata = usage.CloneBillingMetadata(metadata)
+	}
+	if r.cacheWrite5mTokens != nil || r.cacheWrite1hTokens != nil {
+		writes := cacheWriteUsage{ttl: [4]*int64{r.cacheWrite5mTokens, r.cacheWrite1hTokens}, families: [2]bool{true}}
+		if record.Detail.CacheWriteReported != nil && *record.Detail.CacheWriteReported {
+			writes.aggregate = new(record.Detail.CacheCreationTokens)
+		}
+		if writes.apply(&record.Detail) && record.Detail.TokenBreakdown.Valid() {
+			record.Detail.TokenBreakdown = usage.NewPartialSubsetTokenBreakdown(
+				record.Detail.InputTokens, record.Detail.CacheReadTokens, record.Detail.CacheCreationTokens,
+				record.Detail.OutputTokens, record.Detail.ReasoningTokens, record.Detail.TotalTokens,
+			)
+		}
+	}
+
+	record.UpstreamModel = r.upstreamModel
+	record.RequestSpeed = r.requestSpeed
+	record.ResponseSpeed = r.responseSpeed
+	record.ResponseProvider = r.responseProvider
+	record.ResponseProviderSource = r.responseProviderSource
+	if r.responseModel != "" {
+		record.ResponseModel = r.responseModel
+	}
+	if r.responseTier != "" {
+		record.ResponseServiceTier = r.responseTier
+	}
+	r.modelMu.RUnlock()
 	record = r.finalizeRecord(ctx, record)
 	if !record.Failed && usage.DeferRecord(ctx, record) {
 		return
@@ -565,6 +1054,13 @@ func (r *usageReporter) publishRecordImmediate(ctx context.Context, record usage
 }
 
 func (r *usageReporter) finalizeRecord(ctx context.Context, record usage.Record) usage.Record {
+	record.CacheReadReported = record.CacheReadReported || record.Detail.CacheReadReported
+	record.CacheWriteReported = usage.NormalizeCacheWriteReported(
+		record.Detail.CacheWriteReported, record.Detail.CacheCreationTokens,
+	)
+	if record.BillingMetadata == nil {
+		record.BillingMetadata = usage.CloneBillingMetadata(record.Detail.BillingMetadata)
+	}
 	if record.APIKey == "" {
 		record.APIKey = r.apiKey
 	}
@@ -710,9 +1206,123 @@ func resolveUsageSource(
 	return "", "", false
 }
 
+// Cache write totals are known when an aggregate or every TTL in a reported family is valid.
+type cacheWriteUsage struct {
+	aggregate *int64
+	ttl       [4]*int64
+	families  [2]bool
+}
+
+func (state *cacheWriteUsage) observe(aggregate gjson.Result, ttls [4]gjson.Result) {
+	if aggregate.Exists() {
+		state.aggregate = nil
+		if validUsageTokenNode(aggregate) {
+			state.aggregate = new(aggregate.Int())
+		}
+	}
+	for index, value := range ttls {
+		if !value.Exists() {
+			continue
+		}
+		if !aggregate.Exists() {
+			state.aggregate = nil
+		}
+		state.families[index/2] = true
+		state.ttl[index] = nil
+		if validUsageTokenNode(value) {
+			state.ttl[index] = new(value.Int())
+		}
+	}
+}
+
+func (state *cacheWriteUsage) apply(detail *usage.Detail) bool {
+	quantities := [4]int64{}
+	complete := state.families[0] || state.families[1]
+	for index, value := range state.ttl {
+		if value != nil {
+			quantities[index] = *value
+		} else if state.families[index/2] {
+			complete = false
+		}
+	}
+	total, valid := usage.AddNonNegativeInt64(quantities[:]...)
+	if !valid {
+		log.Warn("usage: rejected overflowing cache write TTL detail")
+		detail.CacheWriteReported = new(false)
+		return false
+	}
+	if state.aggregate != nil {
+		total = *state.aggregate
+	}
+	detail.CacheCreationTokens = total
+	detail.CacheWriteReported = new(state.aggregate != nil || complete)
+	detail.CacheCreation5mInputTokens, detail.CacheCreation1hInputTokens = quantities[0], quantities[1]
+	detail.CacheCreation30mInputTokens, detail.CacheCreation12hInputTokens = quantities[2], quantities[3]
+	return true
+}
+
+func cacheWriteUsageNode(node gjson.Result, paths ...string) gjson.Result {
+	if value := firstExistingUsageNode(node, paths...); value.Exists() {
+		return value
+	}
+	for _, path := range paths {
+		if value := node.Get(path); value.Exists() {
+			return value
+		}
+	}
+	return gjson.Result{}
+}
+
+func (state *cacheWriteUsage) observeOpenAI(node gjson.Result) {
+	state.observe(
+		cacheWriteUsageNode(
+			node,
+			"input_tokens_details.cache_creation_tokens", "input_tokens_details.cache_write_tokens",
+			"prompt_tokens_details.cache_creation_tokens", "prompt_tokens_details.cache_write_tokens",
+		), [4]gjson.Result{
+			cacheWriteUsageNode(
+				node, "prompt_tokens_details.cache_creation.ephemeral_5m_input_tokens",
+				"input_tokens_details.cache_write_tokens_details.ttl_5m_tokens",
+			),
+			cacheWriteUsageNode(
+				node, "prompt_tokens_details.cache_creation.ephemeral_1h_input_tokens",
+				"input_tokens_details.cache_write_tokens_details.ttl_1h_tokens",
+			),
+			node.Get("input_tokens_details.cache_write_tokens_details.ttl_30m_tokens"),
+			node.Get("input_tokens_details.cache_write_tokens_details.ttl_12h_tokens"),
+		},
+	)
+}
+
+func (state *cacheWriteUsage) observeClaude(node gjson.Result) {
+	previousAggregate := state.aggregate
+	aggregate := node.Get("cache_creation_input_tokens")
+	ttls := [4]gjson.Result{
+		node.Get("cache_creation.ephemeral_5m_input_tokens"),
+		node.Get("cache_creation.ephemeral_1h_input_tokens"),
+	}
+	state.observe(aggregate, ttls)
+	if previousAggregate != nil && !aggregate.Exists() && (ttls[0].Exists() || ttls[1].Exists()) {
+		var known int64
+		for _, value := range state.ttl {
+			if value != nil {
+				var valid bool
+				known, valid = usage.AddNonNegativeInt64(known, *value)
+				if !valid {
+					return
+				}
+			}
+		}
+		// A partial Claude TTL update retains the aggregate's unclassified remainder.
+		state.aggregate = new(max(*previousAggregate, known))
+	}
+}
+
 type streamUsageBuffer struct {
+	cacheWriteUsage     cacheWriteUsage
 	geminiPromptTokens  int64
 	geminiToolUseTokens int64
+	geminiModalities    [4]map[string]int64
 	detail              usage.Detail
 	hasUsage            bool
 	hasTier             bool
@@ -735,11 +1345,39 @@ var (
 	openAIStreamTierMarker  = []byte(`"service_tier"`)
 )
 
-func (b *streamUsageBuffer) observe(detail usage.Detail, hasUsage bool, hasTier bool) {
+func (b *streamUsageBuffer) observe(detail usage.Detail, hasUsage bool, hasTier bool, writes ...cacheWriteUsage) {
 	if b == nil || (!hasUsage && !hasTier) {
 		return
 	}
 	if hasUsage {
+		if len(writes) > 0 {
+			if !writes[0].apply(&detail) {
+				return
+			}
+			b.cacheWriteUsage = writes[0]
+			if detail.TokenBreakdown.Valid() && detail.TokenBreakdown.Quality != usage.TokenAccountingQualityInconsistent {
+				detail.TokenBreakdown = usage.NewPartialSubsetTokenBreakdown(
+					detail.InputTokens, detail.CacheReadTokens, detail.CacheCreationTokens, detail.OutputTokens,
+					detail.ReasoningTokens, detail.TotalTokens,
+				)
+			}
+		}
+		if !detail.CacheReadReported && b.detail.CacheReadReported && detail.InputTokens >= b.detail.CacheReadTokens {
+			detail.CacheReadReported = true
+			detail.CacheReadTokens = b.detail.CacheReadTokens
+			if detail.CachedTokens == 0 {
+				detail.CachedTokens = b.detail.CacheReadTokens
+			}
+			if detail.TokenBreakdown.Valid() {
+				detail.TokenBreakdown = usage.NewPartialSubsetTokenBreakdown(
+					detail.InputTokens, detail.CacheReadTokens, detail.CacheCreationTokens,
+					detail.OutputTokens, detail.ReasoningTokens, detail.TotalTokens,
+				)
+			}
+		}
+		if detail.BillingMetadata == nil {
+			detail.BillingMetadata = usage.CloneBillingMetadata(b.detail.BillingMetadata)
+		}
 		preservedTier := b.detail.ResponseServiceTier
 		b.detail = detail
 		if !hasTier {
@@ -758,15 +1396,20 @@ func (b *streamUsageBuffer) observeGeminiStream(line []byte) {
 		return
 	}
 	root := gjson.ParseBytes(jsonPayload(line))
-	node := firstValidUsageObject(root, geminiUsageTokenFieldsExist,
+	node := firstValidUsageObject(
+		root, geminiUsageTokenFieldsExist,
 		"response.usageMetadata", "usageMetadata", "response.usage_metadata", "usage_metadata",
-		"response.cpaUsageMetadata", "cpaUsageMetadata")
+		"response.cpaUsageMetadata", "cpaUsageMetadata",
+	)
 	if !node.Exists() {
 		return
 	}
 	incoming := parseGeminiFamilyUsageDetail(node)
 	if b.hasUsage && node.Get("promptTokenCount").Exists() && node.Get("candidatesTokenCount").Exists() &&
 		node.Get("totalTokenCount").Exists() && !hasNonZeroTokenUsage(incoming) {
+		if incoming.CacheReadReported && b.detail.CacheReadTokens == 0 {
+			b.detail.CacheReadReported = true
+		}
 		return
 	}
 	next := b.detail
@@ -787,6 +1430,8 @@ func (b *streamUsageBuffer) observeGeminiStream(line []byte) {
 		return
 	}
 	next.InputTokens = inputTokens
+	next.CacheReadReported = next.CacheReadReported || incoming.CacheReadReported
+
 	for _, field := range []struct {
 		path   string
 		target *int64
@@ -809,6 +1454,31 @@ func (b *streamUsageBuffer) observeGeminiStream(line []byte) {
 			log.Warn("usage: rejected overflowing Gemini stream token detail")
 			return
 		}
+	}
+	for index, field := range []struct {
+		count, details string
+		previous       int64
+	}{
+		{"promptTokenCount", "promptTokensDetails", b.geminiPromptTokens},
+		{"cachedContentTokenCount", "cacheTokensDetails", b.detail.CacheReadTokens},
+		{"candidatesTokenCount", "candidatesTokensDetails", b.detail.OutputTokens},
+		{"toolUsePromptTokenCount", "toolUsePromptTokensDetails", b.geminiToolUseTokens},
+	} {
+		if value := firstExistingUsageNode(
+			node, field.count,
+		); value.Exists() && value.Int() != field.previous && !node.Get(field.details).IsArray() {
+			b.geminiModalities[index] = nil
+		}
+	}
+	billingNode := node
+	if next.CacheReadReported && !firstExistingUsageNode(node, "cachedContentTokenCount").Exists() {
+		if raw, err := sjson.SetBytes([]byte(node.Raw), "cachedContentTokenCount", next.CacheReadTokens); err == nil {
+			billingNode = gjson.ParseBytes(raw)
+		}
+	}
+	next.BillingMetadata = parseGeminiBillingMetadata(billingNode, &b.geminiModalities)
+	if next.BillingMetadata.ContextInputTokens == nil && b.detail.BillingMetadata != nil && b.detail.BillingMetadata.ContextInputTokens != nil {
+		next.BillingMetadata.ContextInputTokens = new(*b.detail.BillingMetadata.ContextInputTokens)
 	}
 	b.geminiPromptTokens, b.geminiToolUseTokens = promptTokens, toolUseTokens
 	b.observe(next, true, false)
@@ -839,7 +1509,11 @@ func (b *streamUsageBuffer) observeOpenAIStream(line []byte) {
 		detail = parseOpenAIStyleUsageNode(usageNode)
 	}
 	detail.ResponseServiceTier = extractResponseServiceTierFromValidJSON(payload)
-	b.observe(detail, hasUsage, detail.ResponseServiceTier != "")
+	writes := b.cacheWriteUsage
+	if hasUsage {
+		writes.observeOpenAI(usageNode)
+	}
+	b.observe(detail, hasUsage, detail.ResponseServiceTier != "", writes)
 }
 
 func (b *streamUsageBuffer) observeOpenAIResponseModel(line []byte) {
@@ -984,7 +1658,14 @@ func (b *PluginExecutorStreamUsage) ObserveLine(line []byte) {
 		b.openAI.observeGeminiStream(line)
 	case "interactions", "interactions-response":
 		if detail, hasUsage, hasTier := parseInteractionsStreamUsageState(line); hasUsage || hasTier {
-			b.openAI.observe(detail, hasUsage, hasTier)
+			writes := b.openAI.cacheWriteUsage
+			writes.observe(
+				cacheWriteUsageNode(
+					interactionsUsageNode(gjson.ParseBytes(jsonPayload(line))), "cache_creation_tokens",
+					"cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens",
+				), [4]gjson.Result{},
+			)
+			b.openAI.observe(detail, hasUsage, hasTier, writes)
 		}
 	case "antigravity":
 		b.openAI.observeGeminiStream(line)
@@ -992,7 +1673,9 @@ func (b *PluginExecutorStreamUsage) ObserveLine(line []byte) {
 		payload := jsonPayload(line)
 		if len(payload) > 0 && gjson.ValidBytes(payload) {
 			if detail, ok := parseCodexUsage(payload); ok && hasNonZeroTokenUsage(detail) {
-				b.openAI.observe(detail, true, detail.ResponseServiceTier != "")
+				writes := b.openAI.cacheWriteUsage
+				writes.observeOpenAI(gjson.GetBytes(payload, "response.usage"))
+				b.openAI.observe(detail, true, detail.ResponseServiceTier != "", writes)
 				return
 			}
 		}
@@ -1119,26 +1802,8 @@ func parseClaudeUsage(data []byte) usage.Detail {
 
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	cacheReadTokens := firstExistingUsageNode(usageNode, "cache_read_input_tokens").Int()
-	cacheCreationTokens := firstExistingUsageNode(usageNode, "cache_creation_input_tokens").Int()
-	cacheCreation5mTokens := firstExistingUsageNode(
-		usageNode,
-		"cache_creation.ephemeral_5m_input_tokens",
-	).Int()
-	cacheCreation1hTokens := firstExistingUsageNode(
-		usageNode,
-		"cache_creation.ephemeral_1h_input_tokens",
-	).Int()
-	knownCacheCreationTokens, knownCacheCreationOK := usage.AddNonNegativeInt64(
-		cacheCreation5mTokens,
-		cacheCreation1hTokens,
-	)
-	if !knownCacheCreationOK {
-		log.Warn("usage: rejected overflowing Claude cache creation detail")
-		return usage.Detail{}
-	}
-	if cacheCreationTokens == 0 {
-		cacheCreationTokens = knownCacheCreationTokens
-	}
+	var writes cacheWriteUsage
+	writes.observeClaude(usageNode)
 	rawOutputTokens := firstExistingUsageNode(usageNode, "output_tokens").Int()
 	reasoningTokens := firstExistingUsageNode(
 		usageNode,
@@ -1153,15 +1818,18 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		nonReasoningOutput = 0
 	}
 	detail := usage.Detail{
-		InputTokens:                firstExistingUsageNode(usageNode, "input_tokens").Int(),
-		OutputTokens:               nonReasoningOutput,
-		ReasoningTokens:            reasoningTokens,
-		CachedTokens:               cacheReadTokens,
-		CacheReadTokens:            cacheReadTokens,
-		CacheCreationTokens:        cacheCreationTokens,
-		CacheCreation5mInputTokens: cacheCreation5mTokens,
-		CacheCreation1hInputTokens: cacheCreation1hTokens,
-		ResponseServiceTier:        usageServiceTier(usageNode),
+		InputTokens:       firstExistingUsageNode(usageNode, "input_tokens").Int(),
+		OutputTokens:      nonReasoningOutput,
+		ReasoningTokens:   reasoningTokens,
+		CachedTokens:      cacheReadTokens,
+		CacheReadTokens:   cacheReadTokens,
+		CacheReadReported: firstExistingUsageNode(usageNode, "cache_read_input_tokens").Exists(),
+		BillingMetadata:   &usage.BillingMetadata{SchemaVersion: 1},
+
+		ResponseServiceTier: usageServiceTier(usageNode),
+	}
+	if !writes.apply(&detail) {
+		return usage.Detail{CacheWriteReported: new(false)}
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
@@ -1174,6 +1842,18 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		return usage.Detail{}
 	}
 	detail.TotalTokens = total
+	if firstExistingUsageNode(
+		usageNode, "input_tokens",
+	).Exists() && detail.CacheReadReported && detail.CacheWriteReported != nil && *detail.CacheWriteReported {
+		contextTokens, _ := usage.AddNonNegativeInt64(
+			detail.InputTokens, detail.CacheReadTokens, detail.CacheCreationTokens,
+		)
+		detail.BillingMetadata.ContextInputTokens = &contextTokens
+	}
+	if region := usageNode.Get("inference_geo"); region.Type == gjson.String && strings.TrimSpace(region.String()) != "" {
+		detail.BillingMetadata.Region = strings.TrimSpace(region.String())
+		detail.BillingMetadata.RegionSource = "usage.inference_geo"
+	}
 	detail.TokenBreakdown = usage.NewIndependentTokenBreakdown(
 		detail.InputTokens,
 		detail.CacheReadTokens,
@@ -1186,6 +1866,8 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 }
 
 type claudeStreamUsageBuffer struct {
+	cacheWriteUsage cacheWriteUsage
+	inputReported   bool
 	detail          usage.Detail
 	rawOutputTokens int64
 	hasUsage        bool
@@ -1208,7 +1890,13 @@ func (b *claudeStreamUsageBuffer) observe(line []byte) {
 	if claudeUsageTokenFieldsExist(usageNode) {
 		candidate := b.detail
 		rawOutputTokens := b.rawOutputTokens
-		mergeClaudeUsageNode(&candidate, &rawOutputTokens, usageNode)
+		writes := b.cacheWriteUsage
+		writes.observeClaude(usageNode)
+		if !writes.apply(&candidate) {
+			return
+		}
+		inputReported := b.inputReported || firstExistingUsageNode(usageNode, "input_tokens").Exists()
+		mergeClaudeUsageNode(&candidate, &rawOutputTokens, usageNode, inputReported)
 		total, ok := usage.AddNonNegativeInt64(
 			candidate.InputTokens,
 			rawOutputTokens,
@@ -1230,6 +1918,8 @@ func (b *claudeStreamUsageBuffer) observe(line []byte) {
 				candidate.ReasoningTokens,
 				candidate.TotalTokens,
 			)
+			b.inputReported = inputReported
+			b.cacheWriteUsage = writes
 			b.detail = candidate
 			b.hasUsage = true
 		} else {
@@ -1291,7 +1981,7 @@ func claudeUsageTokenFieldsExist(node gjson.Result) bool {
 	return false
 }
 
-func mergeClaudeUsageNode(detail *usage.Detail, rawOutputTokens *int64, node gjson.Result) {
+func mergeClaudeUsageNode(detail *usage.Detail, rawOutputTokens *int64, node gjson.Result, inputReported bool) {
 	if detail == nil || rawOutputTokens == nil {
 		return
 	}
@@ -1317,31 +2007,25 @@ func mergeClaudeUsageNode(detail *usage.Detail, rawOutputTokens *int64, node gjs
 	}
 	if value := node.Get("cache_read_input_tokens"); validUsageTokenNode(value) {
 		detail.CacheReadTokens = value.Int()
+		detail.CacheReadReported = true
 	}
-	cacheCreation := node.Get("cache_creation_input_tokens")
-	if validUsageTokenNode(cacheCreation) {
-		detail.CacheCreationTokens = cacheCreation.Int()
+	metadata := usage.CloneBillingMetadata(detail.BillingMetadata)
+	if metadata == nil {
+		metadata = &usage.BillingMetadata{SchemaVersion: 1}
 	}
-	cacheCreation5m := node.Get("cache_creation.ephemeral_5m_input_tokens")
-	if validUsageTokenNode(cacheCreation5m) {
-		detail.CacheCreation5mInputTokens = cacheCreation5m.Int()
-	}
-	cacheCreation1h := node.Get("cache_creation.ephemeral_1h_input_tokens")
-	if validUsageTokenNode(cacheCreation1h) {
-		detail.CacheCreation1hInputTokens = cacheCreation1h.Int()
-	}
-	if !validUsageTokenNode(cacheCreation) &&
-		(validUsageTokenNode(cacheCreation5m) || validUsageTokenNode(cacheCreation1h)) {
-		known, ok := usage.AddNonNegativeInt64(
-			detail.CacheCreation5mInputTokens,
-			detail.CacheCreation1hInputTokens,
-		)
-		if !ok {
-			log.Warn("usage: ignored overflowing Claude cache creation TTL detail")
-		} else {
-			detail.CacheCreationTokens = known
+	metadata.ContextInputTokens = nil
+	if inputReported && detail.CacheReadReported && detail.CacheWriteReported != nil && *detail.CacheWriteReported {
+		if value, ok := usage.AddNonNegativeInt64(
+			detail.InputTokens, detail.CacheReadTokens, detail.CacheCreationTokens,
+		); ok {
+			metadata.ContextInputTokens = &value
 		}
 	}
+	if region := node.Get("inference_geo"); region.Type == gjson.String && strings.TrimSpace(region.String()) != "" {
+		metadata.Region = strings.TrimSpace(region.String())
+		metadata.RegionSource = "usage.inference_geo"
+	}
+	detail.BillingMetadata = metadata
 }
 
 func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
@@ -1350,15 +2034,86 @@ func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	return buffer.detailValue()
 }
 
+func parseGeminiBillingMetadata(node gjson.Result, groups *[4]map[string]int64) *usage.BillingMetadata {
+	metadata := &usage.BillingMetadata{SchemaVersion: 1}
+	if prompt := firstExistingUsageNode(node, "promptTokenCount"); prompt.Exists() {
+		value := prompt.Int()
+		metadata.ContextInputTokens = &value
+	}
+	if groups == nil {
+		groups = &[4]map[string]int64{}
+	}
+	for index, path := range []string{
+		"promptTokensDetails", "cacheTokensDetails", "candidatesTokensDetails", "toolUsePromptTokensDetails",
+	} {
+		if !node.Get(path).IsArray() {
+			continue
+		}
+		groups[index] = make(map[string]int64)
+		for _, value := range node.Get(path).Array() {
+			modality := strings.ToLower(value.Get("modality").String())
+			if modality != "text" && modality != "image" && modality != "audio" && modality != "video" {
+				continue
+			}
+			count := firstExistingUsageNode(value, "tokenCount")
+			if !count.Exists() {
+				continue
+			}
+			if total, ok := usage.AddNonNegativeInt64(groups[index][modality], count.Int()); ok {
+				groups[index][modality] = total
+			} else {
+				log.Warn("usage: ignored overflowing Gemini modality detail")
+			}
+		}
+	}
+	for _, modality := range []string{"text", "image", "audio", "video"} {
+		prompt, promptKnown := groups[0][modality]
+		cached, cacheKnown := groups[1][modality]
+		tool, toolKnown := groups[3][modality]
+		ordinary, ordinaryKnown := tool, toolKnown
+		cachedTotal := firstExistingUsageNode(node, "cachedContentTokenCount")
+		if promptKnown && cached <= prompt && (cacheKnown || cachedTotal.Exists() && cachedTotal.Int() == 0) {
+			if count, ok := usage.AddNonNegativeInt64(prompt-cached, tool); ok {
+				ordinary, ordinaryKnown = count, true
+			}
+		}
+		if ordinaryKnown {
+			metadata.Modalities = append(
+				metadata.Modalities,
+				usage.ModalityTokenUsage{Category: "uncached_input", Modality: modality, Tokens: ordinary},
+			)
+		}
+		if cacheKnown {
+			metadata.Modalities = append(
+				metadata.Modalities,
+				usage.ModalityTokenUsage{Category: "cache_read", Modality: modality, Tokens: cached},
+			)
+		}
+		if count, known := groups[2][modality]; known {
+			metadata.Modalities = append(
+				metadata.Modalities, usage.ModalityTokenUsage{Category: "output", Modality: modality, Tokens: count},
+			)
+		}
+	}
+	return metadata
+}
+
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	cachedTokens := firstExistingUsageNode(node, "cachedContentTokenCount").Int()
 	detail := usage.Detail{
-		InputTokens:     firstExistingUsageNode(node, "promptTokenCount").Int(),
-		OutputTokens:    firstExistingUsageNode(node, "candidatesTokenCount").Int(),
-		ReasoningTokens: firstExistingUsageNode(node, "thoughtsTokenCount").Int(),
-		TotalTokens:     firstExistingUsageNode(node, "totalTokenCount").Int(),
-		CachedTokens:    cachedTokens,
-		CacheReadTokens: cachedTokens,
+		InputTokens:        firstExistingUsageNode(node, "promptTokenCount").Int(),
+		OutputTokens:       firstExistingUsageNode(node, "candidatesTokenCount").Int(),
+		ReasoningTokens:    firstExistingUsageNode(node, "thoughtsTokenCount").Int(),
+		TotalTokens:        firstExistingUsageNode(node, "totalTokenCount").Int(),
+		CachedTokens:       cachedTokens,
+		CacheReadTokens:    cachedTokens,
+		CacheReadReported:  firstExistingUsageNode(node, "cachedContentTokenCount").Exists(),
+		CacheWriteReported: new(false),
+		BillingMetadata:    parseGeminiBillingMetadata(node, nil),
+	}
+	if prompt := firstExistingUsageNode(node, "promptTokenCount"); prompt.Exists() {
+		value := prompt.Int()
+		detail.BillingMetadata.ContextInputTokens = &value
 	}
 	toolUseTokens := node.Get("toolUsePromptTokenCount")
 	inputTokens, ok := usage.AddNonNegativeInt64(detail.InputTokens, toolUseTokens.Int())
@@ -1383,7 +2138,8 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 func parseGeminiCLIUsage(data []byte) usage.Detail {
 	root := gjson.ParseBytes(data)
 	node := firstValidUsageObject(
-		root, geminiUsageTokenFieldsExist, "response.usageMetadata", "response.usage_metadata",
+		root, geminiUsageTokenFieldsExist,
+		"response.usageMetadata", "response.usage_metadata", "usageMetadata", "usage_metadata",
 	)
 	if !node.Exists() {
 		return usage.Detail{}
@@ -1415,7 +2171,7 @@ func parseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 		detail.OutputTokens == 0 &&
 		detail.ReasoningTokens == 0 &&
 		detail.CachedTokens == 0 &&
-		detail.TotalTokens == 0 {
+		detail.TotalTokens == 0 && !detail.CacheReadReported {
 		return usage.Detail{}, false
 	}
 	return detail, true
@@ -1423,6 +2179,9 @@ func parseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 	cacheRead := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
+	cacheWrite := firstExistingUsageNode(
+		node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens",
+	)
 	detail := usage.Detail{
 		InputTokens: firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
 		OutputTokens: firstExistingUsageNode(
@@ -1435,10 +2194,10 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 		CachedTokens: firstExistingUsageNode(
 			node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens",
 		).Int(),
-		CacheReadTokens: cacheRead.Int(),
-		CacheCreationTokens: firstExistingUsageNode(
-			node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens",
-		).Int(),
+		CacheReadTokens:     cacheRead.Int(),
+		CacheReadReported:   cacheRead.Exists() || firstExistingUsageNode(node, "cachedContentTokenCount").Exists(),
+		CacheWriteReported:  new(cacheWrite.Exists()),
+		CacheCreationTokens: cacheWrite.Int(),
 	}
 	if !cacheRead.Exists() && detail.CachedTokens > 0 {
 		detail.CacheReadTokens = detail.CachedTokens
@@ -1453,7 +2212,9 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 	inputTokens, ok := usage.AddNonNegativeInt64(detail.InputTokens, toolUseTokens.Int())
 	if !ok || (toolUseTokens.Exists() && !validUsageTokenNode(toolUseTokens)) {
 		log.Warn("usage: rejected invalid or overflowing Interactions input detail")
-		detail = usage.EnsureTokenBreakdownForProvider(usage.Detail{TotalTokens: detail.TotalTokens}, "interactions", "")
+		detail = usage.EnsureTokenBreakdownForProvider(
+			usage.Detail{TotalTokens: detail.TotalTokens}, "interactions", "",
+		)
 		detail.TokenBreakdown.Quality = usage.TokenAccountingQualityInconsistent
 		return detail
 	}
@@ -1643,7 +2404,8 @@ func parseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	root := gjson.ParseBytes(payload)
 	node := firstValidUsageObject(
-		root, geminiUsageTokenFieldsExist, "response.usageMetadata", "response.usage_metadata",
+		root, geminiUsageTokenFieldsExist,
+		"response.usageMetadata", "response.usage_metadata", "usageMetadata", "usage_metadata",
 	)
 	if !node.Exists() {
 		return usage.Detail{}, false

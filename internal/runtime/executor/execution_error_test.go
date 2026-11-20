@@ -79,6 +79,26 @@ func TestParseRetryAfterHeader(t *testing.T) {
 	}
 }
 
+func TestParseRetryAfterHeaderOriginalCompatibleValues(t *testing.T) {
+	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name, value string
+		want        time.Duration
+	}{
+		{"delta seconds header", "17", 17 * time.Second},
+		{"http date header", now.Add(23 * time.Second).Format(http.TimeFormat), 23 * time.Second},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				got := parseRetryAfterHeader(http.Header{"Retry-After": {test.value}}, now)
+				if got == nil || *got != test.want {
+					t.Fatalf("retry-after = %v, want %s", got, test.want)
+				}
+			},
+		)
+	}
+}
+
 func TestResponseStartedErrorPreservesTypedSemantics(t *testing.T) {
 	cause := &executionErrorTestCause{
 		retryAfter: 3 * time.Second,

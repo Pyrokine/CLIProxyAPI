@@ -34,19 +34,6 @@ func SetBoolIfDifferent(payload []byte, path string, value bool) []byte {
 	return updated
 }
 
-// setRawIfDifferent updates path only when the existing raw JSON is different.
-func setRawIfDifferent(payload []byte, path string, value []byte) []byte {
-	current := util.GetGJSONBytesNoCopy(payload, path)
-	if current.Exists() && current.Raw == string(value) {
-		return payload
-	}
-	updated, errSet := sjson.SetRawBytes(payload, path, value)
-	if errSet != nil {
-		return payload
-	}
-	return updated
-}
-
 // JoinRawJSONArray joins validated raw JSON array items without re-encoding them.
 func JoinRawJSONArray(items [][]byte) []byte {
 	size := len(items) + 1

@@ -23,10 +23,16 @@ func newIdleTransportFixture(t *testing.T) idleTransportFixture {
 
 	idle := make(chan struct{}, 1)
 	closed := make(chan struct{}, 1)
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "ok")
-	}))
+	server := httptest.NewUnstartedServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, "ok")
+			},
+		),
+	)
 	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		// Only idle and closed transitions signal the fixture; other states are ignored.
+		//goland:noinspection GoSwitchMissingCasesForIotaConsts
 		switch state {
 		case http.StateIdle:
 			select {
@@ -93,10 +99,12 @@ func TestTransportCacheBoundedLRUClosesEvictedTransport(t *testing.T) {
 	if _, err := cache.Get("second", func() (*http.Transport, error) { return second.transport, nil }); err != nil {
 		t.Fatalf("cache second transport: %v", err)
 	}
-	if _, err := cache.Get("first", func() (*http.Transport, error) {
-		t.Fatal("cache hit rebuilt first transport")
-		return nil, nil
-	}); err != nil {
+	if _, err := cache.Get(
+		"first", func() (*http.Transport, error) {
+			t.Fatal("cache hit rebuilt first transport")
+			return nil, nil
+		},
+	); err != nil {
 		t.Fatalf("reuse first transport: %v", err)
 	}
 	if _, err := cache.Get("third", func() (*http.Transport, error) { return third.transport, nil }); err != nil {
@@ -107,7 +115,10 @@ func TestTransportCacheBoundedLRUClosesEvictedTransport(t *testing.T) {
 		t.Fatalf("cache length = %d, want 2", cache.Len())
 	}
 	if !cache.Contains("first") || !cache.Contains("third") || cache.Contains("second") {
-		t.Fatalf("cache keys after LRU eviction: first=%t second=%t third=%t", cache.Contains("first"), cache.Contains("second"), cache.Contains("third"))
+		t.Fatalf(
+			"cache keys after LRU eviction: first=%t second=%t third=%t", cache.Contains("first"),
+			cache.Contains("second"), cache.Contains("third"),
+		)
 	}
 	waitForIdleTransportClose(t, second.closed)
 	select {
@@ -132,11 +143,13 @@ func TestTransportCacheConcurrentSameKeyReuse(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			transport, err := cache.Get("shared", func() (*http.Transport, error) {
-				builds.Add(1)
-				time.Sleep(time.Millisecond)
-				return want, nil
-			})
+			transport, err := cache.Get(
+				"shared", func() (*http.Transport, error) {
+					builds.Add(1)
+					time.Sleep(time.Millisecond)
+					return want, nil
+				},
+			)
 			results <- transport
 			errorsCh <- err
 		}()
@@ -162,19 +175,51 @@ func TestTransportCacheConcurrentSameKeyReuse(t *testing.T) {
 }
 
 func TestTransportCacheDoesNotCacheBuildFailures(t *testing.T) {
+	t.Run(
+		"original same-key retry", func(t *testing.T) {
+			cache := NewTransportCache[cacheKey](4)
+			key := cacheKey{"auth", "broken"}
+			for _, build := range []func() (*http.Transport, error){
+				func() (*http.Transport, error) { return nil, errors.New("boom") },
+				func() (*http.Transport, error) { return nil, nil },
+			} {
+				if transport, err := cache.Get(key, build); transport != nil || err == nil || cache.Len() != 0 {
+					t.Fatalf(
+						"failed build changed the cache: transport=%p error=%v length=%d", transport, err, cache.Len(),
+					)
+				}
+			}
+			if transport, err := cache.Get(
+				key, func() (*http.Transport, error) { return &http.Transport{}, nil },
+			); err != nil || transport == nil {
+				t.Fatalf("retry after original failure sequence: transport=%p error=%v", transport, err)
+			}
+		},
+	)
 	cache := NewTransportCache[string](2)
 	wantErr := errors.New("build failed")
-	if transport, err := cache.Get("error", func() (*http.Transport, error) { return nil, wantErr }); transport != nil || !errors.Is(err, wantErr) {
+	if transport, err := cache.Get(
+		"error", func() (*http.Transport, error) { return nil, wantErr },
+	); transport != nil || !errors.Is(err, wantErr) {
 		t.Fatalf("error build = (%v, %v), want (nil, %v)", transport, err, wantErr)
 	}
 	if cache.Contains("error") {
 		t.Fatal("build error was cached")
 	}
-	if transport, err := cache.Get("nil", func() (*http.Transport, error) { return nil, nil }); transport != nil || err == nil {
+	if transport, err := cache.Get(
+		"nil", func() (*http.Transport, error) { return nil, nil },
+	); transport != nil || err == nil {
 		t.Fatalf("nil build = (%v, %v), want (nil, error)", transport, err)
 	}
 	if cache.Contains("nil") || cache.Len() != 0 {
 		t.Fatalf("failed builds changed cache: len=%d", cache.Len())
+	}
+	for _, key := range []string{"error", "nil"} {
+		want := &http.Transport{}
+		transport, err := cache.Get(key, func() (*http.Transport, error) { return want, nil })
+		if err != nil || transport != want || !cache.Contains(key) {
+			t.Fatalf("retry after failed build for %q = (%p, %v)", key, transport, err)
+		}
 	}
 }
 
@@ -196,7 +241,6 @@ func TestTransportCacheCloseOperations(t *testing.T) {
 		"purge":       purge,
 	}
 	for key, fixture := range fixtures {
-		fixture := fixture
 		if _, err := cache.Get(key, func() (*http.Transport, error) { return fixture.transport, nil }); err != nil {
 			t.Fatalf("cache %q: %v", key, err)
 		}

@@ -45,23 +45,6 @@ func TestSetBoolIfDifferentNormalizesWrongType(t *testing.T) {
 	}
 }
 
-func TestSetRawIfDifferentReusesIdenticalRawValue(t *testing.T) {
-	input := []byte(`{"metadata":{"source":"executor"},"input":[]}`)
-	output := setRawIfDifferent(input, "metadata", []byte(`{"source":"executor"}`))
-	if &output[0] != &input[0] {
-		t.Fatal("identical raw value caused a payload copy")
-	}
-}
-
-func TestSetRawIfDifferentUpdatesDifferentRawValue(t *testing.T) {
-	input := []byte(`{"metadata":"executor"}`)
-	output := setRawIfDifferent(input, "metadata", []byte(`{"source":"executor"}`))
-	metadata := gjson.GetBytes(output, "metadata")
-	if !metadata.IsObject() || metadata.Get("source").String() != "executor" {
-		t.Fatalf("metadata = %s, want object", metadata.Raw)
-	}
-}
-
 // noinspection GoUnusedGlobalVariable
 var benchmarkPayloadMutationOutput []byte
 

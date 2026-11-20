@@ -27,7 +27,8 @@ func TestEnsureCacheControl(t *testing.T) {
 	t.Run(
 		"Array System Prompt", func(t *testing.T) {
 			input := []byte(
-				`{"model": "claude-3-5-sonnet", "system": [{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}], "messages": []}`,
+				(`{"model": "claude-3-5-sonnet", "system": [{"type": "text", "text": "Pa` +
+					`rt 1"}, {"type": "text", "text": "Part 2"}], "messages": []}`),
 			)
 			output := ensureCacheControl(input, false)
 
@@ -45,7 +46,7 @@ func TestEnsureCacheControl(t *testing.T) {
 	)
 
 	// Test case 3: A usable system prompt covers the tools prefix, so native
-	// Claude Code does not add a redundant tools breakpoint.
+	// Claude Code does not add a redundant breakpoint for tools.
 	t.Run(
 		"Tools Not Auto Cached", func(t *testing.T) {
 			input := []byte(`{
@@ -77,14 +78,11 @@ func TestEnsureCacheControl(t *testing.T) {
 	// Per Anthropic docs: Up to 4 breakpoints allowed, tools and system are cached separately
 	t.Run(
 		"Independent Cache Breakpoints", func(t *testing.T) {
-			input := []byte(`{
-			"model": "claude-3-5-sonnet",
-			"tools": [
-				{"name": "tool1", "description": "First tool", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}
-			],
-			"system": [{"type": "text", "text": "System"}],
-			"messages": []
-		}`)
+			input := []byte(("{\n\t\t\t\"model\": \"claude-3-5-sonnet\",\n\t\t\t\"tools\": [\n\t\t\t" +
+				`	{"name": "tool1", "description": "First tool", "input_schema": {"type` +
+				"\": \"object\"}, \"cache_control\": {\"type\": \"ephemeral\"}}\n\t\t\t" +
+				"],\n\t\t\t\"system\": [{\"type\": \"text\", \"text\": \"System\"}],\n" +
+				"\t\t\t\"messages\": []\n\t\t}"))
 			output := ensureCacheControl(input, false)
 
 			// Tool already has cache_control - should not be changed
@@ -138,25 +136,37 @@ func TestEnsureCacheControl(t *testing.T) {
 				"empty string": `"system": "",`,
 				"blank string": `"system": "   ",`,
 			} {
-				t.Run(name, func(t *testing.T) {
-					input := []byte(`{
+				t.Run(
+					name, func(t *testing.T) {
+						input := []byte(`{
 					"model": "claude-3-5-sonnet",
 					` + system + `
 					"tools": [{"name": "tool1", "description": "Tool", "input_schema": {"type": "object"}}],
 					"messages": [{"role": "user", "content": "Hi"}]
 				}`)
-					output := ensureCacheControl(input, false)
+						output := ensureCacheControl(input, false)
 
-					if got := gjson.GetBytes(output, "tools.0.cache_control.type").String(); got != "ephemeral" {
-						t.Errorf("an unusable system prompt must still yield a tools breakpoint: %s", string(output))
-					}
-					if gjson.GetBytes(output, "system.0.cache_control").Exists() {
-						t.Errorf("unusable system must not receive its own breakpoint: %s", string(output))
-					}
-					if countCacheControls(output) != 2 {
-						t.Errorf("want tools and message breakpoints only, got %d in %s", countCacheControls(output), string(output))
-					}
-				})
+						if got := gjson.GetBytes(output, "tools.0.cache_control.type").String(); got != "ephemeral" {
+							t.Errorf(
+								"an unusable system prompt must still yield a tools breakpoint: %s", string(output),
+							)
+						}
+						if gjson.GetBytes(output, "system.0.cache_control").Exists() {
+							t.Errorf("unusable system must not receive its own breakpoint: %s", string(output))
+						}
+						if bytes.Contains(output, []byte(`"text":""`)) || bytes.Contains(
+							output, []byte(`"text":"   "`),
+						) {
+							t.Errorf("empty system was promoted into a text block: %s", output)
+						}
+						if countCacheControls(output) != 2 {
+							t.Errorf(
+								"want tools and message breakpoints only, got %d in %s", countCacheControls(output),
+								string(output),
+							)
+						}
+					},
+				)
 			}
 		},
 	)
@@ -256,14 +266,12 @@ func TestEnsureCacheControl(t *testing.T) {
 	// Test case 9: An earlier marker does not freeze the rolling breakpoint.
 	t.Run(
 		"Messages Inject Despite Earlier Cache Control", func(t *testing.T) {
-			input := []byte(`{
-			"model": "claude-3-5-sonnet",
-			"messages": [
-				{"role": "user", "content": [{"type": "text", "text": "First user"}]},
-				{"role": "assistant", "content": [{"type": "text", "text": "Assistant reply", "cache_control": {"type": "ephemeral"}}]},
-				{"role": "user", "content": [{"type": "text", "text": "Second user"}]}
-			]
-		}`)
+			input := []byte(("{\n\t\t\t\"model\": \"claude-3-5-sonnet\",\n\t\t\t\"messages\": [\n\t" +
+				`			{"role": "user", "content": [{"type": "text", "text": "First user"}` +
+				"]},\n\t\t\t\t{\"role\": \"assistant\", \"content\": [{\"type\": \"text" +
+				`", "text": "Assistant reply", "cache_control": {"type": "ephemeral"}}]` +
+				"},\n\t\t\t\t{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"" +
+				"text\": \"Second user\"}]}\n\t\t\t]\n\t\t}"))
 			output := ensureCacheControl(input, false)
 
 			if got := gjson.GetBytes(output, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
@@ -303,13 +311,11 @@ func TestEnsureCacheControl(t *testing.T) {
 
 	t.Run(
 		"Messages Caching Trailing System Array Falls Back", func(t *testing.T) {
-			input := []byte(`{
-			"messages": [
-				{"role": "user", "content": "User"},
-				{"role": "assistant", "content": "Assistant"},
-				{"role": "system", "content": [{"type": "text", "text": "Internal 1"}, {"type": "text", "text": "Internal 2"}]}
-			]
-		}`)
+			input := []byte(("{\n\t\t\t\"messages\": [\n\t\t\t\t{\"role\": \"user\", \"content\": \"" +
+				"User\"},\n\t\t\t\t{\"role\": \"assistant\", \"content\": \"Assistant\"" +
+				"},\n\t\t\t\t{\"role\": \"system\", \"content\": [{\"type\": \"text\", " +
+				`"text": "Internal 1"}, {"type": "text", "text": "Internal 2"}]}` +
+				"\n\t\t\t]\n\t\t}"))
 			output := ensureCacheControl(input, false)
 			if gjson.GetBytes(output, "messages.2.content.1.cache_control").Exists() {
 				t.Fatalf("array-content trailing system must not be marked: %s", output)
@@ -352,7 +358,9 @@ func TestEnsureCacheControl(t *testing.T) {
 				]
 			}`)
 				output := ensureCacheControl(input, false)
-				if got := gjson.GetBytes(output, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+				if got := gjson.GetBytes(
+					output, "messages.0.content.0.cache_control.type",
+				).String(); got != "ephemeral" {
 					t.Fatalf("preceding user cache_control.type = %q, want fallback ephemeral. Output: %s", got, output)
 				}
 				if got := gjson.GetBytes(output, "messages.1.content"); got.Type != gjson.String {
@@ -364,6 +372,86 @@ func TestEnsureCacheControl(t *testing.T) {
 			},
 		)
 	}
+
+	t.Run(
+		"Messages Inject Despite Cloaking First User Marker", func(t *testing.T) {
+			input := []byte(`{
+			"model":"claude-3-5-sonnet",
+			"tools":[{"name":"Read","description":"read","input_schema":{"type":"object"}}],
+			"system":"You are helpful.",
+			"messages":[
+				{"role":"user","content":[{"type":"text","text":"currentDate"},
+					{"type":"text","text":"First user","cache_control":{"type":"ephemeral"}}]},
+				{"role":"assistant","content":[{"type":"text","text":"Assistant reply"}]},
+				{"role":"user","content":[{"type":"text","text":"Second user"}]},
+				{"role":"assistant","content":[{"type":"text","text":"Assistant reply 2"}]},
+				{"role":"user","content":[{"type":"text","text":"Third user"}]}
+			]
+		}`)
+			output := ensureCacheControl(input, false)
+			if got := gjson.GetBytes(output, "messages.0.content.1.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("cloaking first-user marker lost: %s", output)
+			}
+			if got := gjson.GetBytes(output, "messages.4.content.0.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("latest user missing rolling cache_control after cloaking marker: %s", output)
+			}
+			if gjson.GetBytes(output, "tools.0.cache_control").Exists() {
+				t.Errorf("a payload with a system prompt must not stamp tools cache_control: %s", output)
+			}
+			if got := gjson.GetBytes(output, "system.0.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("system should receive independent cache_control: %s", output)
+			}
+		},
+	)
+	t.Run(
+		"Messages Skip When Latest User Already Has Cache Control", func(t *testing.T) {
+			input := []byte(`{
+			"model":"claude-3-5-sonnet",
+			"messages":[
+				{"role":"user","content":[{"type":"text","text":"First user"}]},
+				{"role":"assistant","content":[{"type":"text","text":"Assistant reply"}]},
+				{"role":"user","content":[{"type":"text","text":"Second user",
+					"cache_control":{"type":"ephemeral","ttl":"1h"}}]}
+			]
+		}`)
+			output := ensureCacheControl(input, false)
+			if got := gjson.GetBytes(output, "messages.2.content.0.cache_control.ttl").String(); got != "1h" {
+				t.Errorf("latest-user cache_control.ttl = %q, want 1h; output=%s", got, output)
+			}
+			if gjson.GetBytes(output, "messages.0.content.0.cache_control").Exists() {
+				t.Errorf("latest marker created an extra first-user breakpoint: %s", output)
+			}
+		},
+	)
+	t.Run(
+		"String Promotion Native Parent Order", func(t *testing.T) {
+			input := []byte(`{"system":"System <tag> &","messages":[{"role":"user","content":"User <tag> &"}]}`)
+			output := ensureCacheControl(input, false)
+			wantSystem := []byte(`"system":[{"type":"text","text":"System <tag> &",` +
+				`"cache_control":{"type":"ephemeral"}}]`)
+			wantMessage := []byte(`"content":[{"type":"text","text":"User <tag> &",` +
+				`"cache_control":{"type":"ephemeral"}}]`)
+			if !bytes.Contains(output, wantSystem) || !bytes.Contains(output, wantMessage) {
+				t.Fatalf("string promotion changed native parent/key order: %s", output)
+			}
+			if bytes.Contains(output, []byte("\\u003c")) || bytes.Contains(output, []byte("\\u003e")) ||
+				bytes.Contains(output, []byte("\\u0026")) {
+				t.Fatalf("string promotion introduced HTML escaping: %s", output)
+			}
+		},
+	)
+	t.Run(
+		"Existing Global Scope Preserved", func(t *testing.T) {
+			input := []byte(`{"system":[{"type":"text","text":"Global",` +
+				`"cache_control":{"type":"ephemeral","ttl":"1h","scope":"global"}}],` +
+				`"messages":[{"role":"user","content":"User"}]}`)
+			output := ensureCacheControl(input, false)
+			want := []byte(`"cache_control":{"type":"ephemeral","ttl":"1h","scope":"global"}`)
+			if !bytes.Contains(output, want) {
+				t.Fatalf("existing global scope marker changed: %s", output)
+			}
+		},
+	)
 
 	t.Run(
 		"Native Cache Control Wire Order", func(t *testing.T) {
@@ -482,25 +570,19 @@ func TestInjectToolsCacheControlSkipsDeferredTools(t *testing.T) {
 
 // TestCacheControlOrder verifies the correct order: tools -> system -> messages
 func TestCacheControlOrder(t *testing.T) {
-	input := []byte(`{
-		"model": "claude-sonnet-4",
-		"tools": [
-			{"name": "Read", "description": "Read file", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}},
-			{"name": "Write", "description": "Write file", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}}
-		],
-		"system": [
-			{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
-			{"type": "text", "text": "Additional instructions here..."}
-		],
-		"messages": [
-			{"role": "user", "content": "Hello"}
-		]
-	}`)
+	input := []byte(("{\n\t\t\"model\": \"claude-sonnet-4\",\n\t\t\"tools\": [\n\t\t\t{\"name\": \"Read\", \"" +
+		"description\": \"Read file\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {" +
+		"\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"Write\", \"description\": \"Write file\", \"" +
+		"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"" +
+		"content\": {\"type\": \"string\"}}}}\n\t\t],\n\t\t\"system\": [\n\t\t\t{\"type\": \"text\", \"text\"" +
+		": \"You are Claude Code, Anthropic's official CLI for Claude.\"},\n\t\t\t{\"type\": \"text\", \"" +
+		"text\": \"Additional instructions here...\"}\n\t\t],\n\t\t\"messages\": [\n\t\t\t{\"role\": \"user\"" +
+		", \"content\": \"Hello\"}\n\t\t]\n\t}"))
 
 	output := ensureCacheControl(input, false)
 
 	// A usable system prompt covers the tools prefix, so default native
-	// placement does not add a redundant tools marker.
+	// placement does not add a redundant marker for tools.
 	if gjson.GetBytes(output, "tools.0.cache_control").Exists() ||
 		gjson.GetBytes(output, "tools.1.cache_control").Exists() {
 		t.Error("default ensureCacheControl must not stamp tools")
@@ -513,7 +595,9 @@ func TestCacheControlOrder(t *testing.T) {
 	if gjson.GetBytes(output, "system.1.cache_control.ttl").Exists() {
 		t.Error("default last system element must not carry a ttl")
 	}
-	if got := gjson.GetBytes(upgradeClaudeCacheControlTTL(output, claudeCacheControlTTL1h), "system.1.cache_control.ttl").String(); got != "1h" {
+	if got := gjson.GetBytes(
+		upgradeClaudeCacheControlTTL(output, claudeCacheControlTTL1h), "system.1.cache_control.ttl",
+	).String(); got != "1h" {
 		t.Errorf("upgraded last system element ttl = %q, want 1h", got)
 	}
 

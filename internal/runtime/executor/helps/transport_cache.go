@@ -116,6 +116,8 @@ func (c *TransportCache[K]) Contains(key K) bool {
 }
 
 // CloseKey removes the transport cached under key and closes its idle connections.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *TransportCache[K]) CloseKey(key K) bool {
 	if c == nil {
 		return false

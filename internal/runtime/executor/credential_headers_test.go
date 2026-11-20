@@ -28,21 +28,23 @@ func TestPrepareRequestClearsStaleCredentialHeaders(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-			request.Header.Set("Authorization", "Bearer stale")
-			request.Header.Set("X-Api-Key", "stale-claude")
-			request.Header.Set("X-Goog-Api-Key", "stale-gemini")
+		t.Run(
+			test.name, func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+				request.Header.Set("Authorization", "Bearer stale")
+				request.Header.Set("X-Api-Key", "stale-claude")
+				request.Header.Set("X-Goog-Api-Key", "stale-gemini")
 
-			if errPrepare := test.prepare(request, &cliproxyauth.Auth{}); errPrepare != nil {
-				t.Fatalf("PrepareRequest() error = %v", errPrepare)
-			}
-			for _, name := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key"} {
-				if value := request.Header.Get(name); value != "" {
-					t.Fatalf("stale %s = %q", name, value)
+				if errPrepare := test.prepare(request, &cliproxyauth.Auth{}); errPrepare != nil {
+					t.Fatalf("PrepareRequest() error = %v", errPrepare)
 				}
-			}
-		})
+				for _, name := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key"} {
+					if value := request.Header.Get(name); value != "" {
+						t.Fatalf("stale %s = %q", name, value)
+					}
+				}
+			},
+		)
 	}
 }
 

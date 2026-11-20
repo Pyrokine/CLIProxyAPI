@@ -46,6 +46,12 @@ func responseModelEvent(payload []byte, provider string) (string, bool) {
 	terminal := false
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex":
+		if kind == "" && (gjson.GetBytes(data, "object").String() == "response.compaction" ||
+			gjson.GetBytes(data, "model").Type == gjson.String) {
+			model = gjson.GetBytes(data, "model")
+			terminal = true
+			break
+		}
 		switch kind {
 		case "response.created", "response.in_progress":
 		case "response.completed", "response.incomplete", "response.done":
@@ -69,7 +75,7 @@ func responseModelEvent(payload []byte, provider string) (string, bool) {
 				model = gjson.GetBytes(data, "model")
 			}
 		}
-	case "gemini", "gemini-interactions", "vertex", "aistudio", "antigravity":
+	case "gemini", "gemini-cli", "gemini-interactions", "vertex", "aistudio", "antigravity":
 		model = gjson.GetBytes(data, "response.modelVersion")
 		if model.Type != gjson.String {
 			model = gjson.GetBytes(data, "modelVersion")
@@ -102,7 +108,10 @@ func responseModelEvent(payload []byte, provider string) (string, bool) {
 		if model.Type != gjson.String {
 			model = gjson.GetBytes(data, "model")
 		}
-		terminal = kind == "response.completed" || kind == "response.incomplete" || kind == "response.done" || isInteractionsModelTerminal(data, kind)
+		terminal = kind == "response.completed" || kind == "response.incomplete" || kind == "response.done" ||
+			isInteractionsModelTerminal(
+				data, kind,
+			)
 		status := gjson.GetBytes(data, "status").String()
 		if gjson.GetBytes(data, "object").String() == "chat.completion" ||
 			gjson.GetBytes(data, "choices.0.finish_reason").String() != "" ||
@@ -154,7 +163,9 @@ func modelIsSubstituted(expected, served string) bool {
 	if slash := strings.LastIndexByte(served, '/'); slash >= 0 {
 		served = served[slash+1:]
 	}
-	return !sameModelAlias(expected, served) && !sameModelAlias(strings.TrimSuffix(expected, "-latest"), strings.TrimSuffix(served, "-latest"))
+	return !sameModelAlias(expected, served) && !sameModelAlias(
+		strings.TrimSuffix(expected, "-latest"), strings.TrimSuffix(served, "-latest"),
+	)
 }
 
 func sameModelAlias(a, b string) bool {
@@ -218,5 +229,8 @@ func (r *usageReporter) warnModelSubstitution(ctx context.Context, upstreamModel
 	if index == "" {
 		index = "unknown"
 	}
-	logWithRequestID(ctx).Warnf("%s executor: upstream served model %q for requested model %q (auth_index=%s)", r.provider, served, r.model, index)
+	logWithRequestID(ctx).Warnf(
+		"%s executor: upstream served model %q for requested model %q (auth_index=%s)", r.provider, served, r.model,
+		index,
+	)
 }

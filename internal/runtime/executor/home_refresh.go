@@ -14,6 +14,7 @@ import (
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e statusErr) LogDiagnostic() string {
 	return logging.SafeDiagnosticForLog(e.logDiagnostic)
 }
@@ -130,7 +131,18 @@ func refreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		if diagnostic == "" {
 			diagnostic = message
 			switch safeType := strings.ToLower(code); safeType {
-			case "authentication_error", "unauthorized", "invalid_grant", "refresh_token_expired", "refresh_token_revoked", "refresh_token_reused", "model_not_found", "auth_not_found", "auth_unavailable", "refresh_temporarily_unavailable", "refresh_unsupported", "home_unavailable":
+			case "authentication_error",
+				"unauthorized",
+				"invalid_grant",
+				"refresh_token_expired",
+				"refresh_token_revoked",
+				"refresh_token_reused",
+				"model_not_found",
+				"auth_not_found",
+				"auth_unavailable",
+				"refresh_temporarily_unavailable",
+				"refresh_unsupported",
+				"home_unavailable":
 				diagnostic = "Home refresh failed: type=" + safeType
 			}
 		}
@@ -143,6 +155,9 @@ func refreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 			code: http.StatusBadGateway, msg: "home returned invalid auth payload",
 			logDiagnostic: "Home refresh response decode failed: " + logging.SafeErrorDiagnostic(errParse),
 		}
+	}
+	if strings.TrimSpace(updated.Provider) == "" {
+		return nil, true, statusErr{code: http.StatusBadGateway, msg: "home returned invalid auth payload"}
 	}
 	if updated.Disabled || updated.Status == cliproxyauth.StatusDisabled {
 		return nil, true, statusErr{code: http.StatusUnauthorized, msg: "credential unauthorized"}
@@ -176,11 +191,20 @@ func parseHomeRefreshAuth(raw []byte) (*cliproxyauth.Auth, string, error) {
 
 func statusFromHomeRefreshErrorCode(code string) int {
 	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "authentication_error", "unauthorized", "invalid_grant", "refresh_token_expired", "refresh_token_revoked", "refresh_token_reused":
+	case "authentication_error",
+		"unauthorized",
+		"invalid_grant",
+		"refresh_token_expired",
+		"refresh_token_revoked",
+		"refresh_token_reused":
 		return http.StatusUnauthorized
 	case "model_not_found":
 		return http.StatusNotFound
-	case "auth_not_found", "auth_unavailable", "refresh_temporarily_unavailable", "refresh_unsupported", "home_unavailable":
+	case "auth_not_found",
+		"auth_unavailable",
+		"refresh_temporarily_unavailable",
+		"refresh_unsupported",
+		"home_unavailable":
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusServiceUnavailable

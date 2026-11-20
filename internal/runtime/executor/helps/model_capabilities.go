@@ -19,7 +19,6 @@ import (
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
-	log "github.com/sirupsen/logrus"
 )
 
 var apiKeyCompatRequestRegistry = func() *sdktranslator.Registry {
@@ -29,10 +28,12 @@ var apiKeyCompatRequestRegistry = func() *sdktranslator.Registry {
 		sdktranslator.FormatCodex,
 		codexclaude.ConvertClaudeRequestToCodexWithCompatReturningError,
 	)
-	registry.RegisterCheckedRequest(
+	registry.RegisterRequestEnvelope(
 		sdktranslator.FormatClaude,
 		sdktranslator.FormatGemini,
-		geminiclaude.ConvertClaudeRequestToGeminiWithCompatReturningError,
+		func(ctx context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
+			return geminiclaude.ConvertClaudeRequestToGeminiEnvelope(ctx, req, true)
+		},
 	)
 	registry.RegisterCheckedRequest(
 		sdktranslator.FormatClaude,
@@ -62,24 +63,6 @@ func APIKeyModelIsCompat(req cliproxyexecutor.Request) bool {
 	return ok && modelInfo.IsCompat
 }
 
-func TranslateRequestWithAPIKeyModelCompatibility(
-	ctx context.Context,
-	headers http.Header,
-	cfg *config.Config,
-	from,
-	to sdktranslator.Format,
-	model string,
-	payload []byte,
-	stream,
-	isCompat bool,
-) []byte {
-	body, err := TranslateRequestWithAPIKeyModelCompatibilityChecked(ctx, headers, cfg, from, to, model, payload, stream, isCompat)
-	if err != nil {
-		log.WithError(err).Warnf("request translation rejected for %s -> %s", from, to)
-	}
-	return body
-}
-
 func TranslateRequestWithAPIKeyModelCompatibilityChecked(
 	ctx context.Context,
 	headers http.Header,
@@ -102,7 +85,8 @@ func TranslateRequestWithAPIKeyModelCompatibilityChecked(
 		}
 	}
 	var requestRegistry *sdktranslator.Registry
-	if from == sdktranslator.FormatOpenAIResponse && (to == sdktranslator.FormatGemini || to == sdktranslator.FormatGeminiCLI) {
+	if from == sdktranslator.FormatOpenAIResponse &&
+		(to == sdktranslator.FormatGemini || to == sdktranslator.FormatGeminiCLI) {
 		for _, request := range requests {
 			if request == nil {
 				continue
@@ -113,19 +97,25 @@ func TranslateRequestWithAPIKeyModelCompatibilityChecked(
 			}
 			nativeWebSearch := *info.NativeCapabilities.WebSearch
 			requestRegistry = sdktranslator.NewRegistry()
-			requestRegistry.RegisterCheckedRequest(from, to, func(model string, body []byte, stream bool) ([]byte, error) {
-				converted, err := geminiresponses.ConvertOpenAIResponsesRequestToGeminiChecked(model, body, stream, &nativeWebSearch)
-				if err != nil || to == sdktranslator.FormatGemini {
-					return converted, err
-				}
-				return geminiclgemini.ConvertGeminiRequestToGeminiCLI(model, converted, stream), nil
-			})
+			requestRegistry.RegisterCheckedRequest(
+				from, to, func(model string, body []byte, stream bool) ([]byte, error) {
+					converted, err := geminiresponses.ConvertOpenAIResponsesRequestToGeminiChecked(
+						model, body, stream, &nativeWebSearch,
+					)
+					if err != nil || to == sdktranslator.FormatGemini {
+						return converted, err
+					}
+					return geminiclgemini.ConvertGeminiRequestToGeminiCLI(model, converted, stream), nil
+				},
+			)
 			break
 		}
 	}
 	var translated sdktranslator.RequestEnvelope
 	if !isCompat && requestRegistry == nil {
-		translated = translateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream, modelInfo)
+		translated = translateRequestWithCodexMultiAgentV2(
+			ctx, headers, cfg, from, to, model, payload, stream, modelInfo,
+		)
 	} else {
 		if from == sdktranslator.FormatOpenAIResponse {
 			payload = rewriteCodexOrphanDelegationInput(ctx, headers, payload, cfg)
@@ -139,9 +129,11 @@ func TranslateRequestWithAPIKeyModelCompatibilityChecked(
 				requestRegistry = apiKeyCompatRequestRegistry
 			}
 		}
-		translated = requestRegistry.TranslateRequestEnvelope(ctx, from, to, sdktranslator.RequestEnvelope{
-			Format: from, Model: model, ModelInfo: modelInfo, Body: payload, Stream: stream,
-		})
+		translated = requestRegistry.TranslateRequestEnvelope(
+			ctx, from, to, sdktranslator.RequestEnvelope{
+				Format: from, Model: model, ModelInfo: modelInfo, Body: payload, Stream: stream,
+			},
+		)
 	}
 	for _, request := range requests {
 		if request == nil {

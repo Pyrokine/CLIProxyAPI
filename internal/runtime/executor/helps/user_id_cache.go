@@ -66,7 +66,7 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 	if apiKey == "" {
 		return newUserID()
 	}
-	client, homeMode, errClient := currentClaudeIDKVClient()
+	client, homeMode, errClient := currentClaudeIDKVClient(ctx)
 	if homeMode {
 		if errClient != nil {
 			return "", errClient
@@ -100,7 +100,7 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 	}
 
 	userIDCacheCleanupOnce.Do(startUserIDCacheCleanup)
-	key := userIDCacheKey(apiKey)
+	key := claudeLocalCacheKey(ctx, userIDCacheKey(apiKey))
 	now := time.Now()
 
 	userIDCacheMu.RLock()

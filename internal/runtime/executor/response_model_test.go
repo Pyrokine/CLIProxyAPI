@@ -6,40 +6,90 @@ import (
 )
 
 func TestResponseModelEvent(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	tests := []struct {
 		name, provider, payload, want string
 		terminal                      bool
 	}{
-		{"codex created", "codex", `data: {"type":"response.created","response":{"model":"gpt-6-sol"}}`, "gpt-6-sol", false},
-		{"codex completed", "codex", `{"type":"response.completed","response":{"model":"gpt-6-luna"}}`, "gpt-6-luna", true},
-		{"codex delta ignored", "codex", `{"type":"response.output_text.delta","response":{"model":"wrong"}}`, "", false},
-		{"claude start", "claude", `data: {"type":"message_start","message":{"model":"claude-opus-5-5"}}`, "claude-opus-5-5", false},
+		{
+			"codex created", "codex", `data: {"type":"response.created","response":{"model":"gpt-6-sol"}}`, "gpt-6-sol",
+			false,
+		},
+		{
+			"codex completed", "codex", `{"type":"response.completed","response":{"model":"gpt-6-luna"}}`, "gpt-6-luna",
+			true,
+		},
+		{"codex nonstream", "codex", `{"object":"response","model":"gpt-6-sol"}`, "gpt-6-sol", true},
+		{"codex image response", "codex", `{"model":"gpt-image-2","data":[]}`, "gpt-image-2", true},
+		{
+			"codex delta ignored", "codex", `{"type":"response.output_text.delta","response":{"model":"wrong"}}`, "",
+			false,
+		},
+		{
+			"claude start", "claude", `data: {"type":"message_start","message":{"model":"claude-opus-5-5"}}`,
+			"claude-opus-5-5", false,
+		},
 		{"claude stop", "claude", `{"type":"message_stop"}`, "", true},
-		{"gemini", "gemini", `{"candidates":[{"finishReason":"STOP"}],"modelVersion":"gemini-3.5-flash"}`, "gemini-3.5-flash", true},
-		{"gemini interactions", "gemini", `{"event_type":"interaction.completed","interaction":{"model":"gemini-3.5-flash","status":"completed"}}`, "gemini-3.5-flash", true},
+		{
+			"gemini", "gemini", `{"candidates":[{"finishReason":"STOP"}],"modelVersion":"gemini-3.5-flash"}`,
+			"gemini-3.5-flash", true,
+		},
+		{
+			"gemini interactions", "gemini",
+			`{"event_type":"interaction.completed","interaction":{"model":"gemini-3.5-flash","status":"completed"}}`,
+			"gemini-3.5-flash", true,
+		},
 		{"interactions without model", "gemini", `{"type":"interaction.failed"}`, "", true},
 		{"meta", "meta", `{"type":"response.completed","response":{"model":"meta-llama"}}`, "meta-llama", true},
-		{"generic interactions", "devin", `{"event_type":"interaction.completed","interaction":{"model":"devin-2","status":"completed"}}`, "devin-2", true},
-		{"generic chat completion chunk", "kimi", `{"object":"chat.completion.chunk","model":"kimi-k3","choices":[{"finish_reason":"stop"}]}`, "kimi-k3", true},
+		{
+			"generic interactions", "devin",
+			`{"event_type":"interaction.completed","interaction":{"model":"devin-2","status":"completed"}}`, "devin-2",
+			true,
+		},
+		{
+			"generic chat completion chunk", "kimi",
+			`{"object":"chat.completion.chunk","model":"kimi-k3","choices":` +
+				`[{"finish_reason":` +
+				`"stop"}]}`, "kimi-k3", true,
+		},
 		{"chat completion", "kimi", `{"object":"chat.completion","model":"kimi-k3"}`, "kimi-k3", true},
 		{"nonstring", "meta", `{"type":"response.completed","response":{"model":7}}`, "", true},
-		{"oversized", "meta", `{"type":"response.completed","response":{"model":"` + strings.Repeat("x", 129) + `"}}`, "", true},
-		{"control character", "meta", `{"type":"response.completed","response":{"model":"bad\nname"}}`, "", true},
+		{
+			"oversized", "meta",
+			`{"type":"response.completed","response":{"model":"` + strings.Repeat("x", 129) + `"}}`, "", true,
+		},
+		{
+			"control character",
+			"meta",
+			`{"type":"response.completed","response":{"model":"bad\nname"}}`,
+			"",
+			true,
+		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			model, terminal := responseModelEvent([]byte(tt.payload), tt.provider)
-			if model != tt.want || terminal != tt.terminal {
-				t.Fatalf("responseModelEvent() = (%q, %t), want (%q, %t)", model, terminal, tt.want, tt.terminal)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				model, terminal := responseModelEvent([]byte(tt.payload), tt.provider)
+				if model != tt.want || terminal != tt.terminal {
+					t.Fatalf(
+						"responseModelEvent() = (%q, %t), want (%q, %t)",
+						model,
+						terminal,
+						tt.want,
+						tt.terminal,
+					)
+				}
+			},
+		)
 	}
 }
 
 func TestUsageReporterResponseModelFinal(t *testing.T) {
 	reporter := &usageReporter{provider: "codex", model: "gpt-6-sol"}
 	reporter.observeResponseModel([]byte(`data: {"type":"response.created","response":{"model":"gpt-6-sol"}}`))
-	reporter.observeResponseModel([]byte(`data: {"type":"response.completed","response":{"model":"gpt-6-luna"}}`))
+	reporter.observeResponseModel(
+		[]byte(`data: {"type":"response.completed","response":{"model":"gpt-6-luna"}}`),
+	)
 	reporter.observeResponseModel([]byte(`data: {"type":"response.created","response":{"model":"ignored"}}`))
 	served, _ := reporter.responseModelSnapshot()
 	if served != "gpt-6-luna" {
@@ -77,19 +127,29 @@ func TestUsageReporterGenericTerminalStatus(t *testing.T) {
 			{status: "in_progress"},
 			{},
 		} {
-			t.Run(provider+"/"+tt.status, func(t *testing.T) {
-				reporter := &usageReporter{provider: provider, model: "requested-model"}
-				reporter.observeResponseModel([]byte(`{"model":"served-final","status":"` + tt.status + `"}`))
-				reporter.observeResponseModel([]byte(`{"model":"late-metadata"}`))
-				served, _ := reporter.responseModelSnapshot()
-				want := "late-metadata"
-				if tt.final {
-					want = "served-final"
-				}
-				if served != want || reporter.modelFinal != tt.final {
-					t.Fatalf("model = %q final = %v, want %q/%v", served, reporter.modelFinal, want, tt.final)
-				}
-			})
+			t.Run(
+				provider+"/"+tt.status, func(t *testing.T) {
+					reporter := &usageReporter{provider: provider, model: "requested-model"}
+					reporter.observeResponseModel(
+						[]byte(`{"model":"served-final","status":"` + tt.status + `"}`),
+					)
+					reporter.observeResponseModel([]byte(`{"model":"late-metadata"}`))
+					served, _ := reporter.responseModelSnapshot()
+					want := "late-metadata"
+					if tt.final {
+						want = "served-final"
+					}
+					if served != want || reporter.modelFinal != tt.final {
+						t.Fatalf(
+							"model = %q final = %v, want %q/%v",
+							served,
+							reporter.modelFinal,
+							want,
+							tt.final,
+						)
+					}
+				},
+			)
 		}
 	}
 }

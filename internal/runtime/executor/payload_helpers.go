@@ -3,7 +3,6 @@ package executor
 import (
 	"encoding/json"
 	"net/http"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -13,10 +12,28 @@ import (
 	executorhelps "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func bindFinalModelContext(
+	req *cliproxyexecutor.Request,
+	auth *cliproxyauth.Auth,
+	opts cliproxyexecutor.Options,
+	finalModel string,
+) error {
+	bound, err := cliproxyauth.BindFinalModelContext(*req, auth, payloadRequestedModel(opts, req.Model), finalModel)
+	if err != nil {
+		return statusErr{
+			code: http.StatusBadRequest, msg: err.Error(), requestScoped: true,
+			dispatchPhase: cliproxyexecutor.DispatchPhaseNotSent,
+		}
+	}
+	*req = bound
+	return nil
+}
 
 // applyPayloadConfigWithRequest applies payload config using source protocol and request header gates.
 // requestPath is the inbound HTTP request path used for endpoint-scoped gates (e.g., DisableImageGenerationChat).
@@ -66,7 +83,7 @@ func applyPayloadConfigWithRequestTracked(
 	if cfg == nil {
 		return payload, nil
 	}
-	out := payload
+	out := applyModelCatalogSpeed(cfg, model, protocol, root, payload, requestedModel, targetExecutor, requestPath)
 	var touched map[string]bool
 	markTouched := func(path string) {
 		for _, trackedPath := range trackedPaths {
@@ -392,49 +409,22 @@ func payloadPathExists(payload []byte, path string) bool {
 }
 
 func payloadResultEquals(result gjson.Result, value any) bool {
-	actual, ok := normalizedPayloadResult(result)
-	if !ok {
-		return false
-	}
-	expected, ok := normalizedPayloadValue(value)
-	if !ok {
-		return false
-	}
-	return reflect.DeepEqual(actual, expected)
-}
-
-func normalizedPayloadResult(result gjson.Result) (any, bool) {
 	if !result.Exists() {
-		return nil, false
+		return false
 	}
 	raw := strings.TrimSpace(result.Raw)
 	if raw == "" {
 		encoded, errMarshal := json.Marshal(result.Value())
 		if errMarshal != nil {
-			return nil, false
+			return false
 		}
 		raw = string(encoded)
 	}
-	return normalizedPayloadJSON([]byte(raw))
-}
-
-func normalizedPayloadValue(value any) (any, bool) {
-	encoded, errMarshal := json.Marshal(value)
+	expected, errMarshal := json.Marshal(value)
 	if errMarshal != nil {
-		return nil, false
+		return false
 	}
-	return normalizedPayloadJSON(encoded)
-}
-
-func normalizedPayloadJSON(data []byte) (any, bool) {
-	if len(strings.TrimSpace(string(data))) == 0 {
-		return nil, false
-	}
-	var out any
-	if errUnmarshal := json.Unmarshal(data, &out); errUnmarshal != nil {
-		return nil, false
-	}
-	return out, true
+	return util.JSONEqual([]byte(raw), expected)
 }
 
 func payloadFromProtocolMatches(pattern, fromProtocol string) bool {
@@ -557,7 +547,7 @@ func payloadRuleTargetsPath(path, trackedPath string) bool {
 	if trackedPath == "" {
 		return false
 	}
-	return path == trackedPath || strings.HasPrefix(path, trackedPath+".")
+	return path == trackedPath || strings.HasPrefix(path, trackedPath+".") || strings.HasPrefix(trackedPath, path+".")
 }
 
 func resolvePayloadRulePaths(payload []byte, path string) []string {
@@ -1081,12 +1071,10 @@ func capMaxTokens(body []byte, model string) []byte {
 	if !isRegisteredClaude {
 		return body
 	}
-	limit := maxTokensByModel(model)
-	mt := gjson.GetBytes(body, "max_tokens")
-	if mt.Exists() && mt.Int() <= limit {
+	if gjson.GetBytes(body, "max_tokens").Exists() {
 		return body
 	}
-	out, err := sjson.SetBytes(body, "max_tokens", limit)
+	out, err := sjson.SetBytes(body, "max_tokens", maxTokensByModel(model))
 	if err != nil {
 		return body
 	}

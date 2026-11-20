@@ -92,11 +92,13 @@ func newDevinHTTPClient(
 		if roundTripper, ok := util.RoundTripperValue(ctx).(http.RoundTripper); ok && roundTripper != nil {
 			if transport, isTransport := roundTripper.(*http.Transport); isTransport {
 				key := devinTransportKey{baseTransport: transport}
-				cloned, err := devinTransports.Get(key, func() (*http.Transport, error) {
-					copyTransport := transport.Clone()
-					copyTransport.DisableCompression = true
-					return copyTransport, nil
-				})
+				cloned, err := devinTransports.Get(
+					key, func() (*http.Transport, error) {
+						copyTransport := transport.Clone()
+						copyTransport.DisableCompression = true
+						return copyTransport, nil
+					},
+				)
 				if err == nil {
 					return &http.Client{Transport: cloned, Timeout: timeout}
 				}
@@ -111,25 +113,27 @@ func newDevinHTTPClient(
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 	key := devinTransportKey{proxyURL: proxyURL}
-	transport, err := devinTransports.Get(key, func() (*http.Transport, error) {
-		if proxyURL != "" {
-			if errValidate := proxyutil.ValidateProxyURL(proxyURL); errValidate != nil {
-				return nil, errValidate
+	transport, err := devinTransports.Get(
+		key, func() (*http.Transport, error) {
+			if proxyURL != "" {
+				if errValidate := proxyutil.ValidateProxyURL(proxyURL); errValidate != nil {
+					return nil, errValidate
+				}
+				built, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+				if errBuild != nil {
+					return nil, errBuild
+				}
+				built.DisableCompression = true
+				return built, nil
 			}
-			built, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
-			if errBuild != nil {
-				return nil, errBuild
+			if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+				cloned := defaultTransport.Clone()
+				cloned.DisableCompression = true
+				return cloned, nil
 			}
-			built.DisableCompression = true
-			return built, nil
-		}
-		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
-			cloned := defaultTransport.Clone()
-			cloned.DisableCompression = true
-			return cloned, nil
-		}
-		return &http.Transport{DisableCompression: true}, nil
-	})
+			return &http.Transport{DisableCompression: true}, nil
+		},
+	)
 	if err != nil {
 		return &http.Client{Transport: proxyErrorTransport{err: err}, Timeout: timeout}
 	}

@@ -122,7 +122,9 @@ func TestCodexResponsesBodyCompatUsesRequestScopedTranslatorHooks(t *testing.T) 
 		cliproxyexecutor.Request{
 			Model: "deepseek-v4",
 			Payload: []byte(
-				`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":""}]}]}`,
+				(`{"messages":[{"role":"assistant","content":[{"type":"thinking",` +
+					`"thinking":"reason","signature":` +
+					`""}]}]}`),
 			),
 			Metadata: map[string]any{
 				"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},

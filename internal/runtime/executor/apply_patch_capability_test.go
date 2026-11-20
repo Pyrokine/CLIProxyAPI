@@ -21,14 +21,19 @@ func TestNativeApplyPatchCapability(t *testing.T) {
 		{name: "xai auto", executor: NewXAIAutoExecutor(&config.Config{}), want: true},
 		{name: "xai nil", executor: (*XAIExecutor)(nil)},
 		{name: "xai incomplete auto", executor: &XAIAutoExecutor{}},
-		{name: "xai incomplete websocket", executor: &XAIAutoExecutor{httpExec: newXAIExecutor(&config.Config{}), wsExec: &XAIWebsocketsExecutor{}}},
+		{
+			name:     "xai incomplete websocket",
+			executor: &XAIAutoExecutor{httpExec: newXAIExecutor(&config.Config{}), wsExec: &XAIWebsocketsExecutor{}},
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			support, declared := tc.executor.(coreauth.ApplyPatchSupport)
-			if got := declared && support.SupportsApplyPatch(); got != tc.want {
-				t.Fatalf("capability = %t, want %t", got, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				support, declared := tc.executor.(coreauth.ApplyPatchSupport)
+				if got := declared && support.SupportsApplyPatch(); got != tc.want {
+					t.Fatalf("capability = %t, want %t", got, tc.want)
+				}
+			},
+		)
 	}
 }
 
@@ -64,18 +69,20 @@ func TestTranslatedApplyPatchCapability(t *testing.T) {
 		{"kimi-ai native responses", NewKimiAIExecutor(cfg), false},
 		{"kimi nil", (*KimiExecutor)(nil), false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			support, declared := tc.executor.(coreauth.ApplyPatchSupport)
-			if got := declared && support.SupportsApplyPatch(); got != tc.want {
-				t.Fatalf("capability = %t, want %t", got, tc.want)
-			}
-			if tc.want {
-				manager := coreauth.NewManager(nil, nil, nil)
-				manager.RegisterExecutor(tc.executor)
-				if !manager.SupportsApplyPatchForProviders([]string{tc.executor.Identifier()}) {
-					t.Fatal("manager did not consume executor capability")
+		t.Run(
+			tc.name, func(t *testing.T) {
+				support, declared := tc.executor.(coreauth.ApplyPatchSupport)
+				if got := declared && support.SupportsApplyPatch(); got != tc.want {
+					t.Fatalf("capability = %t, want %t", got, tc.want)
 				}
-			}
-		})
+				if tc.want {
+					manager := coreauth.NewManager(nil, nil, nil)
+					manager.RegisterExecutor(tc.executor)
+					if !manager.SupportsApplyPatchForProviders([]string{tc.executor.Identifier()}) {
+						t.Fatal("manager did not consume executor capability")
+					}
+				}
+			},
+		)
 	}
 }

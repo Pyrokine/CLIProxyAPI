@@ -14,6 +14,7 @@ import (
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 )
@@ -111,7 +112,13 @@ func TestC09ProviderSessionUseRejectsInvalidExplicitIDs(t *testing.T) {
 		Metadata: metadata,
 	}
 
-	wantCodexID := helps.ProviderSessionUUID("codex", metadata)
+	wantCodexID := uuid.NewSHA1(
+		uuid.NameSpaceOID, []byte(strings.Join(
+			[]string{
+				"cli-proxy-api", "codex", "prompt-cache", "gpt-5", helps.ProviderSessionUUID("codex", metadata),
+			}, "\x00",
+		)),
+	).String()
 	_, body, _, err := (&codexExecutor{}).cacheHelper(
 		context.Background(),
 		sdktranslator.FormatOpenAIResponse,
@@ -172,11 +179,19 @@ func TestC09ProviderSessionUseRejectsInvalidExplicitIDs(t *testing.T) {
 
 func TestC09CodexReplayRejectsInvalidExplicitIDs(t *testing.T) {
 	oversized := strings.Repeat("x", 257)
-	payload := []byte(`{"prompt_cache_key":"bad\nsession","client_metadata":{"x-codex-window-id":"` + oversized + `"}}`)
+	payload := []byte(
+		`{"prompt_cache_key":"bad\nsession","client_metadata":{"x-codex-window-id":"` + oversized + `"}}`,
+	)
 	if got := codexReasoningReplaySessionKeyFromPayload(payload); got != "" {
 		t.Fatalf("Codex payload replay key = %q, want empty", got)
 	}
-	if got := codexReasoningReplaySessionKeyFromTurnMetadata(`{"prompt_cache_key":"bad\nsession","window_id":"` + oversized + `"}`); got != "" {
+	if got := codexReasoningReplaySessionKeyFromTurnMetadata(
+		(`{"prompt_cache_key":"bad\nsession","window_id":` +
+			`"`) +
+			oversized +
+			`"}`,
+	); got !=
+		"" {
 		t.Fatalf("Codex turn metadata replay key = %q, want empty", got)
 	}
 
@@ -206,8 +221,10 @@ func TestC09RequiredCodexWebsocketRejectsMissingActiveConnection(t *testing.T) {
 			},
 		},
 		cliproxyexecutor.Request{
-			Model:   "gpt-5",
-			Payload: []byte(`{"model":"gpt-5","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`),
+			Model: "gpt-5",
+			Payload: []byte(
+				`{"model":"gpt-5","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`,
+			),
 		},
 		cliproxyexecutor.Options{
 			SourceFormat: sdktranslator.FormatOpenAIResponse,
@@ -242,8 +259,9 @@ func TestC09RequiredXAIWebsocketRejectsMissingActiveConnection(t *testing.T) {
 			},
 		},
 		cliproxyexecutor.Request{
-			Model:   "grok-4.3",
-			Payload: []byte(`{"type":"response.append","model":"grok-4.3","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`),
+			Model: "grok-4.3",
+			Payload: []byte((`{"type":"response.append","model":"grok-4.3","previous_response_id":"r` +
+				`esp-1","input":[{"type":"message","id":"msg-2"}]}`)),
 		},
 		cliproxyexecutor.Options{
 			SourceFormat: sdktranslator.FormatOpenAIResponse,
@@ -271,14 +289,17 @@ func TestC09XAICompactedTranscriptReplaysOnceAcrossReset(t *testing.T) {
 	}
 	state.mapDownstreamToUpstream("resp-compact", "")
 
-	appendPayload := []byte(`{"type":"response.append","model":"grok-4.3","input":[{"type":"message","id":"msg-2"}]}`)
+	appendPayload := []byte(
+		`{"type":"response.append","model":"grok-4.3","input":[{"type":"message","id":"msg-2"}]}`,
+	)
 	mapper := newXAIWebsocketRequestIDMapper(store, "c09-xai-compact-reset", appendPayload)
 	upstream, err := mapper.upstreamRequestPayload(appendPayload)
 	if err != nil {
 		t.Fatalf("upstreamRequestPayload() error = %v", err)
 	}
 	input := gjson.GetBytes(upstream, "input").Array()
-	if len(input) != 2 || input[0].Get("type").String() != "compaction" || input[1].Get("id").String() != "msg-2" {
+	if len(input) != 2 || input[0].Get("type").String() != "compaction" ||
+		input[1].Get("id").String() != "msg-2" {
 		t.Fatalf("post-compact append input = %s", gjson.GetBytes(upstream, "input").Raw)
 	}
 	if !mapper.replayedCompactedTranscript {
@@ -292,7 +313,9 @@ func TestC09XAICompactedTranscriptReplaysOnceAcrossReset(t *testing.T) {
 		t.Fatalf("recordTranscriptTurn() error = %v", err)
 	}
 
-	resetPayload := []byte(`{"type":"response.create","model":"grok-4.3","input":[{"type":"message","id":"msg-3"}]}`)
+	resetPayload := []byte(
+		`{"type":"response.create","model":"grok-4.3","input":[{"type":"message","id":"msg-3"}]}`,
+	)
 	resetMapper := newXAIWebsocketRequestIDMapper(store, "c09-xai-compact-reset", resetPayload)
 	reset, err := resetMapper.upstreamRequestPayload(resetPayload)
 	if err != nil {
@@ -310,7 +333,8 @@ func TestC09ValidateXAIWebsocketCompactionResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate valid response error = %v", err)
 	}
-	if responseID != xaiCompactionResponseID(valid) || gjson.GetBytes(item, "encrypted_content").String() != "opaque" {
+	if responseID != xaiCompactionResponseID(valid) ||
+		gjson.GetBytes(item, "encrypted_content").String() != "opaque" {
 		t.Fatalf("validated response = id:%q item:%s", responseID, item)
 	}
 	for _, invalid := range [][]byte{

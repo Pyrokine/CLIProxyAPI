@@ -22,13 +22,15 @@ func TestOpenAICompatPrepareRequestUsesCallerHeadersAndClearsStaleCredentials(t 
 		"X-Api-Key":      {"stale-claude"},
 		"X-Goog-Api-Key": {"stale-gemini"},
 	}
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"header:X-Copied":     "$x-client",
-		"header:X-Literal":    "literal",
-		"header:X-Session":    "$cpa-session-id",
-		"header:X-Missing":    "$Missing",
-		"header:X-Credential": "$Authorization",
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"header:X-Copied":     "$x-client",
+			"header:X-Literal":    "literal",
+			"header:X-Session":    "$cpa-session-id",
+			"header:X-Missing":    "$Missing",
+			"header:X-Credential": "$Authorization",
+		},
+	}
 
 	if err := NewOpenAICompatExecutor("compat", &config.Config{}).PrepareRequest(req, auth); err != nil {
 		t.Fatalf("PrepareRequest() error = %v", err)
@@ -49,78 +51,90 @@ func TestOpenAICompatCustomHeadersUseExplicitRequestBoundary(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			captured := make(chan http.Header, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				captured <- r.Header.Clone()
-				if test.stream {
-					w.Header().Set("Content-Type", "text/event-stream")
-					if test.media {
-						_, _ = w.Write([]byte("data: {\"ok\":true}\n\n"))
-					} else {
-						_, _ = w.Write([]byte("data: [DONE]\n\n"))
-					}
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				if test.media {
-					_, _ = w.Write([]byte(`{"created":1,"data":[]}`))
-				} else {
-					_, _ = w.Write([]byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
-				}
-			}))
-			defer server.Close()
+		t.Run(
+			test.name, func(t *testing.T) {
+				captured := make(chan http.Header, 1)
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, r *http.Request) {
+							captured <- r.Header.Clone()
+							if test.stream {
+								w.Header().Set("Content-Type", "text/event-stream")
+								if test.media {
+									_, _ = w.Write([]byte("data: {\"ok\":true}\n\n"))
+								} else {
+									_, _ = w.Write([]byte("data: [DONE]\n\n"))
+								}
+								return
+							}
+							w.Header().Set("Content-Type", "application/json")
+							if test.media {
+								_, _ = w.Write([]byte(`{"created":1,"data":[]}`))
+							} else {
+								_, _ = w.Write(
+									[]byte((`{"id":"chatcmpl-1","choices":[{"message":{"role":` +
+										`"assistant","content":` +
+										`"ok"}}]}`)),
+								)
+							}
+						},
+					),
+				)
+				defer server.Close()
 
-			executor := NewOpenAICompatExecutor("compat", &config.Config{})
-			auth := &cliproxyauth.Auth{Attributes: map[string]string{
-				"base_url":              server.URL + "/v1",
-				"header:X-Copied":       "$x-client",
-				"header:X-Literal":      "literal",
-				"header:X-Session":      "$CPA-SESSION-ID",
-				"header:X-Missing":      "$Missing",
-				"header:X-Credential":   "$Authorization",
-				"header:Authorization":  "Bearer custom",
-				"header:X-Api-Key":      "custom-claude",
-				"header:X-Goog-Api-Key": "custom-gemini",
-			}}
-			req := cliproxyexecutor.Request{
-				Model:   "upstream-model",
-				Payload: []byte(`{"model":"alias-model","messages":[{"role":"user","content":"hi"}]}`),
-			}
-			opts := cliproxyexecutor.Options{
-				SourceFormat: sdktranslator.FormatOpenAI,
-				Stream:       test.stream,
-				Headers: http.Header{
-					"x-client":       {"first", "second"},
-					"Authorization":  {"Bearer inbound"},
-					"X-Api-Key":      {"inbound-claude"},
-					"X-Goog-Api-Key": {"inbound-gemini"},
-					"Content-Type":   {"application/json"},
-				},
-			}
-			if test.media {
-				opts.SourceFormat = sdktranslator.FromString(openAICompatImageHandlerType)
-				opts.Metadata = map[string]any{
-					cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+				executor := NewOpenAICompatExecutor("compat", &config.Config{})
+				auth := &cliproxyauth.Auth{
+					Attributes: map[string]string{
+						"base_url":              server.URL + "/v1",
+						"header:X-Copied":       "$x-client",
+						"header:X-Literal":      "literal",
+						"header:X-Session":      "$CPA-SESSION-ID",
+						"header:X-Missing":      "$Missing",
+						"header:X-Credential":   "$Authorization",
+						"header:Authorization":  "Bearer custom",
+						"header:X-Api-Key":      "custom-claude",
+						"header:X-Goog-Api-Key": "custom-gemini",
+					},
 				}
-				req.Payload = []byte(`{"model":"alias-image","prompt":"draw"}`)
-			}
-			ctx := util.WithSessionID(context.Background(), "canonical-session")
-			if test.stream {
-				result, err := executor.ExecuteStream(ctx, auth, req, opts)
-				if err != nil {
-					t.Fatalf("ExecuteStream() error = %v", err)
+				req := cliproxyexecutor.Request{
+					Model:   "upstream-model",
+					Payload: []byte(`{"model":"alias-model","messages":[{"role":"user","content":"hi"}]}`),
 				}
-				for chunk := range result.Chunks {
-					if chunk.Err != nil {
-						t.Fatalf("stream chunk error = %v", chunk.Err)
+				opts := cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAI,
+					Stream:       test.stream,
+					Headers: http.Header{
+						"x-client":       {"first", "second"},
+						"Authorization":  {"Bearer inbound"},
+						"X-Api-Key":      {"inbound-claude"},
+						"X-Goog-Api-Key": {"inbound-gemini"},
+						"Content-Type":   {"application/json"},
+					},
+				}
+				if test.media {
+					opts.SourceFormat = sdktranslator.FromString(openAICompatImageHandlerType)
+					opts.Metadata = map[string]any{
+						cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
 					}
+					req.Payload = []byte(`{"model":"alias-image","prompt":"draw"}`)
 				}
-			} else if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
-				t.Fatalf("Execute() error = %v", err)
-			}
-			assertOpenAICompatCustomHeaders(t, <-captured)
-		})
+				ctx := util.WithSessionID(context.Background(), "canonical-session")
+				if test.stream {
+					result, err := executor.ExecuteStream(ctx, auth, req, opts)
+					if err != nil {
+						t.Fatalf("ExecuteStream() error = %v", err)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk error = %v", chunk.Err)
+						}
+					}
+				} else if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
+					t.Fatalf("Execute() error = %v", err)
+				}
+				assertOpenAICompatCustomHeaders(t, <-captured)
+			},
+		)
 	}
 }
 

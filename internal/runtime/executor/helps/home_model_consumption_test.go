@@ -10,7 +10,9 @@ import (
 )
 
 func TestHomeModelCapabilitiesOverrideLocalThinkingAndCompatibility(t *testing.T) {
-	body := []byte(`{"model":"test-model","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":"hi"},{"type":"configuration_update","reasoning":{"effort":"low"}}]}`)
+	body := []byte((`{"model":"test-model","reasoning":{"effort":"high"},"input":[{"type":"` +
+		`message","role":"user","content":"hi"},{"type":"configuration_update",` +
+		`"reasoning":{"effort":"low"}}]}`))
 	local := &registry.ModelInfo{ID: "test-model", IsCompat: true, SupportConfigurationUpdate: true}
 	home := &registry.ModelInfo{
 		ID: "test-model", Type: "codex", Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high"}},

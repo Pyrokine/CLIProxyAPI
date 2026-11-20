@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -86,7 +87,8 @@ func TestUsageReporterMarksFailedRecordIncomplete(t *testing.T) {
 	ctx := logging.WithResponseTimingHolder(context.Background())
 	logging.MarkFirstResponseByte(ctx)
 	reporter.publishRecord(
-		ctx, usage.Record{RequestedAt: reporter.requestedAt, Failed: true, Detail: usage.Detail{TotalTokens: 1}},
+		ctx,
+		usage.Record{RequestedAt: reporter.requestedAt, Failed: true, Detail: usage.Detail{TotalTokens: 1}},
 	)
 
 	select {
@@ -174,7 +176,9 @@ func TestInteractionsUsageReporterDoesNotDoubleCountCacheAliases(t *testing.T) {
 	registerTestUsagePlugin(t, plugin)
 
 	detail := parseInteractionsUsage(
-		[]byte(`{"usage":{"input_tokens":8,"output_tokens":2,"cached_tokens":4,"cacheReadTokens":4,"cacheWriteTokens":3}}`),
+		[]byte(
+			`{"usage":{"input_tokens":8,"output_tokens":2,"cached_tokens":4,"cacheReadTokens":4,"cacheWriteTokens":3}}`,
+		),
 	)
 	reporter := &usageReporter{provider: "gemini-interactions", model: "gemini-test", alias: "gemini-test"}
 	reporter.publish(context.Background(), detail)
@@ -184,7 +188,8 @@ func TestInteractionsUsageReporterDoesNotDoubleCountCacheAliases(t *testing.T) {
 		if got.Detail.TotalTokens != 10 {
 			t.Fatalf("total tokens = %d, want 10: %#v", got.Detail.TotalTokens, got.Detail)
 		}
-		if got.Detail.CachedTokens != 4 || got.Detail.CacheReadTokens != 4 || got.Detail.CacheCreationTokens != 3 {
+		if got.Detail.CachedTokens != 4 || got.Detail.CacheReadTokens != 4 ||
+			got.Detail.CacheCreationTokens != 3 {
 			t.Fatalf("cache detail = %#v, want cached/read/creation 4/4/3", got.Detail)
 		}
 	case <-time.After(time.Second):
@@ -204,7 +209,11 @@ func TestUsageReporterPreservesHTTPAndExecutionIDs(t *testing.T) {
 	select {
 	case got := <-plugin.records:
 		if got.RequestID != "http-request-id" || got.ExecutionID != "model-execution-id" {
-			t.Fatalf("usage IDs = (%q, %q), want separate HTTP and execution IDs", got.RequestID, got.ExecutionID)
+			t.Fatalf(
+				"usage IDs = (%q, %q), want separate HTTP and execution IDs",
+				got.RequestID,
+				got.ExecutionID,
+			)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for usage record")
@@ -218,13 +227,17 @@ func TestUsageReporterIncludesRuntimeMetadata(t *testing.T) {
 	ctx := usage.WithReasoningEffort(context.Background(), "medium")
 	ctx = usage.WithServiceTier(ctx, "flex")
 	ctx = usage.WithStream(ctx, true)
-	ctx = logging.WithClientRequestMetadata(ctx, logging.ClientRequestMetadata{
-		SessionID:       "slot:worker",
-		ParentSessionID: "slot:root",
-	})
-	reporter := newUsageReporter(ctx, testUsageExecutor{}, "gpt-5.4", &cliproxyauth.Auth{
-		Attributes: map[string]string{"base_url": " https://selected.example/v1 "},
-	})
+	ctx = logging.WithClientRequestMetadata(
+		ctx, logging.ClientRequestMetadata{
+			SessionID:       "slot:worker",
+			ParentSessionID: "slot:root",
+		},
+	)
+	reporter := newUsageReporter(
+		ctx, testUsageExecutor{}, "gpt-5.4", &cliproxyauth.Auth{
+			Attributes: map[string]string{"base_url": " https://selected.example/v1 "},
+		},
+	)
 	reporter.publish(ctx, usage.Detail{TotalTokens: 1, ResponseServiceTier: "default"})
 
 	select {
@@ -270,36 +283,62 @@ func TestUsageReporterSetTranslatedReasoningEffortOverridesContext(t *testing.T)
 }
 
 func TestUsageReporterSetTranslatedReasoningEffortPreservesContextServiceTier(t *testing.T) {
-	reporter := &usageReporter{reasoningEffort: "medium", serviceTier: "flex"}
-
-	reporter.setTranslatedReasoningEffort([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), "openai")
-
-	if reporter.reasoningEffort != "" {
-		t.Fatalf("reasoning effort = %q, want empty", reporter.reasoningEffort)
-	}
-	if reporter.serviceTier != "flex" {
-		t.Fatalf("service tier = %q, want flex", reporter.serviceTier)
+	for _, test := range []struct {
+		name, payload string
+	}{
+		{"missing", `{"messages":[{"role":"user","content":"hi"}]}`},
+		{"null", `{"service_tier":null}`},
+		{"boolean", `{"service_tier":false}`},
+		{"number", `{"service_tier":1}`},
+		{"array", `{"service_tier":[]}`},
+		{"object", `{"service_tier":{}}`},
+		{"empty", `{"service_tier":""}`},
+		{"whitespace", `{"service_tier":"  "}`},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				reporter := &usageReporter{reasoningEffort: "medium", serviceTier: "flex"}
+				reporter.setTranslatedReasoningEffort([]byte(test.payload), "openai")
+				if reporter.reasoningEffort != "" {
+					t.Fatalf("reasoning effort = %q, want empty", reporter.reasoningEffort)
+				}
+				if reporter.serviceTier != "flex" {
+					t.Fatalf("request service tier = %q, want flex", reporter.serviceTier)
+				}
+			},
+		)
 	}
 }
 
 func TestUsageReporterSetTranslatedReasoningEffortExtractsServiceTier(t *testing.T) {
-	reporter := &usageReporter{serviceTier: usage.DefaultServiceTier}
-
-	reporter.setTranslatedReasoningEffort(
-		[]byte(`{"reasoning":{"effort":"high"},"service_tier":"priority"}`), "openai-response",
-	)
-
-	if reporter.reasoningEffort != "high" {
-		t.Fatalf("reasoning effort = %q, want high", reporter.reasoningEffort)
-	}
-	if reporter.serviceTier != "priority" {
-		t.Fatalf("service tier = %q, want priority", reporter.serviceTier)
+	for _, test := range []struct {
+		name, payload string
+	}{
+		{"root", `{"reasoning":{"effort":"high"},"service_tier":"priority"}`},
+		{"request envelope", `{"reasoning":{"effort":"high"},"request":{"service_tier":"priority"}}`},
+		{"response envelope", `{"reasoning":{"effort":"high"},"response":{"service_tier":"priority"}}`},
+		{"trimmed", `{"reasoning":{"effort":"high"},"service_tier":" priority "}`},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				reporter := &usageReporter{serviceTier: usage.DefaultServiceTier}
+				reporter.setTranslatedReasoningEffort([]byte(test.payload), "openai-response")
+				if reporter.reasoningEffort != "high" {
+					t.Fatalf("reasoning effort = %q, want high", reporter.reasoningEffort)
+				}
+				if reporter.serviceTier != "priority" {
+					t.Fatalf("request service tier = %q, want priority", reporter.serviceTier)
+				}
+			},
+		)
 	}
 }
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(
-		`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`,
+		`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"pr` +
+			`ompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{` +
+			`"reasoning_tokens":5}}}`,
 	)
 	detail := parseOpenAIUsage(data)
 	if detail.InputTokens != 1 {
@@ -321,7 +360,8 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 
 func TestParseOpenAIUsageResponses(t *testing.T) {
 	data := []byte(
-		`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`,
+		(`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"` +
+			`cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`),
 	)
 	detail := parseOpenAIUsage(data)
 	if detail.InputTokens != 10 {
@@ -358,13 +398,17 @@ func TestParsePluginExecutorResponseUsageResponsesShapes(t *testing.T) {
 		},
 		{
 			name: "Codex protocol top-level usage", protocol: "codex",
-			payload: `{"response":{"service_tier":"priority"},"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`,
-			input:   3, output: 4, total: 7, tier: "priority",
+			payload: `{"response":{"service_tier":"priority"},"usage":{"input_tokens":3,` +
+				`"output_tokens":4,"total_tokens":` +
+				`7}}`,
+			input: 3, output: 4, total: 7, tier: "priority",
 		},
 		{
 			name: "nested response usage wins", protocol: "openai-response",
-			payload: `{"service_tier":"priority","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"response":{"usage":{"input_tokens":18,"output_tokens":22,"total_tokens":40}}}`,
-			input:   18, output: 22, total: 40, tier: "priority",
+			payload: `{"service_tier":"priority","usage":{"input_tokens":1,"output_tokens":1` +
+				`,"total_tokens":2},"response":{"usage":{"input_tokens":18,"output_toke` +
+				`ns":22,"total_tokens":40}}}`,
+			input: 18, output: 22, total: 40, tier: "priority",
 		},
 		{
 			name: "tier-only response", protocol: "openai-response",
@@ -386,12 +430,23 @@ func TestParsePluginExecutorResponseUsageResponsesShapes(t *testing.T) {
 			input:   6, output: 8, total: 14,
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := ParsePluginExecutorResponseUsage(tc.protocol, []byte(tc.payload))
-			if got.InputTokens != tc.input || got.OutputTokens != tc.output || got.TotalTokens != tc.total || got.ResponseServiceTier != tc.tier {
-				t.Fatalf("usage = %+v, want input=%d output=%d total=%d tier=%q", got, tc.input, tc.output, tc.total, tc.tier)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				got := ParsePluginExecutorResponseUsage(tc.protocol, []byte(tc.payload))
+				if got.InputTokens != tc.input || got.OutputTokens != tc.output ||
+					got.TotalTokens != tc.total ||
+					got.ResponseServiceTier != tc.tier {
+					t.Fatalf(
+						"usage = %+v, want input=%d output=%d total=%d tier=%q",
+						got,
+						tc.input,
+						tc.output,
+						tc.total,
+						tc.tier,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -403,41 +458,68 @@ func TestPluginExecutorStreamUsageKeepsTopLevelResponsesTokens(t *testing.T) {
 		tier  string
 	}{
 		{
-			name:  "tier and top-level usage in same event",
-			lines: []string{`data: {"type":"response.completed","service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`},
+			name: "tier and top-level usage in same event",
+			lines: []string{
+				`data: {"type":"response.completed","service_tier":"default","usage":{"` +
+					`input_tokens":34,"output_tokens":499,"total_tokens":533}}`,
+			},
 			input: 34, tier: "default",
 		},
 		{
-			name:  "tier before top-level usage",
-			lines: []string{`data: {"service_tier":"priority"}`, `data: {"type":"response.completed","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`},
+			name: "tier before top-level usage",
+			lines: []string{
+				`data: {"service_tier":"priority"}`,
+				`data: {"type":"response.completed","usage":{"input_tokens":34,` +
+					`"output_tokens":499,"total_tokens":` +
+					`533}}`,
+			},
 			input: 34, tier: "priority",
 		},
 		{
-			name:  "nested zero does not hide top-level usage",
-			lines: []string{`data: {"response":{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}},"service_tier":"flex","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`},
+			name: "nested zero does not hide top-level usage",
+			lines: []string{
+				`data: {"response":{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}` +
+					`},"service_tier":"flex","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`,
+			},
 			input: 34, tier: "flex",
 		},
 		{
-			name:  "nested nonzero usage wins",
-			lines: []string{`data: {"service_tier":"priority","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"response":{"usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}}`},
+			name: "nested nonzero usage wins",
+			lines: []string{
+				`data: {"service_tier":"priority","usage":{"input_tokens":1,"output_tokens":1,"` +
+					`total_tokens":2},"response":{"usage":{"input_tokens":34,"output_tokens":499,"total_tokens":` +
+					`533}}}`,
+			},
 			input: 34, tier: "priority",
 		},
 		{
-			name:  "later tier-only event preserves tokens",
-			lines: []string{`data: {"usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`, `data: {"service_tier":"default"}`},
+			name: "later tier-only event preserves tokens",
+			lines: []string{
+				`data: {"usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`,
+				`data: {"service_tier":"default"}`,
+			},
 			input: 34, tier: "default",
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			buffer := NewPluginExecutorStreamUsage("openai-response")
-			for _, line := range tc.lines {
-				buffer.ObserveLine([]byte(line))
-			}
-			got, ok := buffer.Detail()
-			if !ok || got.InputTokens != tc.input || got.OutputTokens != 499 || got.TotalTokens != 533 || got.ResponseServiceTier != tc.tier {
-				t.Fatalf("detail = %+v ok=%v, want input=%d output=499 total=533 tier=%q", got, ok, tc.input, tc.tier)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				buffer := NewPluginExecutorStreamUsage("openai-response")
+				for _, line := range tc.lines {
+					buffer.ObserveLine([]byte(line))
+				}
+				got, ok := buffer.Detail()
+				if !ok || got.InputTokens != tc.input || got.OutputTokens != 499 || got.TotalTokens != 533 ||
+					got.ResponseServiceTier != tc.tier {
+					t.Fatalf(
+						"detail = %+v ok=%v, want input=%d output=499 total=533 tier=%q",
+						got,
+						ok,
+						tc.input,
+						tc.tier,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -450,16 +532,32 @@ func TestPluginExecutorUsageReporterAttributesSelectedAuthOnce(t *testing.T) {
 		Attributes: map[string]string{"base_url": "https://selected.test/v1", "type": "oauth"},
 	}
 	reporter := NewPluginExecutorUsageReporter(ctx, testUsageExecutor{}, "gpt-test", auth)
-	reporter.SetTranslatedReasoningEffort([]byte(`{"model":"gpt-test","service_tier":"priority"}`), "openai-response")
-	reporter.Publish(ctx, ParsePluginExecutorResponseUsage("openai-response", []byte(`{"service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`)))
+	reporter.SetTranslatedReasoningEffort(
+		[]byte(`{"model":"gpt-test","service_tier":"priority"}`),
+		"openai-response",
+	)
+	reporter.Publish(
+		ctx, ParsePluginExecutorResponseUsage(
+			"openai-response",
+			[]byte(
+				`{"service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`,
+			),
+		),
+	)
 	reporter.EnsurePublished(ctx)
 	reporter.PublishFailure(ctx, errors.New("late failure"))
 	select {
 	case got := <-plugin.records:
-		if got.AuthID != auth.ID || got.AuthIndex != auth.EnsureIndex() || got.ExecutorType != "testUsageExecutor" || got.BaseURL != "https://selected.test/v1" || got.Failed || got.Stream {
+		if got.AuthID != auth.ID || got.AuthIndex != auth.EnsureIndex() ||
+			got.ExecutorType != "testUsageExecutor" ||
+			got.BaseURL != "https://selected.test/v1" ||
+			got.Failed ||
+			got.Stream {
 			t.Fatalf("selected auth record = %+v", got)
 		}
-		if got.Detail.InputTokens != 34 || got.Detail.OutputTokens != 499 || got.Detail.TotalTokens != 533 || got.ServiceTier != "priority" || got.ResponseServiceTier != "default" {
+		if got.Detail.InputTokens != 34 || got.Detail.OutputTokens != 499 || got.Detail.TotalTokens != 533 ||
+			got.ServiceTier != "priority" ||
+			got.ResponseServiceTier != "default" {
 			t.Fatalf("usage detail = %+v", got)
 		}
 	case <-time.After(time.Second):
@@ -479,11 +577,17 @@ func TestPluginExecutorUsageReporterPreservesPartialStreamUsageOnFailure(t *test
 	auth := &cliproxyauth.Auth{ID: "selected-auth-2", Provider: "test-provider"}
 	reporter := NewPluginExecutorUsageReporter(ctx, testUsageExecutor{}, "gpt-test", auth)
 	reporter.MarkStream()
-	reporter.PublishFailureWithDetail(ctx, usage.Detail{InputTokens: 34, OutputTokens: 3, TotalTokens: 37, ResponseServiceTier: "flex"}, errors.New("stream interrupted"))
+	reporter.PublishFailureWithDetail(
+		ctx, usage.Detail{InputTokens: 34, OutputTokens: 3, TotalTokens: 37, ResponseServiceTier: "flex"},
+		errors.New("stream interrupted"),
+	)
 	reporter.EnsurePublished(ctx)
 	select {
 	case got := <-plugin.records:
-		if got.AuthID != auth.ID || !got.Failed || !got.Stream || got.Detail.InputTokens != 34 || got.Detail.OutputTokens != 3 || got.Detail.TotalTokens != 37 || got.ResponseServiceTier != "flex" {
+		if got.AuthID != auth.ID || !got.Failed || !got.Stream || got.Detail.InputTokens != 34 ||
+			got.Detail.OutputTokens != 3 ||
+			got.Detail.TotalTokens != 37 ||
+			got.ResponseServiceTier != "flex" {
 			t.Fatalf("failed stream usage record = %+v", got)
 		}
 	case <-time.After(time.Second):
@@ -507,14 +611,18 @@ func TestParseServiceTierFields(t *testing.T) {
 	}
 
 	codexDetail, ok := parseCodexUsage(
-		[]byte(`{"response":{"service_tier":"priority","usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9}}}`),
+		[]byte(
+			`{"response":{"service_tier":"priority","usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9}}}`,
+		),
 	)
 	if !ok || codexDetail.ResponseServiceTier != "priority" {
 		t.Fatalf("parseCodexUsage = (%+v, %v), want priority tier", codexDetail, ok)
 	}
 
 	interactionDetail := parseInteractionsUsage(
-		[]byte(`{"interaction":{"service_tier":"flex","usage":{"input_tokens":6,"output_tokens":7,"total_tokens":13}}}`),
+		[]byte(
+			`{"interaction":{"service_tier":"flex","usage":{"input_tokens":6,"output_tokens":7,"total_tokens":13}}}`,
+		),
 	)
 	if interactionDetail.ResponseServiceTier != "flex" {
 		t.Fatalf("Interactions response service tier = %q, want flex", interactionDetail.ResponseServiceTier)
@@ -529,14 +637,17 @@ func TestParseOpenAIUsageIgnoresNullUsage(t *testing.T) {
 }
 
 func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
-	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],"usage":null}`)
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[{"in` +
+		`dex":0,"delta":{"content":"hi"},"finish_reason":null}],"usage":null}`)
 	if detail, ok := parseOpenAIStreamUsage(line); ok {
 		t.Fatalf("parseOpenAIStreamUsage = (%+v, true), want false for null usage", detail)
 	}
 }
 
 func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
-	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}`)
+	line := []byte((`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"` +
+		`input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"` +
+		`output_tokens_details":{"reasoning_tokens":2}}}`))
 	detail, ok := parseOpenAIStreamUsage(line)
 	if !ok {
 		t.Fatal("parseOpenAIStreamUsage ok = false, want true")
@@ -578,15 +689,17 @@ func TestStreamUsageBuffersMarkReporterWithoutUsage(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			reporter := &usageReporter{}
-			if test.publish(reporter) {
-				t.Fatal("empty stream buffer reported usage")
-			}
-			if !reporter.stream {
-				t.Fatal("stream reporter was not marked")
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				reporter := &usageReporter{}
+				if test.publish(reporter) {
+					t.Fatal("empty stream buffer reported usage")
+				}
+				if !reporter.stream {
+					t.Fatal("stream reporter was not marked")
+				}
+			},
+		)
 	}
 }
 
@@ -600,8 +713,13 @@ func TestParseGeminiStreamUsageSkipsZeroPlaceholders(t *testing.T) {
 		{
 			name: "non-zero then zero",
 			lines: [][]byte{
-				[]byte(`data: {"usageMetadata":{"promptTokenCount":17984,"candidatesTokenCount":2668,"thoughtsTokenCount":1028,"totalTokenCount":21680}}`),
-				[]byte(`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":0}}`),
+				[]byte(`data: {"usageMetadata":{"promptTokenCount":17984,"candidatesTokenCount` +
+					`":2668,"thoughtsTokenCount":1028,"totalTokenCount":21680}}`),
+				[]byte(
+					`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,` +
+						`"thoughtsTokenCount":0,"totalTokenCount":` +
+						`0}}`,
+				),
 			},
 			want: usage.Detail{
 				InputTokens: 17984, OutputTokens: 2668, ReasoningTokens: 1028, TotalTokens: 21680,
@@ -611,7 +729,11 @@ func TestParseGeminiStreamUsageSkipsZeroPlaceholders(t *testing.T) {
 		{
 			name: "zero then non-zero",
 			lines: [][]byte{
-				[]byte(`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":0}}`),
+				[]byte(
+					`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,` +
+						`"thoughtsTokenCount":0,"totalTokenCount":` +
+						`0}}`,
+				),
 				[]byte(`data: {"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":7}}`),
 			},
 			want:       usage.Detail{InputTokens: 5, OutputTokens: 7, TotalTokens: 12},
@@ -637,39 +759,41 @@ func TestParseGeminiStreamUsageSkipsZeroPlaceholders(t *testing.T) {
 	}
 
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			var accepted int
-			var buffered streamUsageBuffer
-			for _, line := range testCase.lines {
-				detail, ok := parseGeminiStreamUsage(line)
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				var accepted int
+				var buffered streamUsageBuffer
+				for _, line := range testCase.lines {
+					detail, ok := parseGeminiStreamUsage(line)
+					if !ok {
+						continue
+					}
+					accepted++
+					buffered.observe(detail, true, false)
+				}
+				if accepted != testCase.wantAccept {
+					t.Fatalf("accepted usage count = %d, want %d", accepted, testCase.wantAccept)
+				}
+				got, ok := buffered.detailValue()
+				if testCase.wantAccept == 0 {
+					if ok {
+						t.Fatalf("usage detail = %+v, want no usage", got)
+					}
+					return
+				}
 				if !ok {
-					continue
+					t.Fatal("usage detail missing")
 				}
-				accepted++
-				buffered.observe(detail, true, false)
-			}
-			if accepted != testCase.wantAccept {
-				t.Fatalf("accepted usage count = %d, want %d", accepted, testCase.wantAccept)
-			}
-			got, ok := buffered.detailValue()
-			if testCase.wantAccept == 0 {
-				if ok {
-					t.Fatalf("usage detail = %+v, want no usage", got)
+				if got.InputTokens != testCase.want.InputTokens ||
+					got.OutputTokens != testCase.want.OutputTokens ||
+					got.ReasoningTokens != testCase.want.ReasoningTokens ||
+					got.CachedTokens != testCase.want.CachedTokens ||
+					got.CacheReadTokens != testCase.want.CacheReadTokens ||
+					got.TotalTokens != testCase.want.TotalTokens {
+					t.Fatalf("usage detail = %+v, want %+v", got, testCase.want)
 				}
-				return
-			}
-			if !ok {
-				t.Fatal("usage detail missing")
-			}
-			if got.InputTokens != testCase.want.InputTokens ||
-				got.OutputTokens != testCase.want.OutputTokens ||
-				got.ReasoningTokens != testCase.want.ReasoningTokens ||
-				got.CachedTokens != testCase.want.CachedTokens ||
-				got.CacheReadTokens != testCase.want.CacheReadTokens ||
-				got.TotalTokens != testCase.want.TotalTokens {
-				t.Fatalf("usage detail = %+v, want %+v", got, testCase.want)
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -685,7 +809,11 @@ func TestStreamUsageBufferMergesFinalUsageAndTier(t *testing.T) {
 				[]byte(`data: {"service_tier":"default"}`),
 				[]byte(`data: {"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}`),
 			},
-			want: usage.Detail{InputTokens: 2, OutputTokens: 3, TotalTokens: 5, ResponseServiceTier: "default"},
+			want: usage.Detail{
+				CacheWriteReported: new(false), InputTokens: 2, OutputTokens: 3, TotalTokens: 5,
+				ResponseServiceTier: "default",
+				BillingMetadata:     &usage.BillingMetadata{SchemaVersion: 1, ContextInputTokens: new(int64(2))},
+			},
 		},
 		{
 			name: "usage then final tier",
@@ -693,15 +821,27 @@ func TestStreamUsageBufferMergesFinalUsageAndTier(t *testing.T) {
 				[]byte(`data: {"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}`),
 				[]byte(`data: {"service_tier":"priority"}`),
 			},
-			want: usage.Detail{InputTokens: 2, OutputTokens: 3, TotalTokens: 5, ResponseServiceTier: "priority"},
+			want: usage.Detail{
+				CacheWriteReported:  new(false),
+				InputTokens:         2,
+				OutputTokens:        3,
+				TotalTokens:         5,
+				ResponseServiceTier: "priority",
+				BillingMetadata:     &usage.BillingMetadata{SchemaVersion: 1, ContextInputTokens: new(int64(2))},
+			},
 		},
 		{
 			name: "zero usage replaces previous usage",
 			chunks: [][]byte{
-				[]byte(`data: {"usage":{"input_tokens":9,"output_tokens":8,"total_tokens":17},"service_tier":"flex"}`),
+				[]byte(
+					`data: {"usage":{"input_tokens":9,"output_tokens":8,"total_tokens":17},"service_tier":"flex"}`,
+				),
 				[]byte(`data: {"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`),
 			},
-			want: usage.Detail{ResponseServiceTier: "flex"},
+			want: usage.Detail{
+				CacheWriteReported: new(false), ResponseServiceTier: "flex",
+				BillingMetadata: &usage.BillingMetadata{SchemaVersion: 1, ContextInputTokens: new(int64(0))},
+			},
 		},
 	}
 
@@ -740,7 +880,13 @@ func TestStreamUsageBufferObservesSplitResponseModels(t *testing.T) {
 	reporter := &usageReporter{provider: "openai-compat", model: "requested-model"}
 	buffer := streamUsageBuffer{modelReporter: reporter}
 	buffer.observeOpenAIStreamChunk([]byte("data: {\"object\":\"chat.completion.chunk\",\"model\":\"served-"))
-	buffer.observeOpenAIStreamChunk([]byte("v1\"}\ndata: {\"object\":\"chat.completion.chunk\",\"model\":\"served-v2\",\"choices\":[{\"finish_reason\":\"stop\"}]}"))
+	buffer.observeOpenAIStreamChunk(
+		[]byte(
+			"v1\"}\ndata: {\"object\":\"chat.completion.chunk\",\"model\":" +
+				"\"served-v2\",\"choices\":[{\"finish_reason\":" +
+				"\"stop\"}]}",
+		),
+	)
 	buffer.flushOpenAIStream()
 	buffer.observeOpenAIStreamChunk([]byte("\ndata: {\"model\":\"ignored\"}\n"))
 
@@ -753,7 +899,9 @@ func TestStreamUsageBufferObservesSplitResponseModels(t *testing.T) {
 func TestStreamUsageBufferObservesMultilineResponseModel(t *testing.T) {
 	reporter := &usageReporter{provider: "openai-compat", model: "requested-model"}
 	buffer := streamUsageBuffer{modelReporter: reporter}
-	buffer.observeOpenAIStreamChunk([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\n"))
+	buffer.observeOpenAIStreamChunk(
+		[]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\n"),
+	)
 	buffer.observeOpenAIStreamChunk([]byte("data: \"response\":{\"model\":\"served-multiline\"}}\n\n"))
 
 	served, _ := reporter.responseModelSnapshot()
@@ -765,13 +913,22 @@ func TestStreamUsageBufferObservesMultilineResponseModel(t *testing.T) {
 func TestStreamUsageBufferSkipsOversizedModelEvent(t *testing.T) {
 	reporter := &usageReporter{provider: "openai-compat", model: "requested-model"}
 	buffer := streamUsageBuffer{modelReporter: reporter}
-	buffer.observeOpenAIStreamChunk(append([]byte("data: "), bytes.Repeat([]byte("x"), maxStreamModelEventBytes)...))
-	buffer.observeOpenAIStreamChunk([]byte("\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"served-after-overflow\"}}\n\n"))
+	buffer.observeOpenAIStreamChunk(
+		append([]byte("data: "), bytes.Repeat([]byte("x"), maxStreamModelEventBytes)...),
+	)
+	buffer.observeOpenAIStreamChunk(
+		[]byte(
+			"\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"served-after-overflow\"}}\n\n",
+		),
+	)
 	buffer.flushOpenAIStream()
 
 	served, _ := reporter.responseModelSnapshot()
 	if served != "served-after-overflow" || len(buffer.modelLines) != 0 || buffer.modelOverflow {
-		t.Fatalf("response model after oversized event = %q, lines=%d overflow=%t", served, len(buffer.modelLines), buffer.modelOverflow)
+		t.Fatalf(
+			"response model after oversized event = %q, lines=%d overflow=%t", served, len(buffer.modelLines),
+			buffer.modelOverflow,
+		)
 	}
 }
 
@@ -786,7 +943,11 @@ func TestStreamUsageBufferDropsOversizedLineAndRecovers(t *testing.T) {
 	}
 
 	buffer.observeOpenAIStreamChunk(
-		[]byte("\ndata: {\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5},\"service_tier\":\"priority\"}\n"),
+		[]byte(
+			"\ndata: {\"usage\":{\"input_tokens\":2,\"output_tokens\":3," +
+				"\"total_tokens\":5},\"service_tier\":" +
+				"\"priority\"}\n",
+		),
 	)
 	detail, ok := buffer.detailValue()
 	if !ok || detail.InputTokens != 2 || detail.OutputTokens != 3 || detail.ResponseServiceTier != "priority" {
@@ -797,14 +958,22 @@ func TestStreamUsageBufferDropsOversizedLineAndRecovers(t *testing.T) {
 func TestStreamUsageBufferIgnoresInvalidUsageAndTierTypes(t *testing.T) {
 	var buffer streamUsageBuffer
 	buffer.observeOpenAIStream(
-		[]byte(`data: {"usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12},"service_tier":"default"}`),
+		[]byte(
+			`data: {"usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12},"service_tier":"default"}`,
+		),
 	)
 	buffer.observeOpenAIStream(
-		[]byte(`data: {"usage":{"input_tokens":null,"output_tokens":"7","total_tokens":null},"service_tier":123}`),
+		[]byte(
+			`data: {"usage":{"input_tokens":null,"output_tokens":"7","total_tokens":null},"service_tier":123}`,
+		),
 	)
 
 	detail, ok := buffer.detailValue()
-	want := usage.Detail{InputTokens: 5, OutputTokens: 7, TotalTokens: 12, ResponseServiceTier: "default"}
+	want := usage.Detail{
+		CacheWriteReported: new(false), InputTokens: 5, OutputTokens: 7, TotalTokens: 12,
+		ResponseServiceTier: "default",
+		BillingMetadata:     &usage.BillingMetadata{SchemaVersion: 1, ContextInputTokens: new(int64(5))},
+	}
 	if !ok {
 		t.Fatalf("detail = %+v ok=false, want %+v", detail, want)
 	}
@@ -813,12 +982,18 @@ func TestStreamUsageBufferIgnoresInvalidUsageAndTierTypes(t *testing.T) {
 
 func TestStreamUsageBufferParsesEscapedUsageAndServiceTierKeys(t *testing.T) {
 	var buffer streamUsageBuffer
+	//goland:noinspection SpellCheckingInspection
 	buffer.observeOpenAIStream(
-		[]byte("data: {\"\\u0075sage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5},\"service\\u005ftier\":\"priority\"}"),
+		[]byte("data: {\"\\u0075sage\":{\"input_tokens\":2,\"output_tokens\":3,\"total" +
+			"_tokens\":5},\"service\\u005ftier\":\"priority\"}"),
 	)
 
 	detail, ok := buffer.detailValue()
-	want := usage.Detail{InputTokens: 2, OutputTokens: 3, TotalTokens: 5, ResponseServiceTier: "priority"}
+	want := usage.Detail{
+		CacheWriteReported: new(false), InputTokens: 2, OutputTokens: 3, TotalTokens: 5,
+		ResponseServiceTier: "priority",
+		BillingMetadata:     &usage.BillingMetadata{SchemaVersion: 1, ContextInputTokens: new(int64(2))},
+	}
 	if !ok {
 		t.Fatalf("detail = %+v ok=false, want %+v", detail, want)
 	}
@@ -827,6 +1002,7 @@ func TestStreamUsageBufferParsesEscapedUsageAndServiceTierKeys(t *testing.T) {
 
 func TestStreamUsageBufferParsesEscapedServiceTierWithoutUsage(t *testing.T) {
 	var buffer streamUsageBuffer
+	//goland:noinspection SpellCheckingInspection
 	buffer.observeOpenAIStream([]byte("data: {\"service\\u005ftier\":\"flex\",\"type\":\"response.created\"}"))
 
 	detail, ok := buffer.detailValue()
@@ -838,7 +1014,10 @@ func TestStreamUsageBufferParsesEscapedServiceTierWithoutUsage(t *testing.T) {
 
 func TestParseOpenAIUsageSkipsInvalidTokenAliases(t *testing.T) {
 	detail := parseOpenAIUsage(
-		[]byte(`{"usage":{"prompt_tokens":null,"input_tokens":5,"completion_tokens":"bad","output_tokens":7,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":null},"input_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":null},"output_tokens_details":{"reasoning_tokens":2}},"service_tier":123}`),
+		[]byte((`{"usage":{"prompt_tokens":null,"input_tokens":5,"completion_tokens":"bad","output_tokens":7,"` +
+			`total_tokens":12,"prompt_tokens_details":{"cached_tokens":null},"input_tokens_details":{"` +
+			`cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":null},"output_tokens_details":` +
+			`{"reasoning_tokens":2}},"service_tier":123}`)),
 	)
 	if detail.InputTokens != 5 || detail.OutputTokens != 7 || detail.TotalTokens != 12 ||
 		detail.CachedTokens != 3 || detail.ReasoningTokens != 2 {
@@ -851,9 +1030,13 @@ func TestParseOpenAIUsageSkipsInvalidTokenAliases(t *testing.T) {
 
 func TestParseOpenAIUsageRejectsInvalidTokenNumbers(t *testing.T) {
 	detail := parseOpenAIUsage(
-		[]byte(`{"usage":{"prompt_tokens":-1,"input_tokens":5,"completion_tokens":1.5,"output_tokens":7,"total_tokens":9223372036854775808,"prompt_tokens_details":{"cached_tokens":-2},"input_tokens_details":{"cached_tokens":3}}}`),
+		[]byte(`{"usage":{"prompt_tokens":-1,"input_tokens":5,"completion_tokens":1.5,` +
+			`"output_tokens":7,"total_tokens":9223372036854775808,"prompt_tokens_de` +
+			`tails":{"cached_tokens":-2},"input_tokens_details":{"cached_tokens":3}` +
+			`}}`),
 	)
-	if detail.InputTokens != 5 || detail.OutputTokens != 7 || detail.TotalTokens != 12 || detail.CachedTokens != 3 {
+	if detail.InputTokens != 5 || detail.OutputTokens != 7 || detail.TotalTokens != 12 ||
+		detail.CachedTokens != 3 {
 		t.Fatalf("detail = %+v", detail)
 	}
 	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete {
@@ -864,10 +1047,15 @@ func TestParseOpenAIUsageRejectsInvalidTokenNumbers(t *testing.T) {
 func TestStreamUsageBufferKeepsValidUsageAfterNegativeUpdate(t *testing.T) {
 	var buffer streamUsageBuffer
 	buffer.observeOpenAIStream([]byte(`data: {"usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}`))
-	buffer.observeOpenAIStream([]byte(`data: {"usage":{"input_tokens":-1,"output_tokens":-2,"total_tokens":-3}}`))
+	buffer.observeOpenAIStream(
+		[]byte(`data: {"usage":{"input_tokens":-1,"output_tokens":-2,"total_tokens":-3}}`),
+	)
 
 	detail, ok := buffer.detailValue()
-	want := usage.Detail{InputTokens: 5, OutputTokens: 7, TotalTokens: 12}
+	want := usage.Detail{
+		CacheWriteReported: new(false), InputTokens: 5, OutputTokens: 7, TotalTokens: 12,
+		BillingMetadata: &usage.BillingMetadata{SchemaVersion: 1, ContextInputTokens: new(int64(5))},
+	}
 	if !ok {
 		t.Fatalf("detail = %+v ok=false, want %+v", detail, want)
 	}
@@ -922,7 +1110,9 @@ func TestStreamUsageFailureWinsBeforeDeferredSuccess(t *testing.T) {
 	reporter := &usageReporter{provider: "openai", model: "gpt-test"}
 	var buffer streamUsageBuffer
 	buffer.observeOpenAIStream(
-		[]byte(`data: {"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},"service_tier":"default"}`),
+		[]byte(
+			`data: {"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},"service_tier":"default"}`,
+		),
 	)
 
 	reporter.publishFailure(ctx, errors.New("stream read failed"))
@@ -950,7 +1140,11 @@ func TestUsageReporterCancellationAfterFinalizerCheckWinsOverSuccess(t *testing.
 			publish: func(ctx context.Context, reporter *usageReporter) {
 				var buffer streamUsageBuffer
 				buffer.observeOpenAIStream(
-					[]byte(`data: {"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},"service_tier":"default"}`),
+					[]byte(
+						`data: {"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},` +
+							`"service_tier":` +
+							`"default"}`,
+					),
 				)
 				buffer.publish(ctx, reporter)
 			},
@@ -964,41 +1158,44 @@ func TestUsageReporterCancellationAfterFinalizerCheckWinsOverSuccess(t *testing.
 	}
 
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
-			registerTestUsagePlugin(t, plugin)
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+				registerTestUsagePlugin(t, plugin)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			reporter := &usageReporter{provider: "openai", model: "gpt-test"}
-			if errContext := scannerOrContextError(ctx, nil); errContext != nil {
-				t.Fatalf("pre-publication context error = %v, want nil", errContext)
-			}
-			cancel()
+				ctx, cancel := context.WithCancel(context.Background())
+				reporter := &usageReporter{provider: "openai", model: "gpt-test"}
+				if errContext := scannerOrContextError(ctx, nil); errContext != nil {
+					t.Fatalf("pre-publication context error = %v, want nil", errContext)
+				}
+				cancel()
 
-			testCase.publish(ctx, reporter)
-			reporter.publish(ctx, usage.Detail{TotalTokens: 99})
+				testCase.publish(ctx, reporter)
+				reporter.publish(ctx, usage.Detail{TotalTokens: 99})
 
-			select {
-			case got := <-plugin.records:
-				if !got.Failed {
-					t.Fatalf("Failed = false, want true: %#v", got)
+				select {
+				case got := <-plugin.records:
+					if !got.Failed {
+						t.Fatalf("Failed = false, want true: %#v", got)
+					}
+					if got.Fail.StatusCode != clienterror.StatusClientClosedRequest ||
+						!strings.Contains(got.Fail.Body, context.Canceled.Error()) {
+						t.Fatalf("failure = %#v, want canceled request", got.Fail)
+					}
+					if got.Detail.InputTokens != 0 || got.Detail.OutputTokens != 0 ||
+						got.Detail.TotalTokens != 0 {
+						t.Fatalf("detail = %#v, want canceled success usage discarded", got.Detail)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("timed out waiting for canceled usage record")
 				}
-				if got.Fail.StatusCode != clienterror.StatusClientClosedRequest ||
-					!strings.Contains(got.Fail.Body, context.Canceled.Error()) {
-					t.Fatalf("failure = %#v, want canceled request", got.Fail)
+				select {
+				case duplicate := <-plugin.records:
+					t.Fatalf("duplicate usage record = %#v", duplicate)
+				case <-time.After(20 * time.Millisecond):
 				}
-				if got.Detail.InputTokens != 0 || got.Detail.OutputTokens != 0 || got.Detail.TotalTokens != 0 {
-					t.Fatalf("detail = %#v, want canceled success usage discarded", got.Detail)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("timed out waiting for canceled usage record")
-			}
-			select {
-			case duplicate := <-plugin.records:
-				t.Fatalf("duplicate usage record = %#v", duplicate)
-			case <-time.After(20 * time.Millisecond):
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -1006,7 +1203,7 @@ func assertUsageDetailWithBreakdown(t *testing.T, got, want usage.Detail) {
 	t.Helper()
 	breakdown := got.TokenBreakdown
 	got.TokenBreakdown = usage.TokenBreakdown{}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("detail = %+v, want %+v", got, want)
 	}
 	if !breakdown.Valid() || breakdown.TotalTokens != got.TotalTokens {
@@ -1057,14 +1254,17 @@ func TestParseOpenAIUsageNormalizesCacheTokenAliases(t *testing.T) {
 		created int64
 	}{
 		{
-			name:    "prompt details write alias",
-			usage:   `{"usage":{"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":5}}}`,
+			name: "prompt details write alias",
+			usage: `{"usage":{"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_deta` +
+				`ils":{"cached_tokens":3,"cache_write_tokens":5}}}`,
 			read:    3,
 			created: 5,
 		},
 		{
-			name:    "input details creation alias",
-			usage:   `{"usage":{"input_tokens":8,"output_tokens":2,"input_tokens_details":{"cached_tokens":4,"cache_creation_tokens":6}}}`,
+			name: "input details creation alias",
+			usage: `{"usage":{"input_tokens":8,"output_tokens":2,"input_tokens_details":` +
+				`{"cached_tokens":4,"cache_creation_tokens":` +
+				`6}}}`,
 			read:    4,
 			created: 6,
 		},
@@ -1086,7 +1286,11 @@ func TestParseOpenAIUsageNormalizesCacheTokenAliases(t *testing.T) {
 }
 
 func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
-	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_read_input_tokens":7,"cache_creation_input_tokens":19514}}`)
+	data := []byte(
+		`{"usage":{"input_tokens":3085,"output_tokens":253,` +
+			`"cache_read_input_tokens":7,"cache_creation_input_tokens":` +
+			`19514}}`,
+	)
 	detail := parseClaudeUsage(data)
 	if detail.InputTokens != 3085 {
 		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 3085)
@@ -1109,7 +1313,9 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 }
 
 func TestParseClaudeUsageCapturesCacheCreationTTLBreakdown(t *testing.T) {
-	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":15,"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":7},"output_tokens_details":{"thinking_tokens":2}}}`)
+	data := []byte((`{"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"` +
+		`cache_creation_input_tokens":15,"cache_creation":{"ephemeral_5m_input_tokens":6,"` +
+		`ephemeral_1h_input_tokens":7},"output_tokens_details":{"thinking_tokens":2}}}`))
 	detail := parseClaudeUsage(data)
 	if detail.CacheCreationTokens != 15 || detail.CacheCreation5mInputTokens != 6 ||
 		detail.CacheCreation1hInputTokens != 7 {
@@ -1133,7 +1339,11 @@ func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
 }
 
 func TestParseClaudeStreamUsageIncludesCacheTokensInTotal(t *testing.T) {
-	line := []byte(`data: {"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}`)
+	line := []byte(
+		`data: {"usage":{"input_tokens":10,"output_tokens":5,` +
+			`"cache_read_input_tokens":3,"cache_creation_input_tokens":` +
+			`4}}`,
+	)
 	detail, ok := parseClaudeStreamUsage(line)
 	if !ok {
 		t.Fatal("parseClaudeStreamUsage() ok = false, want true")
@@ -1149,9 +1359,13 @@ func TestParseClaudeStreamUsageIncludesCacheTokensInTotal(t *testing.T) {
 func TestClaudeStreamUsageBufferMergesMessageStartAndDelta(t *testing.T) {
 	var buffer claudeStreamUsageBuffer
 	buffer.observe(
-		[]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":3,"cache_creation_input_tokens":4,"service_tier":"priority"}}}`),
+		[]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"c` +
+			`ache_read_input_tokens":3,"cache_creation_input_tokens":4,"service_tie` +
+			`r":"priority"}}}`),
 	)
-	buffer.observe([]byte(`data: {"type":"message_delta","usage":{"output_tokens":5,"service_tier":"priority"}}`))
+	buffer.observe(
+		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":5,"service_tier":"priority"}}`),
+	)
 
 	detail, ok := buffer.detailValue()
 	if !ok {
@@ -1174,10 +1388,16 @@ func TestClaudeStreamUsageBufferMergesMessageStartAndDelta(t *testing.T) {
 func TestClaudeStreamUsageBufferMergesCumulativeCacheCreationTTLBreakdown(t *testing.T) {
 	var buffer claudeStreamUsageBuffer
 	buffer.observe(
-		[]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":3,"cache_creation_input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":6}}}}`),
+		[]byte((`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens"` +
+			`:3,"cache_creation_input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":4,"` +
+			`ephemeral_1h_input_tokens":6}}}}`)),
 	)
 	buffer.observe(
-		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":5}}}`),
+		[]byte(
+			`data: {"type":"message_delta","usage":{"output_tokens":5,` +
+				`"cache_creation":{"ephemeral_5m_input_tokens":` +
+				`5}}}`,
+		),
 	)
 	detail, ok := buffer.detailValue()
 	if !ok {
@@ -1214,7 +1434,8 @@ func TestClaudeStreamUsageBufferPreservesValidStateAfterMalformedAndOverflowingE
 	if !ok {
 		t.Fatal("detailValue() ok = false, want true")
 	}
-	if detail.InputTokens != int64(^uint64(0)>>1) || detail.OutputTokens != 0 || detail.TotalTokens != int64(^uint64(0)>>1) {
+	if detail.InputTokens != int64(^uint64(0)>>1) || detail.OutputTokens != 0 ||
+		detail.TotalTokens != int64(^uint64(0)>>1) {
 		t.Fatalf("detail = %#v, want previous valid MaxInt64 state", detail)
 	}
 }
@@ -1226,7 +1447,9 @@ func TestClaudeStreamUsageBufferFailurePublishesAccumulatedDetailOnce(t *testing
 	reporter := &usageReporter{provider: "claude", model: "claude-test", alias: "claude-test"}
 	var buffer claudeStreamUsageBuffer
 	buffer.observe(
-		[]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":3}}}`),
+		[]byte(
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":3}}}`,
+		),
 	)
 	buffer.observe([]byte(`data: {"type":"message_delta","usage":{"output_tokens":5}}`))
 	buffer.publishFailure(context.Background(), reporter, errors.New("stream failed"))
@@ -1237,7 +1460,8 @@ func TestClaudeStreamUsageBufferFailurePublishesAccumulatedDetailOnce(t *testing
 		if !got.Failed || got.Completed || got.Fail.Body != "stream failed" {
 			t.Fatalf("record outcome = %#v, want failed stream", got)
 		}
-		if got.Detail.InputTokens != 10 || got.Detail.OutputTokens != 5 || got.Detail.CacheReadTokens != 3 || got.Detail.TotalTokens != 18 {
+		if got.Detail.InputTokens != 10 || got.Detail.OutputTokens != 5 || got.Detail.CacheReadTokens != 3 ||
+			got.Detail.TotalTokens != 18 {
 			t.Fatalf("record detail = %#v, want accumulated 10/5/3/18", got.Detail)
 		}
 	case <-time.After(time.Second):
@@ -1252,9 +1476,12 @@ func TestClaudeStreamUsageBufferFailurePublishesAccumulatedDetailOnce(t *testing
 
 func TestParseInteractionsUsageOpenAIStyle(t *testing.T) {
 	detail := parseInteractionsUsage(
-		[]byte(`{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"total_tokens":12,"cached_tokens":2,"cache_read_tokens":7,"cache_creation_tokens":8}}`),
+		[]byte(`{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"tot` +
+			`al_tokens":12,"cached_tokens":2,"cache_read_tokens":7,"cache_creation_` +
+			`tokens":8}}`),
 	)
-	if detail.InputTokens != 3 || detail.OutputTokens != 4 || detail.ReasoningTokens != 5 || detail.TotalTokens != 12 {
+	if detail.InputTokens != 3 || detail.OutputTokens != 4 || detail.ReasoningTokens != 5 ||
+		detail.TotalTokens != 12 {
 		t.Fatalf("detail = %#v, want input/output/reasoning/total 3/4/5/12", detail)
 	}
 	if detail.CachedTokens != 2 || detail.CacheReadTokens != 7 || detail.CacheCreationTokens != 8 {
@@ -1264,7 +1491,11 @@ func TestParseInteractionsUsageOpenAIStyle(t *testing.T) {
 
 func TestParseInteractionsUsageNestedMetadata(t *testing.T) {
 	detail := parseInteractionsUsage(
-		[]byte(`{"interaction":{"metadata":{"usage":{"prompt_tokens":10,"completion_tokens":20,"total_cached_tokens":6}}}}`),
+		[]byte(
+			`{"interaction":{"metadata":{"usage":{"prompt_tokens":10,` +
+				`"completion_tokens":20,"total_cached_tokens":` +
+				`6}}}}`,
+		),
 	)
 	if detail.InputTokens != 10 {
 		t.Fatalf("input tokens = %d, want 10", detail.InputTokens)
@@ -1282,7 +1513,9 @@ func TestParseInteractionsUsageNestedMetadata(t *testing.T) {
 
 func TestParseInteractionsUsageSkipsInvalidEarlierUsageNode(t *testing.T) {
 	detail := parseInteractionsUsage(
-		[]byte(`{"interaction":{"usage":"invalid"},"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`),
+		[]byte(
+			`{"interaction":{"usage":"invalid"},"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`,
+		),
 	)
 	if detail.InputTokens != 3 || detail.OutputTokens != 4 || detail.TotalTokens != 7 {
 		t.Fatalf("detail = %#v, want fallback usage 3/4/7", detail)
@@ -1291,7 +1524,8 @@ func TestParseInteractionsUsageSkipsInvalidEarlierUsageNode(t *testing.T) {
 
 func TestParseInteractionsUsageGeminiStyle(t *testing.T) {
 	detail := parseInteractionsUsage(
-		[]byte(`{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":13,"thoughtsTokenCount":17,"totalTokenCount":41,"cachedContentTokenCount":19}}`),
+		[]byte((`{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":13,"thoughtsTokenCount":17,"` +
+			`totalTokenCount":41,"cachedContentTokenCount":19}}`)),
 	)
 	if detail.InputTokens != 11 {
 		t.Fatalf("input tokens = %d, want 11", detail.InputTokens)
@@ -1317,13 +1551,16 @@ func TestParseInteractionsUsageCacheWriteAliasesAndTotal(t *testing.T) {
 		wantTotal int64
 	}{
 		{
-			name:      "snake case without explicit read",
-			usage:     `{"usage":{"input_tokens":10,"output_tokens":4,"reasoning_tokens":2,"cached_tokens":3,"cache_write_tokens":5}}`,
+			name: "snake case without explicit read",
+			usage: `{"usage":{"input_tokens":10,"output_tokens":4,"reasoning_tokens":2,` +
+				`"cached_tokens":3,"cache_write_tokens":` +
+				`5}}`,
 			wantTotal: 16,
 		},
 		{
-			name:      "camel case with explicit read",
-			usage:     `{"usage":{"input_tokens":10,"output_tokens":4,"reasoning_tokens":2,"cached_tokens":3,"cacheReadTokens":7,"cacheWriteTokens":5}}`,
+			name: "camel case with explicit read",
+			usage: `{"usage":{"input_tokens":10,"output_tokens":4,"reasoning_tokens":2,"cached_tokens":3,"` +
+				`cacheReadTokens":7,"cacheWriteTokens":5}}`,
 			wantTotal: 16,
 		},
 	}
@@ -1359,7 +1596,11 @@ func TestParseInteractionsStreamUsageDataFrame(t *testing.T) {
 
 func TestParseInteractionsStreamUsagePreservesZeroUsageAndTier(t *testing.T) {
 	detail, hasUsage, hasTier := parseInteractionsStreamUsageState(
-		[]byte(`data: {"interaction":{"service_tier":"default","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`),
+		[]byte(
+			`data: {"interaction":{"service_tier":"default","usage":` +
+				`{"input_tokens":0,"output_tokens":0,"total_tokens":` +
+				`0}}}`,
+		),
 	)
 	if !hasUsage || !hasTier {
 		t.Fatalf("state = (%+v, %v, %v), want usage and tier", detail, hasUsage, hasTier)
@@ -1390,7 +1631,12 @@ func TestResolveUsageSourcePreservesNonSecretAccountInfo(t *testing.T) {
 	if got, kind, redacted := resolveUsageSource(
 		oauth, "",
 	); got != "user@example.com" || kind != usage.CredentialSourceKindIdentity || redacted {
-		t.Fatalf("resolveUsageSource OAuth = %q/%q/%v, want user@example.com/identity/false", got, kind, redacted)
+		t.Fatalf(
+			"resolveUsageSource OAuth = %q/%q/%v, want user@example.com/identity/false",
+			got,
+			kind,
+			redacted,
+		)
 	}
 
 	vertex := &cliproxyauth.Auth{

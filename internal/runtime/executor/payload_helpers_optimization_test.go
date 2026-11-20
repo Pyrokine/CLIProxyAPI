@@ -19,6 +19,29 @@ func (m countingPayloadMarshaler) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m.value)
 }
 
+func TestSetRawIfDifferentReusesIdenticalRawValue(t *testing.T) {
+	input := []byte(`{"metadata":{"source":"executor"},"input":[]}`)
+	output, ok := setPayloadRawValueIfDifferentTracked(input, "metadata", []byte(`{"source":"executor"}`))
+	if !ok {
+		t.Fatal("identical raw value was rejected")
+	}
+	if &output[0] != &input[0] {
+		t.Fatal("identical raw value caused a payload copy")
+	}
+}
+
+func TestSetRawIfDifferentUpdatesDifferentRawValue(t *testing.T) {
+	input := []byte(`{"metadata":"executor"}`)
+	output, ok := setPayloadRawValueIfDifferentTracked(input, "metadata", []byte(`{"source":"executor"}`))
+	if !ok {
+		t.Fatal("raw object update was rejected")
+	}
+	metadata := gjson.GetBytes(output, "metadata")
+	if !metadata.IsObject() || metadata.Get("source").String() != "executor" {
+		t.Fatalf("metadata = %s, want object", metadata.Raw)
+	}
+}
+
 func TestApplyPayloadConfigReusesCanonicalOverrides(t *testing.T) {
 	cfg := &config.Config{
 		Payload: config.PayloadConfig{
@@ -43,6 +66,58 @@ func TestApplyPayloadConfigReusesCanonicalOverrides(t *testing.T) {
 	}
 }
 
+func TestApplyPayloadConfigProjectionOverrideWritesEveryMatch(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "gpt-test", Protocol: "openai"}},
+					Params: map[string]any{"items.#.value": []any{1, 2}},
+				},
+			},
+		},
+	}
+	input := []byte(`{"items":[{"value":1},{"value":2}]}`)
+	output, touched := applyPayloadConfigWithRequestTracked(
+		cfg, "gpt-test", "openai", "", "", input, nil, "", "", nil, "openai-compat",
+		"items",
+	)
+	if !touched["items"] {
+		t.Fatal("projection override did not own items")
+	}
+	for _, path := range []string{"items.0.value", "items.1.value"} {
+		if got := gjson.GetBytes(output, path).Raw; got != `[1,2]` {
+			t.Fatalf("%s = %s, want [1,2]", path, got)
+		}
+	}
+}
+
+func TestApplyPayloadConfigProjectionOverrideRawWritesEveryMatch(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			OverrideRaw: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "gpt-test", Protocol: "openai"}},
+					Params: map[string]any{"items.#.value": `[1,2]`},
+				},
+			},
+		},
+	}
+	input := []byte(`{"items":[{"value":1},{"value":2}]}`)
+	output, touched := applyPayloadConfigWithRequestTracked(
+		cfg, "gpt-test", "openai", "", "", input, nil, "", "", nil, "openai-compat",
+		"items",
+	)
+	if !touched["items"] {
+		t.Fatal("projection override did not own items")
+	}
+	for _, path := range []string{"items.0.value", "items.1.value"} {
+		if got := gjson.GetBytes(output, path).Raw; got != `[1,2]` {
+			t.Fatalf("%s = %s, want [1,2]", path, got)
+		}
+	}
+}
+
 func TestApplyPayloadConfigNormalizesByteSliceOverride(t *testing.T) {
 	cfg := &config.Config{
 		Payload: config.PayloadConfig{
@@ -54,6 +129,7 @@ func TestApplyPayloadConfigNormalizesByteSliceOverride(t *testing.T) {
 			},
 		},
 	}
+	//goland:noinspection SpellCheckingInspection
 	input := []byte(`{"value":"YWJj"}`)
 	output := applyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "openai-compat", nil)
 	value := gjson.GetBytes(output, "value")
@@ -98,7 +174,9 @@ func TestRemoveToolTypeReusesArrayWithoutMatch(t *testing.T) {
 }
 
 func TestStripVertexToolCallIDsReusesPayloadWithoutIDs(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"id":9007199254740993}}}]}]}`)
+	input := []byte(
+		`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"id":9007199254740993}}}]}]}`,
+	)
 	output := stripVertexOpenAIResponsesToolCallIDs(input, "openai-response")
 	if &output[0] != &input[0] {
 		t.Fatal("payload without tool call IDs was copied")
@@ -106,7 +184,10 @@ func TestStripVertexToolCallIDsReusesPayloadWithoutIDs(t *testing.T) {
 }
 
 func TestStripVertexToolCallIDsRebuildsContentsOnce(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"lookup","args":{"id":9007199254740993}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"lookup","response":{"id":"keep"}}}]}]}`)
+	input := []byte((`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call_1","` +
+		`name":"lookup","args":{"id":9007199254740993}}}]},{"role":"user","part` +
+		`s":[{"functionResponse":{"id":"call_1","name":"lookup","response":{"id` +
+		`":"keep"}}}]}]}`))
 	output := stripVertexOpenAIResponsesToolCallIDs(input, "openai-response")
 	if gjson.GetBytes(output, "contents.0.parts.0.functionCall.id").Exists() {
 		t.Fatal("functionCall.id was not removed")

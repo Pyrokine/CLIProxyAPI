@@ -33,8 +33,8 @@ func EncodeDevinToolCallID(id string) string {
 	return devinToolIDPrefix + base64.RawURLEncoding.EncodeToString([]byte(id))
 }
 
-// DecodeDevinToolCallID reverses one canonical encoding layer.
-func DecodeDevinToolCallID(id string) string {
+// decodeDevinToolCallID reverses one canonical encoding layer.
+func decodeDevinToolCallID(id string) string {
 	if !strings.HasPrefix(id, devinToolIDPrefix) {
 		return id
 	}
@@ -53,9 +53,9 @@ func DecodeDevinToolCallID(id string) string {
 func RestoreDevinToolCallIDs(prompts []DevinPrompt) {
 	for i := range prompts {
 		for j := range prompts[i].ToolCalls {
-			prompts[i].ToolCalls[j].ID = DecodeDevinToolCallID(prompts[i].ToolCalls[j].ID)
+			prompts[i].ToolCalls[j].ID = decodeDevinToolCallID(prompts[i].ToolCalls[j].ID)
 		}
-		prompts[i].ToolCallID = DecodeDevinToolCallID(prompts[i].ToolCallID)
+		prompts[i].ToolCallID = decodeDevinToolCallID(prompts[i].ToolCallID)
 	}
 }
 

@@ -150,54 +150,83 @@ func TestRefreshAuthViaHomePreservesMarkedUpstreamResponse(t *testing.T) {
 		{"empty", "", http.StatusUnauthorized},
 		{"binary", "\xff\x00synthetic", http.StatusBadGateway},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			payload, err := json.Marshal(map[string]any{
-				"error": map[string]any{"type": "authentication_error", "message": "private control diagnostic", "upstream": map[string]any{"status": test.status, "body": []byte(test.body)}},
-				"auth":  map[string]any{"metadata": map[string]any{"access_token": "synthetic-private-token"}},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			client := &testHomeRefreshClient{heartbeat: true, payload: payload}
-			ctx := cliproxyauth.WithHomeRefreshClient(context.Background(), client)
-			updated, attempted, err := refreshAuthViaHome(ctx, &config.Config{Home: config.HomeConfig{Enabled: true}}, &cliproxyauth.Auth{ID: "synthetic", Index: "synthetic-index"})
-			if !attempted || updated != nil || err == nil {
-				t.Fatalf("updated=%v attempted=%t err=%v", updated, attempted, err)
-			}
-			for _, cause := range []error{err, fmt.Errorf("wrapper: %w", err), markResponseStarted(err)} {
-				body, direct := clienterror.ResponseBodyFromError(cause)
-				if !direct || string(body) != test.body || clienterror.HTTPStatusFromError(cause) != test.status {
-					t.Fatalf("status=%d body=%q direct=%t", clienterror.HTTPStatusFromError(cause), body, direct)
+		t.Run(
+			test.name, func(t *testing.T) {
+				payload, err := json.Marshal(
+					map[string]any{
+						"error": map[string]any{
+							"type": "authentication_error", "message": "private control diagnostic",
+							"upstream": map[string]any{"status": test.status, "body": []byte(test.body)},
+						},
+						"auth": map[string]any{
+							"metadata": map[string]any{"access_token": "synthetic-private-token"},
+						},
+					},
+				)
+				if err != nil {
+					t.Fatal(err)
 				}
-				failure := failFromErrors(nil, cause)
-				if failure.StatusCode != test.status || failure.Body != test.body {
-					t.Fatalf("usage failure=%#v", failure)
+				client := &testHomeRefreshClient{heartbeat: true, payload: payload}
+				ctx := cliproxyauth.WithHomeRefreshClient(context.Background(), client)
+				updated, attempted, err := refreshAuthViaHome(
+					ctx, &config.Config{Home: config.HomeConfig{Enabled: true}},
+					&cliproxyauth.Auth{ID: "synthetic", Index: "synthetic-index"},
+				)
+				if !attempted || updated != nil || err == nil {
+					t.Fatalf("updated=%v attempted=%t err=%v", updated, attempted, err)
 				}
-			}
-			var upstream statusErr
-			if !errors.As(err, &upstream) || upstream.IsRequestScoped() || upstream.ExecutionDisposition().DispatchPhase != cliproxyexecutor.DispatchPhaseResponseStarted {
-				t.Fatalf("upstream disposition=%#v", upstream)
-			}
-			var terminated *cliproxyexecutor.RequestTerminatedError
-			if errors.As(err, &terminated) {
-				t.Fatal("upstream response became plugin termination")
-			}
-		})
+				for _, cause := range []error{err, fmt.Errorf("wrapper: %w", err), markResponseStarted(err)} {
+					body, direct := clienterror.ResponseBodyFromError(cause)
+					if !direct || string(body) != test.body ||
+						clienterror.HTTPStatusFromError(cause) != test.status {
+						t.Fatalf(
+							"status=%d body=%q direct=%t",
+							clienterror.HTTPStatusFromError(cause),
+							body,
+							direct,
+						)
+					}
+					failure := failFromErrors(nil, cause)
+					if failure.StatusCode != test.status || failure.Body != test.body {
+						t.Fatalf("usage failure=%#v", failure)
+					}
+				}
+				var upstream statusErr
+				if !errors.As(
+					err, &upstream,
+				) ||
+					upstream.IsRequestScoped() ||
+					upstream.ExecutionDisposition().DispatchPhase !=
+						cliproxyexecutor.DispatchPhaseResponseStarted {
+					t.Fatalf("upstream disposition=%#v", upstream)
+				}
+				if _, ok := errors.AsType[*cliproxyexecutor.RequestTerminatedError](err); ok {
+					t.Fatal("upstream response became plugin termination")
+				}
+			},
+		)
 	}
 }
 
 func TestRefreshAuthViaHomeRejectsMalformedUpstreamEnvelope(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	for _, payload := range []string{
 		`{"error":{"upstream":{"status":0,"body":"cHJpdmF0ZQ=="}}}`,
 		`{"error":{"upstream":{"status":-1,"body":"cHJpdmF0ZQ=="}}}`,
 		`{"error":{"upstream":{"status":200,"body":"cHJpdmF0ZQ=="}}}`,
 		`{"error":{"upstream":{"status":399,"body":"cHJpdmF0ZQ=="}}}`,
 		`{"error":{"upstream":{"status":600,"body":"cHJpdmF0ZQ=="}}}`,
-		`{"error":{"upstream":{"status":401,"body":"not-base64"}},"auth":{"metadata":{"access_token":"synthetic-private"}}}`,
+		`{"error":{"upstream":{"status":401,"body":"not-base64"}},"auth":` +
+			`{"metadata":{"access_token":` +
+			`"synthetic-private"}}}`,
 		`{"error":{"upstream":{"status":401,"body":{"access_token":"synthetic-private"}}}}`,
 	} {
 		client := &testHomeRefreshClient{heartbeat: true, payload: []byte(payload)}
-		updated, attempted, err := refreshAuthViaHome(cliproxyauth.WithHomeRefreshClient(context.Background(), client), &config.Config{Home: config.HomeConfig{Enabled: true}}, &cliproxyauth.Auth{ID: "synthetic", Index: "synthetic-index"})
+		updated, attempted, err := refreshAuthViaHome(
+			cliproxyauth.WithHomeRefreshClient(context.Background(), client),
+			&config.Config{Home: config.HomeConfig{Enabled: true}},
+			&cliproxyauth.Auth{ID: "synthetic", Index: "synthetic-index"},
+		)
 		if !attempted || updated != nil || clienterror.HTTPStatusFromError(err) != http.StatusBadGateway {
 			t.Fatalf("updated=%v attempted=%t err=%v", updated, attempted, err)
 		}
@@ -208,8 +237,16 @@ func TestRefreshAuthViaHomeRejectsMalformedUpstreamEnvelope(t *testing.T) {
 }
 
 func TestRefreshAuthViaHomeKeepsControlErrorsPrivate(t *testing.T) {
-	client := &testHomeRefreshClient{heartbeat: true, payload: []byte(`{"error":{"type":"authentication_error","message":"synthetic-private-token"},"auth":{"metadata":{"access_token":"synthetic-private-token"}}}`)}
-	updated, attempted, err := refreshAuthViaHome(cliproxyauth.WithHomeRefreshClient(context.Background(), client), &config.Config{Home: config.HomeConfig{Enabled: true}}, &cliproxyauth.Auth{ID: "synthetic", Index: "synthetic-index"})
+	client := &testHomeRefreshClient{
+		heartbeat: true,
+		payload: []byte((`{"error":{"type":"authentication_error","message":"synthetic-private-token"},"auth":` +
+			`{"metadata":{"access_token":"synthetic-private-token"}}}`)),
+	}
+	updated, attempted, err := refreshAuthViaHome(
+		cliproxyauth.WithHomeRefreshClient(context.Background(), client),
+		&config.Config{Home: config.HomeConfig{Enabled: true}},
+		&cliproxyauth.Auth{ID: "synthetic", Index: "synthetic-index"},
+	)
 	if !attempted || updated != nil || err == nil || err.Error() != "credential unauthorized" {
 		t.Fatalf("updated=%v attempted=%t err=%v", updated, attempted, err)
 	}
@@ -223,7 +260,9 @@ func TestRefreshAuthViaHomeKeepsControlErrorsPrivate(t *testing.T) {
 }
 
 func TestC08RefreshAuthViaHomeRejectsDisabledCredential(t *testing.T) {
-	payload := []byte(`{"auth":{"provider":"codex","disabled":true,"metadata":{"access_token":"new"}},"auth_index":"idx-1"}`)
+	payload := []byte(
+		`{"auth":{"provider":"codex","disabled":true,"metadata":{"access_token":"new"}},"auth_index":"idx-1"}`,
+	)
 	client := &testHomeRefreshClient{heartbeat: true, payload: payload}
 	previous := currentHomeRefreshClient
 	currentHomeRefreshClient = func() homeRefreshClient { return client }
