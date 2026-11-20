@@ -302,7 +302,9 @@ func (s *retryingRefreshStore) Save(_ context.Context, auth *Auth) (string, erro
 	if call == s.failCall {
 		return "", errors.New("persist failed")
 	}
-	PrepareAuthForPersistence(auth)
+	if err := PrepareAuthForPersistence(auth); err != nil {
+		return "", err
+	}
 	raw, errMarshal := json.Marshal(auth.Metadata)
 	if errMarshal != nil {
 		return "", errMarshal

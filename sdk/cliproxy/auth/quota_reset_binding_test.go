@@ -7,12 +7,14 @@ import (
 
 func TestQuotaResetPreservesSDKMethodContract(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	var reset func(context.Context, string) (*Auth, []string, error) = manager.ResetQuota
-	auth, err := manager.Register(context.Background(), &Auth{
-		ID: "synthetic-sdk-reset", Provider: "codex", Label: "original",
-		Metadata: map[string]any{"access_token": "synthetic-sdk-token"},
-		Status:   StatusError, Unavailable: true, Quota: QuotaState{Exceeded: true},
-	})
+	var reset = manager.ResetQuota
+	auth, err := manager.Register(
+		context.Background(), &Auth{
+			ID: "synthetic-sdk-reset", Provider: "codex", Label: "original",
+			Metadata: map[string]any{"access_token": "synthetic-sdk-token"},
+			Status:   StatusError, Unavailable: true, Quota: QuotaState{Exceeded: true},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

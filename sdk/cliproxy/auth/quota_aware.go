@@ -13,6 +13,8 @@ import (
 const quotaAwareInFlightLeaseTTL = 24 * time.Hour
 
 // QuotaSchedulingStatus describes whether a quota snapshot can influence routing.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type QuotaSchedulingStatus string
 
 const (
@@ -29,11 +31,15 @@ type QuotaSchedulingSnapshot struct {
 }
 
 // QuotaSchedulingProvider returns immutable snapshots keyed by auth index.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type QuotaSchedulingProvider interface {
 	Snapshots(provider, model string, authIndexes []string) map[string]QuotaSchedulingSnapshot
 }
 
 // QuotaSchedulingProviderFunc adapts a function to QuotaSchedulingProvider.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type QuotaSchedulingProviderFunc func(
 	provider,
 	model string,
@@ -95,6 +101,7 @@ type quotaInFlightLease struct {
 	once      sync.Once
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (l *quotaInFlightLease) Release() {
 	if l == nil {
 		return

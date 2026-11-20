@@ -35,6 +35,7 @@ func (e *routingSelectionCause) ExecutionDisposition() cliproxyexecutor.Executio
 	return e.disposition
 }
 
+// noinspection GoDirectComparisonOfErrors
 func requireSelectionCause(t *testing.T, err error, want *routingSelectionCause) {
 	t.Helper()
 	if err == nil {
@@ -47,7 +48,10 @@ func requireSelectionCause(t *testing.T, err error, want *routingSelectionCause)
 	if got.StatusCode() != want.status || !reflect.DeepEqual(got.ResponseBody(), want.body) ||
 		got.RetryAfter() == nil || *got.RetryAfter() != want.retryAfter ||
 		got.ExecutionDisposition() != want.disposition {
-		t.Fatalf("preserved cause metadata = status:%d body:%q retry:%v disposition:%+v", got.StatusCode(), got.ResponseBody(), got.RetryAfter(), got.ExecutionDisposition())
+		t.Fatalf(
+			"preserved cause metadata = status:%d body:%q retry:%v disposition:%+v", got.StatusCode(),
+			got.ResponseBody(), got.RetryAfter(), got.ExecutionDisposition(),
+		)
 	}
 }
 
@@ -75,24 +79,26 @@ func TestStructuredModelNotFoundUsesExactModelDisposition(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			disposition := executionDispositionForAttempt(
-				test.cause,
-				cliproxyexecutor.DispatchPhaseMaybeSent,
-				&Auth{ID: "model-not-found-auth", Provider: "codex"},
-				"codex",
-				model,
-			)
-			if disposition.Outcome != cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing ||
-				disposition.RetryDirective != cliproxyexecutor.RetryDirectiveNextAuth ||
-				disposition.EffectScope != cliproxyexecutor.StateEffectScopeExactModel ||
-				disposition.EffectKey != model {
-				t.Fatalf("model_not_found disposition = %+v", disposition)
-			}
-			if isRequestInvalidError(test.cause) {
-				t.Fatal("model_not_found was classified as a caller request fault")
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				disposition := executionDispositionForAttempt(
+					test.cause,
+					cliproxyexecutor.DispatchPhaseMaybeSent,
+					&Auth{ID: "model-not-found-auth", Provider: "codex"},
+					"codex",
+					model,
+				)
+				if disposition.Outcome != cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing ||
+					disposition.RetryDirective != cliproxyexecutor.RetryDirectiveNextAuth ||
+					disposition.EffectScope != cliproxyexecutor.StateEffectScopeExactModel ||
+					disposition.EffectKey != model {
+					t.Fatalf("model_not_found disposition = %+v", disposition)
+				}
+				if isRequestInvalidError(test.cause) {
+					t.Fatal("model_not_found was classified as a caller request fault")
+				}
+			},
+		)
 	}
 }
 
@@ -103,26 +109,46 @@ func TestAuthAndQuotaStatusesPrecedeModelNotFoundBody(t *testing.T) {
 		wantRetry cliproxyexecutor.RetryDirective
 		wantScope cliproxyexecutor.StateEffectScope
 	}{
-		{http.StatusUnauthorized, cliproxyexecutor.RetryDirectiveSameAuthAfterRefresh, cliproxyexecutor.StateEffectScopeCredential},
-		{http.StatusPaymentRequired, cliproxyexecutor.RetryDirectiveNextAuth, cliproxyexecutor.StateEffectScopeCredential},
-		{http.StatusTooManyRequests, cliproxyexecutor.RetryDirectiveRetryAfter, cliproxyexecutor.StateEffectScopeQuotaFamily},
+		{
+			http.StatusUnauthorized, cliproxyexecutor.RetryDirectiveSameAuthAfterRefresh,
+			cliproxyexecutor.StateEffectScopeCredential,
+		},
+		{
+			http.StatusPaymentRequired, cliproxyexecutor.RetryDirectiveNextAuth,
+			cliproxyexecutor.StateEffectScopeCredential,
+		},
+		{
+			http.StatusTooManyRequests, cliproxyexecutor.RetryDirectiveRetryAfter,
+			cliproxyexecutor.StateEffectScopeQuotaFamily,
+		},
 	} {
-		t.Run(strconv.Itoa(test.status), func(t *testing.T) {
-			disposition := executionDispositionForAttempt(
-				&Error{
-					HTTPStatus: test.status,
-					Message:    `{"error":{"type":"authentication_error","code":"model_not_found"}}`,
-				},
-				cliproxyexecutor.DispatchPhaseMaybeSent,
-				&Auth{ID: "status-first-auth", Provider: "codex"},
-				"codex",
-				model,
-			)
-			if disposition.Outcome != cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing ||
-				disposition.RetryDirective != test.wantRetry || disposition.EffectScope != test.wantScope {
-				t.Fatalf("HTTP %d disposition = %+v", test.status, disposition)
-			}
-		})
+		t.Run(
+			strconv.Itoa(test.status), func(t *testing.T) {
+				disposition := executionDispositionForAttempt(
+					&Error{
+						HTTPStatus: test.status,
+						Message:    `{"error":{"type":"authentication_error","code":"model_not_found"}}`,
+					},
+					cliproxyexecutor.DispatchPhaseMaybeSent,
+					&Auth{ID: "status-first-auth", Provider: "codex"},
+					"codex",
+					model,
+				)
+				if disposition.Outcome != cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing ||
+					disposition.RetryDirective != test.wantRetry || disposition.EffectScope != test.wantScope {
+					t.Fatalf("HTTP %d disposition = %+v", test.status, disposition)
+				}
+				mapped := errorForResult(
+					&statusBearingError{
+						status: test.status, msg: `{"error":{"type":"authentication_error","code":"model_not_found"}}`,
+					},
+				)
+				if mapped.HTTPStatus != test.status || mapped.Code == "model_not_found" ||
+					mapped.executionState().EffectScope != test.wantScope {
+					t.Fatalf("HTTP %d body overrode auth/quota status: %+v", test.status, mapped)
+				}
+			},
+		)
 	}
 }
 
@@ -163,9 +189,11 @@ func TestSelectionExhaustionPreservesCredentialModelAndQuotaCauses(t *testing.T)
 					EffectKey:      "routing-selection-model",
 				},
 			},
-			auth: &Auth{ID: "model-auth", Provider: "codex", ModelStates: map[string]*ModelState{
-				"routing-selection-model": {Unavailable: true, UpdatedAt: now},
-			}},
+			auth: &Auth{
+				ID: "model-auth", Provider: "codex", ModelStates: map[string]*ModelState{
+					"routing-selection-model": {Unavailable: true, UpdatedAt: now},
+				},
+			},
 		},
 		{
 			name: "quota family",
@@ -181,34 +209,38 @@ func TestSelectionExhaustionPreservesCredentialModelAndQuotaCauses(t *testing.T)
 					EffectKey:      "routing-selection-family",
 				},
 			},
-			auth: &Auth{ID: "quota-auth", Provider: "codex", ModelStates: map[string]*ModelState{
-				"routing-selection-model": {
-					Unavailable:    true,
-					NextRetryAfter: now.Add(time.Minute),
-					UpdatedAt:      now,
-					Quota: QuotaState{
-						Exceeded:      true,
-						Family:        "routing-selection-family",
-						NextRecoverAt: now.Add(time.Minute),
+			auth: &Auth{
+				ID: "quota-auth", Provider: "codex", ModelStates: map[string]*ModelState{
+					"routing-selection-model": {
+						Unavailable:    true,
+						NextRetryAfter: now.Add(time.Minute),
+						UpdatedAt:      now,
+						Quota: QuotaState{
+							Exceeded:      true,
+							Family:        "routing-selection-family",
+							NextRecoverAt: now.Add(time.Minute),
+						},
 					},
 				},
-			}},
+			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			resultErr := errorForResult(test.cause)
-			switch test.name {
-			case "credential":
-				test.auth.LastError = resultErr
-				test.auth.UpdatedAt = now
-			case "exact model", "quota family":
-				test.auth.ModelStates["routing-selection-model"].LastError = resultErr
-			}
-			_, errSelection := getAvailableAuths(
-				[]*Auth{test.auth}, "codex", "routing-selection-model", cliproxyexecutor.Options{}, now,
-			)
-			requireSelectionCause(t, errSelection, test.cause)
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				resultErr := errorForResult(test.cause)
+				switch test.name {
+				case "credential":
+					test.auth.LastError = resultErr
+					test.auth.UpdatedAt = now
+				case "exact model", "quota family":
+					test.auth.ModelStates["routing-selection-model"].LastError = resultErr
+				}
+				_, errSelection := getAvailableAuths(
+					[]*Auth{test.auth}, "codex", "routing-selection-model", cliproxyexecutor.Options{}, now,
+				)
+				requireSelectionCause(t, errSelection, test.cause)
+			},
+		)
 	}
 }
 
@@ -279,19 +311,21 @@ func TestSchedulerAndContext1MExhaustionPreserveCause(t *testing.T) {
 			EffectKey:      model,
 		},
 	}
-	auth := &Auth{ID: authID, Provider: provider, ModelStates: map[string]*ModelState{
-		model: {
-			Unavailable:    true,
-			NextRetryAfter: now.Add(time.Minute),
-			UpdatedAt:      now,
-			LastError:      errorForResult(cause),
-			Quota: QuotaState{
-				Exceeded:      true,
-				Family:        model,
-				NextRecoverAt: now.Add(time.Minute),
+	auth := &Auth{
+		ID: authID, Provider: provider, ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:    true,
+				NextRetryAfter: now.Add(time.Minute),
+				UpdatedAt:      now,
+				LastError:      errorForResult(cause),
+				Quota: QuotaState{
+					Exceeded:      true,
+					Family:        model,
+					NextRecoverAt: now.Add(time.Minute),
+				},
 			},
 		},
-	}}
+	}
 	registerSchedulerModels(t, provider, model, authID)
 	scheduler := newSchedulerForTest(&RoundRobinSelector{}, auth)
 	_, errScheduler := scheduler.pickSingle(context.Background(), provider, model, cliproxyexecutor.Options{}, nil)
@@ -310,7 +344,8 @@ func TestSchedulerAndContext1MExhaustionPreserveCause(t *testing.T) {
 }
 
 func TestCloudflareChallengeMarkersAndOriginErrors(t *testing.T) {
-	origin := `<html><body><h1>Web server is returning an unknown error</h1><p>There is an unknown connection issue between Cloudflare and the origin web server.</p></body></html>`
+	origin := `<html><body><h1>Web server is returning an unknown error</h1><p>There is an unknown ` +
+		`connection issue between Cloudflare and the origin web server.</p></body></html>`
 	for _, message := range []string{
 		origin,
 		"generic Cloudflare edge failure",
@@ -349,25 +384,29 @@ func TestCloudflare520Through526AreTransientAndHonorCooldownPolicy(t *testing.T)
 	for status := 520; status <= 526; status++ {
 		manager := NewManager(nil, nil, nil)
 		authID := "cloudflare-origin-" + strconv.Itoa(status)
-		if _, errRegister := manager.Register(context.Background(), &Auth{
-			ID: authID, Provider: "codex", Status: StatusActive,
-		}); errRegister != nil {
+		if _, errRegister := manager.Register(
+			context.Background(), &Auth{
+				ID: authID, Provider: "codex", Status: StatusActive,
+			},
+		); errRegister != nil {
 			t.Fatalf("Register(%d) error = %v", status, errRegister)
 		}
-		manager.MarkResult(context.Background(), Result{
-			AuthID: authID, Provider: "codex", Model: "gpt-5.6-sol",
-			Error: &Error{HTTPStatus: status, Message: "Cloudflare origin failure"},
-		})
+		manager.MarkResult(
+			context.Background(), Result{
+				AuthID: authID, Provider: "codex", Model: "gpt-5.6-sol",
+				Error: &Error{HTTPStatus: status, Message: "Cloudflare origin failure"},
+			},
+		)
 		updated, _ := manager.GetByID(authID)
 		state := updated.ModelStates["gpt-5.6-sol"]
 		if state == nil || !state.Unavailable || state.Quota.Exceeded ||
 			state.LastError == nil || state.LastError.HTTPStatus != status {
 			t.Fatalf("HTTP %d transient state = %#v", status, state)
 		}
-		if state.LastError.Outcome != cliproxyexecutor.ExecutionOutcomeFailed ||
-			state.LastError.RetryDirective != cliproxyexecutor.RetryDirectiveNoRetry ||
-			state.LastError.EffectScope != cliproxyexecutor.StateEffectScopeExactModel ||
-			state.LastError.EffectKey != "gpt-5.6-sol" {
+		if state.LastError.executionState().Outcome != cliproxyexecutor.ExecutionOutcomeFailed ||
+			state.LastError.executionState().RetryDirective != cliproxyexecutor.RetryDirectiveNoRetry ||
+			state.LastError.executionState().EffectScope != cliproxyexecutor.StateEffectScopeExactModel ||
+			state.LastError.executionState().EffectKey != "gpt-5.6-sol" {
 			t.Fatalf("HTTP %d disposition = %+v", status, state.LastError.ExecutionDisposition())
 		}
 		remaining := time.Until(state.NextRetryAfter)
@@ -377,21 +416,25 @@ func TestCloudflare520Through526AreTransientAndHonorCooldownPolicy(t *testing.T)
 
 		credentialManager := NewManager(nil, nil, nil)
 		credentialID := "cloudflare-origin-credential-" + strconv.Itoa(status)
-		if _, errRegister := credentialManager.Register(context.Background(), &Auth{
-			ID: credentialID, Provider: "codex", Status: StatusActive,
-		}); errRegister != nil {
+		if _, errRegister := credentialManager.Register(
+			context.Background(), &Auth{
+				ID: credentialID, Provider: "codex", Status: StatusActive,
+			},
+		); errRegister != nil {
 			t.Fatalf("Register credential scope (%d) error = %v", status, errRegister)
 		}
-		credentialManager.MarkResult(context.Background(), Result{
-			AuthID: credentialID, Provider: "codex",
-			Error: &Error{HTTPStatus: status, Message: "Cloudflare origin failure"},
-		})
+		credentialManager.MarkResult(
+			context.Background(), Result{
+				AuthID: credentialID, Provider: "codex",
+				Error: &Error{HTTPStatus: status, Message: "Cloudflare origin failure"},
+			},
+		)
 		credential, _ := credentialManager.GetByID(credentialID)
 		if credential == nil || !credential.Unavailable || credential.Quota.Exceeded ||
 			credential.LastError == nil || credential.LastError.HTTPStatus != status ||
-			credential.LastError.Outcome != cliproxyexecutor.ExecutionOutcomeFailed ||
-			credential.LastError.RetryDirective != cliproxyexecutor.RetryDirectiveNoRetry ||
-			credential.LastError.EffectScope != cliproxyexecutor.StateEffectScopeCredential {
+			credential.LastError.executionState().Outcome != cliproxyexecutor.ExecutionOutcomeFailed ||
+			credential.LastError.executionState().RetryDirective != cliproxyexecutor.RetryDirectiveNoRetry ||
+			credential.LastError.executionState().EffectScope != cliproxyexecutor.StateEffectScopeCredential {
 			t.Fatalf("HTTP %d credential transient state = %#v", status, credential)
 		}
 		credentialRemaining := time.Until(credential.NextRetryAfter)
@@ -401,16 +444,20 @@ func TestCloudflare520Through526AreTransientAndHonorCooldownPolicy(t *testing.T)
 	}
 
 	manager := NewManager(nil, nil, nil)
-	if _, errRegister := manager.Register(context.Background(), &Auth{
-		ID: "cloudflare-hint", Provider: "codex", Status: StatusActive,
-	}); errRegister != nil {
+	if _, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: "cloudflare-hint", Provider: "codex", Status: StatusActive,
+		},
+	); errRegister != nil {
 		t.Fatal(errRegister)
 	}
 	hint := 15 * time.Second
-	manager.MarkResult(context.Background(), Result{
-		AuthID: "cloudflare-hint", Provider: "codex", Model: "gpt-5.6-sol", RetryAfter: &hint,
-		Error: &Error{HTTPStatus: 520, Message: "Cloudflare origin failure"},
-	})
+	manager.MarkResult(
+		context.Background(), Result{
+			AuthID: "cloudflare-hint", Provider: "codex", Model: "gpt-5.6-sol", RetryAfter: &hint,
+			Error: &Error{HTTPStatus: 520, Message: "Cloudflare origin failure"},
+		},
+	)
 	withHint, _ := manager.GetByID("cloudflare-hint")
 	remaining := time.Until(withHint.ModelStates["gpt-5.6-sol"].NextRetryAfter)
 	if remaining < 12*time.Second || remaining > 18*time.Second {
@@ -419,15 +466,19 @@ func TestCloudflare520Through526AreTransientAndHonorCooldownPolicy(t *testing.T)
 
 	SetTransientErrorCooldownSeconds(-1)
 	disabled := NewManager(nil, nil, nil)
-	if _, errRegister := disabled.Register(context.Background(), &Auth{
-		ID: "cloudflare-disabled", Provider: "codex", Status: StatusActive,
-	}); errRegister != nil {
+	if _, errRegister := disabled.Register(
+		context.Background(), &Auth{
+			ID: "cloudflare-disabled", Provider: "codex", Status: StatusActive,
+		},
+	); errRegister != nil {
 		t.Fatal(errRegister)
 	}
-	disabled.MarkResult(context.Background(), Result{
-		AuthID: "cloudflare-disabled", Provider: "codex", Model: "gpt-5.6-sol", RetryAfter: &hint,
-		Error: &Error{HTTPStatus: 520, Message: "Cloudflare origin failure"},
-	})
+	disabled.MarkResult(
+		context.Background(), Result{
+			AuthID: "cloudflare-disabled", Provider: "codex", Model: "gpt-5.6-sol", RetryAfter: &hint,
+			Error: &Error{HTTPStatus: 520, Message: "Cloudflare origin failure"},
+		},
+	)
 	withoutCooldown, _ := disabled.GetByID("cloudflare-disabled")
 	state := withoutCooldown.ModelStates["gpt-5.6-sol"]
 	if state == nil || state.Unavailable || !state.NextRetryAfter.IsZero() {
@@ -435,15 +486,19 @@ func TestCloudflare520Through526AreTransientAndHonorCooldownPolicy(t *testing.T)
 	}
 
 	disabledCredential := NewManager(nil, nil, nil)
-	if _, errRegister := disabledCredential.Register(context.Background(), &Auth{
-		ID: "cloudflare-disabled-credential", Provider: "codex", Status: StatusActive,
-	}); errRegister != nil {
+	if _, errRegister := disabledCredential.Register(
+		context.Background(), &Auth{
+			ID: "cloudflare-disabled-credential", Provider: "codex", Status: StatusActive,
+		},
+	); errRegister != nil {
 		t.Fatal(errRegister)
 	}
-	disabledCredential.MarkResult(context.Background(), Result{
-		AuthID: "cloudflare-disabled-credential", Provider: "codex", RetryAfter: &hint,
-		Error: &Error{HTTPStatus: 520, Message: "Cloudflare origin failure"},
-	})
+	disabledCredential.MarkResult(
+		context.Background(), Result{
+			AuthID: "cloudflare-disabled-credential", Provider: "codex", RetryAfter: &hint,
+			Error: &Error{HTTPStatus: 520, Message: "Cloudflare origin failure"},
+		},
+	)
 	credentialWithoutCooldown, _ := disabledCredential.GetByID("cloudflare-disabled-credential")
 	if credentialWithoutCooldown == nil || credentialWithoutCooldown.Unavailable ||
 		!credentialWithoutCooldown.NextRetryAfter.IsZero() {
@@ -516,7 +571,7 @@ func TestCooldownSnapshotIsReadOnlyStableAndSafe(t *testing.T) {
 			t.Fatalf("cooldown view leaked raw state: %s", encoded)
 		}
 	}
-	for iteration := 0; iteration < 20; iteration++ {
+	for iteration := range 20 {
 		if again := CooldownSnapshotForAuth(auth, now); !reflect.DeepEqual(again, views) {
 			t.Fatalf("cooldown snapshot changed at iteration %d: %+v", iteration, again)
 		}
@@ -528,24 +583,26 @@ func TestCooldownSnapshotIsReadOnlyStableAndSafe(t *testing.T) {
 
 func TestCooldownSnapshotEqualDeadlinePrefersQuota(t *testing.T) {
 	now := time.Now().UTC()
-	auth := &Auth{ModelStates: map[string]*ModelState{
-		"model-a(high)": {
-			Unavailable:    true,
-			NextRetryAfter: now.Add(time.Minute),
-			LastError:      &Error{HTTPStatus: http.StatusServiceUnavailable},
-		},
-		"model-a(low)": {
-			Unavailable:    true,
-			NextRetryAfter: now.Add(time.Minute),
-			LastError:      &Error{HTTPStatus: http.StatusTooManyRequests},
-			Quota: QuotaState{
-				Exceeded:      true,
-				Reason:        "quota",
-				NextRecoverAt: now.Add(time.Minute),
+	auth := &Auth{
+		ModelStates: map[string]*ModelState{
+			"model-a(high)": {
+				Unavailable:    true,
+				NextRetryAfter: now.Add(time.Minute),
+				LastError:      &Error{HTTPStatus: http.StatusServiceUnavailable},
+			},
+			"model-a(low)": {
+				Unavailable:    true,
+				NextRetryAfter: now.Add(time.Minute),
+				LastError:      &Error{HTTPStatus: http.StatusTooManyRequests},
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: now.Add(time.Minute),
+				},
 			},
 		},
-	}}
-	for iteration := 0; iteration < 20; iteration++ {
+	}
+	for range 20 {
 		views := CooldownSnapshotForAuth(auth, now)
 		if len(views) != 1 || views[0].ModelKey != "model-a" ||
 			views[0].Reason != "quota" || views[0].HTTPStatus != http.StatusTooManyRequests {

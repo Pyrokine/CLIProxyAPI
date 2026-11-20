@@ -24,16 +24,18 @@ func TestApplyAuthPriorityMetadataCopiesFilePriority(t *testing.T) {
 		raw  any
 		want string
 	}{
-		{name: "numeric", raw: float64(1.5), want: "1"},
+		{name: "numeric", raw: 1.5, want: "1"},
 		{name: "string", raw: " 4 ", want: "4"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			auth := &Auth{Attributes: map[string]string{"priority": "7"}}
-			ApplyAuthPriorityMetadata(auth, map[string]any{"priority": tc.raw})
-			if auth.Attributes["priority"] != tc.want || auth.Attributes[AttributeFilePriority] != "true" ||
-				auth.Metadata["priority"] != tc.raw {
-				t.Fatalf("file priority not propagated: %+v", auth)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				auth := &Auth{Attributes: map[string]string{"priority": "7"}}
+				ApplyAuthPriorityMetadata(auth, map[string]any{"priority": tc.raw})
+				if auth.Attributes["priority"] != tc.want || auth.Attributes[AttributeFilePriority] != "true" ||
+					auth.Metadata["priority"] != tc.raw {
+					t.Fatalf("file priority not propagated: %+v", auth)
+				}
+			},
+		)
 	}
 }

@@ -218,36 +218,40 @@ func TestSchedulerQuotaAwarePreservesWeightedCreditsAcrossRetryTriedFilter(t *te
 		{name: "fresh_pool", sharedPool: true},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			ids := []string{"a", "b", "c", "d"}
-			weights := []int64{5, 3, 2, 1}
-			auths := make([]*Auth, 0, len(weights))
-			snapshots := make(map[string]QuotaSchedulingSnapshot)
-			for index, weight := range weights {
-				authID := ids[index]
-				authIndex := authID + "-index"
-				if test.sharedPool {
-					authIndex = "shared-index"
-					snapshots[authIndex] = QuotaSchedulingSnapshot{
-						Status:   QuotaSchedulingStatusFresh,
-						Headroom: 0.5,
+		t.Run(
+			test.name, func(t *testing.T) {
+				ids := []string{"a", "b", "c", "d"}
+				weights := []int64{5, 3, 2, 1}
+				auths := make([]*Auth, 0, len(weights))
+				snapshots := make(map[string]QuotaSchedulingSnapshot)
+				for index, weight := range weights {
+					authID := ids[index]
+					authIndex := authID + "-index"
+					if test.sharedPool {
+						authIndex = "shared-index"
+						snapshots[authIndex] = QuotaSchedulingSnapshot{
+							Status:   QuotaSchedulingStatusFresh,
+							Headroom: 0.5,
+						}
 					}
+					auths = append(auths, quotaAwareTestAuth(authID, authIndex, "gemini", 0, weight))
 				}
-				auths = append(auths, quotaAwareTestAuth(authID, authIndex, "gemini", 0, weight))
-			}
-			scheduler := newQuotaAwareSchedulerForTest(
-				staticQuotaSchedulingProvider{
-					byProvider: map[string]map[string]QuotaSchedulingSnapshot{"gemini": snapshots},
-				},
-				auths...,
-			)
-
-			assertWeightedRetryDistribution(t, func(tried map[string]struct{}) (*Auth, error) {
-				return scheduler.pickSingle(
-					context.Background(), "gemini", "", cliproxyexecutor.Options{}, tried,
+				scheduler := newQuotaAwareSchedulerForTest(
+					staticQuotaSchedulingProvider{
+						byProvider: map[string]map[string]QuotaSchedulingSnapshot{"gemini": snapshots},
+					},
+					auths...,
 				)
-			})
-		})
+
+				assertWeightedRetryDistribution(
+					t, func(tried map[string]struct{}) (*Auth, error) {
+						return scheduler.pickSingle(
+							context.Background(), "gemini", "", cliproxyexecutor.Options{}, tried,
+						)
+					},
+				)
+			},
+		)
 	}
 }
 

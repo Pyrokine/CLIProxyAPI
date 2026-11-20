@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -99,16 +101,22 @@ type RequestAuthPreparer interface {
 
 // UnauthorizedRefreshEvaluator lets an executor report whether it can refresh
 // provider-owned credential material after an unauthorized response.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type UnauthorizedRefreshEvaluator interface {
 	ShouldRefreshAfterUnauthorized(auth *Auth) bool
 }
 
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
 }
 
 // ExecutionSessionAuthCloser allows executors to release sessions owned by one auth.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ExecutionSessionAuthCloser interface {
 	CloseExecutionSessionsForAuth(authID string)
 }
@@ -121,6 +129,8 @@ const (
 )
 
 // RefreshEvaluator allows runtime state to override refresh decisions.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type RefreshEvaluator interface {
 	ShouldRefresh(now time.Time, auth *Auth) bool
 }
@@ -184,10 +194,21 @@ func SetTransientErrorCooldownSeconds(seconds int) {
 	const maxSeconds = int64((1<<63 - 1) / time.Second)
 	configured := int64(seconds)
 	if configured > maxSeconds {
-		log.Warnf("transient-error-cooldown-seconds %d exceeds duration limit; using %d", configured, maxSeconds)
+		log.Warnf(
+			"transient-error-cooldown-seconds %d exceeds duration limit; using %d",
+			configured,
+			maxSeconds,
+		)
 		configured = maxSeconds
 	}
 	transientErrorCooldownSeconds.Store(configured)
+}
+
+// QuotaCooldownDisabledForAuth 读取凭证 override 与进程全局冷却设置
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func QuotaCooldownDisabledForAuth(auth *Auth) bool {
+	return quotaCooldownDisabledForAuth(auth)
 }
 
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
@@ -197,14 +218,18 @@ func quotaCooldownDisabledForAuth(auth *Auth) bool {
 func recoverableFailureRetryAfterWithHint(
 	now time.Time,
 	retryAfter *time.Duration,
-	disableCooling bool,
+	disableCooling,
+	forceCooldown bool,
 ) time.Time {
-	if disableCooling {
+	if disableCooling && !forceCooldown {
 		return time.Time{}
 	}
 	seconds := transientErrorCooldownSeconds.Load()
 	if seconds < 0 {
-		return time.Time{}
+		if !forceCooldown {
+			return time.Time{}
+		}
+		seconds = 0
 	}
 	if retryAfter != nil && *retryAfter > 0 {
 		return now.Add(*retryAfter)
@@ -249,14 +274,26 @@ type Result struct {
 
 // Selector chooses an auth candidate for execution.
 type Selector interface {
-	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
+	Pick(
+		ctx context.Context,
+		provider, model string,
+		opts cliproxyexecutor.Options,
+		auths []*Auth,
+	) (*Auth, error)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PluginScheduler interface {
 	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
 }
 
+type pluginSchedulerState interface {
+	HasScheduler() bool
+}
+
 // PluginSchedulerAcrossPriorities allows a plugin scheduler to consider every available priority tier.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type PluginSchedulerAcrossPriorities interface {
 	SchedulerWantsAcrossPriorities() bool
 }
@@ -335,24 +372,27 @@ const authLoadGateCapacity int64 = 1 << 30
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store                  Store
-	cooldownStore          CooldownStateStore
-	configCooldownMu       sync.Mutex
-	deferredAuthRecreate   func(context.Context, *Auth) error
-	executors              map[string]ProviderExecutor
-	selector               Selector
-	selectorMu             sync.Mutex
-	hook                   Hook
-	refreshBindingObserver func(before, after *Auth)
-	resultPolicy           atomic.Pointer[resultPolicyHolder]
-	mu                     sync.RWMutex
-	executorMu             sync.RWMutex
-	authIntentMu           sync.Mutex
-	rollbackStateMu        sync.Mutex
-	persistenceLock        *authMutationLock
-	authLoadGate           *semaphore.Weighted
-	auths                  map[string]*Auth
-	authChangeWatchers     map[string]map[chan struct{}]struct{}
+	store                     Store
+	cooldownStore             CooldownStateStore
+	pendingCooldownStateStore CooldownStateStore
+	configCooldownMu          sync.Mutex
+	deferredAuthRecreate      func(context.Context, *Auth) error
+	executors                 map[string]ProviderExecutor
+	selector                  Selector
+	selectorMu                sync.Mutex
+	hook                      Hook
+	refreshBindingObserver    func(before, after *Auth)
+	resultPolicy              atomic.Pointer[resultPolicyHolder]
+	errorQueue                atomic.Pointer[redisqueue.Queue]
+	mu                        sync.RWMutex
+	executorMu                sync.RWMutex
+	authIntentMu              sync.Mutex
+	rollbackStateMu           sync.Mutex
+	persistenceLock           *authMutationLock
+	authLoadGate              *semaphore.Weighted
+	auths                     map[string]*Auth
+	authAffinity              map[string]string
+	authChangeWatchers        map[string]map[chan struct{}]struct{}
 	// Retain each ID's first binding so unversioned results cannot affect replacements.
 	firstCredentialGenerations  map[string]uint64
 	scheduler                   *authScheduler
@@ -372,6 +412,8 @@ type Manager struct {
 	authGenerationSeq uint64
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
+	// modelPoolOffsets 按凭证和配置别名记录轮换，配置发布、重载和删除凭证时清理
+	modelPoolOffsets map[string]map[string]int
 
 	// Retry controls request retry behavior.
 	requestRetry        atomic.Int32
@@ -418,12 +460,14 @@ type Manager struct {
 	refreshLocks   map[string]*authRefreshLock
 
 	// Auto refresh state
-	refreshLifecycleMu sync.Mutex
-	refreshCancel      context.CancelFunc
-	refreshWorkers     sync.WaitGroup
-	refreshStopping    bool
-	refreshSemaphore   chan struct{}
-	autoRefreshJobs    map[string]*autoRefreshJob // guarded by m.mu
+	refreshTransitionMu sync.Mutex
+	refreshLifecycleMu  sync.Mutex
+	refreshCancel       context.CancelFunc
+	refreshWorkers      *sync.WaitGroup
+	refreshDone         <-chan struct{}
+	refreshStopping     bool
+	refreshSemaphore    chan struct{}
+	autoRefreshJobs     map[string]*autoRefreshJob // guarded by m.mu
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -458,15 +502,21 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		deferredAuthContext:        deferredAuthContext,
 		deferredAuthCancel:         deferredAuthCancel,
 		refreshSemaphore:           make(chan struct{}, refreshMaxConcurrency),
+		refreshWorkers:             &sync.WaitGroup{},
 		runtimeScope:               uuid.NewString(),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
+	manager.errorQueue.Store(redisqueue.DefaultQueue())
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
-	if defaultInFlightConfig, errInFlightConfig := HomeInFlightPublisherConfigFromConfig(internalconfig.DefaultCredentialInFlightConfig()); errInFlightConfig == nil {
+	if defaultInFlightConfig,
+		errInFlightConfig :=
+		HomeInFlightPublisherConfigFromConfig(internalconfig.DefaultCredentialInFlightConfig()); errInFlightConfig ==
+		nil {
 		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
 	}
 	manager.scheduler = newAuthScheduler(selector)
+	manager.scheduler.modelResolver = manager.selectionModelForAuth
 	return manager
 }
 
@@ -580,6 +630,7 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *Manager) RefreshSchedulerAll() {
 	if m == nil {
 		return
@@ -655,6 +706,88 @@ func (m *Manager) Selector() Selector {
 	return m.selector
 }
 
+// AuthAffinity 返回本地亲和键当前绑定的凭据 ID
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (m *Manager) AuthAffinity(key string) string {
+	if m == nil {
+		return ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.authAffinity[strings.TrimSpace(key)]
+}
+
+// SetAuthAffinity 设置本地亲和绑定，凭据 ID 可在注册前指定
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (m *Manager) SetAuthAffinity(key, authID string) {
+	key = strings.TrimSpace(key)
+	authID = strings.TrimSpace(authID)
+	if m == nil || key == "" || authID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.authAffinity == nil {
+		m.authAffinity = make(map[string]string)
+	}
+	m.authAffinity[key] = authID
+}
+
+// ClearAuthAffinity 删除指定本地亲和键的绑定
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (m *Manager) ClearAuthAffinity(key string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.authAffinity, strings.TrimSpace(key))
+}
+
+func authAffinityKeyFromMetadata(metadata map[string]any) string {
+	switch value := metadata["auth_affinity_key"].(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+func (m *Manager) applyAuthAffinity(opts *cliproxyexecutor.Options) {
+	if m == nil || opts == nil || pinnedAuthIDFromMetadata(opts.Metadata) != "" {
+		return
+	}
+	if key := authAffinityKeyFromMetadata(opts.Metadata); key != "" {
+		if authID := m.AuthAffinity(key); authID != "" {
+			opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = authID
+		}
+	}
+}
+
+func (m *Manager) persistAuthAffinity(result Result) {
+	if !result.Success || result.RuntimeOnly || m.HomeEnabled() {
+		return
+	}
+	key := authAffinityKeyFromMetadata(result.Options.Metadata)
+	if key == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.resultCredentialMatches(m.auths[result.AuthID], result) {
+		return
+	}
+	if m.authAffinity == nil {
+		m.authAffinity = make(map[string]string)
+	}
+	m.authAffinity[key] = result.AuthID
+}
+
 // LookupSessionAffinity observes the current session binding without selecting or refreshing it.
 func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Auth, string) {
 	if m == nil {
@@ -670,7 +803,7 @@ func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Aut
 	authProviders := make(map[string]string, len(m.auths))
 	for authID, auth := range m.auths {
 		if auth != nil {
-			authProviders[authID] = strings.ToLower(strings.TrimSpace(auth.Provider))
+			authProviders[authID] = executorKeyFromAuth(auth)
 		}
 	}
 	m.mu.RUnlock()
@@ -708,7 +841,7 @@ func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Aut
 	}
 	snapshot := auth.Clone()
 	m.mu.RUnlock()
-	if provider != "mixed" && !strings.EqualFold(snapshot.Provider, provider) {
+	if provider != "mixed" && executorKeyFromAuth(snapshot) != provider {
 		return nil, "unbound"
 	}
 	snapshot.EnsureIndex()
@@ -824,6 +957,12 @@ func (m *Manager) SetConfig(cfg *config.Config) {
 	if m == nil {
 		return
 	}
+	snapshot, err := internalconfig.Clone(cfg)
+	if err != nil {
+		log.Warnf("failed to copy runtime config snapshot: %v", err)
+		return
+	}
+	cfg = snapshot
 	m.configCooldownMu.Lock()
 	defer m.configCooldownMu.Unlock()
 	if m.setConfigSnapshotLocked(cfg) {
@@ -834,6 +973,32 @@ func (m *Manager) SetConfig(cfg *config.Config) {
 		defer cancel()
 		m.persistCooldownStatesToLocked(persistCtx, store)
 	}
+}
+
+// SetConfigSnapshot 发布独立配置快照，返回清除冷却后是否需要持久保存
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (m *Manager) SetConfigSnapshot(cfg *internalconfig.Config) bool {
+	if m == nil {
+		return false
+	}
+	snapshot, err := internalconfig.Clone(cfg)
+	if err != nil {
+		log.Warnf("failed to copy runtime config snapshot: %v", err)
+		return false
+	}
+	m.configCooldownMu.Lock()
+	defer m.configCooldownMu.Unlock()
+	m.mu.RLock()
+	oldStore := m.cooldownStore
+	m.mu.RUnlock()
+	changed := m.setConfigSnapshotLocked(snapshot)
+	if changed && oldStore != nil {
+		m.mu.Lock()
+		m.pendingCooldownStateStore = oldStore
+		m.mu.Unlock()
+	}
+	return changed
 }
 
 func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
@@ -848,11 +1013,13 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 	clearedCooldowns := m.clearDisabledCooldownStates(cfg)
 	m.mu.Lock()
 	m.configureRefreshSemaphoreLocked(cfg)
+	m.modelPoolOffsets = nil
 	m.mu.Unlock()
 	if !cfg.Home.Enabled {
 		m.clearHomeRuntimeAuths()
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.RefreshSchedulerAll()
 	return clearedCooldowns
 }
 
@@ -911,16 +1078,22 @@ func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) strin
 
 }
 
+// RefreshAPIKeyModelAlias 根据当前已提交凭据与配置一次性发布别名表
+func (m *Manager) RefreshAPIKeyModelAlias() {
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.RefreshSchedulerAll()
+}
+
 func (m *Manager) rebuildAPIKeyModelAliasFromRuntimeConfig() {
 	if m == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 }
 
@@ -985,7 +1158,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 				compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 			}
 			if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
-				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
+				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider, auth); entry != nil {
 					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 				}
 			}
@@ -1064,8 +1237,19 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 }
 
 // RegisterExecutorIfAuthCurrent publishes an executor only while authID still owns generation.
-func (m *Manager) RegisterExecutorIfAuthCurrent(authID string, generation uint64, executor ProviderExecutor) bool {
-	return m.registerExecutorIfAuthCurrent(context.Background(), strings.TrimSpace(authID), generation, executor)
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (m *Manager) RegisterExecutorIfAuthCurrent(
+	authID string,
+	generation uint64,
+	executor ProviderExecutor,
+) bool {
+	return m.registerExecutorIfAuthCurrent(
+		context.Background(),
+		strings.TrimSpace(authID),
+		generation,
+		executor,
+	)
 }
 
 // RegisterExecutorIfAuthPublicationCurrent also verifies the deferred recreation intent in ctx.
@@ -1094,6 +1278,7 @@ func (m *Manager) registerExecutorIfAuthCurrent(
 
 	var replaced ProviderExecutor
 	m.authIntentMu.Lock()
+	var selections []*HomeDispatchSelection
 	m.executorMu.Lock()
 	m.mu.Lock()
 	if authID != "" {
@@ -1109,11 +1294,14 @@ func (m *Manager) registerExecutorIfAuthCurrent(
 	replaced = m.executors[provider]
 	m.executors[provider] = executor
 	if replaced != nil && !sameProviderExecutor(replaced, executor) {
-		m.clearHomeRuntimeAuthsForProviderLocked(provider)
+		selections = m.clearHomeRuntimeAuthsForProviderLocked(provider)
 	}
 	m.mu.Unlock()
 	m.executorMu.Unlock()
 	m.authIntentMu.Unlock()
+	for _, selection := range selections {
+		selection.End("executor_replaced")
+	}
 
 	if replaced != nil && !sameProviderExecutor(replaced, executor) {
 		if closer, ok := replaced.(ExecutionSessionCloser); ok && closer != nil {
@@ -1154,6 +1342,7 @@ func (m *Manager) ReplaceExecutorIfSame(expected, replacement ProviderExecutor) 
 	if provider == "" {
 		return false
 	}
+	var selections []*HomeDispatchSelection
 	m.executorMu.Lock()
 	m.mu.Lock()
 	current := m.executors[provider]
@@ -1164,10 +1353,14 @@ func (m *Manager) ReplaceExecutorIfSame(expected, replacement ProviderExecutor) 
 	}
 	m.executors[provider] = replacement
 	if !sameProviderExecutor(expected, replacement) {
-		m.clearHomeRuntimeAuthsForProviderLocked(provider)
+		selections = m.clearHomeRuntimeAuthsForProviderLocked(provider)
 	}
 	m.mu.Unlock()
 	m.executorMu.Unlock()
+	for _, selection := range selections {
+		selection.End("executor_replaced")
+	}
+
 	if !sameProviderExecutor(expected, replacement) {
 		if closer, ok := expected.(ExecutionSessionCloser); ok && closer != nil {
 			closer.CloseExecutionSession(CloseAllExecutionSessionsID)
@@ -1182,14 +1375,19 @@ func (m *Manager) UnregisterExecutor(provider string) {
 	if provider == "" {
 		return
 	}
+	var selections []*HomeDispatchSelection
 	m.executorMu.Lock()
 	m.mu.Lock()
 	if m.executors[provider] != nil {
 		delete(m.executors, provider)
-		m.clearHomeRuntimeAuthsForProviderLocked(provider)
+		selections = m.clearHomeRuntimeAuthsForProviderLocked(provider)
 	}
 	m.mu.Unlock()
 	m.executorMu.Unlock()
+	for _, selection := range selections {
+		selection.End("executor_replaced")
+	}
+
 }
 
 // UnregisterExecutorIfSame removes an executor only when expected still owns the provider.
@@ -1201,6 +1399,7 @@ func (m *Manager) UnregisterExecutorIfSame(provider string, expected ProviderExe
 	if provider == "" {
 		return false
 	}
+	var selections []*HomeDispatchSelection
 	m.executorMu.Lock()
 	m.mu.Lock()
 	if !sameProviderExecutor(m.executors[provider], expected) {
@@ -1209,9 +1408,13 @@ func (m *Manager) UnregisterExecutorIfSame(provider string, expected ProviderExe
 		return false
 	}
 	delete(m.executors, provider)
-	m.clearHomeRuntimeAuthsForProviderLocked(provider)
+	selections = m.clearHomeRuntimeAuthsForProviderLocked(provider)
 	m.mu.Unlock()
 	m.executorMu.Unlock()
+	for _, selection := range selections {
+		selection.End("executor_replaced")
+	}
+
 	return true
 }
 
@@ -1293,7 +1496,8 @@ func (m *Manager) queueAuthRecreation(ctx context.Context, auth *Auth, pending <
 	m.authIntentMu.Unlock()
 	m.deferredAuthMu.Unlock()
 	if replaced {
-		if previousIntent, ok := previous.(*authRecreationIntent); ok && previousIntent != nil && previousIntent.cancel != nil {
+		if previousIntent, ok := previous.(*authRecreationIntent); ok && previousIntent != nil &&
+			previousIntent.cancel != nil {
 			previousIntent.cancel()
 		}
 	}
@@ -1458,7 +1662,8 @@ func (m *Manager) supersedeAuthRecreation(ctx context.Context, id string) bool {
 	id = strings.TrimSpace(id)
 	m.authIntentMu.Lock()
 	if ctx != nil {
-		if intent, ok := ctx.Value(authRecreationIntentContextKey{}).(*authRecreationIntent); ok && intent != nil {
+		if intent, ok := ctx.Value(authRecreationIntentContextKey{}).(*authRecreationIntent); ok &&
+			intent != nil {
 			current, currentOK := m.pendingAuthRecreations.Load(id)
 			if currentOK && current == intent {
 				m.authIntentMu.Unlock()
@@ -1503,7 +1708,8 @@ func (m *Manager) prepareDirectAuthMutation(ctx context.Context, id string) cont
 	_, pendingDeletion := m.pendingAuthDeletions[id]
 	_, removed := m.removedAuths[id]
 	m.mu.RUnlock()
-	forcePersist := pendingDeletion || pendingRecreation || shouldAllowAuthRecreate(ctx) && shouldSkipPersist(ctx) && removed
+	forcePersist := pendingDeletion || pendingRecreation ||
+		shouldAllowAuthRecreate(ctx) && shouldSkipPersist(ctx) && removed
 	if forcePersist {
 		return WithForcePersist(ctx)
 	}
@@ -1656,7 +1862,8 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.authIntentMu.Unlock()
 		return nil, errPublication
 	}
-	if currentSeq, removed := m.removedAuths[auth.ID]; removed && (!allowRecreate || !removedAtStart || currentSeq != removedSeq) {
+	if currentSeq, removed := m.removedAuths[auth.ID]; removed &&
+		(!allowRecreate || !removedAtStart || currentSeq != removedSeq) {
 		m.mu.Unlock()
 		m.authIntentMu.Unlock()
 		if persisted {
@@ -1664,8 +1871,12 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		}
 		return nil, nil
 	}
+	if current := m.auths[auth.ID]; current != nil && !persistentAuthBindingChanged(current, snapshot) {
+		snapshot, _ = mergePersistentAuthState(current, snapshot)
+	}
 	m.assignAuthGenerationLocked(snapshot)
 	snapshot.credentialGeneration = snapshot.Generation
+	snapshot.registrationGeneration = snapshot.Generation
 	m.auths[auth.ID] = snapshot
 	m.notifyAuthChangeLocked(auth.ID)
 	published := snapshot.Clone()
@@ -1678,15 +1889,17 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(published.Clone())
 	}
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
+		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	}
 	unlockMutation()
 	mutationLocked = false
 	m.hook.OnAuthRegistered(ctx, published.Clone())
-	return published.Clone(), nil
+	return authUpdateSnapshot(published), nil
 }
 
-// Update applies persistent provider-owned fields and preserves the latest
-// runtime quota and lifecycle state.
+// Update applies persistent fields and explicit SDK quota changes, preserving
+// concurrent runtime observations and registration ownership.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
@@ -1737,7 +1950,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, fmt.Errorf("ignored watcher replay of unpersisted refreshed credential %s", auth.ID)
 	}
 	m.cancelPendingRefreshPersistence(auth.ID)
-	updated, errUpdate := m.updateAuthLocked(ctx, auth, true)
+	updated, errUpdate := m.updateAuthLocked(ctx, auth)
 	unlockMutation()
 	if updated != nil {
 		m.hook.OnAuthUpdated(ctx, updated.Clone())
@@ -1768,7 +1981,6 @@ func (m *Manager) MutatePersistentAuth(
 	if errMutation != nil {
 		return nil, errMutation
 	}
-	m.cancelPendingRefreshPersistence(id)
 	registered := false
 	defer func() {
 		unlockMutation()
@@ -1791,6 +2003,16 @@ func (m *Manager) MutatePersistentAuth(
 		currentRefreshBeforeMutation = currentBeforeMutation.NextRefreshAfter
 	}
 	m.mu.RUnlock()
+	if expected, bound := ctx.Value(expectedAuthGenerationContextKey{}).(uint64); bound {
+		currentGeneration := uint64(0)
+		if currentBeforeMutation != nil {
+			currentGeneration = currentBeforeMutation.Generation
+		}
+		if currentGeneration != expected {
+			return nil, ErrAuthGenerationConflict
+		}
+	}
+	m.cancelPendingRefreshPersistence(id)
 	registered = currentBeforeMutation == nil
 	if removedAtStart && !allowRecreate {
 		return nil, nil
@@ -1874,18 +2096,106 @@ func (m *Manager) MutatePersistentAuth(
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(published.Clone())
 	}
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if !shouldDeferAPIKeyModelAliasRebuild(publicationCtx) {
+		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	}
 	if bindingChanged {
 		m.completeAuthBindingChange(publicationCtx, previousBinding, published)
 	}
 	return published.Clone(), nil
 }
 
-func (m *Manager) updateAuthLocked(
-	ctx context.Context,
-	auth *Auth,
-	preserveRuntime bool,
-) (*Auth, error) {
+type authQuotaMutation struct {
+	quota     QuotaState
+	authority StateResetAuthority
+}
+
+func authUpdateSnapshot(auth *Auth) *Auth {
+	snapshot := auth.Clone()
+	if snapshot != nil {
+		base := snapshot.Quota.Clone()
+		snapshot.quotaUpdateBase = &base
+		if snapshot.hasRejectedAccessToken() {
+			snapshot.Unavailable = true
+			if snapshot.Status != StatusDisabled {
+				snapshot.Status = StatusError
+			}
+		}
+	}
+	return snapshot
+}
+
+func quotaMutationForAuthUpdate(current, update *Auth) (*authQuotaMutation, error) {
+	if update.quotaUpdateBase != nil && reflect.DeepEqual(update.Quota, *update.quotaUpdateBase) ||
+		update.quotaUpdateBase == nil && reflect.DeepEqual(update.Quota, QuotaState{}) ||
+		reflect.DeepEqual(current.Quota, update.Quota) {
+		return nil, nil
+	}
+	var desired, installed QuotaState
+	applyCooldownFields(&desired, update.Quota)
+	applyCooldownFields(&installed, current.Quota)
+	desired.Generation, installed.Generation = 0, 0
+	if desired.ResetAuthority == StateResetAuthoritySuccess {
+		desired.ResetAuthority = ""
+	}
+	if installed.ResetAuthority == StateResetAuthoritySuccess {
+		installed.ResetAuthority = ""
+	}
+	if reflect.DeepEqual(desired, installed) && !update.Quota.ObservedAt.After(current.Quota.ObservedAt) {
+		return nil, nil
+	}
+	if update.Generation != 0 && update.Generation != current.Generation {
+		return nil, ErrAuthGenerationConflict
+	}
+	if update.quotaUpdateBase != nil {
+		var expected, actual QuotaState
+		applyCooldownFields(&expected, *update.quotaUpdateBase)
+		applyCooldownFields(&actual, current.Quota)
+		if !reflect.DeepEqual(expected, actual) {
+			return nil, ErrAuthGenerationConflict
+		}
+	}
+	if current.Quota.Exceeded && current.Quota.Reason == "credential_quota" &&
+		current.Quota.NextRecoverAt.After(time.Now()) && !update.Quota.Exceeded {
+		return nil, nil
+	}
+	quota := update.Quota.Clone()
+	quota.Generation = nextStateGeneration(current.Quota.Generation)
+	if quota.Exceeded &&
+		resetAuthorityRank(current.Quota.ResetAuthority) > resetAuthorityRank(quota.ResetAuthority) {
+		quota.ResetAuthority = current.Quota.ResetAuthority
+	}
+	if quota.Exceeded && quota.ResetAuthority == "" {
+		quota.ResetAuthority = StateResetAuthoritySuccess
+	}
+	return &authQuotaMutation{quota: quota, authority: StateResetAuthorityOperator}, nil
+}
+
+func applyAuthQuotaMutation(auth *Auth, mutation *authQuotaMutation) {
+	if auth == nil || mutation == nil {
+		return
+	}
+	if !mutation.quota.Exceeded && auth.Quota.Exceeded && !auth.hasRejectedAccessToken() &&
+		auth.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential &&
+		statusCodeFromResult(auth.LastError) == http.StatusTooManyRequests {
+		clearAuthState(auth, time.Now(), mutation.authority)
+	}
+	applyCooldownFields(&auth.Quota, mutation.quota)
+	if mutation.quota.ObservedAt.After(auth.Quota.ObservedAt) {
+		auth.Quota.ObservedAt = mutation.quota.ObservedAt
+		auth.Quota.Signals = mutation.quota.Clone().Signals
+	}
+	auth.StateGeneration = nextStateGeneration(auth.StateGeneration)
+	if auth.Quota.Exceeded {
+		auth.StateEffectScope = cliproxyexecutor.StateEffectScopeCredential
+		auth.StateEffectKey = auth.ID
+		if resetAuthorityRank(auth.Quota.ResetAuthority) > resetAuthorityRank(auth.ResetAuthority) {
+			auth.ResetAuthority = auth.Quota.ResetAuthority
+		}
+	}
+}
+
+func (m *Manager) updateAuthLocked(ctx context.Context, auth *Auth) (*Auth, error) {
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, errWeight
 	}
@@ -1903,6 +2213,7 @@ func (m *Manager) updateAuthLocked(
 	next := auth.Clone()
 	bindingChanged := false
 	var previousBinding *Auth
+	var quotaMutation *authQuotaMutation
 	if !ok || existing == nil {
 		if seq, removed := m.removedAuths[auth.ID]; removed {
 			removedAtStart = true
@@ -1912,17 +2223,22 @@ func (m *Manager) updateAuthLocked(
 				return nil, nil
 			}
 		}
-	} else if preserveRuntime {
+	} else {
+		if auth.registrationGeneration != 0 && auth.registrationGeneration != existing.registrationGeneration {
+			m.mu.Unlock()
+			return nil, ErrAuthGenerationConflict
+		}
 		previousBinding = existing.Clone()
 		next, bindingChanged = mergePersistentAuthState(existing, auth)
-	} else {
-		if !next.indexAssigned && next.Index == "" {
-			next.Index = existing.Index
-			next.indexAssigned = existing.indexAssigned
+		if !bindingChanged {
+			var errQuota error
+			quotaMutation, errQuota = quotaMutationForAuthUpdate(existing, auth)
+			if errQuota != nil {
+				m.mu.Unlock()
+				return nil, errQuota
+			}
+			applyAuthQuotaMutation(next, quotaMutation)
 		}
-		next.Success = existing.Success
-		next.Failed = existing.Failed
-		next.recentRequests = existing.recentRequests
 	}
 	clearedCooldown := false
 	if m.cooldownDisabledForAuth(next) || next.Disabled || next.Status == StatusDisabled {
@@ -1949,12 +2265,15 @@ func (m *Manager) updateAuthLocked(
 	snapshot := next.Clone()
 	m.authIntentMu.Lock()
 	m.mu.Lock()
-	if errPublication := m.authPublicationContextErrorLocked(publicationCtx, auth.ID, persisted); errPublication != nil {
+	if errPublication := m.authPublicationContextErrorLocked(
+		publicationCtx, auth.ID, persisted,
+	); errPublication != nil {
 		m.mu.Unlock()
 		m.authIntentMu.Unlock()
 		return nil, errPublication
 	}
-	if currentSeq, removed := m.removedAuths[auth.ID]; removed && (!allowRecreate || !removedAtStart || currentSeq != removedSeq) {
+	if currentSeq, removed := m.removedAuths[auth.ID]; removed &&
+		(!allowRecreate || !removedAtStart || currentSeq != removedSeq) {
 		m.mu.Unlock()
 		m.authIntentMu.Unlock()
 		if persisted {
@@ -1962,6 +2281,12 @@ func (m *Manager) updateAuthLocked(
 		}
 		return nil, nil
 	}
+	if existing != nil && m.auths[auth.ID] == existing && !bindingChanged &&
+		existing.Quota.ObservedAt.After(snapshot.Quota.ObservedAt) {
+		snapshot.Quota.ObservedAt = existing.Quota.ObservedAt
+		snapshot.Quota.Signals = existing.Quota.Clone().Signals
+	}
+	snapshot.quotaUpdateBase = nil
 	m.assignAuthGenerationLocked(snapshot)
 	if existing != nil && m.auths[auth.ID] == existing && !bindingChanged &&
 		next.NextRefreshAfter.Equal(refreshBeforeSave) &&
@@ -1983,13 +2308,15 @@ func (m *Manager) updateAuthLocked(
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(published.Clone())
 	}
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if !shouldDeferAPIKeyModelAliasRebuild(publicationCtx) {
+		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	}
 	if bindingChanged {
 		m.completeAuthBindingChange(publicationCtx, previousBinding, published)
-	} else if clearedCooldown {
+	} else if clearedCooldown || quotaMutation != nil {
 		m.persistCooldownStatesAfterMutation(publicationCtx)
 	}
-	return published.Clone(), nil
+	return authUpdateSnapshot(published), nil
 }
 
 // MergePersistentUpdate atomically applies persistent provider-owned fields when
@@ -2109,7 +2436,9 @@ func (m *Manager) MergePersistentUpdateConditional(
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(published.Clone())
 	}
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if !shouldDeferAPIKeyModelAliasRebuild(publicationCtx) {
+		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	}
 	if bindingChanged {
 		m.completeAuthBindingChange(publicationCtx, previousBinding, published)
 	}
@@ -2208,30 +2537,48 @@ func mergePersistentAuthState(current, update *Auth) (*Auth, bool) {
 	return mergePersistentAuthStateWithBinding(current, update, persistentAuthBindingChanged(current, update))
 }
 
-func mergeRefreshedAuthState(current, update *Auth) (*Auth, bool) {
-	bindingChanged := refreshedAuthBindingChanged(current, update)
-	if !bindingChanged {
-		return mergePersistentAuthStateWithBinding(current, update, false)
+func mergeRefreshedAuthState(base, current, update *Auth) (*Auth, bool) {
+	if current == nil {
+		return mergeAuthContent(base, current, update), update != nil
 	}
-	persistent := update.Clone()
-	persistent.Status = StatusActive
+	if update == nil || (base != nil && current.registrationGeneration != base.registrationGeneration) {
+		return current.Clone(), false
+	}
+	persistent := mergeAuthContent(base, current, update)
+	baseDisabled := base != nil && (base.Disabled || base.Status == StatusDisabled)
+	currentDisabled := current.Disabled || current.Status == StatusDisabled
+	updatedDisabled := update.Disabled || update.Status == StatusDisabled
+	persistent.Disabled = currentDisabled
+	if updatedDisabled != baseDisabled && currentDisabled == baseDisabled {
+		persistent.Disabled = updatedDisabled
+	}
+	persistent.Metadata["disabled"] = persistent.Disabled
 	if persistent.Disabled {
 		persistent.Status = StatusDisabled
+	} else if persistent.Status == StatusDisabled {
+		persistent.Status = StatusActive
 	}
-	persistent.StatusMessage = ""
-	persistent.Unavailable = false
-	persistent.NextRetryAfter = time.Time{}
-	persistent.Quota = QuotaState{}
-	persistent.LastError = nil
-	persistent.ModelStates = nil
-	persistent.StateGeneration = 0
-	persistent.StateEffectScope = ""
-	persistent.StateEffectKey = ""
-	persistent.ResetAuthority = ""
-	persistent.Runtime = nil
-	persistent.RefreshCommit = nil
-	persistent.LastRefreshedAt = time.Time{}
-	return mergePersistentAuthStateWithBinding(current, persistent, true)
+	bindingChanged := refreshedAuthBindingChanged(current, persistent)
+	if bindingChanged {
+		persistent.Status = StatusActive
+		if persistent.Disabled {
+			persistent.Status = StatusDisabled
+		}
+		persistent.StatusMessage = ""
+		persistent.Unavailable = false
+		persistent.NextRetryAfter = time.Time{}
+		persistent.Quota = QuotaState{}
+		persistent.LastError = nil
+		persistent.ModelStates = nil
+		persistent.StateGeneration = 0
+		persistent.StateEffectScope = ""
+		persistent.StateEffectKey = ""
+		persistent.ResetAuthority = ""
+		persistent.Runtime = nil
+		persistent.RefreshCommit = nil
+		persistent.LastRefreshedAt = time.Time{}
+	}
+	return mergePersistentAuthStateWithBinding(current, persistent, bindingChanged)
 }
 
 func mergePersistentAuthStateWithBinding(current, update *Auth, bindingChanged bool) (*Auth, bool) {
@@ -2274,7 +2621,17 @@ func mergePersistentAuthStateWithBinding(current, update *Auth, bindingChanged b
 		if persistent.Runtime != nil {
 			next.Runtime = persistent.Runtime
 		}
-		if !persistent.LastRefreshedAt.IsZero() {
+		if current.Disabled ||
+			current.Status ==
+				StatusDisabled ||
+			persistent.Disabled ||
+			persistent.Status ==
+				StatusDisabled {
+			next.LastRefreshedAt = persistent.LastRefreshedAt
+			if !hasTerminalUnauthorizedAuthFailure(current) {
+				next.NextRefreshAfter = persistent.NextRefreshAfter
+			}
+		} else if !persistent.LastRefreshedAt.IsZero() {
 			next.LastRefreshedAt = persistent.LastRefreshedAt
 		}
 		if persistent.Disabled != current.Disabled {
@@ -2360,7 +2717,12 @@ func (m *Manager) ResetCooldown(ctx context.Context, authID string) (*Auth, []st
 	return m.resetRoutingCooldown(ctx, authID, true, nil)
 }
 
-func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, includeTransient bool, expected *Auth) (*Auth, []string, error) {
+func (m *Manager) resetRoutingCooldown(
+	ctx context.Context,
+	authID string,
+	includeTransient bool,
+	expected *Auth,
+) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -2388,7 +2750,8 @@ func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, inclu
 		m.mu.RUnlock()
 		return nil, nil, nil
 	}
-	if expected != nil && (auth.Generation != expected.Generation || !persistentAuthStateMatches(expected, auth)) {
+	if expected != nil &&
+		(auth.Generation != expected.Generation || !persistentAuthStateMatches(expected, auth)) {
 		m.mu.RUnlock()
 		return nil, nil, fmt.Errorf("credential changed before local quota reset")
 	}
@@ -2398,7 +2761,8 @@ func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, inclu
 	hadAuthCooldown := hasQuotaCooldownState(updated.Quota, updated.LastError)
 	clearCredentialCooldown := false
 	if includeTransient && !updated.Disabled && updated.Status != StatusDisabled {
-		clearCredentialCooldown = updated.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential && hadAuthCooldown
+		clearCredentialCooldown = updated.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential &&
+			hadAuthCooldown
 		for _, view := range CooldownSnapshotForAuth(updated, now) {
 			if view.Scope == "credential" {
 				hadAuthCooldown = true
@@ -2413,8 +2777,10 @@ func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, inclu
 			continue
 		}
 		quotaBlocked := hasQuotaCooldownState(state.Quota, state.LastError)
-		blocked, _, retryAt := cooldownViewBlock(state.Unavailable, state.Quota.Exceeded,
-			state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+		blocked, _, retryAt := cooldownViewBlock(
+			state.Unavailable, state.Quota.Exceeded,
+			state.NextRetryAfter, state.Quota.NextRecoverAt, now,
+		)
 		if !quotaBlocked && !(includeTransient && blocked && retryAt.After(now)) {
 			continue
 		}
@@ -2422,7 +2788,7 @@ func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, inclu
 		state.QuotaEpoch++
 		clearModelState(state, now, StateResetAuthorityOperator)
 	}
-	if len(models) == 0 && !hadAuthCooldown {
+	if len(models) == 0 && !hadAuthCooldown && !updated.creditsRetryAfter.After(now) {
 		return updated, nil, nil
 	}
 	wasDisabled := updated.Disabled
@@ -2478,6 +2844,7 @@ func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, inclu
 		return nil, nil, nil
 	}
 	m.assignAuthGenerationLocked(snapshot)
+	snapshot.creditsRetryAfter = time.Time{}
 	m.auths[authID] = snapshot.Clone()
 	m.mu.Unlock()
 	m.authIntentMu.Unlock()
@@ -2494,6 +2861,8 @@ func (m *Manager) resetRoutingCooldown(ctx context.Context, authID string, inclu
 }
 
 // RecoverCredentialQuota clears only credential-scoped quota state after an authoritative usage refresh.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *Manager) RecoverCredentialQuota(ctx context.Context, authID string) (*Auth, error) {
 	return m.RecoverQuotaAfterRefresh(ctx, authID, time.Time{}, nil)
 }
@@ -2538,6 +2907,7 @@ func (m *Manager) RecoverQuotaAfterRefresh(
 	now := time.Now()
 	wasDisabled := updated.Disabled
 	previousStatus := updated.Status
+	credentialRecoveryAllowed := refreshStartedAt.IsZero() || !updated.UpdatedAt.After(refreshStartedAt)
 	changed := false
 	if !wasDisabled && previousStatus != StatusDisabled && !refreshStartedAt.IsZero() {
 		refreshStartedAt = refreshStartedAt.UTC()
@@ -2547,7 +2917,7 @@ func (m *Manager) RecoverQuotaAfterRefresh(
 			}
 		}
 	}
-	if hasCredentialQuotaCooldownState(updated) &&
+	if credentialRecoveryAllowed && hasCredentialQuotaCooldownState(updated) &&
 		clearAuthState(updated, now, StateResetAuthoritySuccess) {
 		refreshAuthFromModelStates(updated, now)
 		changed = true
@@ -2723,7 +3093,9 @@ func (m *Manager) publishClientModelProjections(auth *Auth, generation uint64, n
 		if model == nil || strings.TrimSpace(model.ID) == "" {
 			continue
 		}
-		projections = append(projections, clientModelProjectionForAuth(auth, model.ID, now))
+		projection := clientModelProjectionForAuth(auth, m.selectionModelForAuth(auth, model.ID), now)
+		projection.ModelID = model.ID
+		projections = append(projections, projection)
 	}
 	if len(projections) == 0 {
 		return
@@ -2780,7 +3152,6 @@ func (m *Manager) RemoveIfGeneration(
 	if id == "" || generation == 0 {
 		return false, nil
 	}
-	m.cancelPendingRefreshPersistence(id)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -2801,6 +3172,7 @@ func (m *Manager) RemoveIfGeneration(
 	provider := strings.TrimSpace(current.Provider)
 	_, versionedStore := m.store.(VersionedStore)
 	m.mu.RUnlock()
+	m.cancelPendingRefreshPersistence(id)
 
 	persistRequested := !shouldSkipPersist(ctx) || shouldForcePersist(ctx)
 	runtimeOnlyRemove := shouldRuntimeOnlyRemove(ctx)
@@ -2824,13 +3196,96 @@ func (m *Manager) RemoveIfGeneration(
 		}
 	}
 
+	return m.removeRuntimeGeneration(ctx, id, generation, provider)
+}
+
+// RemoveIfGenerations deletes one persisted credential and its runtime identities
+// only while every expected generation still owns its entry. deletePersisted
+// runs once under the persistence lock with auth publication excluded. An empty
+// generation set still protects file-only cleanup against new runtime identities.
+func (m *Manager) RemoveIfGenerations(
+	ctx context.Context,
+	generations map[string]uint64,
+	deletePersisted func(context.Context) (bool, error),
+) (bool, error) {
+	if m == nil || deletePersisted == nil {
+		return false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ids := make([]string, 0, len(generations))
+	for id, generation := range generations {
+		if strings.TrimSpace(id) == "" || generation == 0 {
+			return false, nil
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	lockIDs := dedupeStrings(append([]string(nil), ids...))
+	sort.Strings(lockIDs)
+	if m.authLoadGate != nil {
+		if err := m.authLoadGate.Acquire(ctx, authLoadGateCapacity); err != nil {
+			return false, err
+		}
+		defer m.authLoadGate.Release(authLoadGateCapacity)
+	}
+	unlocks := make([]func(), 0, len(lockIDs))
+	defer func() {
+		for _, unlock := range slices.Backward(unlocks) {
+			unlock()
+		}
+	}()
+	for _, id := range lockIDs {
+		unlock, err := m.lockAuthMutationWithinLoadGate(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		unlocks = append(unlocks, unlock)
+	}
+	providers := make(map[string]string, len(ids))
+	m.mu.RLock()
+	for _, id := range ids {
+		current := m.auths[id]
+		if current == nil || current.Generation != generations[id] {
+			m.mu.RUnlock()
+			return false, nil
+		}
+		providers[id] = strings.TrimSpace(current.Provider)
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		m.cancelPendingRefreshPersistence(id)
+	}
+	unlockPersistence, err := m.lockPersistence(ctx)
+	if err != nil {
+		return false, err
+	}
+	deleted, err := deletePersisted(ctx)
+	unlockPersistence()
+	if err != nil || !deleted {
+		return false, err
+	}
+	for _, id := range ids {
+		if removed, err := m.removeRuntimeGeneration(ctx, id, generations[id], providers[id]); err != nil ||
+			!removed {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func (m *Manager) removeRuntimeGeneration(ctx context.Context, id string, generation uint64, provider string) (
+	bool,
+	error,
+) {
 	m.advanceAuthRemovalEpoch(id)
 	m.cancelPendingAuthRecreation(id)
 	m.supersedeAuthDeletion(id)
 	removalTime := time.Now()
 
 	m.mu.Lock()
-	current = m.auths[id]
+	current := m.auths[id]
 	if current == nil || current.Generation != generation {
 		m.mu.Unlock()
 		return false, errors.Join(
@@ -2839,6 +3294,7 @@ func (m *Manager) RemoveIfGeneration(
 		)
 	}
 	delete(m.auths, id)
+	delete(m.modelPoolOffsets, id)
 	m.notifyAuthChangeLocked(id)
 	removalGeneration := m.nextAuthGenerationLocked()
 	if m.removedAuths == nil {
@@ -2864,7 +3320,9 @@ func (m *Manager) RemoveIfGeneration(
 	m.mu.Unlock()
 
 	m.recordSchedulerRemovalTombstone(id, removalGeneration, removalTime)
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
+		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	}
 	m.invalidateSessionAffinity(id)
 	if provider != "" {
 		if exec, ok := m.Executor(provider); ok && exec != nil {
@@ -2909,6 +3367,7 @@ func (m *Manager) Remove(ctx context.Context, id string) error {
 	if existing != nil {
 		provider = strings.TrimSpace(existing.Provider)
 		delete(m.auths, id)
+		delete(m.modelPoolOffsets, id)
 		m.notifyAuthChangeLocked(id)
 	}
 	if m.removedAuths == nil {
@@ -2958,6 +3417,7 @@ func (m *Manager) Remove(ctx context.Context, id string) error {
 			provider = currentProvider
 		}
 		delete(m.auths, id)
+		delete(m.modelPoolOffsets, id)
 		m.notifyAuthChangeLocked(id)
 	}
 	m.removedAuthSeq++
@@ -3001,7 +3461,9 @@ func (m *Manager) Remove(ctx context.Context, id string) error {
 		}
 	}
 
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
+		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	}
 	m.invalidateSessionAffinity(id)
 
 	if provider != "" {
@@ -3018,7 +3480,10 @@ func (m *Manager) Remove(ctx context.Context, id string) error {
 func rejectedPersistedAuthPublicationError(id string) error {
 	return errors.Join(
 		errAuthDurableStateUncertain,
-		fmt.Errorf("credential %s was persisted but rejected before runtime publication", strings.TrimSpace(id)),
+		fmt.Errorf(
+			"credential %s was persisted but rejected before runtime publication",
+			strings.TrimSpace(id),
+		),
 	)
 }
 
@@ -3052,7 +3517,8 @@ func persistedAuthDeleteMatches(expected, current *Auth) bool {
 }
 
 func (m *Manager) rejectedWatcherAuthMutation(ctx context.Context, auth *Auth) bool {
-	if m == nil || auth == nil || !shouldAllowAuthRecreate(ctx) || !shouldSkipPersist(ctx) || shouldForcePersist(ctx) {
+	if m == nil || auth == nil || !shouldAllowAuthRecreate(ctx) || !shouldSkipPersist(ctx) ||
+		shouldForcePersist(ctx) {
 		return false
 	}
 	m.mu.RLock()
@@ -3418,7 +3884,15 @@ func (m *Manager) invalidateSessionAffinity(authID string) {
 	if m == nil || authID == "" {
 		return
 	}
-	if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
+	m.mu.Lock()
+	for key, boundAuthID := range m.authAffinity {
+		if boundAuthID == authID {
+			delete(m.authAffinity, key)
+		}
+	}
+	selector := m.selector
+	m.mu.Unlock()
+	if invalidator, ok := selector.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
 		invalidator.InvalidateAuth(authID)
 	}
 }
@@ -3435,24 +3909,28 @@ func (m *Manager) Load(ctx context.Context) error {
 		defer m.authLoadGate.Release(authLoadGateCapacity)
 	}
 	var unpersistedID string
-	m.pendingRefreshPersistenceRetries.Range(func(key, value any) bool {
-		id, _ := key.(string)
-		intent, _ := value.(*authRefreshPersistenceIntent)
-		if intent == nil || intent.ctx == nil || intent.ctx.Err() != nil {
-			return true
-		}
-		m.mu.RLock()
-		current := m.auths[id]
-		active := current != nil && current.Generation == intent.generation
-		m.mu.RUnlock()
-		if active {
-			unpersistedID = id
-		}
-		return !active
-	})
+	m.pendingRefreshPersistenceRetries.Range(
+		func(key, value any) bool {
+			id, _ := key.(string)
+			intent, _ := value.(*authRefreshPersistenceIntent)
+			if intent == nil || intent.ctx == nil || intent.ctx.Err() != nil {
+				return true
+			}
+			m.mu.RLock()
+			current := m.auths[id]
+			active := current != nil && current.Generation == intent.generation
+			m.mu.RUnlock()
+			if active {
+				unpersistedID = id
+			}
+			return !active
+		},
+	)
 	if unpersistedID != "" {
-		return errors.Join(errAuthDurableStateUncertain,
-			fmt.Errorf("credential %s has an unpersisted refresh", unpersistedID))
+		return errors.Join(
+			errAuthDurableStateUncertain,
+			fmt.Errorf("credential %s has an unpersisted refresh", unpersistedID),
+		)
 	}
 	m.mu.RLock()
 	store := m.store
@@ -3468,6 +3946,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	defer m.mu.Unlock()
 	previousAuths := m.auths
 	m.auths = make(map[string]*Auth, len(items))
+	m.modelPoolOffsets = nil
 	loaded := make([]*Auth, 0, len(items))
 	for _, auth := range items {
 		if auth == nil || auth.ID == "" {
@@ -3492,9 +3971,20 @@ func (m *Manager) Load(ctx context.Context) error {
 		if previous := previousAuths[auth.ID]; previous != nil && previous.credentialGeneration != 0 &&
 			!persistentAuthBindingChanged(previous, snapshot) && previous.ProxyURL == snapshot.ProxyURL {
 			snapshot.credentialGeneration = previous.credentialGeneration
+			snapshot.registrationGeneration = previous.registrationGeneration
+			if runtimeAuthCredentialsEqual(previous, snapshot) {
+				snapshot.creditsRetryAfter = previous.creditsRetryAfter
+			}
 		}
 		m.auths[auth.ID] = snapshot
 		loaded = append(loaded, snapshot.Clone())
+	}
+	for key, authID := range m.authAffinity {
+		previous, current := previousAuths[authID], m.auths[authID]
+		if previous != nil &&
+			(current == nil || previous.credentialGeneration != current.credentialGeneration) {
+			delete(m.authAffinity, key)
+		}
 	}
 	if m.scheduler != nil {
 		removalTime := time.Now()
@@ -3531,11 +4021,15 @@ func (m *Manager) Execute(
 	opts = ensureRouteTraceState(opts)
 	req, opts = cliproxysession.Enrich(req, opts)
 	if !util.HasExplicitSessionID(ctx) {
-		ctx = util.WithInferredSessionID(ctx, ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata))
+		ctx = util.WithInferredSessionID(
+			ctx,
+			inferredSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata),
+		)
 	}
 	ctx = m.withHomeRefreshClient(ctx)
 	opts = ensureRequestedModelMetadata(opts, req.Model)
 	opts = bindRouteTraceRootMetadata(opts)
+	selectionCtx := ctx
 	resp, err := retryWithCooldown(
 		m, ctx, providers, req, opts, func(
 			innerCtx context.Context,
@@ -3544,6 +4038,7 @@ func (m *Manager) Execute(
 			innerOpts cliproxyexecutor.Options,
 			maxCreds int,
 		) (cliproxyexecutor.Response, error) {
+			selectionCtx = innerCtx
 			if m.HomeEnabled() {
 				return m.executeHome(innerCtx, innerProviders, innerReq, innerOpts, false)
 			}
@@ -3571,7 +4066,8 @@ func (m *Manager) Execute(
 		},
 	)
 	if err != nil && !isRequestStopError(err) && !m.HomeEnabled() &&
-		hasAntigravityProvider(providers) && shouldAttemptAntigravityCreditsFallback(m, err) {
+		hasAntigravityProvider(providers) && shouldAttemptAntigravityCreditsFallback(m, err) &&
+		!m.hasAvailableFreeAuth(selectionCtx, providers, req.Model, opts) {
 		if creditsResp, creditsErr, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); creditsErr != nil {
 			return cliproxyexecutor.Response{}, unwrapRequestScopedActionError(creditsErr)
 		} else if ok {
@@ -3594,7 +4090,10 @@ func (m *Manager) ExecuteCount(
 	opts = ensureRouteTraceState(opts)
 	req, opts = cliproxysession.Enrich(req, opts)
 	if !util.HasExplicitSessionID(ctx) {
-		ctx = util.WithInferredSessionID(ctx, ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata))
+		ctx = util.WithInferredSessionID(
+			ctx,
+			inferredSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata),
+		)
 	}
 	ctx = m.withHomeRefreshClient(ctx)
 	opts = ensureRequestedModelMetadata(opts, req.Model)
@@ -3667,12 +4166,16 @@ func (m *Manager) ExecuteStream(
 	opts = ensureRouteTraceState(opts)
 	req, opts = cliproxysession.Enrich(req, opts)
 	if !util.HasExplicitSessionID(ctx) {
-		ctx = util.WithInferredSessionID(ctx, ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata))
+		ctx = util.WithInferredSessionID(
+			ctx,
+			inferredSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata),
+		)
 	}
 	ctx = m.withHomeRefreshClient(ctx)
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	opts = bindRouteTraceRootMetadata(opts)
+	selectionCtx := ctx
 	result, err := retryWithCooldown(
 		m, ctx, providers, req, opts, func(
 			innerCtx context.Context,
@@ -3681,6 +4184,7 @@ func (m *Manager) ExecuteStream(
 			innerOpts cliproxyexecutor.Options,
 			maxCreds int,
 		) (*cliproxyexecutor.StreamResult, error) {
+			selectionCtx = innerCtx
 			if m.HomeEnabled() {
 				return m.executeHomeStream(innerCtx, innerProviders, innerReq, innerOpts)
 			}
@@ -3712,7 +4216,8 @@ func (m *Manager) ExecuteStream(
 	if err != nil {
 		publicErr := unwrapRequestScopedActionError(err)
 		if !isRequestStopError(err) && !m.HomeEnabled() &&
-			hasAntigravityProvider(providers) && shouldAttemptAntigravityCreditsFallback(m, err) {
+			hasAntigravityProvider(providers) && shouldAttemptAntigravityCreditsFallback(m, err) &&
+			!m.hasAvailableFreeAuth(selectionCtx, providers, req.Model, opts) {
 			if creditsResult, creditsErr, ok := m.tryAntigravityCreditsExecuteStream(
 				ctx, req, opts,
 			); creditsErr != nil {
@@ -3753,6 +4258,7 @@ func retryWithCooldown[T any](
 		maxCreds int,
 	) (T, error),
 ) (T, error) {
+	requestStarted := time.Now()
 	var zero T
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -3763,27 +4269,53 @@ func retryWithCooldown[T any](
 		ctx = context.Background()
 	}
 	homeLimit, homeAuthority := -1, false
-	var lastErr error
+	homeSelectionDeadline := requestStarted.Add(maxWait)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(homeSelectionDeadline) {
+		homeSelectionDeadline = deadline
+	}
+	var lastErr, upstreamErr error
 	traceProvider := "mixed"
 	if len(normalized) == 1 {
 		traceProvider = normalized[0]
 	}
-	for attempt := 0; ; attempt++ {
+	for attempt := 0; ; {
 		if err := ctx.Err(); err != nil {
 			return zero, err
 		}
-		state := &retryRoundState{round: attempt, defaultRetry: defaultRetry, maxCredentials: maxRetryCredentials, attempted: make(map[string]struct{}), homeLimit: homeLimit, homeAuthority: homeAuthority}
+		state := &retryRoundState{
+			round: attempt, defaultRetry: defaultRetry, maxCredentials: maxRetryCredentials,
+			attempted: make(map[string]struct{}), homeLimit: homeLimit, homeAuthority: homeAuthority,
+			upstreamErr: upstreamErr,
+		}
 		roundCtx := context.WithValue(ctx, retryRoundContextKey{}, state)
 		result, errAttempt := attemptFn(roundCtx, normalized, req, opts, maxRetryCredentials)
 		homeLimit, homeAuthority = state.homeLimit, state.homeAuthority
+		upstreamErr = state.upstreamErr
+		lastErr = state.preferredError(errAttempt)
+		state.upstreamErr = nil
 		if errAttempt == nil {
 			return result, nil
 		}
-		lastErr = errAttempt
 		if isRequestStopError(errAttempt) {
 			break
 		}
-		wait, shouldRetry := m.shouldRetryAfterError(roundCtx, opts, errAttempt, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(
+			roundCtx,
+			opts,
+			errAttempt,
+			attempt,
+			normalized,
+			authSelectionModelFromOptions(opts, req.Model),
+			maxWait,
+		)
+		selectionWait := m.HomeEnabled() && len(state.attempted) == 0 && isHomeCooldownError(errAttempt)
+		waitLimit := maxWait
+		if selectionWait && shouldRetry {
+			waitLimit = time.Until(homeSelectionDeadline)
+			if waitLimit <= 0 || wait > waitLimit {
+				shouldRetry = false
+			}
+		}
 		traceAttempt, previousAttempt := currentRouteTraceAttempt(opts)
 		resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errAttempt, "retry_stopped")
 		if !shouldRetry {
@@ -3815,7 +4347,7 @@ func retryWithCooldown[T any](
 				RetryAfterMS:    wait.Milliseconds(),
 			},
 		)
-		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, waitLimit); errWait != nil {
 			waitCode, waitStatus, _ := routeTraceError(opts.Metadata, errWait, "cooldown_wait_failed")
 			publishRouteTraceEvent(
 				opts.Metadata, cliproxyexecutor.RouteTraceEvent{
@@ -3841,6 +4373,12 @@ func retryWithCooldown[T any](
 				ResultCode:      "success",
 			},
 		)
+		if !selectionWait {
+			attempt++
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return zero, err
 	}
 	// noinspection GoDfaConstantCondition — lastErr is always non-nil here; intentional.
 	return zero, lastErr
@@ -3861,6 +4399,37 @@ func hasAntigravityProvider(providers []string) bool {
 	return false
 }
 
+func (m *Manager) hasAvailableFreeAuth(
+	ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options,
+) bool {
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		providerSet[strings.ToLower(strings.TrimSpace(provider))] = struct{}{}
+	}
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	if pinnedAuthID == "" {
+		pinnedAuthID = m.AuthAffinity(authAffinityKeyFromMetadata(opts.Metadata))
+	}
+	model = authSelectionModelFromOptions(opts, model)
+	predicate := selectionPredicate(ctx, opts)
+	var tried map[string]struct{}
+	if round := retryRoundFromContext(ctx); round != nil {
+		tried = round.attempted
+	}
+	for _, candidate := range m.List() {
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
+		current, provider := m.currentSelectableAuth(candidate.ID, model, providerSet, predicate, tried)
+		if current != nil {
+			if executor, ok := m.Executor(provider); ok && executor != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error) bool {
 	if m == nil || lastErr == nil || isRequestStopError(lastErr) || isRequestScopedError(lastErr) {
 		return false
@@ -3875,7 +4444,8 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error) bool {
 		return retryDirectiveAllowsRedispatch(disposition)
 	case 0:
 		if authErr, ok := errors.AsType[*Error](lastErr); ok {
-			return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable" || authErr.Code == "model_cooldown"
+			return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable" ||
+				authErr.Code == "model_cooldown"
 		}
 		return false
 	default:
@@ -3887,7 +4457,8 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(
 	routeModel string,
 	opts cliproxyexecutor.Options,
 ) []creditsCandidateEntry {
-	if m == nil || !strings.Contains(strings.ToLower(strings.TrimSpace(routeModel)), "claude") {
+	if m == nil || m.HomeEnabled() ||
+		!strings.Contains(strings.ToLower(strings.TrimSpace(routeModel)), "claude") {
 		return nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
@@ -3895,6 +4466,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(
 	defer m.mu.RUnlock()
 	var known []creditsCandidateEntry
 	var unknown []creditsCandidateEntry
+	now := time.Now()
 	for _, auth := range m.auths {
 		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
 			continue
@@ -3905,7 +4477,10 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
 			continue
 		}
-		executor, ok := m.executors["antigravity"]
+		if auth.creditsRetryAfter.After(now) && !m.cooldownDisabledForAuth(auth) {
+			continue
+		}
+		executor, ok := m.executors[executorKeyFromAuth(auth)]
 		if !ok || executor == nil {
 			continue
 		}
@@ -3924,16 +4499,39 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(
 }
 
 func (m *Manager) prepareAntigravityCreditsExecution(
-	ctx context.Context, auth *Auth, routeModel string, opts cliproxyexecutor.Options,
-) (context.Context, cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	ctx context.Context,
+	executor ProviderExecutor,
+	auth *Auth,
+	routeModel string,
+	opts cliproxyexecutor.Options,
+) (context.Context, *Auth, cliproxyexecutor.Options, error) {
 	creditsCtx := WithAntigravityCredits(ctx)
 	if rt := m.roundTripperFor(auth); rt != nil {
 		creditsCtx = util.WithRoundTripper(creditsCtx, rt)
 	}
 	creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 	creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
-	publishSelectedAuthMetadata(creditsOpts.Metadata, auth)
-	return creditsCtx, cliproxyexecutor.Request{Model: routeModel}, creditsOpts
+	preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, executor, auth)
+	if errPrepare != nil {
+		resultCode, httpStatus, retryAfterMS := routeTraceError(
+			creditsOpts.Metadata,
+			errPrepare,
+			"prepare_failed",
+		)
+		publishAuthRouteTraceEvent(
+			creditsOpts, auth, cliproxyexecutor.RouteTraceEvent{
+				Provider:     "antigravity",
+				Model:        routeModel,
+				Action:       "attempt.prepare_failed",
+				ResultCode:   resultCode,
+				HTTPStatus:   httpStatus,
+				RetryAfterMS: retryAfterMS,
+			},
+		)
+		return creditsCtx, auth, creditsOpts, errPrepare
+	}
+	publishSelectedAuthMetadata(creditsOpts.Metadata, preparedAuth)
+	return creditsCtx, preparedAuth, creditsOpts, nil
 }
 
 func (m *Manager) antigravityCreditsModelAliasResult(routeModel string, auth *Auth) OAuthModelAliasResult {
@@ -3949,7 +4547,7 @@ func (m *Manager) antigravityCreditsModelAliasResult(routeModel string, auth *Au
 func (m *Manager) tryAntigravityCreditsExecute(
 	ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error, bool) {
-	var modelSupportErr error
+	var modelSupportErr, preparationErr error
 	attemptedUpstream := false
 	for _, candidate := range m.findAllAntigravityCreditsCandidateAuths(req.Model, opts) {
 		if errCtx := ctx.Err(); errCtx != nil {
@@ -3980,10 +4578,23 @@ func (m *Manager) tryAntigravityCreditsExecute(
 				Action:   "attempt.prepare_started",
 			},
 		)
-		creditsCtx, execReq, creditsOpts := m.prepareAntigravityCreditsExecution(
-			ctx, candidate.auth, req.Model, attemptOpts,
+		creditsCtx, preparedAuth, creditsOpts, errPrepare := m.prepareAntigravityCreditsExecution(
+			ctx, candidate.executor, candidate.auth, req.Model, attemptOpts,
 		)
-		execReq.Payload = req.Payload
+		if errPrepare != nil {
+			if errors.Is(errPrepare, context.Canceled) || errors.Is(errPrepare, context.DeadlineExceeded) ||
+				!retryDirectiveAllowsRedispatch(
+					executionDispositionForError(
+						errPrepare, cliproxyexecutor.DispatchPhaseNotSent,
+					),
+				) {
+				return cliproxyexecutor.Response{}, errPrepare, true
+			}
+			preparationErr = errPrepare
+			continue
+		}
+		candidate.auth = preparedAuth
+		execReq := req
 		aliasResult := m.antigravityCreditsModelAliasResult(req.Model, candidate.auth)
 		execReq.Model = aliasResult.UpstreamModel
 		var errIntercept error
@@ -3991,7 +4602,11 @@ func (m *Manager) tryAntigravityCreditsExecute(
 			creditsCtx, candidate.executor, candidate.provider, candidate.auth, execReq, creditsOpts, req.Model,
 		)
 		if errIntercept != nil {
-			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errIntercept, "request_intercepted")
+			resultCode, httpStatus, retryAfterMS := routeTraceError(
+				opts.Metadata,
+				errIntercept,
+				"request_intercepted",
+			)
 			publishAuthRouteTraceEvent(
 				attemptOpts, candidate.auth, cliproxyexecutor.RouteTraceEvent{
 					Provider:     candidate.provider,
@@ -4009,7 +4624,11 @@ func (m *Manager) tryAntigravityCreditsExecute(
 			execReq, candidate.auth, req.Model, execReq.Model,
 		)
 		if errIntercept != nil {
-			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errIntercept, "model_not_supported")
+			resultCode, httpStatus, retryAfterMS := routeTraceError(
+				opts.Metadata,
+				errIntercept,
+				"model_not_supported",
+			)
 			publishAuthRouteTraceEvent(
 				attemptOpts, candidate.auth, cliproxyexecutor.RouteTraceEvent{
 					Provider:     candidate.provider,
@@ -4052,7 +4671,13 @@ func (m *Manager) tryAntigravityCreditsExecute(
 		if errExec != nil {
 			phase = cliproxyexecutor.DispatchPhaseMaybeSent
 		}
-		result := executionResult(candidate.auth, candidate.provider, req.Model, errExec, phase)
+		result := executionResult(
+			candidate.auth,
+			candidate.provider,
+			stateModelForExecution(candidate.auth, req.Model, execReq.Model),
+			errExec,
+			phase,
+		)
 		decision := requestScopedActionDecision{err: errExec}
 		if errExec != nil {
 			result.RetryAfter = retryAfterFromError(errExec)
@@ -4122,13 +4747,16 @@ func (m *Manager) tryAntigravityCreditsExecute(
 	if !attemptedUpstream && modelSupportErr != nil {
 		return cliproxyexecutor.Response{}, modelSupportErr, true
 	}
+	if !attemptedUpstream && preparationErr != nil {
+		return cliproxyexecutor.Response{}, preparationErr, true
+	}
 	return cliproxyexecutor.Response{}, nil, false
 }
 
 func (m *Manager) tryAntigravityCreditsExecuteStream(
 	ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options,
 ) (*cliproxyexecutor.StreamResult, error, bool) {
-	var modelSupportErr error
+	var modelSupportErr, preparationErr error
 	attemptedUpstream := false
 	for _, candidate := range m.findAllAntigravityCreditsCandidateAuths(req.Model, opts) {
 		if errCtx := ctx.Err(); errCtx != nil {
@@ -4159,10 +4787,23 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(
 				Action:   "attempt.prepare_started",
 			},
 		)
-		creditsCtx, execReq, creditsOpts := m.prepareAntigravityCreditsExecution(
-			ctx, candidate.auth, req.Model, attemptOpts,
+		creditsCtx, preparedAuth, creditsOpts, errPrepare := m.prepareAntigravityCreditsExecution(
+			ctx, candidate.executor, candidate.auth, req.Model, attemptOpts,
 		)
-		execReq.Payload = req.Payload
+		if errPrepare != nil {
+			if errors.Is(errPrepare, context.Canceled) || errors.Is(errPrepare, context.DeadlineExceeded) ||
+				!retryDirectiveAllowsRedispatch(
+					executionDispositionForError(
+						errPrepare, cliproxyexecutor.DispatchPhaseNotSent,
+					),
+				) {
+				return nil, errPrepare, true
+			}
+			preparationErr = errPrepare
+			continue
+		}
+		candidate.auth = preparedAuth
+		execReq := req
 		aliasResult := m.antigravityCreditsModelAliasResult(req.Model, candidate.auth)
 		execReq.Model = aliasResult.UpstreamModel
 		var errIntercept error
@@ -4170,7 +4811,11 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(
 			creditsCtx, candidate.executor, candidate.provider, candidate.auth, execReq, creditsOpts, req.Model,
 		)
 		if errIntercept != nil {
-			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errIntercept, "request_intercepted")
+			resultCode, httpStatus, retryAfterMS := routeTraceError(
+				opts.Metadata,
+				errIntercept,
+				"request_intercepted",
+			)
 			publishAuthRouteTraceEvent(
 				attemptOpts, candidate.auth, cliproxyexecutor.RouteTraceEvent{
 					Provider:     candidate.provider,
@@ -4188,7 +4833,11 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(
 			execReq, candidate.auth, req.Model, execReq.Model,
 		)
 		if errIntercept != nil {
-			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errIntercept, "model_not_supported")
+			resultCode, httpStatus, retryAfterMS := routeTraceError(
+				opts.Metadata,
+				errIntercept,
+				"model_not_supported",
+			)
 			publishAuthRouteTraceEvent(
 				attemptOpts, candidate.auth, cliproxyexecutor.RouteTraceEvent{
 					Provider:     candidate.provider,
@@ -4233,14 +4882,18 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(
 			failure := executionResult(
 				candidate.auth,
 				candidate.provider,
-				req.Model,
+				stateModelForExecution(candidate.auth, req.Model, execReq.Model),
 				errStream,
 				cliproxyexecutor.DispatchPhaseMaybeSent,
 			)
 			failure.RetryAfter = retryAfterFromError(errStream)
 			decision := m.applyRequestScopedErrorRule(candidate.auth, errStream, &failure)
 			errStream = decision.err
-			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errStream, "stream_bootstrap_failed")
+			resultCode, httpStatus, retryAfterMS := routeTraceError(
+				opts.Metadata,
+				errStream,
+				"stream_bootstrap_failed",
+			)
 			publishResultRouteTraceEvent(
 				attemptOpts, candidate.auth, cliproxyexecutor.RouteTraceEvent{
 					Provider:     candidate.provider,
@@ -4289,6 +4942,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(
 	if !attemptedUpstream && modelSupportErr != nil {
 		return nil, modelSupportErr, true
 	}
+	if !attemptedUpstream && preparationErr != nil {
+		return nil, preparationErr, true
+	}
 	return nil, nil, false
 }
 
@@ -4308,6 +4964,20 @@ func executorForAuth(executor ProviderExecutor, auth *Auth) (ProviderExecutor, e
 // mixedOnce rotates credentials across providers for a single execution attempt.
 // executeFn performs the actual provider call; recordResult records the outcome
 // (e.g. MarkResult for state-changing calls, hook.OnResult for read-only calls like CountTokens).
+func authSelectionModelFromOptions(opts cliproxyexecutor.Options, fallback string) string {
+	var model string
+	switch value := opts.Metadata[cliproxyexecutor.AuthSelectionModelMetadataKey].(type) {
+	case string:
+		model = value
+	case []byte:
+		model = string(value)
+	}
+	if model = strings.TrimSpace(model); model != "" {
+		return model
+	}
+	return fallback
+}
+
 func mixedOnce[T any](
 	m *Manager,
 	ctx context.Context,
@@ -4330,8 +5000,8 @@ func mixedOnce[T any](
 	if len(providers) == 0 {
 		return zero, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	routeModel := req.Model
-	opts = ensureRequestedModelMetadata(opts, routeModel)
+	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	opts = ensureRequestedModelMetadata(opts, req.Model)
 	opts = ensureRouteTraceState(opts)
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -4339,6 +5009,7 @@ func mixedOnce[T any](
 		tried = state.attempted
 	}
 	var lastErr error
+credentialLoop:
 	for {
 		if err := ctx.Err(); err != nil {
 			return zero, err
@@ -4454,7 +5125,9 @@ func mixedOnce[T any](
 		if errPrepare == nil {
 			executor, errPrepare = executorForAuth(executor, auth)
 		}
-		warnLogUpstreamFailure(execCtx, auth, provider, routeModel, prepareStarted, errPrepare, cliproxyexecutor.DispatchPhaseNotSent)
+		warnLogUpstreamFailure(
+			execCtx, auth, provider, routeModel, prepareStarted, errPrepare, cliproxyexecutor.DispatchPhaseNotSent,
+		)
 		if errPrepare != nil {
 			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errPrepare, "prepare_failed")
 			publishAuthRouteTraceEvent(
@@ -4485,6 +5158,9 @@ func mixedOnce[T any](
 					HTTPStatus: httpStatus,
 				}, result,
 			)
+			if !retryDirectiveAllowsRedispatch(result.Disposition) {
+				return zero, errPrepare
+			}
 			lastErr = errPrepare
 			publishAuthRouteTraceEvent(
 				pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
@@ -4508,294 +5184,363 @@ func mixedOnce[T any](
 				ResultCode: "success",
 			},
 		)
-		execReq := req
-		aliasResult := OAuthModelAliasResult{}
-		if auth.Attributes != nil && strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]) != "" {
-			execReq.Model = strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey])
-			aliasResult = homeForceMappingAliasResult(auth, execReq.Model)
-		} else {
-			execReq.Model = rewriteModelForAuth(routeModel, auth)
-			aliasResult = m.resolveExecutionAliasResultForRequested(auth, execReq.Model)
-			execReq.Model = aliasResult.UpstreamModel
+		aliases := m.executionModelAliases(auth, rewriteModelForAuth(routeModel, auth))
+		if routeModel != req.Model {
+			aliases = []OAuthModelAliasResult{{UpstreamModel: req.Model}}
 		}
-		execOpts := cloneExecutorOptions(pickOpts)
-		var errIntercept error
-		execCtx, execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(
-			execCtx, executor, provider, auth, execReq, execOpts, routeModel,
-		)
-		if errIntercept != nil {
-			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errIntercept, "request_intercepted")
-			publishAuthRouteTraceEvent(
-				pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
-					Provider:     provider,
-					Model:        routeModel,
-					TargetModel:  execReq.Model,
-					Action:       "attempt.intercept_failed",
-					ResultCode:   resultCode,
-					HTTPStatus:   httpStatus,
-					RetryAfterMS: retryAfterMS,
-				},
-			)
-			return zero, errIntercept
-		}
-		execReq, errIntercept = attachResolvedAPIKeyModelInfo(execReq, auth, routeModel, execReq.Model)
-		if errIntercept != nil {
-			result := executionResult(
-				auth, provider, routeModel, errIntercept, cliproxyexecutor.DispatchPhaseNotSent,
-			)
-			result.RuntimeOnly = runtimeOnly
-			result.Options = cloneExecutorOptions(execOpts)
-			recordResult(execCtx, result)
-			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errIntercept, "model_not_supported")
-			publishResultRouteTraceEvent(
-				pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
-					Provider:     provider,
-					Model:        routeModel,
-					TargetModel:  execReq.Model,
-					Action:       "attempt.model_rejected",
-					ResultCode:   resultCode,
-					HTTPStatus:   httpStatus,
-					RetryAfterMS: retryAfterMS,
-				}, result,
-			)
-			publishResultRouteTraceEvent(
-				pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
-					Provider:   provider,
-					Model:      routeModel,
-					Action:     "result.recorded",
-					ResultCode: resultCode,
-					HTTPStatus: httpStatus,
-				}, result,
-			)
-			lastErr = errIntercept
-			publishAuthRouteTraceEvent(
-				pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
-					Provider: provider,
-					Model:    routeModel,
-					Action:   "attempt.retry",
-					Reason:   "next_credential",
-				},
-			)
-			if runtimeOnly {
-				homeAuthCount++
+		aliases = m.rotateExecutionModelAliases(auth, rewriteModelForAuth(routeModel, auth), aliases)
+		preparedCtx := execCtx
+		for modelIndex, aliasResult := range aliases {
+			execCtx := preparedCtx
+			if err := execCtx.Err(); err != nil {
+				return zero, err
 			}
-			releaseLeaseNow()
-			continue
-		}
-		execReq = sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, execReq)
-		if opts.Stream {
-			execCtx = contextWithRouteTraceStream(execCtx, pickOpts, execReq.Model)
-		}
-		publishAuthRouteTraceEvent(
-			pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
-				Provider:    provider,
-				Model:       routeModel,
-				TargetModel: execReq.Model,
-				Action:      "attempt.execute_started",
-			},
-		)
-		attemptCtx := newUpstreamAttemptContext(execCtx, execOpts.Stream)
-		started := time.Now()
-		resp, errExec := executeFn(attemptCtx, auth, executor, provider, execReq, execOpts, aliasResult)
-		warnLogUpstreamFailure(attemptCtx, auth, provider, execReq.Model, started, errExec, cliproxyexecutor.DispatchPhaseMaybeSent)
-		if errExec != nil {
-			if errCtx := attemptCtx.Err(); errCtx != nil {
-				errExec = errCtx
-			} else {
-				disposition := executionDispositionForAttempt(
-					errExec, cliproxyexecutor.DispatchPhaseMaybeSent, auth, provider, routeModel,
+			if len(aliases) > 1 {
+				stateAuth, exists := m.GetByID(auth.ID)
+				if !exists || stateAuth.credentialGeneration != auth.credentialGeneration {
+					releaseLeaseNow()
+					continue credentialLoop
+				}
+				if blocked, _, _ := isAuthBlockedForModel(stateAuth, aliasResult.UpstreamModel, time.Now()); blocked {
+					continue
+				}
+				if thinking.HasContext1MTag(routeModel) && !m.executionModelSupportsContext1M(
+					auth, routeModel, aliasResult.UpstreamModel,
+				) {
+					continue
+				}
+				if modelIndex > 0 {
+					attempt, previousAttempt = nextRouteTraceAttempt(opts)
+					pickOpts = withRouteTraceAttempt(opts, attempt, previousAttempt)
+				}
+			}
+			execReq := req
+			execReq.Model = aliasResult.UpstreamModel
+			if runtimeOnly && aliasResult.ForceMapping {
+				aliasResult.OriginalAlias = requestedModelFromMetadata(opts.Metadata, routeModel)
+			}
+			execOpts := cloneExecutorOptions(pickOpts)
+			var errIntercept error
+			execCtx, execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(
+				execCtx, executor, provider, auth, execReq, execOpts, routeModel,
+			)
+			if errIntercept != nil {
+				resultCode, httpStatus, retryAfterMS := routeTraceError(
+					opts.Metadata, errIntercept, "request_intercepted",
 				)
-				if retryDirectiveAllowsRefresh(disposition) {
-					refreshCtx := newUpstreamAttemptContext(execCtx, false)
-					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(
-						refreshCtx, auth, executor, errExec, false,
-					); okRefresh {
-						if runtimeOnly && cachedRuntimeAuth != nil &&
-							!m.compareAndSwapHomeRuntimeAuth(
-								runtimeSessionID, cachedRuntimeAuth, refreshed, executor,
-							) {
+				publishAuthRouteTraceEvent(
+					pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
+						Provider:     provider,
+						Model:        routeModel,
+						TargetModel:  execReq.Model,
+						Action:       "attempt.intercept_failed",
+						ResultCode:   resultCode,
+						HTTPStatus:   httpStatus,
+						RetryAfterMS: retryAfterMS,
+					},
+				)
+				return zero, errIntercept
+			}
+			if execReq.Model != aliasResult.UpstreamModel {
+				for _, candidate := range aliases {
+					if candidate.UpstreamModel == execReq.Model {
+						aliasResult = candidate
+						break
+					}
+				}
+			}
+			if len(aliases) > 1 {
+				stateAuth, exists := m.GetByID(auth.ID)
+				if !exists || stateAuth.credentialGeneration != auth.credentialGeneration {
+					releaseLeaseNow()
+					continue credentialLoop
+				}
+				if blocked, _, _ := isAuthBlockedForModel(stateAuth, execReq.Model, time.Now()); blocked {
+					lastErr = m.unavailableSelectionError([]*Auth{stateAuth}, provider, execReq.Model)
+					continue
+				}
+			}
+			execReq, errIntercept = m.attachExecutionModelInfo(execReq, auth, req.Model)
+			if errIntercept != nil {
+				result := executionResult(
+					auth, provider, routeModel, errIntercept, cliproxyexecutor.DispatchPhaseNotSent,
+				)
+				result.RuntimeOnly = runtimeOnly
+				result.Options = cloneExecutorOptions(execOpts)
+				recordResult(execCtx, result)
+				resultCode, httpStatus, retryAfterMS := routeTraceError(
+					opts.Metadata, errIntercept, "model_not_supported",
+				)
+				publishResultRouteTraceEvent(
+					pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
+						Provider:     provider,
+						Model:        routeModel,
+						TargetModel:  execReq.Model,
+						Action:       "attempt.model_rejected",
+						ResultCode:   resultCode,
+						HTTPStatus:   httpStatus,
+						RetryAfterMS: retryAfterMS,
+					}, result,
+				)
+				publishResultRouteTraceEvent(
+					pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
+						Provider:   provider,
+						Model:      routeModel,
+						Action:     "result.recorded",
+						ResultCode: resultCode,
+						HTTPStatus: httpStatus,
+					}, result,
+				)
+				lastErr = errIntercept
+				publishAuthRouteTraceEvent(
+					pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
+						Provider: provider,
+						Model:    routeModel,
+						Action:   "attempt.retry",
+						Reason:   "next_credential",
+					},
+				)
+				if runtimeOnly {
+					homeAuthCount++
+				}
+				releaseLeaseNow()
+				continue credentialLoop
+			}
+			execReq = sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, execReq)
+			if opts.Stream {
+				execCtx = contextWithRouteTraceStream(execCtx, pickOpts, execReq.Model)
+			}
+			publishAuthRouteTraceEvent(
+				pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
+					Provider:    provider,
+					Model:       routeModel,
+					TargetModel: execReq.Model,
+					Action:      "attempt.execute_started",
+				},
+			)
+			attemptCtx := newUpstreamAttemptContext(execCtx, execOpts.Stream)
+			started := time.Now()
+			resp, errExec := executeFn(attemptCtx, auth, executor, provider, execReq, execOpts, aliasResult)
+			warnLogUpstreamFailure(
+				attemptCtx, auth, provider, execReq.Model, started, errExec, cliproxyexecutor.DispatchPhaseMaybeSent,
+			)
+			if errExec != nil {
+				if errCtx := attemptCtx.Err(); errCtx != nil {
+					errExec = errCtx
+				} else {
+					disposition := executionDispositionForAttempt(
+						errExec, cliproxyexecutor.DispatchPhaseMaybeSent, auth, provider, routeModel,
+					)
+					if retryDirectiveAllowsRefresh(disposition) {
+						refreshCtx := newUpstreamAttemptContext(execCtx, false)
+						if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(
+							refreshCtx, auth, executor, errExec, false,
+						); okRefresh {
+							if runtimeOnly && cachedRuntimeAuth != nil &&
+								!m.compareAndSwapHomeRuntimeAuth(
+									runtimeSessionID, cachedRuntimeAuth, refreshed, executor,
+								) {
+								publishAuthRouteTraceEvent(
+									pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
+										Provider:   provider,
+										Model:      routeModel,
+										Action:     "attempt.retry",
+										Reason:     "runtime_auth_changed",
+										ResultCode: "stale_selection",
+									},
+								)
+								releaseLeaseNow()
+								continue credentialLoop
+							}
+							auth = refreshed
 							publishAuthRouteTraceEvent(
 								pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
-									Provider:   provider,
-									Model:      routeModel,
-									Action:     "attempt.retry",
-									Reason:     "runtime_auth_changed",
-									ResultCode: "stale_selection",
+									Provider:    provider,
+									Model:       routeModel,
+									TargetModel: execReq.Model,
+									Action:      "auth.refresh_completed",
+									ResultCode:  "success",
 								},
 							)
-							releaseLeaseNow()
-							continue
-						}
-						auth = refreshed
-						publishAuthRouteTraceEvent(
-							pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
-								Provider:    provider,
-								Model:       routeModel,
-								TargetModel: execReq.Model,
-								Action:      "auth.refresh_completed",
-								ResultCode:  "success",
-							},
-						)
-						publishAuthRouteTraceEvent(
-							pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
-								Provider:    provider,
-								Model:       routeModel,
-								TargetModel: execReq.Model,
-								Action:      "attempt.execute_retried",
-								Reason:      "auth_refreshed",
-							},
-						)
-						attemptCtx = newUpstreamAttemptContext(execCtx, execOpts.Stream)
-						started = time.Now()
-						resp, errExec = executeFn(attemptCtx, auth, executor, provider, execReq, execOpts, aliasResult)
-						warnLogUpstreamFailure(attemptCtx, auth, provider, execReq.Model, started, errExec, cliproxyexecutor.DispatchPhaseMaybeSent)
-						if errCtx := attemptCtx.Err(); errExec != nil && errCtx != nil {
-							errExec = errCtx
+							publishAuthRouteTraceEvent(
+								pickOpts, auth, cliproxyexecutor.RouteTraceEvent{
+									Provider:    provider,
+									Model:       routeModel,
+									TargetModel: execReq.Model,
+									Action:      "attempt.execute_retried",
+									Reason:      "auth_refreshed",
+								},
+							)
+							attemptCtx = newUpstreamAttemptContext(execCtx, execOpts.Stream)
+							started = time.Now()
+							resp, errExec = executeFn(
+								attemptCtx, auth, executor, provider, execReq, execOpts, aliasResult,
+							)
+							warnLogUpstreamFailure(
+								attemptCtx, auth, provider, execReq.Model, started, errExec,
+								cliproxyexecutor.DispatchPhaseMaybeSent,
+							)
+							if errCtx := attemptCtx.Err(); errExec != nil && errCtx != nil {
+								errExec = errCtx
+							}
 						}
 					}
 				}
 			}
-		}
-		if errCancel := claudeOAuthRequestCancellation(attemptCtx, auth, errExec); errCancel != nil {
-			errExec = errCancel
-		}
-		phase := cliproxyexecutor.DispatchPhaseResponseStarted
-		if errExec != nil {
-			phase = cliproxyexecutor.DispatchPhaseMaybeSent
-		}
-		result := executionResult(auth, provider, routeModel, errExec, phase)
-		if retryDirectiveAllowsRefresh(result.Disposition) {
-			result.Disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
-			if result.Error != nil {
-				result.Error.RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
+			if errCancel := claudeOAuthRequestCancellation(attemptCtx, auth, errExec); errCancel != nil {
+				errExec = errCancel
 			}
-		}
-		result.RuntimeOnly = runtimeOnly
-		result.Options = cloneExecutorOptions(execOpts)
-		decision := requestScopedActionDecision{err: errExec}
-		compactRequestFault := false
-		if errExec != nil {
-			result.RetryAfter = retryAfterFromError(errExec)
-			decision = m.applyRequestScopedErrorRule(auth, errExec, &result)
-			errExec = decision.err
-			if !decision.matched {
-				compactRequestFault = applyResponsesCompactErrorDisposition(execOpts, errExec, &result)
+			phase := cliproxyexecutor.DispatchPhaseResponseStarted
+			if errExec != nil {
+				phase = cliproxyexecutor.DispatchPhaseMaybeSent
 			}
-			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errExec, "execution_failed")
-			failureReason := "upstream_failure"
-			if isConnectionLifecycleError(errExec) {
-				failureReason = "request_canceled"
-			}
-			failureEvent := cliproxyexecutor.RouteTraceEvent{
-				Provider:     provider,
-				Model:        routeModel,
-				TargetModel:  execReq.Model,
-				Action:       "attempt.failed",
-				Reason:       failureReason,
-				ResultCode:   resultCode,
-				HTTPStatus:   httpStatus,
-				RetryAfterMS: retryAfterMS,
-				FinalTarget:  !retryDirectiveAllowsRedispatch(result.Disposition),
-			}
-			applyDispositionToRouteTrace(&failureEvent, result.Disposition, result.StateGeneration)
-			publishAuthRouteTraceEvent(pickOpts, auth, failureEvent)
-			resultAction := "result.recorded"
-			if isConnectionLifecycleError(errExec) {
-				resultAction = "result.observed"
-			} else {
-				recordResult(attemptCtx, result)
-			}
-			recordedEvent := cliproxyexecutor.RouteTraceEvent{
-				Provider:     provider,
-				Model:        routeModel,
-				TargetModel:  execReq.Model,
-				Action:       resultAction,
-				ResultCode:   resultCode,
-				HTTPStatus:   httpStatus,
-				RetryAfterMS: retryAfterMS,
-			}
-			applyDispositionToRouteTrace(&recordedEvent, result.Disposition, result.StateGeneration)
-			publishAuthRouteTraceEvent(pickOpts, auth, recordedEvent)
-			requestInvalid := !decision.matched && (compactRequestFault || isRequestInvalidError(errExec))
-			if decision.stop || requestInvalid || !retryDirectiveAllowsRedispatch(result.Disposition) {
-				reason := "retry_forbidden"
-				if decision.stop {
-					reason = "request_scoped_rule"
-				} else if requestInvalid {
-					reason = "request_invalid"
-				} else if result.Disposition.Outcome == cliproxyexecutor.ExecutionOutcomeUnknown {
-					reason = "outcome_unknown"
+			result := executionResult(
+				auth, provider, stateModelForExecution(auth, routeModel, execReq.Model), errExec, phase,
+			)
+			retryRoundFromContext(ctx).observeUpstreamError(errExec, result.Disposition)
+			if retryDirectiveAllowsRefresh(result.Disposition) {
+				result.Disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
+				if result.Error != nil {
+					result.Error.executionState().RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
 				}
-				stoppedEvent := cliproxyexecutor.RouteTraceEvent{
-					Provider:   provider,
-					Model:      routeModel,
-					Action:     "route.stopped",
-					Reason:     reason,
-					ResultCode: resultCode,
-					HTTPStatus: httpStatus,
+			}
+			result.RuntimeOnly = runtimeOnly
+			result.Options = cloneExecutorOptions(execOpts)
+			decision := requestScopedActionDecision{err: errExec}
+			compactRequestFault := false
+			if errExec != nil {
+				result.RetryAfter = retryAfterFromError(errExec)
+				decision = m.applyRequestScopedErrorRule(auth, errExec, &result)
+				errExec = decision.err
+				if !decision.matched {
+					compactRequestFault = applyResponsesCompactErrorDisposition(execOpts, errExec, &result)
 				}
-				applyDispositionToRouteTrace(&stoppedEvent, result.Disposition, result.StateGeneration)
-				publishAuthRouteTraceEvent(pickOpts, auth, stoppedEvent)
-				if decision.stop {
-					return zero, wrapRequestStopError(errExec)
+				resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errExec, "execution_failed")
+				failureReason := "upstream_failure"
+				if isConnectionLifecycleError(errExec) {
+					failureReason = "request_canceled"
 				}
-				return zero, errExec
+				failureEvent := cliproxyexecutor.RouteTraceEvent{
+					Provider:     provider,
+					Model:        routeModel,
+					TargetModel:  execReq.Model,
+					Action:       "attempt.failed",
+					Reason:       failureReason,
+					ResultCode:   resultCode,
+					HTTPStatus:   httpStatus,
+					RetryAfterMS: retryAfterMS,
+					FinalTarget:  !retryDirectiveAllowsRedispatch(result.Disposition),
+				}
+				applyDispositionToRouteTrace(&failureEvent, result.Disposition, result.StateGeneration)
+				publishAuthRouteTraceEvent(pickOpts, auth, failureEvent)
+				resultAction := "result.recorded"
+				if isConnectionLifecycleError(errExec) {
+					resultAction = "result.observed"
+				} else {
+					recordResult(attemptCtx, result)
+				}
+				recordedEvent := cliproxyexecutor.RouteTraceEvent{
+					Provider:     provider,
+					Model:        routeModel,
+					TargetModel:  execReq.Model,
+					Action:       resultAction,
+					ResultCode:   resultCode,
+					HTTPStatus:   httpStatus,
+					RetryAfterMS: retryAfterMS,
+				}
+				applyDispositionToRouteTrace(&recordedEvent, result.Disposition, result.StateGeneration)
+				publishAuthRouteTraceEvent(pickOpts, auth, recordedEvent)
+				requestInvalid := !decision.matched && (compactRequestFault || isRequestInvalidError(errExec))
+				if decision.stop || requestInvalid || !retryDirectiveAllowsRedispatch(result.Disposition) {
+					reason := "retry_forbidden"
+					if decision.stop {
+						reason = "request_scoped_rule"
+					} else if requestInvalid {
+						reason = "request_invalid"
+					} else if result.Disposition.Outcome == cliproxyexecutor.ExecutionOutcomeUnknown {
+						reason = "outcome_unknown"
+					}
+					stoppedEvent := cliproxyexecutor.RouteTraceEvent{
+						Provider:   provider,
+						Model:      routeModel,
+						Action:     "route.stopped",
+						Reason:     reason,
+						ResultCode: resultCode,
+						HTTPStatus: httpStatus,
+					}
+					applyDispositionToRouteTrace(&stoppedEvent, result.Disposition, result.StateGeneration)
+					publishAuthRouteTraceEvent(pickOpts, auth, stoppedEvent)
+					if decision.stop {
+						return zero, wrapRequestStopError(errExec)
+					}
+					return zero, errExec
+				}
+				lastErr = errExec
+				retryEvent := cliproxyexecutor.RouteTraceEvent{
+					Provider: provider,
+					Model:    routeModel,
+					Action:   "attempt.retry",
+					Reason:   string(result.Disposition.RetryDirective),
+				}
+				applyDispositionToRouteTrace(&retryEvent, result.Disposition, result.StateGeneration)
+				publishAuthRouteTraceEvent(pickOpts, auth, retryEvent)
+				if modelIndex+1 < len(aliases) &&
+					(result.Disposition.RetryDirective == cliproxyexecutor.RetryDirectiveNextModel ||
+						(result.Disposition.EffectScope == cliproxyexecutor.StateEffectScopeExactModel ||
+							result.Disposition.EffectScope == cliproxyexecutor.StateEffectScopeQuotaFamily) &&
+							(result.Disposition.RetryDirective == cliproxyexecutor.RetryDirectiveNextAuth ||
+								result.Disposition.RetryDirective == cliproxyexecutor.RetryDirectiveRetryAfter)) {
+					continue
+				}
+				if runtimeOnly {
+					homeAuthCount++
+				}
+				releaseLeaseNow()
+				continue credentialLoop
 			}
-			lastErr = errExec
-			retryEvent := cliproxyexecutor.RouteTraceEvent{
-				Provider: provider,
-				Model:    routeModel,
-				Action:   "attempt.retry",
-				Reason:   string(result.Disposition.RetryDirective),
+			m.persistAuthAffinity(result)
+			if opts.Stream {
+				streamEvent := cliproxyexecutor.RouteTraceEvent{
+					Provider:    provider,
+					Model:       routeModel,
+					TargetModel: execReq.Model,
+					Action:      "attempt.stream_started",
+					ResultCode:  "stream_started",
+					HTTPStatus:  http.StatusOK,
+				}
+				applyDispositionToRouteTrace(&streamEvent, result.Disposition, result.StateGeneration)
+				publishAuthRouteTraceEvent(pickOpts, auth, streamEvent)
+				if leaseTransfer != nil && leaseTransfer.claimed.Load() {
+					releaseLease = false
+				}
+				return resp, nil
 			}
-			applyDispositionToRouteTrace(&retryEvent, result.Disposition, result.StateGeneration)
-			publishAuthRouteTraceEvent(pickOpts, auth, retryEvent)
-			if runtimeOnly {
-				homeAuthCount++
-			}
-			releaseLeaseNow()
-			continue
-		}
-		if opts.Stream {
-			streamEvent := cliproxyexecutor.RouteTraceEvent{
+			completedEvent := cliproxyexecutor.RouteTraceEvent{
 				Provider:    provider,
 				Model:       routeModel,
 				TargetModel: execReq.Model,
-				Action:      "attempt.stream_started",
-				ResultCode:  "stream_started",
+				Action:      "attempt.completed",
+				ResultCode:  "success",
 				HTTPStatus:  http.StatusOK,
+				FinalTarget: true,
 			}
-			applyDispositionToRouteTrace(&streamEvent, result.Disposition, result.StateGeneration)
-			publishAuthRouteTraceEvent(pickOpts, auth, streamEvent)
-			if leaseTransfer != nil && leaseTransfer.claimed.Load() {
-				releaseLease = false
+			applyDispositionToRouteTrace(&completedEvent, result.Disposition, result.StateGeneration)
+			publishAuthRouteTraceEvent(pickOpts, auth, completedEvent)
+			recordResult(attemptCtx, result)
+			recordedEvent := cliproxyexecutor.RouteTraceEvent{
+				Provider:    provider,
+				Model:       routeModel,
+				TargetModel: execReq.Model,
+				Action:      "result.recorded",
+				ResultCode:  "success",
+				HTTPStatus:  http.StatusOK,
+				FinalTarget: true,
 			}
+			applyDispositionToRouteTrace(&recordedEvent, result.Disposition, result.StateGeneration)
+			publishAuthRouteTraceEvent(pickOpts, auth, recordedEvent)
 			return resp, nil
 		}
-		completedEvent := cliproxyexecutor.RouteTraceEvent{
-			Provider:    provider,
-			Model:       routeModel,
-			TargetModel: execReq.Model,
-			Action:      "attempt.completed",
-			ResultCode:  "success",
-			HTTPStatus:  http.StatusOK,
-			FinalTarget: true,
-		}
-		applyDispositionToRouteTrace(&completedEvent, result.Disposition, result.StateGeneration)
-		publishAuthRouteTraceEvent(pickOpts, auth, completedEvent)
-		recordResult(attemptCtx, result)
-		recordedEvent := cliproxyexecutor.RouteTraceEvent{
-			Provider:    provider,
-			Model:       routeModel,
-			TargetModel: execReq.Model,
-			Action:      "result.recorded",
-			ResultCode:  "success",
-			HTTPStatus:  http.StatusOK,
-			FinalTarget: true,
-		}
-		applyDispositionToRouteTrace(&recordedEvent, result.Disposition, result.StateGeneration)
-		publishAuthRouteTraceEvent(pickOpts, auth, recordedEvent)
-		return resp, nil
+		releaseLeaseNow()
 	}
 }
 
@@ -4818,6 +5563,7 @@ func (e *streamBootstrapError) Error() string {
 	return e.cause.Error()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *streamBootstrapError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -4832,6 +5578,7 @@ func (e *streamBootstrapError) ExecutionDisposition() cliproxyexecutor.Execution
 	return executionDispositionForError(e.cause, cliproxyexecutor.DispatchPhaseMaybeSent)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *streamBootstrapError) Headers() http.Header {
 	if e == nil {
 		return nil
@@ -4982,9 +5729,16 @@ func applyRequestAfterAuthInterceptor(
 	previousSession := CanonicalSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	currentSession := CanonicalSessionID(nextOpts.Headers, nextOpts.OriginalRequest, nextOpts.Metadata)
 	if previousSession != currentSession {
-		ctx = util.WithInferredSessionID(ctx, currentSession)
+		ctx = util.WithInferredSessionID(
+			ctx, inferredSessionID(nextOpts.Headers, nextOpts.OriginalRequest, nextOpts.Metadata),
+		)
 	}
-	return syncMetadataSessionToContext(ctx, nextOpts.Metadata), cloneExecutorRequest(resp.Request), nextOpts, nil
+	return syncMetadataSessionToContext(
+			ctx,
+			nextOpts.Metadata,
+		), cloneExecutorRequest(
+			resp.Request,
+		), nextOpts, nil
 }
 
 func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
@@ -5032,7 +5786,15 @@ func schedulerAttributeSensitive(key string) bool {
 		return true
 	}
 	switch key {
-	case "provider_key", "provider-key", "compat_name", "compat-name", "auth_index", "auth-index", "label", "source", "scope":
+	case "provider_key",
+		"provider-key",
+		"compat_name",
+		"compat-name",
+		"auth_index",
+		"auth-index",
+		"label",
+		"source",
+		"scope":
 		return false
 	}
 	sensitiveTokens := []string{
@@ -5110,8 +5872,15 @@ func builtinSchedulerStrategy(delegate string) (schedulerStrategy, bool) {
 	}
 }
 
-func pluginSchedulerCandidates(scheduler PluginScheduler, candidates []*Auth, model string) []*Auth {
+func (m *Manager) pluginSchedulerCandidates(
+	scheduler PluginScheduler,
+	candidates []*Auth,
+	model string,
+) []*Auth {
 	if scheduler == nil {
+		return nil
+	}
+	if state, ok := scheduler.(pluginSchedulerState); ok && !state.HasScheduler() {
 		return nil
 	}
 	across := false
@@ -5126,7 +5895,7 @@ func pluginSchedulerCandidates(scheduler PluginScheduler, candidates []*Auth, mo
 		if candidate == nil {
 			continue
 		}
-		if blocked, _, _ := isAuthBlockedForModel(candidate, model, now); blocked {
+		if blocked, _, _ := isAuthBlockedForModel(candidate, m.selectionModelForAuth(candidate, model), now); blocked {
 			continue
 		}
 		candidatePriority := authPriority(candidate)
@@ -5290,14 +6059,42 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
+func discardStreamChunks(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, err error) <-chan struct{} {
+	done := make(chan struct{})
 	if ch == nil {
-		return
+		close(done)
+		return done
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err == nil {
+		err = context.Cause(ctx)
+	}
+	if err == nil {
+		err = context.Canceled
 	}
 	go func() {
-		for range ch {
+		defer close(done)
+		timer := time.NewTimer(time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				return
+			case chunk, ok := <-ch:
+				if !ok {
+					return
+				}
+				if chunk.Acknowledge != nil {
+					chunk.Acknowledge(err)
+				}
+			}
 		}
 	}()
+	return done
 }
 
 func (m *Manager) executeStreamWithBootstrap(
@@ -5316,14 +6113,22 @@ func (m *Manager) executeStreamWithBootstrap(
 	if errStream != nil {
 		return nil, errStream
 	}
+	streamResult, errStream = validateStreamResult(streamResult, nil)
+	if errStream != nil {
+		return nil, errStream
+	}
 	buffered, closed, bootstrapErr := readStreamBootstrap(execCtx, streamResult.Chunks)
 	if bootstrapErr != nil {
-		discardStreamChunks(streamResult.Chunks)
+		discardStreamChunks(execCtx, streamResult.Chunks, bootstrapErr)
 		return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 	}
 	if closed && len(buffered) == 0 {
 		return nil, newStreamBootstrapError(
-			&Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true},
+			&Error{
+				Code:      "empty_stream",
+				Message:   "upstream stream closed before first payload",
+				Retryable: true,
+			},
 			streamResult.Headers,
 		)
 	}
@@ -5333,7 +6138,9 @@ func (m *Manager) executeStreamWithBootstrap(
 		close(closedCh)
 		remaining = closedCh
 	}
+	aliasResult.UpstreamModel = execReq.Model
 	return m.wrapStreamResultWithOptions(
+		execCtx,
 		execCtx,
 		streamAuth.Clone(),
 		streamProvider,
@@ -5358,6 +6165,7 @@ func (m *Manager) wrapStreamResult(
 ) *cliproxyexecutor.StreamResult {
 	return m.wrapStreamResultWithOptions(
 		execCtx,
+		execCtx,
 		streamAuth,
 		streamProvider,
 		routeModel,
@@ -5369,8 +6177,9 @@ func (m *Manager) wrapStreamResult(
 	)
 }
 
+// 上游尝试结束后仍需交付错误，交付取消由客户端 context 决定
 func (m *Manager) wrapStreamResultWithOptions(
-	execCtx context.Context,
+	execCtx, deliveryCtx context.Context,
 	streamAuth *Auth,
 	streamProvider string,
 	routeModel string,
@@ -5397,7 +6206,13 @@ func (m *Manager) wrapStreamResultWithOptions(
 			rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: aliasResult.OriginalAlias})
 		}
 		newResult := func(err error, phase cliproxyexecutor.DispatchPhase) Result {
-			result := executionResult(streamAuth, streamProvider, routeModel, err, phase)
+			result := executionResult(
+				streamAuth,
+				streamProvider,
+				stateModelForExecution(streamAuth, routeModel, aliasResult.UpstreamModel),
+				err,
+				phase,
+			)
 			result.Options = cloneExecutorOptions(execOpts)
 			return result
 		}
@@ -5406,7 +6221,10 @@ func (m *Manager) wrapStreamResultWithOptions(
 				return
 			}
 			failed = true
-			warnLogUpstreamFailure(streamCtx, streamAuth, streamProvider, routeModel, started, err, cliproxyexecutor.DispatchPhaseResponseStarted)
+			warnLogUpstreamFailure(
+				streamCtx, streamAuth, streamProvider, routeModel, started, err,
+				cliproxyexecutor.DispatchPhaseResponseStarted,
+			)
 			result := newResult(err, cliproxyexecutor.DispatchPhaseResponseStarted)
 			result.RetryAfter = retryAfterFromError(err)
 			m.applyRequestScopedErrorRule(streamAuth, err, &result)
@@ -5418,6 +6236,9 @@ func (m *Manager) wrapStreamResultWithOptions(
 				return
 			}
 			failed = true
+			if cancelAttempt, ok := streamCtx.Value(homeAttemptCancelContextKey{}).(context.CancelCauseFunc); ok {
+				defer cancelAttempt(err)
+			}
 			result := newResult(err, cliproxyexecutor.DispatchPhaseResponseStarted)
 			if result.Error != nil {
 				result.Error.Code = requestScopedErrorCode
@@ -5436,15 +6257,15 @@ func (m *Manager) wrapStreamResultWithOptions(
 				return false, nil
 			}
 			if !deliveryAware {
-				if streamCtx == nil {
+				if deliveryCtx == nil {
 					out <- chunk
 					return true, nil
 				}
 				select {
-				case <-streamCtx.Done():
+				case <-deliveryCtx.Done():
 					forward = false
 					publishStreamRouteTraceCancellation(
-						streamCtx, streamAuth, streamProvider, routeModel, streamCtx.Err(),
+						streamCtx, streamAuth, streamProvider, routeModel, deliveryCtx.Err(),
 					)
 					return false, nil
 				case out <- chunk:
@@ -5466,10 +6287,10 @@ func (m *Manager) wrapStreamResultWithOptions(
 				)
 			}
 			select {
-			case <-streamCtx.Done():
+			case <-deliveryCtx.Done():
 				forward = false
-				chunk.Acknowledge(streamCtx.Err())
-				return false, streamCtx.Err()
+				chunk.Acknowledge(deliveryCtx.Err())
+				return false, deliveryCtx.Err()
 			case out <- chunk:
 			}
 			select {
@@ -5478,23 +6299,23 @@ func (m *Manager) wrapStreamResultWithOptions(
 					forward = false
 				}
 				return errDelivery == nil, errDelivery
-			case <-streamCtx.Done():
+			case <-deliveryCtx.Done():
 				forward = false
-				chunk.Acknowledge(streamCtx.Err())
+				chunk.Acknowledge(deliveryCtx.Err())
 				select {
 				case errDelivery := <-delivery:
 					return errDelivery == nil, errDelivery
 				default:
-					return false, streamCtx.Err()
+					return false, deliveryCtx.Err()
 				}
 			}
 		}
-		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
+		emit := func(chunk cliproxyexecutor.StreamChunk) (bool, error) {
 			if chunk.Err == nil && !chunk.Terminal && len(chunk.Payload) == 0 {
 				if chunk.Acknowledge != nil {
 					chunk.Acknowledge(nil)
 				}
-				return true
+				return true, nil
 			}
 			if chunk.Err != nil && !deliveryAware {
 				recordUpstreamFailure(chunk.Err)
@@ -5505,17 +6326,17 @@ func (m *Manager) wrapStreamResultWithOptions(
 					if chunk.Acknowledge != nil {
 						chunk.Acknowledge(nil)
 					}
-					return true
+					return true, nil
 				}
 				chunk.Payload = payload
 			}
 			delivered, errDelivery := deliver(chunk)
 			if errDelivery != nil {
 				recordDeliveryFailure(errDelivery)
-				return false
+				return false, errDelivery
 			}
 			if !delivered {
-				return false
+				return false, nil
 			}
 			if chunk.Terminal {
 				sourceTerminalDelivered = true
@@ -5523,60 +6344,79 @@ func (m *Manager) wrapStreamResultWithOptions(
 			if chunk.Err != nil && deliveryAware {
 				recordUpstreamFailure(chunk.Err)
 			}
-			return true
+			return true, nil
 		}
 		for _, chunk := range buffered {
-			if ok := emit(chunk); !ok {
-				discardStreamChunks(streamChunks)
+			if ok, errDelivery := emit(chunk); !ok {
+				discardStreamChunks(streamCtx, streamChunks, errDelivery)
 				return
 			}
 			if chunk.Err != nil {
-				discardStreamChunks(streamChunks)
+				<-discardStreamChunks(streamCtx, streamChunks, chunk.Err)
 				return
 			}
 		}
-		if !deliveryAware {
-			for chunk := range streamChunks {
-				if ok := emit(chunk); !ok {
-					discardStreamChunks(streamChunks)
+		var deliveryDone <-chan struct{}
+		if deliveryCtx != nil {
+			deliveryDone = deliveryCtx.Done()
+		}
+		var drainDeadline <-chan time.Time
+		for {
+			var (
+				chunk cliproxyexecutor.StreamChunk
+				ok    bool
+			)
+			select {
+			case <-deliveryDone:
+				if deliveryAware {
+					recordDeliveryFailure(deliveryCtx.Err())
 					return
 				}
-				if chunk.Err != nil {
-					discardStreamChunks(streamChunks)
-					return
-				}
-			}
-		} else {
-			for {
-				var (
-					chunk cliproxyexecutor.StreamChunk
-					ok    bool
+				forward = false
+				quotaLease.Release()
+				publishStreamRouteTraceCancellation(
+					streamCtx, streamAuth, streamProvider, routeModel, deliveryCtx.Err(),
 				)
-				select {
-				case <-streamCtx.Done():
-					recordDeliveryFailure(streamCtx.Err())
-					return
-				case chunk, ok = <-streamChunks:
-				}
-				if !ok {
-					break
-				}
-				if ok := emit(chunk); !ok {
-					discardStreamChunks(streamChunks)
-					return
-				}
-				if chunk.Err != nil {
-					discardStreamChunks(streamChunks)
-					return
-				}
+				// 旧 SDK 仍接收源的终态错误，源未关闭时按现有清理上限结束等待
+				timer := time.NewTimer(time.Second)
+				// deliveryDone 随后置为 nil，该分支只创建一次计时器
+				// noinspection GoDeferInLoop
+				defer timer.Stop()
+				drainDeadline = timer.C
+				deliveryDone = nil
+				continue
+			case <-drainDeadline:
+				return
+			case chunk, ok = <-streamChunks:
 			}
-			if streamCtx.Err() != nil {
-				recordDeliveryFailure(streamCtx.Err())
+			if !ok {
+				break
+			}
+			if !forward {
+				if chunk.Err != nil {
+					recordUpstreamFailure(chunk.Err)
+					return
+				}
+				continue
+			}
+			if ok, errDelivery := emit(chunk); !ok {
+				discardStreamChunks(streamCtx, streamChunks, errDelivery)
 				return
 			}
+			if chunk.Err != nil {
+				<-discardStreamChunks(streamCtx, streamChunks, chunk.Err)
+				return
+			}
+		}
+		if !forward {
+			return
+		}
+		if deliveryAware && streamCtx.Err() != nil {
+			recordDeliveryFailure(streamCtx.Err())
+			return
 		}
 		if tail := finishForceMappedStreamChunks(rewriter); len(tail) > 0 {
-			if ok := emit(cliproxyexecutor.StreamChunk{Payload: tail}); !ok {
+			if ok, _ := emit(cliproxyexecutor.StreamChunk{Payload: tail}); !ok {
 				return
 			}
 		}
@@ -5590,7 +6430,7 @@ func (m *Manager) wrapStreamResultWithOptions(
 			return
 		}
 		if deliveryAware && !sourceTerminalDelivered {
-			if ok := emit(cliproxyexecutor.StreamChunk{Terminal: true}); !ok {
+			if ok, _ := emit(cliproxyexecutor.StreamChunk{Terminal: true}); !ok {
 				return
 			}
 		}
@@ -5622,7 +6462,10 @@ func sanitizeDownstreamWebsocketFallbackRequest(
 	return req
 }
 
-func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
+func ensureRequestedModelMetadata(
+	opts cliproxyexecutor.Options,
+	requestedModel string,
+) cliproxyexecutor.Options {
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
 		return opts
@@ -5664,17 +6507,22 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 	if ctx == nil {
 		return nil
 	}
+	requestSessionID := util.SessionIDFromContext(ctx)
 	sessionID := sessionMetadataString(metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey)
 	if sessionID == "" {
 		sessionID = sessionMetadataString(metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
 	}
 	if sessionID == "" {
-		if executionID := sessionMetadataString(metadata, cliproxyexecutor.ExecutionSessionMetadataKey); executionID != "" {
+		if executionID := sessionMetadataString(
+			metadata, cliproxyexecutor.ExecutionSessionMetadataKey,
+		); executionID != "" {
 			sessionID = executionID
 			if !strings.HasPrefix(sessionID, "execution:") {
 				sessionID = "execution:" + sessionID
 			}
-		} else if derivedID := sessionMetadataString(metadata, cliproxyexecutor.DerivedSessionIDMetadataKey); derivedID != "" {
+		} else if derivedID := sessionMetadataString(
+			metadata, cliproxyexecutor.DerivedSessionIDMetadataKey,
+		); derivedID != "" {
 			sessionID = derivedID
 			if !strings.HasPrefix(sessionID, "derived:") {
 				sessionID = "derived:" + sessionID
@@ -5701,8 +6549,12 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 		clientMeta.IsCompaction = metadataBool(metadata, cliproxyexecutor.IsCompactionMetadataKey)
 	}
 	ctx = logging.WithClientRequestMetadata(ctx, clientMeta)
-	if sessionMetadataString(metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey) != "" || sessionID == "" {
+	if sessionMetadataString(metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey) != "" ||
+		sessionID == "" {
 		return util.WithInferredSessionID(ctx, clientMeta.SessionID)
+	}
+	if requestSessionID != "" {
+		return util.WithInferredSessionID(ctx, requestSessionID)
 	}
 	return ctx
 }
@@ -5907,6 +6759,7 @@ func (m *Manager) assignAuthGenerationLocked(auth *Auth) {
 	if m == nil || auth == nil {
 		return
 	}
+	normalizeAuthModelStates(auth)
 	if job := m.autoRefreshJobs[auth.ID]; job != nil {
 		current := m.auths[auth.ID]
 		if current != nil && current.Generation == job.generation &&
@@ -5916,11 +6769,20 @@ func (m *Manager) assignAuthGenerationLocked(auth *Auth) {
 	}
 	auth.Generation = m.nextAuthGenerationLocked()
 	current := m.auths[auth.ID]
+	if current != nil {
+		auth.registrationGeneration = current.registrationGeneration
+	} else if auth.registrationGeneration == 0 {
+		auth.registrationGeneration = auth.Generation
+	}
 	auth.creditsHintManager = m
 	auth.creditsHintRemovalEpoch = m.authRemovalEpoch(auth.ID)
 	auth.creditsHintGeneration = auth.Generation
 	if current != nil {
 		auth.creditsHintGeneration = current.creditsHintGeneration
+	}
+	auth.creditsRetryAfter = time.Time{}
+	if current != nil && runtimeAuthCredentialsEqual(current, auth) {
+		auth.creditsRetryAfter = current.creditsRetryAfter
 	}
 	invalidateAntigravityCreditsHint(auth, current)
 	if current != nil && current.credentialGeneration != 0 &&
@@ -5995,10 +6857,12 @@ func (m *Manager) lockAuthMutation(ctx context.Context, id string) (func(), erro
 	}
 	var once sync.Once
 	return func() {
-		once.Do(func() {
-			unlockAuth()
-			m.authLoadGate.Release(1)
-		})
+		once.Do(
+			func() {
+				unlockAuth()
+				m.authLoadGate.Release(1)
+			},
+		)
 	}, nil
 }
 
@@ -6058,11 +6922,19 @@ func (m *Manager) lockAuthMutationWithinLoadGate(ctx context.Context, id string)
 }
 
 // PrepareRequestAuth prepares an auth using the same lifecycle rules as normal request execution.
-func (m *Manager) PrepareRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth) (*Auth, error) {
+func (m *Manager) PrepareRequestAuth(
+	ctx context.Context,
+	executor ProviderExecutor,
+	auth *Auth,
+) (*Auth, error) {
 	return m.prepareRequestAuth(ctx, executor, auth)
 }
 
-func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth) (*Auth, error) {
+func (m *Manager) prepareRequestAuth(
+	ctx context.Context,
+	executor ProviderExecutor,
+	auth *Auth,
+) (*Auth, error) {
 	if m == nil || executor == nil || auth == nil {
 		return auth, nil
 	}
@@ -6175,6 +7047,7 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 		if strings.TrimSpace(updated.ID) != id {
 			return target, fmt.Errorf("request auth preparation returned auth %q, want %q", updated.ID, id)
 		}
+		updated = mergeAuthContent(expected, expected, updated)
 
 		if !managed {
 			saved, errUpdate := m.Update(ctx, updated)
@@ -6270,13 +7143,26 @@ func selectionPredicate(ctx context.Context, opts cliproxyexecutor.Options) func
 	return eligibility.allows
 }
 
+func inferredSessionID(headers http.Header, body []byte, metadata map[string]any) string {
+	identity := CanonicalSessionID(headers, body, metadata)
+	for _, prefix := range []string{
+		"codex:", "header:", "affinity:", "conv:", "amp:", "clientreq:", "session:", "pck:",
+	} {
+		if raw, found := strings.CutPrefix(identity, prefix); found {
+			return raw
+		}
+	}
+	return identity
+}
+
+// ExtractSessionID 返回公开 SDK 的会话值，保留各来源的原始优先级
 func ExtractSessionID(headers http.Header, body []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, body, metadata)
 	for _, prefix := range []string{
 		"codex:", "header:", "affinity:", "conv:", "amp:", "clientreq:", "session:", "pck:",
 	} {
-		if after, ok := strings.CutPrefix(primary, prefix); ok {
-			return after
+		if raw, found := strings.CutPrefix(primary, prefix); found {
+			return raw
 		}
 	}
 	return primary
@@ -6433,7 +7319,9 @@ func extractMessageHashIDs(body []byte) (string, string) {
 		systemPrompt = truncateSessionText(extractMessageContent(gjson.GetBytes(body, "system")))
 	}
 	if systemPrompt == "" && firstUserMsg == "" {
-		systemPrompt = truncateSessionText(extractMessageContent(gjson.GetBytes(body, "systemInstruction.parts")))
+		systemPrompt = truncateSessionText(
+			extractMessageContent(gjson.GetBytes(body, "systemInstruction.parts")),
+		)
 		gjson.GetBytes(body, "contents").ForEach(
 			func(_, message gjson.Result) bool {
 				content := extractMessageContent(message.Get("parts"))
@@ -6540,10 +7428,14 @@ func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 		if pinSelectedAuthFromMetadata(meta) && pinnedAuthIDFromMetadata(meta) == "" {
 			meta[cliproxyexecutor.PinnedAuthMetadataKey] = authID
 		}
-		if callback, ok := meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok && callback != nil {
+		if callback, ok := meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok &&
+			callback != nil {
 			callback(authID)
 		}
-		if callback, ok := meta[cliproxyexecutor.SelectedAuthInfoCallbackMetadataKey].(func(cliproxyexecutor.SelectedAuthInfo)); ok && callback != nil {
+		if callback,
+			ok :=
+			meta[cliproxyexecutor.SelectedAuthInfoCallbackMetadataKey].(func(cliproxyexecutor.SelectedAuthInfo)); ok &&
+			callback != nil {
 			supportsWebsocket := authWebsocketsEnabled(auth)
 			callback(
 				cliproxyexecutor.SelectedAuthInfo{
@@ -6557,7 +7449,8 @@ func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 	}
 	if authIndex := strings.TrimSpace(auth.EnsureIndex()); authIndex != "" {
 		meta[cliproxyexecutor.SelectedAuthIndexMetadataKey] = authIndex
-		if callback, ok := meta[cliproxyexecutor.SelectedAuthIndexCallbackMetadataKey].(func(string)); ok && callback != nil {
+		if callback, ok := meta[cliproxyexecutor.SelectedAuthIndexCallbackMetadataKey].(func(string)); ok &&
+			callback != nil {
 			callback(authIndex)
 		}
 	}
@@ -6644,7 +7537,10 @@ func rewriteModelForAuth(model string, auth *Auth) string {
 	return strings.TrimPrefix(model, needle)
 }
 
-func (m *Manager) resolveExecutionAliasResultForRequested(auth *Auth, requestedModel string) OAuthModelAliasResult {
+func (m *Manager) resolveExecutionAliasResultForRequested(
+	auth *Auth,
+	requestedModel string,
+) OAuthModelAliasResult {
 	if result := homeForceMappingAliasResult(auth, requestedModel); result.ForceMapping {
 		return result
 	}
@@ -6700,11 +7596,18 @@ func (m *Manager) resolveAPIKeyModelAliasWithResult(auth *Auth, requestedModel s
 		return OAuthModelAliasResult{}
 	}
 
+	result := resolveModelAliasResultFromConfigModels(requestedModel, m.apiKeyModelAliasEntries(auth))
+	if result.UpstreamModel == "" {
+		result.UpstreamModel = requestedModel
+	}
+	return result
+}
+
+func (m *Manager) apiKeyModelAliasEntries(auth *Auth) []modelAliasEntry {
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
-		cfg = &internalconfig.Config{}
+		return nil
 	}
-
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	var models []modelAliasEntry
 	switch provider {
@@ -6744,22 +7647,17 @@ func (m *Manager) resolveAPIKeyModelAliasWithResult(auth *Auth, requestedModel s
 			compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 		}
 		if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
-			if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
+			if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider, auth); entry != nil {
 				models = asModelAliasEntries(entry.Models)
 			}
 		}
 	}
-	if len(models) == 0 {
-		return OAuthModelAliasResult{UpstreamModel: requestedModel}
-	}
-	result := resolveModelAliasResultFromConfigModels(requestedModel, models)
-	if result.UpstreamModel == "" {
-		result.UpstreamModel = requestedModel
-	}
-	return result
+	return models
 }
 
 // APIKeyConfigEntry is a generic interface for API key configurations.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type APIKeyConfigEntry interface {
 	GetAPIKey() string
 	GetBaseURL() string
@@ -6774,24 +7672,43 @@ func resolveAPIKeyConfig[T APIKeyConfigEntry](entries []T, auth *Auth) *T {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
+	if rawIndex, indexed := auth.Attributes[AttributeConfigIndex]; indexed {
+		index, err := strconv.Atoi(strings.TrimSpace(rawIndex))
+		if err != nil || index < 0 || index >= len(entries) {
+			return nil
+		}
+		entry := &entries[index]
+		if attrKey != "" && strings.TrimSpace((*entry).GetAPIKey()) != attrKey ||
+			attrBase != "" && strings.TrimSpace((*entry).GetBaseURL()) != attrBase {
+			return nil
+		}
+		return entry
+	}
+	var firstMatch *T
 	for i := range entries {
 		entry := &entries[i]
 		cfgKey := strings.TrimSpace((*entry).GetAPIKey())
 		cfgBase := strings.TrimSpace((*entry).GetBaseURL())
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
+		matches := attrKey != "" && strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase)
+		if attrKey == "" && attrBase != "" {
+			matches = strings.EqualFold(cfgBase, attrBase)
+		}
+		if !matches {
 			continue
 		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
+		if firstMatch == nil {
+			firstMatch = entry
 		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+		if settings, ok := any(*entry).(interface {
+			GetPrefix() string
+			GetProxyURL() string
+		}); ok && strings.EqualFold(strings.TrimSpace(settings.GetPrefix()), strings.TrimSpace(auth.Prefix)) &&
+			strings.EqualFold(strings.TrimSpace(settings.GetProxyURL()), strings.TrimSpace(auth.ProxyURL)) {
 			return entry
 		}
+	}
+	if firstMatch != nil {
+		return firstMatch
 	}
 	if attrKey != "" {
 		for i := range entries {
@@ -6851,6 +7768,7 @@ type apiKeyModelAliasTable map[string]map[string]string
 func resolveOpenAICompatConfig(
 	cfg *internalconfig.Config,
 	providerKey, compatName, authProvider string,
+	auths ...*Auth,
 ) *internalconfig.OpenAICompatibility {
 	if cfg == nil {
 		return nil
@@ -6864,6 +7782,41 @@ func resolveOpenAICompatConfig(
 	}
 	if v := strings.TrimSpace(authProvider); v != "" {
 		candidates = append(candidates, v)
+	}
+	if len(auths) > 0 && auths[0] != nil {
+		auth := auths[0]
+		if rawIndex, indexed := auth.Attributes[AttributeConfigIndex]; indexed {
+			index, err := strconv.Atoi(strings.TrimSpace(rawIndex))
+			if err != nil || index < 0 || index >= len(cfg.OpenAICompatibility) {
+				return nil
+			}
+			compat := &cfg.OpenAICompatibility[index]
+			if base := authAttribute(
+				auth, "base_url",
+			); compat.Disabled || base != "" && strings.TrimSpace(compat.BaseURL) != base {
+				return nil
+			}
+			if key := authAttribute(auth, AttributeAPIKey); key != "" {
+				keyMatches := false
+				for _, entry := range compat.APIKeyEntries {
+					keyMatches = keyMatches || strings.TrimSpace(entry.APIKey) == key
+				}
+				if !keyMatches {
+					return nil
+				}
+			}
+			if strings.TrimSpace(compat.Name) == "" && strings.EqualFold(
+				strings.TrimSpace(auth.Provider), "openai-compatibility",
+			) {
+				return compat
+			}
+			for _, candidate := range candidates {
+				if strings.EqualFold(strings.TrimSpace(compat.Name), candidate) {
+					return compat
+				}
+			}
+			return nil
+		}
 	}
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
@@ -6911,9 +7864,25 @@ func (m *Manager) unavailableSelectionError(candidates []*Auth, provider string,
 	m.mu.RUnlock()
 
 	now := time.Now()
-	_, cooldownCount, earliest := collectAvailableByPriority(
-		current, provider, model, cliproxyexecutor.Options{}, now,
-	)
+	cooldownCount := 0
+	unauthorizedCount := 0
+	var earliest time.Time
+	for _, candidate := range current {
+		_, count, unauthorized, retryAt := collectAvailableByPriority(
+			[]*Auth{
+				candidate,
+			},
+			provider,
+			m.ResolveExecutionModel(candidate, model),
+			cliproxyexecutor.Options{},
+			now,
+		)
+		cooldownCount += count
+		unauthorizedCount += unauthorized
+		if !retryAt.IsZero() && (earliest.IsZero() || retryAt.Before(earliest)) {
+			earliest = retryAt
+		}
+	}
 	lastCandidateErr := latestSelectionCandidateError(current, model)
 	if len(current) > 0 && cooldownCount == len(current) && !earliest.IsZero() {
 		providerForError := strings.TrimSpace(strings.ToLower(provider))
@@ -6922,6 +7891,13 @@ func (m *Manager) unavailableSelectionError(candidates []*Auth, provider string,
 		}
 		return newModelCooldownErrorWithCause(
 			model, providerForError, max(earliest.Sub(now), 0), lastCandidateErr,
+		)
+	}
+	if len(current) > 0 && unauthorizedCount == len(current) {
+		return NewTerminalAuthError(
+			&Error{
+				Code: "auth_unavailable", Message: "no auth available", HTTPStatus: http.StatusServiceUnavailable,
+			}, latestSelectionCandidateError(current, ""),
 		)
 	}
 	return newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
@@ -6951,10 +7927,23 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	if m == nil {
 		return 0, 0, 0
 	}
-	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
+	return int(
+			m.requestRetry.Load(),
+		), int(
+			m.maxRetryCredentials.Load(),
+		), time.Duration(
+			m.maxRetryInterval.Load(),
+		)
 }
 
-func (m *Manager) closestCooldownWait(ctx context.Context, opts cliproxyexecutor.Options, providers []string, model string, attempt int, status int) (time.Duration, bool) {
+func (m *Manager) closestCooldownWait(
+	ctx context.Context,
+	opts cliproxyexecutor.Options,
+	providers []string,
+	model string,
+	attempt int,
+	status int,
+) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
 	}
@@ -6971,33 +7960,35 @@ func (m *Manager) closestCooldownWait(ctx context.Context, opts cliproxyexecutor
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	eligibility.retryRound = 0
 	pinned := pinnedAuthIDFromMetadata(opts.Metadata)
-	modelKey := canonicalModelKey(model)
-	registryRef := registry.GetGlobalRegistry()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	found := false
 	var minWait time.Duration
 	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || (pinned != "" && auth.ID != pinned) || !eligibility.allows(auth) {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled ||
+			(pinned != "" && auth.ID != pinned) ||
+			!eligibility.allows(auth) {
 			continue
 		}
-		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		provider := executorKeyFromAuth(auth)
 		if _, ok := providerSet[provider]; !ok {
 			continue
 		}
 		if m.executors[provider] == nil {
 			continue
 		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(auth.ID, modelKey) {
+		if !m.authSupportsRouteModel(auth, model) {
 			continue
 		}
-		if thinking.HasContext1MTag(model) && !authSupportsContext1MModel(auth, model) {
+		if thinking.HasContext1MTag(model) && !m.executionModelSupportsContext1M(
+			auth, model, m.ResolveExecutionModel(auth, model),
+		) {
 			continue
 		}
 		if attempt >= effectiveRequestRetryLimit(auth, defaultRetry) {
 			continue
 		}
-		next, allowed := retryRoundStateEligible(auth, model, now)
+		next, allowed := retryRoundStateEligible(auth, m.selectionModelForAuth(auth, model), now)
 		if !allowed {
 			continue
 		}
@@ -7017,16 +8008,24 @@ func (m *Manager) closestCooldownWait(ctx context.Context, opts cliproxyexecutor
 	return minWait, found
 }
 
-func (m *Manager) shouldRetryAfterError(ctx context.Context, opts cliproxyexecutor.Options, err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
-	if err == nil || (ctx != nil && ctx.Err() != nil) || isRequestScopedError(err) || isRequestInvalidError(err) ||
+func (m *Manager) shouldRetryAfterError(
+	ctx context.Context,
+	opts cliproxyexecutor.Options,
+	err error,
+	attempt int,
+	providers []string,
+	model string,
+	maxWait time.Duration,
+) (time.Duration, bool) {
+	if err == nil || (ctx != nil && ctx.Err() != nil) || isRequestScopedError(err) ||
+		isRequestInvalidError(err) ||
 		isResponsesCompactRequestFaultError(opts, err) {
 		return 0, false
 	}
 	if statusCodeFromError(err) == http.StatusOK {
 		return 0, false
 	}
-	var homeBusy *HomeConcurrencyBusyError
-	if errors.As(err, &homeBusy) {
+	if _, ok := errors.AsType[*HomeConcurrencyBusyError](err); ok {
 		return 0, false
 	}
 	disposition := executionDispositionForError(err, cliproxyexecutor.DispatchPhaseMaybeSent)
@@ -7044,13 +8043,18 @@ func (m *Manager) shouldRetryAfterError(ctx context.Context, opts cliproxyexecut
 		if limit < 0 {
 			limit = max(state.defaultRetry, 0)
 		}
-		if attempt >= limit {
-			return 0, false
-		}
-		if attempt > 0 && len(state.attempted) == 0 {
+		if len(state.attempted) == 0 {
+			if limit <= 0 || attempt > limit || !isHomeCooldownError(err) || !state.hasHomeWait ||
+				state.homeWait <= 0 {
+				return 0, false
+			}
+		} else if attempt >= limit {
 			return 0, false
 		}
 		wait, found = state.homeWait, true
+		if state.maxCredentials > 0 && len(state.attempted) >= state.maxCredentials {
+			wait = 0
+		}
 	} else {
 		wait, found = m.closestCooldownWait(ctx, opts, providers, model, attempt, statusCodeFromError(err))
 	}
@@ -7202,6 +8206,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if isForceCooldownResult(result) {
 			disableCooling = false
 		}
+		if cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config); cfg != nil &&
+			cfg.QuotaExceeded.AntigravityCredits && AntigravityCreditsRequested(ctx) &&
+			strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+			if result.Success {
+				auth.creditsRetryAfter = time.Time{}
+			} else if !disableCooling && statusCodeFromResult(result.Error) == http.StatusTooManyRequests {
+				auth.creditsRetryAfter = now.Add(5 * time.Hour)
+			}
+		}
 		applyResultStateLocked(auth, result, now, disableCooling)
 		observeQuotaResultLocked(auth, result, ctx, now)
 		persistAuth = auth.Clone()
@@ -7266,6 +8279,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	unlockMutation()
 	mutationLocked = false
+	m.publishErrorEvent(result, persistAuth)
 	m.hook.OnResult(ctx, result)
 	m.updateSessionAffinity(result)
 }
@@ -7411,7 +8425,11 @@ func applyExactModelFailure(
 	if result.Error != nil {
 		state.StatusMessage = result.Error.Message
 	}
-	switch statusCodeFromResult(result.Error) {
+	cooldownStatus := statusCodeFromResult(result.Error)
+	if cooldownStatus == http.StatusBadRequest && isExplicitModelNotFoundError(result.Error, model) {
+		cooldownStatus = http.StatusNotFound
+	}
+	switch cooldownStatus {
 	case http.StatusNotFound:
 		if !disableCooling {
 			if result.RetryAfter != nil && *result.RetryAfter > 0 {
@@ -7437,26 +8455,34 @@ func applyExactModelFailure(
 		}
 		state.QuotaEpoch++
 		state.NextRetryAfter = next
-		applyCooldownFields(&state.Quota, QuotaState{
-			Exceeded:       true,
-			Reason:         "quota",
-			NextRecoverAt:  next,
-			BackoffLevel:   backoffLevel,
-			Generation:     nextStateGeneration(quota.Generation),
-			ResetAuthority: StateResetAuthoritySuccess,
-		})
+		applyCooldownFields(
+			&state.Quota, QuotaState{
+				Exceeded:       true,
+				Reason:         "quota",
+				NextRecoverAt:  next,
+				BackoffLevel:   backoffLevel,
+				Generation:     nextStateGeneration(quota.Generation),
+				ResetAuthority: StateResetAuthoritySuccess,
+			},
+		)
 	case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526:
-		state.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, result.RetryAfter, disableCooling)
+		state.NextRetryAfter = recoverableFailureRetryAfterWithHint(
+			now, result.RetryAfter, disableCooling, isForceCooldownResult(result),
+		)
 		state.Unavailable = !state.NextRetryAfter.IsZero()
 	}
-	if isForceCooldownResult(result) && state.NextRetryAfter.IsZero() {
-		state.NextRetryAfter = now.Add(transientErrorCooldown)
+	if isForceCooldownResult(result) {
+		state.Unavailable = true
+		if state.NextRetryAfter.IsZero() {
+			state.NextRetryAfter = now.Add(transientErrorCooldown)
+		}
 	}
-	if !state.NextRetryAfter.IsZero() && previousRetryAfter.After(now) && previousRetryAfter.After(state.NextRetryAfter) {
+	if !state.NextRetryAfter.IsZero() && previousRetryAfter.After(now) &&
+		previousRetryAfter.After(state.NextRetryAfter) {
 		state.NextRetryAfter = previousRetryAfter
 	}
 	if state.LastError != nil {
-		state.LastError.StateGeneration = state.Generation
+		state.LastError.executionState().StateGeneration = state.Generation
 	}
 }
 
@@ -7512,18 +8538,20 @@ func applyQuotaFamilyFailure(
 		state.EffectKey = family
 		state.ResetAuthority = StateResetAuthoritySuccess
 		state.Generation = nextStateGeneration(state.Generation)
-		applyCooldownFields(&state.Quota, QuotaState{
-			Exceeded:       true,
-			Reason:         "quota",
-			Family:         family,
-			NextRecoverAt:  next,
-			BackoffLevel:   backoffLevel,
-			Generation:     generation,
-			ResetAuthority: StateResetAuthoritySuccess,
-		})
+		applyCooldownFields(
+			&state.Quota, QuotaState{
+				Exceeded:       true,
+				Reason:         "quota",
+				Family:         family,
+				NextRecoverAt:  next,
+				BackoffLevel:   backoffLevel,
+				Generation:     generation,
+				ResetAuthority: StateResetAuthoritySuccess,
+			},
+		)
 		state.UpdatedAt = now
 		if state.LastError != nil {
-			state.LastError.StateGeneration = generation
+			state.LastError.executionState().StateGeneration = generation
 		}
 	}
 	refreshAuthFromModelStates(auth, now)
@@ -7565,11 +8593,13 @@ func applyQuotaFamilySuccess(
 		state.StatusMessage = ""
 		state.NextRetryAfter = time.Time{}
 		state.LastError = nil
-		applyCooldownFields(&state.Quota, QuotaState{
-			Family:       family,
-			BackoffLevel: backoffLevel,
-			Generation:   generation,
-		})
+		applyCooldownFields(
+			&state.Quota, QuotaState{
+				Family:       family,
+				BackoffLevel: backoffLevel,
+				Generation:   generation,
+			},
+		)
 		state.EffectScope = ""
 		state.EffectKey = ""
 		state.ResetAuthority = ""
@@ -7696,6 +8726,7 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 	}
 	unlockMutation()
 	mutationLocked = false
+	m.publishErrorEvent(result, persistAuth)
 	m.hook.OnResult(ctx, result)
 }
 
@@ -7713,7 +8744,8 @@ func isExplicitModelNotFoundError(err error, requestedModel string) bool {
 	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil {
-		if isModelNotFoundIdentifier(authErr.Code) || isStructuredModelNotFoundError(authErr.Message, requestedModel) {
+		if isModelNotFoundIdentifier(authErr.Code) ||
+			isStructuredModelNotFoundError(authErr.Message, requestedModel) {
 			return true
 		}
 	} else if isStructuredModelNotFoundError(err.Error(), requestedModel) {
@@ -7819,7 +8851,7 @@ func isExplicitModelNotFoundMessage(message, requestedModel string) bool {
 		return false
 	}
 	normalized := strings.NewReplacer("-", "_", " ", "_").Replace(lower)
-	if strings.Contains(normalized, "model_not_found") || strings.Contains(normalized, "unknown_model") {
+	if normalized == "model_not_found" || normalized == "unknown_model" {
 		return true
 	}
 	requested := strings.ToLower(strings.TrimSpace(requestedModel))
@@ -7850,6 +8882,60 @@ func isExactRequestedModelReference(message, requestedModel string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeAuthModelStates(auth *Auth) {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return
+	}
+	folded := make(map[string]*ModelState, len(auth.ModelStates))
+	for model, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		key := canonicalModelKey(model)
+		if key == "" {
+			key = model
+		}
+		candidate := state.Clone()
+		if candidate.EffectScope == cliproxyexecutor.StateEffectScopeExactModel &&
+			canonicalModelKey(candidate.EffectKey) == key {
+			candidate.EffectKey = key
+		}
+		folded[key] = mergeModelStates(folded[key], candidate, model == key)
+	}
+	auth.ModelStates = folded
+}
+
+func mergeModelStates(current, candidate *ModelState, preferCandidate bool) *ModelState {
+	if current == nil {
+		return candidate
+	}
+	winner, other := current, candidate
+	if candidate.Generation > current.Generation || (candidate.Generation == current.Generation &&
+		(candidate.UpdatedAt.After(current.UpdatedAt) ||
+			(candidate.UpdatedAt.Equal(current.UpdatedAt) &&
+				preferCandidate))) {
+		winner, other = candidate, current
+	}
+	quota := winner.Quota
+	if other.Quota.Generation > quota.Generation || (other.Quota.Generation == quota.Generation &&
+		other.Quota.ObservedAt.After(quota.ObservedAt)) {
+		applyCooldownFields(&quota, other.Quota)
+	}
+	if other.Quota.ObservedAt.After(quota.ObservedAt) {
+		quota.ObservedAt = other.Quota.ObservedAt
+		quota.Signals = other.Quota.Clone().Signals
+	}
+	winner.Quota = quota
+	winner.QuotaEpoch = max(winner.QuotaEpoch, other.QuotaEpoch)
+	if winner.Quota.Exceeded {
+		winner.Unavailable = true
+		if winner.Status != StatusDisabled {
+			winner.Status = StatusError
+		}
+	}
+	return winner
 }
 
 func findModelState(auth *Auth, model string) (*ModelState, string) {
@@ -7943,11 +9029,13 @@ func clearModelStateOnSuccess(state *ModelState, now time.Time) bool {
 	state.StatusMessage = ""
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
-	applyCooldownFields(&state.Quota, QuotaState{
-		Family:       family,
-		BackoffLevel: backoffLevel,
-		Generation:   quotaGeneration,
-	})
+	applyCooldownFields(
+		&state.Quota, QuotaState{
+			Family:       family,
+			BackoffLevel: backoffLevel,
+			Generation:   quotaGeneration,
+		},
+	)
 	state.EffectScope = ""
 	state.EffectKey = ""
 	state.ResetAuthority = ""
@@ -7960,9 +9048,10 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil || hasTerminalUnauthorizedAuthFailure(auth) || len(auth.ModelStates) == 0 {
 		return
 	}
-	credentialState := auth.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential &&
-		(auth.Unavailable || auth.LastError != nil || auth.ResetAuthority != "")
-	credentialQuota := auth.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential && auth.Quota.Exceeded
+	if auth.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential &&
+		(auth.Unavailable || auth.LastError != nil || auth.ResetAuthority != "" || auth.Quota.Exceeded) {
+		return
+	}
 	allUnavailable := true
 	earliestRetry := time.Time{}
 	quotaExceeded := false
@@ -8015,30 +9104,27 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 			}
 		}
 	}
-	if !credentialState {
-		auth.Unavailable = allUnavailable
-		if allUnavailable {
-			auth.NextRetryAfter = earliestRetry
-		} else {
-			auth.NextRetryAfter = time.Time{}
-		}
-	}
-	if credentialQuota {
-		return
+	auth.Unavailable = allUnavailable
+	if allUnavailable {
+		auth.NextRetryAfter = earliestRetry
+	} else {
+		auth.NextRetryAfter = time.Time{}
 	}
 	if quotaExceeded {
 		if multipleQuotaFamilies {
 			quotaFamily = ""
 		}
-		applyCooldownFields(&auth.Quota, QuotaState{
-			Exceeded:       true,
-			Reason:         "quota",
-			Family:         quotaFamily,
-			NextRecoverAt:  quotaRecover,
-			BackoffLevel:   maxBackoffLevel,
-			Generation:     quotaGeneration,
-			ResetAuthority: quotaResetAuthority,
-		})
+		applyCooldownFields(
+			&auth.Quota, QuotaState{
+				Exceeded:       true,
+				Reason:         "quota",
+				Family:         quotaFamily,
+				NextRecoverAt:  quotaRecover,
+				BackoffLevel:   maxBackoffLevel,
+				Generation:     quotaGeneration,
+				ResetAuthority: quotaResetAuthority,
+			},
+		)
 	} else {
 		applyCooldownFields(&auth.Quota, QuotaState{})
 	}
@@ -8092,7 +9178,8 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) bool {
 }
 
 func clearAuthState(auth *Auth, now time.Time, action StateResetAuthority) bool {
-	if auth == nil || hasTerminalUnauthorizedAuthFailure(auth) || !resetAuthorityAllows(auth.ResetAuthority, action) ||
+	if auth == nil || hasTerminalUnauthorizedAuthFailure(auth) ||
+		!resetAuthorityAllows(auth.ResetAuthority, action) ||
 		!resetAuthorityAllows(auth.Quota.ResetAuthority, action) {
 		return false
 	}
@@ -8107,11 +9194,13 @@ func clearAuthState(auth *Auth, now time.Time, action StateResetAuthority) bool 
 	auth.Unavailable = false
 	auth.Status = StatusActive
 	auth.StatusMessage = ""
-	applyCooldownFields(&auth.Quota, QuotaState{
-		Family:       family,
-		BackoffLevel: backoffLevel,
-		Generation:   quotaGeneration,
-	})
+	applyCooldownFields(
+		&auth.Quota, QuotaState{
+			Family:       family,
+			BackoffLevel: backoffLevel,
+			Generation:   quotaGeneration,
+		},
+	)
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.StateEffectScope = ""
@@ -8126,19 +9215,8 @@ func cloneError(err *Error) *Error {
 	if err == nil {
 		return nil
 	}
-	return &Error{
-		Code:            err.Code,
-		Message:         err.Message,
-		Retryable:       err.Retryable,
-		HTTPStatus:      err.HTTPStatus,
-		DispatchPhase:   err.DispatchPhase,
-		Outcome:         err.Outcome,
-		RetryDirective:  err.RetryDirective,
-		EffectScope:     err.EffectScope,
-		EffectKey:       err.EffectKey,
-		StateGeneration: err.StateGeneration,
-		cause:           err.cause,
-	}
+	cloned := *err
+	return errorWithState(&cloned, *err.executionState())
 }
 
 func statusCodeFromError(err error) int {
@@ -8155,6 +9233,7 @@ func statusCodeFromError(err error) int {
 	return 0
 }
 
+// noinspection GoDirectComparisonOfErrors
 func errorForResult(err error) *Error {
 	if err == nil {
 		return nil
@@ -8167,18 +9246,20 @@ func errorForResult(err error) *Error {
 			resultErr.HTTPStatus = statusCodeFromError(err)
 		}
 		if err != authErr {
-			resultErr.cause = err
+			resultErr.executionState().cause = err
 		}
 	} else {
-		resultErr = &Error{
-			Message:    err.Error(),
-			HTTPStatus: statusCodeFromError(err),
-			cause:      err,
-		}
+		resultErr = errorWithState(
+			&Error{
+				Message:    err.Error(),
+				HTTPStatus: statusCodeFromError(err),
+			}, errorState{cause: err},
+		)
+
 	}
 	switch {
 	case isRequestScopedError(err) || isRequestInvalidError(err):
-		// 请求本身导致的错误优先于范围更广的连接生命周期分类。
+		// 请求本身导致的错误优先于连接生命周期分类，后者覆盖范围更广
 		resultErr.Code = requestScopedErrorCode
 	case isTransientTransportError(err):
 		resultErr.Code = transientTransportErrorCode
@@ -8189,16 +9270,23 @@ func errorForResult(err error) *Error {
 		}
 	}
 	disposition := executionDispositionForError(err, cliproxyexecutor.DispatchPhaseMaybeSent)
-	resultErr.DispatchPhase = disposition.DispatchPhase
-	resultErr.Outcome = disposition.Outcome
-	resultErr.RetryDirective = disposition.RetryDirective
-	resultErr.EffectScope = disposition.EffectScope
-	resultErr.EffectKey = disposition.EffectKey
+	if resultErr.Code == "" && disposition.EffectScope == cliproxyexecutor.StateEffectScopeExactModel &&
+		isExplicitModelNotFoundError(
+			err, "",
+		) {
+		resultErr.Code = "model_not_found"
+	}
+	resultErr.executionState().DispatchPhase = disposition.DispatchPhase
+	resultErr.executionState().Outcome = disposition.Outcome
+	resultErr.executionState().RetryDirective = disposition.RetryDirective
+	resultErr.executionState().EffectScope = disposition.EffectScope
+	resultErr.executionState().EffectKey = disposition.EffectKey
 	return resultErr
 }
 
 func shouldSkipCredentialCooldown(err *Error) bool {
-	return isRequestScopedResultError(err) || isTransientTransportResultError(err) || isConnectionLifecycleResultError(err)
+	return isRequestScopedResultError(err) || isTransientTransportResultError(err) ||
+		isConnectionLifecycleResultError(err)
 }
 
 func isTransientTransportError(err error) bool {
@@ -8209,7 +9297,8 @@ func isTransientTransportError(err error) bool {
 	var dispositionErr cliproxyexecutor.ExecutionDispositionError
 	if errors.As(err, &dispositionErr) && dispositionErr != nil {
 		disposition := dispositionErr.ExecutionDisposition()
-		if disposition.DispatchPhase != "" && disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseNotSent {
+		if disposition.DispatchPhase != "" &&
+			disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseNotSent {
 			return false
 		}
 		if disposition.Outcome == cliproxyexecutor.ExecutionOutcomeUnknown ||
@@ -8232,7 +9321,7 @@ func isTransientTransportError(err error) bool {
 
 func isTransientTransportResultError(err *Error) bool {
 	return err != nil && err.HTTPStatus == 0 &&
-		(err.Code == transientTransportErrorCode || isTransientTransportError(err.cause))
+		(err.Code == transientTransportErrorCode || isTransientTransportError(err.executionState().cause))
 }
 
 func isConnectionLifecycleError(err error) bool {
@@ -8310,12 +9399,29 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
 	)
 }
 
+// HasUnauthorizedAuthFailure 读取无刷新计划和重试期限的终止鉴权错误
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func HasUnauthorizedAuthFailure(auth *Auth) bool {
+	return auth != nil && auth.Status == StatusError && hasUnauthorizedAuthFailure(auth)
+}
+
+// HasDisabledInvalidGrantFailure 读取已禁用凭证的 invalid_grant 错误
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func HasDisabledInvalidGrantFailure(auth *Auth) bool {
+	return auth != nil && (auth.Disabled || auth.Status == StatusDisabled) && auth.LastError != nil &&
+		(isInvalidGrantResultError(auth.LastError) || isInvalidGrantErrorMessage(auth.LastError.Message) ||
+			isInvalidGrantErrorMessage(auth.LastError.Code))
+}
+
 func hasTerminalUnauthorizedAuthFailure(auth *Auth) bool {
 	return auth != nil && auth.Unavailable && (auth.Status == StatusError || auth.Status == StatusDisabled) &&
 		auth.NextRefreshAfter.IsZero() && auth.NextRetryAfter.IsZero() && hasUnauthorizedAuthFailure(auth) &&
 		isInvalidGrantResultError(auth.LastError)
 }
 
+// noinspection GoDirectComparisonOfErrors
 func refreshErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
@@ -8329,10 +9435,10 @@ func refreshErrorFromError(err error) *Error {
 	if errors.As(err, &source) && source != nil {
 		authErr = cloneError(source)
 		if err != source {
-			authErr.cause = err
+			authErr.executionState().cause = err
 		}
 	} else {
-		authErr = &Error{Message: err.Error(), cause: err}
+		authErr = errorWithState(&Error{Message: err.Error()}, errorState{cause: err})
 	}
 	authErr.HTTPStatus = statusCode
 	if statusCode == http.StatusUnauthorized {
@@ -8416,7 +9522,8 @@ func isModelSupportError(err error) bool {
 
 func isInvalidGrantErrorMessage(message string) bool {
 	lower := strings.ToLower(message)
-	return strings.Contains(lower, "invalid_grant") || strings.Contains(lower, "encountered invalidated oauth token")
+	return strings.Contains(lower, "invalid_grant") ||
+		strings.Contains(lower, "encountered invalidated oauth token")
 }
 
 func isInvalidGrantError(err error) bool {
@@ -8534,7 +9641,7 @@ func applyAuthFailureState(
 	previousRetryAfter := auth.NextRetryAfter
 	previousScope := auth.StateEffectScope
 	if previousScope == "" && auth.LastError != nil {
-		previousScope = auth.LastError.EffectScope
+		previousScope = auth.LastError.executionState().EffectScope
 	}
 	credentialState := previousScope == cliproxyexecutor.StateEffectScopeCredential ||
 		previousScope == "" && (!hasModelError(auth, now) || hasCredentialQuotaCooldownState(auth))
@@ -8543,7 +9650,8 @@ func applyAuthFailureState(
 		applyCooldownFields(&auth.Quota, QuotaState{Generation: auth.Quota.Generation})
 	}
 	defer func() {
-		if !auth.NextRetryAfter.IsZero() && previousRetryAfter.After(now) && previousRetryAfter.After(auth.NextRetryAfter) {
+		if !auth.NextRetryAfter.IsZero() && previousRetryAfter.After(now) &&
+			previousRetryAfter.After(auth.NextRetryAfter) {
 			auth.NextRetryAfter = previousRetryAfter.Round(0)
 		}
 		auth.StateEffectScope = cliproxyexecutor.StateEffectScopeCredential
@@ -8552,7 +9660,7 @@ func applyAuthFailureState(
 		auth.StateGeneration = nextStateGeneration(auth.StateGeneration)
 		auth.UpdatedAt = now
 		if auth.LastError != nil {
-			auth.LastError.StateGeneration = auth.StateGeneration
+			auth.LastError.executionState().StateGeneration = auth.StateGeneration
 		}
 	}()
 
@@ -8568,14 +9676,16 @@ func applyAuthFailureState(
 	if isCloudflareChallengeResultError(resultErr) {
 		auth.StatusMessage = "cloudflare challenge"
 		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)
-		applyCooldownFields(&auth.Quota, QuotaState{
-			Exceeded:       true,
-			Reason:         "cloudflare challenge",
-			NextRecoverAt:  next,
-			BackoffLevel:   backoffLevel,
-			Generation:     nextStateGeneration(auth.Quota.Generation),
-			ResetAuthority: StateResetAuthoritySuccess,
-		})
+		applyCooldownFields(
+			&auth.Quota, QuotaState{
+				Exceeded:       true,
+				Reason:         "cloudflare challenge",
+				NextRecoverAt:  next,
+				BackoffLevel:   backoffLevel,
+				Generation:     nextStateGeneration(auth.Quota.Generation),
+				ResetAuthority: StateResetAuthoritySuccess,
+			},
+		)
 		auth.NextRetryAfter = next
 		return
 	}
@@ -8636,15 +9746,23 @@ func applyAuthFailureState(
 		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526:
 		auth.StatusMessage = "transient upstream error"
-		auth.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, retryAfter, disableCooling)
+		auth.NextRetryAfter = recoverableFailureRetryAfterWithHint(
+			now,
+			retryAfter,
+			disableCooling,
+			forceCooldown,
+		)
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	default:
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
 	}
-	if forceCooldown && auth.NextRetryAfter.IsZero() {
-		auth.NextRetryAfter = now.Add(transientErrorCooldown)
+	if forceCooldown {
+		auth.Unavailable = true
+		if auth.NextRetryAfter.IsZero() {
+			auth.NextRetryAfter = now.Add(transientErrorCooldown)
+		}
 	}
 }
 
@@ -8684,7 +9802,7 @@ func (m *Manager) List() []*Auth {
 	defer m.mu.RUnlock()
 	list := make([]*Auth, 0, len(m.auths))
 	for _, auth := range m.auths {
-		list = append(list, auth.Clone())
+		list = append(list, authUpdateSnapshot(auth))
 	}
 	return list
 }
@@ -8701,7 +9819,7 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	if !ok {
 		return nil, false
 	}
-	return auth.Clone(), true
+	return authUpdateSnapshot(auth), true
 }
 
 // GetExecutionSessionAuthByID retrieves a Home runtime auth scoped to an execution session.
@@ -8715,7 +9833,8 @@ func (m *Manager) GetExecutionSessionAuthByID(sessionID string, authID string) (
 	defer m.mu.RUnlock()
 	sessionAuths := m.homeRuntimeAuths[sessionID]
 	auth := sessionAuths[authID]
-	if auth == nil {
+	owner := m.homeRuntimeAuthOwners[sessionID][authID]
+	if auth == nil || owner == nil || !owner.Active() {
 		return nil, false
 	}
 	return auth.Clone(), true
@@ -8780,11 +9899,11 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 	m.mu.Lock()
 	var selections []*HomeDispatchSelection
 	if sessionID == CloseAllExecutionSessionsID {
-		m.clearHomeRuntimeAuthsLocked()
 		selections = m.takeAllHomeSessionSelectionsLocked()
+		m.clearHomeRuntimeAuthsLocked()
 	} else {
-		m.clearHomeRuntimeAuthsForSessionLocked(sessionID)
 		selections = m.takeHomeSessionSelectionsLocked(sessionID)
+		m.clearHomeRuntimeAuthsForSessionLocked(sessionID)
 	}
 	executors := make([]ProviderExecutor, 0, len(m.executors))
 	for _, exec := range m.executors {
@@ -8819,7 +9938,7 @@ func (m *Manager) currentSelectableAuth(
 	if current == nil || current.Disabled {
 		return nil, ""
 	}
-	providerKey := strings.ToLower(strings.TrimSpace(current.Provider))
+	providerKey := executorKeyFromAuth(current)
 	if len(providers) > 0 {
 		if _, allowed := providers[providerKey]; !allowed {
 			return nil, ""
@@ -8831,16 +9950,17 @@ func (m *Manager) currentSelectableAuth(
 	if _, used := tried[current.ID]; used {
 		return nil, ""
 	}
-	allowBlocked := len(allowModelBlock) > 0 && allowModelBlock[0]
-	if blocked, _, _ := isAuthBlockedForModel(current, model, time.Now()); blocked && !allowBlocked {
+	stateModel := m.selectionModelForAuth(current, model)
+	allowBlocked := stateModel == model && len(allowModelBlock) > 0 && allowModelBlock[0]
+	if blocked, _, _ := isAuthBlockedForModel(current, stateModel, time.Now()); blocked && !allowBlocked {
 		return nil, ""
 	}
-	modelKey := canonicalModelKey(model)
-	registryRef := registry.GetGlobalRegistry()
-	if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(current.ID, modelKey) {
+	if !m.authSupportsRouteModel(current, model) {
 		return nil, ""
 	}
-	if thinking.HasContext1MTag(model) && !authSupportsContext1MModel(current, model) {
+	if thinking.HasContext1MTag(model) && !m.executionModelSupportsContext1M(
+		current, model, m.ResolveExecutionModel(current, model),
+	) {
 		return nil, ""
 	}
 	return current.Clone(), providerKey
@@ -8850,17 +9970,14 @@ func (m *Manager) context1MUnavailableSelectionError(candidates []*Auth, provide
 	if !thinking.HasContext1MTag(model) {
 		return m.unavailableSelectionError(candidates, provider, model)
 	}
-	modelKey := canonicalModelKey(model)
-	registryRef := registry.GetGlobalRegistry()
 	hasBaseSupport := false
 	hasContext1MSupport := false
 	for _, candidate := range candidates {
-		if candidate == nil || modelKey == "" || registryRef == nil ||
-			!registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+		if candidate == nil || !m.authSupportsRouteModel(candidate, model) {
 			continue
 		}
 		hasBaseSupport = true
-		if authSupportsContext1MModel(candidate, model) {
+		if m.executionModelSupportsContext1M(candidate, model, m.ResolveExecutionModel(candidate, model)) {
 			hasContext1MSupport = true
 			break
 		}
@@ -8915,9 +10032,10 @@ func (m *Manager) PickNext(
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
 	}
+	m.applyAuthAffinity(&opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	requestPredicate := selectionPredicate(ctx, opts)
-	schedulerPredicate := combineSelectionPredicates(requestPredicate, context1MSelectionPredicate(model))
+	schedulerPredicate := combineSelectionPredicates(requestPredicate, m.context1MSelectionPredicate(model))
 
 	var traceEvents []cliproxyexecutor.RouteTraceEvent
 	m.mu.RLock()
@@ -8948,11 +10066,10 @@ func (m *Manager) PickNext(
 			modelKey = strings.TrimSpace(parsed.ModelName)
 		}
 	}
-	registryRef := registry.GetGlobalRegistry()
 	context1MUnsupported := false
 	for _, authID := range sortedAuthIDs(m.auths) {
 		candidate := m.auths[authID]
-		if candidate == nil || candidate.Provider != provider {
+		if candidate == nil || executorKeyFromAuth(candidate) != provider {
 			continue
 		}
 		m.recordRouteDecisionCandidate(opts, candidate, model)
@@ -8972,11 +10089,13 @@ func (m *Manager) PickNext(
 			appendCandidateExcluded(&traceEvents, opts, candidate, model, "already_tried")
 			continue
 		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+		if modelKey != "" && !m.authSupportsRouteModel(candidate, model) {
 			appendCandidateExcluded(&traceEvents, opts, candidate, model, "model_unsupported")
 			continue
 		}
-		if thinking.HasContext1MTag(model) && !authSupportsContext1MModel(candidate, model) {
+		if thinking.HasContext1MTag(model) && !m.executionModelSupportsContext1M(
+			candidate, model, m.ResolveExecutionModel(candidate, model),
+		) {
 			context1MUnsupported = true
 			appendCandidateExcluded(&traceEvents, opts, candidate, model, "context_1m_unsupported")
 			continue
@@ -8991,7 +10110,11 @@ func (m *Manager) PickNext(
 		}
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	pluginCandidates := pluginSchedulerCandidates(pluginScheduler, candidates, model)
+	candidates, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model)
+	if errAvailable != nil {
+		return nil, nil, errAvailable
+	}
+	pluginCandidates := m.pluginSchedulerCandidates(pluginScheduler, candidates, model)
 	pluginHandled := false
 	allowedProviders := map[string]struct{}{strings.ToLower(strings.TrimSpace(provider)): {}}
 	for len(pluginCandidates) > 0 {
@@ -9042,7 +10165,9 @@ func (m *Manager) PickNext(
 	var stickySelector *SessionAffinitySelector
 	if sessionSelector, ok := selector.(*SessionAffinitySelector); ok {
 		stickySelector = sessionSelector
-		if sticky, rule := stickySelector.pickStickyForModelWithRule(provider, model, opts, candidates); sticky != nil {
+		if sticky, rule := stickySelector.pickStickyForModelWithRule(
+			provider, model, opts, candidates, m.selectionModelForAuth,
+		); sticky != nil {
 			if current, _ := m.currentSelectableAuth(
 				sticky.ID, model, allowedProviders, requestPredicate, tried,
 			); current != nil {
@@ -9187,9 +10312,10 @@ func (m *Manager) pickNextMixed(
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
+	m.applyAuthAffinity(&opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	requestPredicate := selectionPredicate(ctx, opts)
-	schedulerPredicate := combineSelectionPredicates(requestPredicate, context1MSelectionPredicate(model))
+	schedulerPredicate := combineSelectionPredicates(requestPredicate, m.context1MSelectionPredicate(model))
 
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -9215,7 +10341,6 @@ func (m *Manager) pickNextMixed(
 			modelKey = strings.TrimSpace(parsed.ModelName)
 		}
 	}
-	registryRef := registry.GetGlobalRegistry()
 	context1MUnsupported := false
 	for _, authID := range sortedAuthIDs(m.auths) {
 		candidate := m.auths[authID]
@@ -9235,7 +10360,7 @@ func (m *Manager) pickNextMixed(
 			appendCandidateExcluded(&traceEvents, opts, candidate, model, "request_filter")
 			continue
 		}
-		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
+		providerKey := executorKeyFromAuth(candidate)
 		if providerKey == "" {
 			appendCandidateExcluded(&traceEvents, opts, candidate, model, "provider_missing")
 			continue
@@ -9252,11 +10377,13 @@ func (m *Manager) pickNextMixed(
 			appendCandidateExcluded(&traceEvents, opts, candidate, model, "executor_not_registered")
 			continue
 		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+		if modelKey != "" && !m.authSupportsRouteModel(candidate, model) {
 			appendCandidateExcluded(&traceEvents, opts, candidate, model, "model_unsupported")
 			continue
 		}
-		if thinking.HasContext1MTag(model) && !authSupportsContext1MModel(candidate, model) {
+		if thinking.HasContext1MTag(model) && !m.executionModelSupportsContext1M(
+			candidate, model, m.ResolveExecutionModel(candidate, model),
+		) {
 			context1MUnsupported = true
 			appendCandidateExcluded(&traceEvents, opts, candidate, model, "context_1m_unsupported")
 			continue
@@ -9274,7 +10401,11 @@ func (m *Manager) pickNextMixed(
 		}
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	pluginCandidates := pluginSchedulerCandidates(pluginScheduler, candidates, model)
+	candidates, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model)
+	if errAvailable != nil {
+		return nil, nil, "", errAvailable
+	}
+	pluginCandidates := m.pluginSchedulerCandidates(pluginScheduler, candidates, model)
 	pluginHandled := false
 	for len(pluginCandidates) > 0 {
 		selected, handled, strategy, errPick := m.pickViaPluginScheduler(
@@ -9328,7 +10459,9 @@ func (m *Manager) pickNextMixed(
 	var stickySelector *SessionAffinitySelector
 	if sessionSelector, ok := selector.(*SessionAffinitySelector); ok {
 		stickySelector = sessionSelector
-		if sticky, rule := stickySelector.pickStickyForModelWithRule("mixed", model, opts, candidates); sticky != nil {
+		if sticky, rule := stickySelector.pickStickyForModelWithRule(
+			"mixed", model, opts, candidates, m.selectionModelForAuth,
+		); sticky != nil {
 			if current, providerKey := m.currentSelectableAuth(
 				sticky.ID, model, providerSet, requestPredicate, tried,
 			); current != nil {
@@ -9657,7 +10790,7 @@ func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
 	if apiKey == "" || ctx == nil {
 		return
 	}
-	ginCtx, ok := util.GinContextValue(ctx).(interface{ Set(string, any) })
+	ginCtx, ok := util.GinContextValue(ctx).(interface{ Set(any, any) })
 	if !ok || ginCtx == nil {
 		return
 	}
@@ -9692,7 +10825,7 @@ func homeQueryCredentialFromContext(ctx context.Context) (string, bool) {
 			return apiKey, true
 		}
 	}
-	ginCtx, ok := util.GinContextValue(ctx).(interface{ Get(string) (any, bool) })
+	ginCtx, ok := util.GinContextValue(ctx).(interface{ Get(any) (any, bool) })
 	if !ok || ginCtx == nil {
 		return "", false
 	}
@@ -9742,8 +10875,8 @@ func (m *Manager) clearHomeRuntimeAuths() {
 		return
 	}
 	m.mu.Lock()
-	m.clearHomeRuntimeAuthsLocked()
 	selections := m.takeAllHomeSessionSelectionsLocked()
+	m.clearHomeRuntimeAuthsLocked()
 	m.mu.Unlock()
 	m.homeSessionAliases.clear()
 	for _, selection := range selections {
@@ -9775,47 +10908,44 @@ func homeRuntimeExecutorKey(auth *Auth) string {
 	return strings.ToLower(strings.TrimSpace(auth.Provider))
 }
 
-func (m *Manager) clearHomeRuntimeAuthsForProviderLocked(provider string) {
+func (m *Manager) clearHomeRuntimeAuthsForProviderLocked(provider string) []*HomeDispatchSelection {
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" || m.homeRuntimeAuths == nil {
-		return
+	if provider == "" {
+		return nil
 	}
+	var ended []*HomeDispatchSelection
 	for sessionID, sessionAuths := range m.homeRuntimeAuths {
 		for authID, auth := range sessionAuths {
 			if homeRuntimeExecutorKey(auth) == provider {
+				if owner := m.homeRuntimeAuthOwners[sessionID][authID]; owner != nil {
+					ended = append(ended, owner)
+				}
 				delete(sessionAuths, authID)
+				delete(m.homeRuntimeAuthOwners[sessionID], authID)
 			}
 		}
 		if len(sessionAuths) == 0 {
 			delete(m.homeRuntimeAuths, sessionID)
 		}
+		if len(m.homeRuntimeAuthOwners[sessionID]) == 0 {
+			delete(m.homeRuntimeAuthOwners, sessionID)
+		}
 	}
-}
-
-func (m *Manager) rememberHomeRuntimeAuth(sessionID string, auth *Auth) {
-	sessionID = strings.TrimSpace(sessionID)
-	authID := ""
-	if auth != nil {
-		authID = strings.TrimSpace(auth.ID)
+	for sessionID, selections := range m.homeSessionSelections {
+		for key, selection := range selections {
+			if homeRuntimeExecutorKey(selection.CloneAuth()) == provider {
+				ended = append(ended, selection)
+				delete(selections, key)
+			}
+		}
+		if len(selections) == 0 {
+			delete(m.homeSessionSelections, sessionID)
+		}
 	}
-	if m == nil || auth == nil || sessionID == "" || authID == "" {
-		return
+	for _, selection := range ended {
+		selection.ended.Store(true)
 	}
-	m.mu.Lock()
-	if _, removed := m.removedAuths[authID]; removed {
-		m.mu.Unlock()
-		return
-	}
-	if m.homeRuntimeAuths == nil {
-		m.homeRuntimeAuths = make(map[string]map[string]*Auth)
-	}
-	sessionAuths := m.homeRuntimeAuths[sessionID]
-	if sessionAuths == nil {
-		sessionAuths = make(map[string]*Auth)
-		m.homeRuntimeAuths[sessionID] = sessionAuths
-	}
-	sessionAuths[authID] = auth.Clone()
-	m.mu.Unlock()
+	return ended
 }
 
 func (m *Manager) compareAndSwapHomeRuntimeAuth(
@@ -9855,7 +10985,9 @@ func (m *Manager) compareAndSwapHomeRuntimeAuth(
 		return false
 	}
 	current := sessionAuths[authID]
-	if current == nil || current.Generation != 0 ||
+	owner := m.homeRuntimeAuthOwners[sessionID][authID]
+	if owner == nil || owner != expected.homeRuntimeOwner || !owner.Active() ||
+		current == nil || current.Generation != 0 ||
 		homeRuntimeExecutorKey(current) != executorKey ||
 		strings.TrimSpace(current.Index) != strings.TrimSpace(expected.Index) ||
 		!runtimeAuthCredentialsEqual(current, expected) {
@@ -9864,6 +10996,8 @@ func (m *Manager) compareAndSwapHomeRuntimeAuth(
 		return false
 	}
 	next := refreshed.Clone()
+	preserveHomeRoutingAttributes(next, owner.CloneAuth())
+	next.homeRuntimeOwner = owner
 	if !next.indexAssigned && strings.TrimSpace(next.Index) == "" {
 		next.Index = current.Index
 		next.indexAssigned = current.indexAssigned
@@ -9886,7 +11020,9 @@ func (m *Manager) compareAndSwapHomeRuntimeAuth(
 	} else {
 		committed = commit()
 	}
-	if !committed {
+	if committed {
+		owner.ReplaceAuth(next)
+	} else {
 		sessionAuths[authID] = current
 	}
 	m.mu.Unlock()
@@ -9900,11 +11036,8 @@ func (m *Manager) homeRuntimeAuthByID(sessionID string, authID string) (*Auth, P
 	if m == nil || sessionID == "" || authID == "" {
 		return nil, nil, "", false
 	}
-	m.mu.RLock()
-	sessionAuths := m.homeRuntimeAuths[sessionID]
-	auth := sessionAuths[authID]
-	m.mu.RUnlock()
-	if auth == nil {
+	auth, found := m.GetExecutionSessionAuthByID(sessionID, authID)
+	if !found {
 		return nil, nil, "", false
 	}
 	providerKey := homeRuntimeExecutorKey(auth)
@@ -10033,9 +11166,27 @@ func (m *Manager) persistLocked(
 	if store == nil || removed && (!allowRecreate || !removedAtStart || currentSeq != removedSeq) {
 		return false, nil
 	}
-	savedPath, err := store.Save(ctx, auth)
+	if auth.Storage != nil {
+		if _, independent := auth.Storage.(PersistenceTokenStorage); !independent {
+			return false, fmt.Errorf(
+				"token storage %T must implement CloneForPersistence for manager persistence; "+
+					"direct Save requires caller-owned storage", auth.Storage,
+			)
+		}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	capture := &persistedVersionCapture{}
+	savedPath, err := store.Save(context.WithValue(ctx, persistedVersionCaptureContextKey{}, capture), auth)
 	if err == nil && strings.TrimSpace(savedPath) != "" {
-		if version, errVersion := PersistedVersionForAuth(savedPath, auth); errVersion == nil {
+		version, errVersion := capture.version, capture.err
+		if version.Path == "" {
+			version, errVersion = PersistedVersionForAuth(savedPath, auth)
+		} else if filepath.Clean(version.Path) != filepath.Clean(savedPath) {
+			errVersion = fmt.Errorf("store captured a different credential path")
+		}
+		if errVersion == nil {
 			m.persistedAuthVersions.Store(strings.TrimSpace(auth.ID), version)
 		} else {
 			log.WithError(errVersion).Warnf("could not capture persisted credential version for %s", auth.ID)
@@ -10160,6 +11311,8 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	if m == nil {
 		return
 	}
+	m.refreshTransitionMu.Lock()
+	defer m.refreshTransitionMu.Unlock()
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -10167,15 +11320,36 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 		interval = refreshCheckInterval
 	}
 	interval = min(interval, MaxAutoRefreshCheckInterval)
-	_ = m.stopAutoRefreshWorkers(context.Background())
+	stopCtx, cancelStop := context.WithTimeout(parent, 5*time.Second)
+	errStop := m.stopAutoRefreshWorkers(stopCtx)
+	cancelStop()
+	if errStop != nil {
+		log.WithError(errStop).Warn("retired auth refresh lifecycle still has an in-flight provider")
+		if parent.Err() != nil {
+			return
+		}
+	}
 	ctx, cancel := context.WithCancel(parent)
 	m.refreshLifecycleMu.Lock()
 	m.refreshCancel = cancel
 	m.refreshStopping = false
-	m.refreshWorkers.Add(1)
+	m.refreshDone = nil
+	workers := &sync.WaitGroup{}
+	m.refreshWorkers = workers
+	m.mu.Lock()
+	m.refreshSemaphore = make(chan struct{}, m.autoRefreshWorkers(nil))
+	for _, job := range m.autoRefreshJobs {
+		if current := m.auths[job.id]; current != nil && current.Generation == job.generation &&
+			current.NextRefreshAfter.Equal(job.pendingUntil) {
+			current.NextRefreshAfter = time.Time{}
+		}
+	}
+	m.autoRefreshJobs = make(map[string]*autoRefreshJob)
+	m.mu.Unlock()
+	workers.Add(1)
 	m.refreshLifecycleMu.Unlock()
 	go func() {
-		defer m.refreshWorkers.Done()
+		defer workers.Done()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		m.checkRefreshes(ctx)
@@ -10204,12 +11378,20 @@ func (m *Manager) stopAutoRefreshWorkers(ctx context.Context) error {
 	if cancel != nil {
 		cancel()
 	}
+	done := m.refreshDone
+	if done == nil {
+		waitDone := make(chan struct{})
+		done = waitDone
+		m.refreshDone = done
+		workers := m.refreshWorkers
+		go func() {
+			if workers != nil {
+				workers.Wait()
+			}
+			close(waitDone)
+		}()
+	}
 	m.refreshLifecycleMu.Unlock()
-	done := make(chan struct{})
-	go func() {
-		m.refreshWorkers.Wait()
-		close(done)
-	}()
 	select {
 	case <-done:
 		return nil
@@ -10220,6 +11402,16 @@ func (m *Manager) stopAutoRefreshWorkers(ctx context.Context) error {
 
 // StopAutoRefresh cancels and waits for the background refresh lifecycle.
 func (m *Manager) StopAutoRefresh(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.refreshTransitionMu.Lock()
+	defer m.refreshTransitionMu.Unlock()
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+	}
 	errStop := m.stopAutoRefreshWorkers(ctx)
 	m.mu.RLock()
 	selector := m.selector
@@ -10235,6 +11427,12 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 	now := time.Now()
 	snapshot := m.snapshotAuths()
 	for _, a := range snapshot {
+		m.refreshLocksMu.Lock()
+		refreshing := m.refreshLocks[a.ID] != nil
+		m.refreshLocksMu.Unlock()
+		if refreshing {
+			continue
+		}
 		typ, _ := a.AccountInfo()
 		if typ != "api_key" {
 			if !m.shouldRefresh(a, now) {
@@ -10255,10 +11453,11 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 				m.refreshLifecycleMu.Unlock()
 				continue
 			}
-			m.refreshWorkers.Add(1)
+			workers := m.refreshWorkers
+			workers.Add(1)
 			m.refreshLifecycleMu.Unlock()
 			go func() {
-				defer m.refreshWorkers.Done()
+				defer workers.Done()
 				m.refreshAuthWithLimit(ctx, job)
 			}()
 		}
@@ -10268,19 +11467,20 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 func (m *Manager) refreshAuthWithLimit(ctx context.Context, job *autoRefreshJob) {
 	defer m.finishAutoRefreshJob(job)
 	m.mu.RLock()
-	semaphore := m.refreshSemaphore
+	refreshSlots := m.refreshSemaphore
 	m.mu.RUnlock()
-	if semaphore != nil {
+	if refreshSlots != nil {
 		select {
-		case semaphore <- struct{}{}:
-			defer func() { <-semaphore }()
+		case refreshSlots <- struct{}{}:
+			defer func() { <-refreshSlots }()
 		case <-ctx.Done():
 			return
 		}
 	}
 	m.mu.RLock()
 	auth := m.auths[job.id]
-	current := m.autoRefreshJobs[job.id] == job && auth != nil && auth.Generation == job.generation && !auth.Disabled
+	current := m.autoRefreshJobs[job.id] == job && !authAutoRefreshRestricted(auth) &&
+		auth.Generation == job.generation
 	m.mu.RUnlock()
 	if ctx.Err() == nil && current {
 		_, _ = m.refreshAuthForRequest(ctx, job.id, "", job.generation)
@@ -10298,7 +11498,7 @@ func (m *Manager) snapshotAuths() []*Auth {
 }
 
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-	if a == nil || a.Disabled || hasUnauthorizedAuthFailure(a) {
+	if authAutoRefreshRestricted(a) {
 		return false
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
@@ -10518,7 +11718,7 @@ func (m *Manager) markRefreshPending(id string, generation uint64, now time.Time
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	auth := m.auths[id]
-	if auth == nil || auth.Disabled || hasTerminalUnauthorizedAuthFailure(auth) || auth.Generation != generation {
+	if authAutoRefreshRestricted(auth) || auth.Generation != generation {
 		return nil
 	}
 	if m.autoRefreshJobs[id] != nil || !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
@@ -10616,7 +11816,8 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) {
 		) {
 			continue
 		}
-		if state.Quota.Exceeded && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
+		if state.Quota.Exceeded &&
+			(state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
 			state.LastError = nil
 			if strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") {
 				state.StatusMessage = state.Quota.Reason
@@ -10703,7 +11904,11 @@ func (m *Manager) tryRefreshAfterUnauthorized(
 	} else if !authHasRefreshCredential(auth) {
 		return auth, false
 	}
-	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
+	log.Debugf(
+		"unauthorized response for %s (%s), refreshing credentials before fallback",
+		auth.Provider,
+		auth.ID,
+	)
 	m.markRejectedAccessToken(auth, executor)
 	refreshed, errRefresh := m.refreshAuthForRequest(
 		context.WithValue(ctx, authRefreshReasonKey{}, authRefreshAfterUnauthorized),
@@ -10712,7 +11917,16 @@ func (m *Manager) tryRefreshAfterUnauthorized(
 		auth.Generation,
 	)
 	if errRefresh != nil || refreshed == nil {
-		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
+		log.Debugf(
+			"credential refresh before fallback failed for %s (%s): %v",
+			auth.Provider,
+			auth.ID,
+			errRefresh,
+		)
+		return auth, false
+	}
+	if refreshed.hasRejectedAccessToken() {
+		log.Debugf("credential refresh for %s (%s) retained the rejected access token", auth.Provider, auth.ID)
 		return auth, false
 	}
 	return refreshed, true
@@ -10731,12 +11945,16 @@ type ForceRefreshResult struct {
 	RefreshedAt time.Time `json:"refreshed_at"`
 }
 
+// forceRefreshResult 生成仅含公开字段的刷新摘要
 func forceRefreshResult(auth *Auth) ForceRefreshResult {
 	if auth == nil {
 		return ForceRefreshResult{}
 	}
 	copyAuth := auth.Clone()
 	copyAuth.EnsureIndex()
+	if copyAuth.hasRejectedAccessToken() && copyAuth.Status != StatusDisabled {
+		copyAuth.Status = StatusError
+	}
 	fileName := strings.TrimSpace(copyAuth.FileName)
 	if fileName == "" {
 		fileName = strings.TrimSpace(copyAuth.ID)
@@ -10753,7 +11971,7 @@ func forceRefreshResult(auth *Auth) ForceRefreshResult {
 	}
 }
 
-// ForceRefreshAuth synchronously refreshes one credential without exposing its secrets.
+// ForceRefreshAuth 同步刷新一个凭据，返回安全摘要和刷新错误
 func (m *Manager) ForceRefreshAuth(ctx context.Context, id string) (ForceRefreshResult, error) {
 	if m == nil {
 		return ForceRefreshResult{}, errors.New("auth manager is nil")
@@ -10769,6 +11987,9 @@ func (m *Manager) ForceRefreshAuth(ctx context.Context, id string) (ForceRefresh
 		context.WithValue(ctx, authRefreshReasonKey{}, authRefreshManual), id, "",
 	)
 	if refreshed != nil {
+		if errRefresh == nil && refreshed.hasRejectedAccessToken() {
+			errRefresh = errors.New("credential refresh retained the rejected access token")
+		}
 		return forceRefreshResult(refreshed), errRefresh
 	}
 	if current, ok := m.GetByID(id); ok {
@@ -10963,7 +12184,8 @@ func (m *Manager) refreshAuthForRequest(
 	}
 
 	if failedAccessToken != "" {
-		if currentToken := accessTokenForFingerprint(auth); currentToken != "" && currentToken != failedAccessToken {
+		if currentToken := accessTokenForFingerprint(auth); currentToken != "" &&
+			currentToken != failedAccessToken {
 			return auth.Clone(), nil
 		}
 	}
@@ -10973,12 +12195,20 @@ func (m *Manager) refreshAuthForRequest(
 	if auth.Attributes != nil {
 		persistenceOwnerID = strings.TrimSpace(auth.Attributes["gemini_virtual_parent"])
 	}
+	var unlockOwnerMutation func()
+	ownerMutationLocked := false
+	defer func() {
+		if ownerMutationLocked {
+			unlockOwnerMutation()
+		}
+	}()
 	if persistenceOwnerID != "" && persistenceOwnerID != auth.ID {
-		unlockOwnerMutation, errOwnerMutation := m.lockAuthMutationWithinLoadGate(ctx, persistenceOwnerID)
+		var errOwnerMutation error
+		unlockOwnerMutation, errOwnerMutation = m.lockAuthMutationWithinLoadGate(ctx, persistenceOwnerID)
 		if errOwnerMutation != nil {
 			return nil, errOwnerMutation
 		}
-		defer unlockOwnerMutation()
+		ownerMutationLocked = true
 		m.mu.RLock()
 		persistenceOwner := m.auths[persistenceOwnerID]
 		m.mu.RUnlock()
@@ -10993,7 +12223,44 @@ func (m *Manager) refreshAuthForRequest(
 		return nil, errVersion
 	}
 	cloned := auth.Clone()
+	unlockMutation()
+	mutationLocked = false
+	if ownerMutationLocked {
+		unlockOwnerMutation()
+		ownerMutationLocked = false
+	}
 	updated, err := exec.Refresh(ctx, cloned)
+	commitLockCtx, cancelCommitLock := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		refreshPersistenceCommitTimeout,
+	)
+	defer cancelCommitLock()
+	unlockMutation, errMutation = m.lockAuthMutation(commitLockCtx, id)
+	if errMutation != nil {
+		return nil, errMutation
+	}
+	mutationLocked = true
+	if persistenceOwnerID != "" && persistenceOwnerID != auth.ID {
+		unlockOwnerMutation, errMutation = m.lockAuthMutationWithinLoadGate(commitLockCtx, persistenceOwnerID)
+		if errMutation != nil {
+			return nil, errMutation
+		}
+		ownerMutationLocked = true
+	}
+	m.mu.RLock()
+	current := m.auths[id]
+	currentOwner := refreshAuthSourceMatches(
+		auth, current,
+	) && sameProviderExecutor(m.executors[executorKeyFromAuth(current)], exec)
+	persistenceCurrent := current
+	if persistenceExpected.ID != auth.ID {
+		persistenceCurrent = m.auths[persistenceExpected.ID]
+		currentOwner = currentOwner && refreshAuthSourceMatches(persistenceExpected, persistenceCurrent)
+	}
+	m.mu.RUnlock()
+	if !currentOwner {
+		return nil, errors.New("credential refresh result is stale")
+	}
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		return nil, err
@@ -11011,7 +12278,7 @@ func (m *Manager) refreshAuthForRequest(
 	if err != nil {
 		rejectedAccess := refreshReason == authRefreshAfterUnauthorized && failedAccessToken != "" &&
 			failedAccessToken == accessTokenForFingerprint(auth)
-		if !m.publishRefreshError(auth, exec, refreshCommit, err, now, rejectedAccess) {
+		if !m.publishRefreshError(current, exec, refreshCommit, err, now, rejectedAccess) {
 			return nil, errors.New("credential refresh error is stale")
 		}
 		return nil, err
@@ -11019,6 +12286,26 @@ func (m *Manager) refreshAuthForRequest(
 	if updated == nil || runtimeAuthCredentialsEqual(updated, auth) {
 		return nil, errors.New("credential refresh returned unchanged credentials")
 	}
+	var refreshVersionError error
+	if current.Generation != auth.Generation ||
+		persistenceCurrent.Generation != persistenceExpected.Generation {
+		updated, _ = mergeRefreshedAuthState(auth, current, updated)
+		if refreshPersistence != nil {
+			refreshPersistence, _ = mergeRefreshedAuthState(
+				persistenceExpected,
+				persistenceCurrent,
+				refreshPersistence,
+			)
+		}
+		version, errCapture := m.captureRefreshPersistedVersion(persistenceCurrent)
+		if errCapture != nil {
+			refreshVersionError = errCapture
+		} else {
+			expectedPersistedVersion = version
+		}
+	}
+	auth = current.Clone()
+	persistenceExpected = persistenceCurrent.Clone()
 	commitCtx, cancelCommit := context.WithTimeout(context.WithoutCancel(ctx), refreshPersistenceCommitTimeout)
 	defer cancelCommit()
 	saved, errCommit := m.commitRefreshedAuth(
@@ -11030,6 +12317,7 @@ func (m *Manager) refreshAuthForRequest(
 		exec,
 		refreshCommit,
 		expectedPersistedVersion,
+		refreshVersionError,
 		now,
 	)
 	if saved != nil {
@@ -11048,7 +12336,11 @@ func (m *Manager) refreshAuthForRequest(
 	}
 	if errCommit != nil {
 		if errors.Is(errCommit, errAuthDurableStateUncertain) {
-			log.WithFields(log.Fields{"auth_id": auth.ID, "provider": auth.Provider}).Warn("refreshed credential persistence is uncertain")
+			log.WithFields(
+				log.Fields{
+					"auth_id": auth.ID, "provider": auth.Provider,
+				},
+			).Warn("refreshed credential persistence is uncertain")
 		} else {
 			log.Debugf("refresh commit for %s (%s) failed: %v", auth.Provider, auth.ID, errCommit)
 		}
@@ -11099,7 +12391,11 @@ func (m *Manager) publishRefreshError(
 		next := current.Clone()
 		next.LastError = refreshErrorFromError(refreshErr)
 		if rejectedAccess && isInvalidGrantError(refreshErr) {
-			next.LastError = &Error{Code: "unauthorized", Message: "invalid_grant", HTTPStatus: http.StatusUnauthorized}
+			next.LastError = &Error{
+				Code:       "unauthorized",
+				Message:    "invalid_grant",
+				HTTPStatus: http.StatusUnauthorized,
+			}
 			next.Unavailable = true
 			next.Status = StatusError
 			if next.Disabled || current.Status == StatusDisabled {
@@ -11155,10 +12451,16 @@ func (m *Manager) publishRefreshError(
 			}
 			next.NextRefreshAfter = nextRefresh
 			if next.hasRejectedAccessToken() {
-				log.WithFields(log.Fields{"auth_id": next.ID, "provider": next.Provider}).Warn("credential refresh failed; rejected access token remains unavailable")
+				log.WithFields(
+					log.Fields{
+						"auth_id": next.ID, "provider": next.Provider,
+					},
+				).Warn("credential refresh failed; rejected access token remains unavailable")
 			} else if !next.Unavailable {
 				log.Warnf(
-					"credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired",
+					"credential refresh failed for %s (%s): %s; retaining active "+
+						"credential as access token is "+
+						"unexpired",
 					next.Provider,
 					next.ID,
 					logging.SafeDiagnosticForLog(refreshErr.Error()),
@@ -11199,7 +12501,8 @@ func (m *Manager) publishRefreshedAuthStates(
 	expectedExecutor ProviderExecutor,
 	guard RefreshCommitGuard,
 ) (*Auth, *Auth) {
-	if m == nil || expected == nil || next == nil || expectedExecutor == nil || !refreshCommitGuardCurrent(guard) {
+	if m == nil || expected == nil || next == nil || expectedExecutor == nil ||
+		!refreshCommitGuardCurrent(guard) {
 		return nil, nil
 	}
 	provider := executorKeyFromAuth(expected)
@@ -11453,6 +12756,7 @@ func (m *Manager) commitRefreshedAuth(
 	expectedExecutor ProviderExecutor,
 	guard RefreshCommitGuard,
 	expectedVersion *PersistedVersion,
+	versionError error,
 	now time.Time,
 ) (*Auth, error) {
 	if m == nil || expected == nil || update == nil || expectedExecutor == nil {
@@ -11472,7 +12776,7 @@ func (m *Manager) commitRefreshedAuth(
 		return nil, errors.New("credential refresh result is stale")
 	}
 	previous := current.Clone()
-	next, bindingChanged := mergeRefreshedAuthState(current, update)
+	next, bindingChanged := mergeRefreshedAuthState(expected, current, update)
 	persistTarget := next
 	rollbackTarget := previous
 	var persistencePrevious *Auth
@@ -11492,7 +12796,9 @@ func (m *Manager) commitRefreshedAuth(
 			return nil, errors.New("credential refresh persistence owner is stale")
 		}
 		persistencePrevious = persistenceCurrent.Clone()
-		persistenceNext, persistenceBindingChanged = mergeRefreshedAuthState(persistenceCurrent, persistenceUpdate)
+		persistenceNext, persistenceBindingChanged = mergeRefreshedAuthState(
+			persistenceExpected, persistenceCurrent, persistenceUpdate,
+		)
 		persistenceNext.Runtime = persistenceCurrent.Runtime
 		persistTarget = persistenceNext
 		rollbackTarget = persistenceCurrent.Clone()
@@ -11509,22 +12815,25 @@ func (m *Manager) commitRefreshedAuth(
 	next.LastRefreshedAt = now
 	next.NextRefreshAfter = time.Time{}
 	next.RefreshFailures = 0
-	next.rejectedAccessTokenSHA256 = ""
-	if hasUnauthorizedAuthFailure(next) || isInvalidGrantResultError(next.LastError) {
-		next.LastError = nil
-		next.StatusMessage = ""
-		if !next.Quota.Exceeded && !hasModelError(next, now) {
-			if next.Status == StatusError {
-				next.Status = StatusActive
+	if !next.hasRejectedAccessToken() {
+		next.rejectedAccessTokenSHA256 = ""
+		if (next.LastError != nil && (next.LastError.StatusCode() == http.StatusUnauthorized ||
+			strings.EqualFold(next.LastError.Code, "unauthorized"))) || isInvalidGrantResultError(next.LastError) {
+			next.LastError = nil
+			next.StatusMessage = ""
+			if !next.Quota.Exceeded && !hasModelError(next, now) {
+				if next.Status == StatusError {
+					next.Status = StatusActive
+				}
+				next.Unavailable = false
+				next.NextRetryAfter = time.Time{}
+			} else if next.Quota.Reason != "" {
+				next.StatusMessage = next.Quota.Reason
 			}
-			next.Unavailable = false
-			next.NextRetryAfter = time.Time{}
-		} else if next.Quota.Reason != "" {
-			next.StatusMessage = next.Quota.Reason
 		}
+		clearUnauthorizedModelStates(next, now)
 	}
 	next.UpdatedAt = now
-	clearUnauthorizedModelStates(next, now)
 	if m.shouldRefresh(next, now) {
 		next.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
@@ -11532,7 +12841,9 @@ func (m *Manager) commitRefreshedAuth(
 		persistenceNext.LastRefreshedAt = now
 		persistenceNext.NextRefreshAfter = time.Time{}
 		persistenceNext.RefreshFailures = 0
-		persistenceNext.rejectedAccessTokenSHA256 = ""
+		if !persistenceNext.hasRejectedAccessToken() {
+			persistenceNext.rejectedAccessTokenSHA256 = ""
+		}
 		persistenceNext.UpdatedAt = now
 	}
 	completeBindingChanges := func(saved, persistenceSaved *Auth) {
@@ -11573,6 +12884,9 @@ func (m *Manager) commitRefreshedAuth(
 		return saved, errors.Join(errAuthDurableStateUncertain, cause)
 	}
 
+	if versionError != nil {
+		return publishUncertain(versionError, false)
+	}
 	unlockFile, errVersion := lockRefreshPersistedVersion(expectedVersion)
 	if errVersion != nil {
 		return publishUncertain(errVersion, false)
@@ -11633,12 +12947,16 @@ func (m *Manager) roundTripperFor(auth *Auth) http.RoundTripper {
 }
 
 // RoundTripperProvider defines a minimal provider of per-auth HTTP transports.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type RoundTripperProvider interface {
 	RoundTripperFor(auth *Auth) http.RoundTripper
 }
 
 // RequestPreparer is an optional interface that provider executors can implement
 // to mutate outbound HTTP requests with provider credentials.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type RequestPreparer interface {
 	PrepareRequest(req *http.Request, auth *Auth) error
 }
@@ -11727,6 +13045,8 @@ func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string
 // InjectCredentials delegates per-provider HTTP request preparation when supported.
 // If the registered executor for the auth provider implements RequestPreparer,
 // it will be invoked to modify the request (e.g., add headers).
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	if req == nil || authID == "" {
 		return nil
@@ -11766,7 +13086,10 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	}
 	exec := m.executorFor(providerKey)
 	if exec == nil {
-		return &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
+		return &Error{
+			Code:    "provider_not_found",
+			Message: "executor not registered for provider: " + providerKey,
+		}
 	}
 	preparedAuth, errPrepare := m.prepareRequestAuth(ctx, exec, auth)
 	if errPrepare != nil {
@@ -11830,7 +13153,10 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	}
 	exec := m.executorFor(providerKey)
 	if exec == nil {
-		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
+		return nil, &Error{
+			Code:    "provider_not_found",
+			Message: "executor not registered for provider: " + providerKey,
+		}
 	}
 	preparedAuth, errPrepare := m.prepareRequestAuth(ctx, exec, auth)
 	if errPrepare != nil {

@@ -25,14 +25,18 @@ func TestFileCooldownStateStoreV2RoundTrip(t *testing.T) {
 			Exceeded: true, Reason: "quota", Family: "shared-family", BackoffLevel: 3,
 			Generation: 9, ResetAuthority: StateResetAuthorityOperator,
 		},
-		LastError: &Error{
-			Code: "quota", Message: "quota exhausted", HTTPStatus: http.StatusTooManyRequests,
-			DispatchPhase:  cliproxyexecutor.DispatchPhaseResponseStarted,
-			Outcome:        cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing,
-			RetryDirective: cliproxyexecutor.RetryDirectiveRetryAfter,
-			EffectScope:    cliproxyexecutor.StateEffectScopeQuotaFamily,
-			EffectKey:      "shared-family", StateGeneration: 9,
-		},
+		LastError: errorWithState(
+			&Error{
+				Code: "quota", Message: "quota exhausted", HTTPStatus: http.StatusTooManyRequests,
+			}, errorState{
+				DispatchPhase:  cliproxyexecutor.DispatchPhaseResponseStarted,
+				Outcome:        cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing,
+				RetryDirective: cliproxyexecutor.RetryDirectiveRetryAfter,
+				EffectScope:    cliproxyexecutor.StateEffectScopeQuotaFamily,
+				EffectKey:      "shared-family", StateGeneration: 9,
+			},
+		),
+
 		UpdatedAt: updatedAt,
 	}
 
@@ -140,14 +144,18 @@ func TestManagerRestoreCooldownStateWithoutDeadlineRemainsBlocked(t *testing.T) 
 		Provider: "provider-a", AuthID: "blocked-auth", Model: "model-a", Status: "blocked",
 		Reason: "operator block", EffectScope: cliproxyexecutor.StateEffectScopeExactModel,
 		EffectKey: "model-a", StateGeneration: 7, ResetAuthority: StateResetAuthorityOperator,
-		LastError: &Error{
-			Message: "operator block", HTTPStatus: http.StatusNotFound,
-			DispatchPhase:  cliproxyexecutor.DispatchPhaseResponseStarted,
-			Outcome:        cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing,
-			RetryDirective: cliproxyexecutor.RetryDirectiveNoRetry,
-			EffectScope:    cliproxyexecutor.StateEffectScopeExactModel,
-			EffectKey:      "model-a", StateGeneration: 7,
-		},
+		LastError: errorWithState(
+			&Error{
+				Message: "operator block", HTTPStatus: http.StatusNotFound,
+			}, errorState{
+				DispatchPhase:  cliproxyexecutor.DispatchPhaseResponseStarted,
+				Outcome:        cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing,
+				RetryDirective: cliproxyexecutor.RetryDirectiveNoRetry,
+				EffectScope:    cliproxyexecutor.StateEffectScopeExactModel,
+				EffectKey:      "model-a", StateGeneration: 7,
+			},
+		),
+
 		UpdatedAt: time.Now().Add(-time.Minute),
 	}
 	if errSave := store.Save(context.Background(), []CooldownStateRecord{record}); errSave != nil {
@@ -202,7 +210,9 @@ func TestManagerRestoreCooldownStateWithoutDeadlineRemainsBlocked(t *testing.T) 
 
 func TestNotFoundRetryAfterStateDeadline(t *testing.T) {
 	const short, long, zero, negative = 5 * time.Minute, 20 * time.Hour, time.Duration(0), -time.Minute
-	for _, scope := range []cliproxyexecutor.StateEffectScope{cliproxyexecutor.StateEffectScopeExactModel, cliproxyexecutor.StateEffectScopeCredential} {
+	for _, scope := range []cliproxyexecutor.StateEffectScope{
+		cliproxyexecutor.StateEffectScopeExactModel, cliproxyexecutor.StateEffectScopeCredential,
+	} {
 		for _, tc := range []struct {
 			name          string
 			retry         *time.Duration
@@ -219,32 +229,46 @@ func TestNotFoundRetryAfterStateDeadline(t *testing.T) {
 			{"existing-deadline", new(short), false, long, long},
 			{"expired-deadline", new(short), false, -time.Minute, short},
 		} {
-			t.Run(string(scope)+"/"+tc.name, func(t *testing.T) {
-				now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
-				auth := &Auth{ID: "synthetic-404", Provider: "meta", Status: StatusActive, ModelStates: map[string]*ModelState{"model-a": {Status: StatusActive}}}
-				if tc.priorDuration != 0 {
-					if scope == cliproxyexecutor.StateEffectScopeCredential {
-						auth.NextRetryAfter = now.Add(tc.priorDuration)
-					} else {
-						auth.ModelStates["model-a"].NextRetryAfter = now.Add(tc.priorDuration)
+			t.Run(
+				string(scope)+"/"+tc.name, func(t *testing.T) {
+					now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+					auth := &Auth{
+						ID: "synthetic-404", Provider: "meta", Status: StatusActive,
+						ModelStates: map[string]*ModelState{"model-a": {Status: StatusActive}},
 					}
-				}
-				result := Result{AuthID: auth.ID, Provider: auth.Provider, Model: "model-a", RetryAfter: tc.retry,
-					Error:       &Error{HTTPStatus: http.StatusNotFound, Message: "synthetic upstream not found"},
-					Disposition: cliproxyexecutor.ExecutionDisposition{EffectScope: scope}}
-				applyResultStateLocked(auth, result, now, tc.disabled)
-				deadline, unavailable := auth.NextRetryAfter, auth.Unavailable
-				if scope == cliproxyexecutor.StateEffectScopeExactModel {
-					deadline, unavailable = auth.ModelStates["model-a"].NextRetryAfter, auth.ModelStates["model-a"].Unavailable
-				}
-				want := time.Time{}
-				if tc.wantDuration != 0 {
-					want = now.Add(tc.wantDuration)
-				}
-				if !deadline.Equal(want) || unavailable == tc.disabled {
-					t.Errorf("deadline=%v unavailable=%t, want %v unavailable=%t", deadline, unavailable, want, !tc.disabled)
-				}
-			})
+					if tc.priorDuration != 0 {
+						if scope == cliproxyexecutor.StateEffectScopeCredential {
+							auth.NextRetryAfter = now.Add(tc.priorDuration)
+						} else {
+							auth.ModelStates["model-a"].NextRetryAfter = now.Add(tc.priorDuration)
+						}
+					}
+					result := Result{
+						AuthID: auth.ID, Provider: auth.Provider, Model: "model-a", RetryAfter: tc.retry,
+						Error: &Error{
+							HTTPStatus: http.StatusNotFound,
+							Message:    "synthetic upstream not found",
+						},
+						Disposition: cliproxyexecutor.ExecutionDisposition{EffectScope: scope},
+					}
+					applyResultStateLocked(auth, result, now, tc.disabled)
+					deadline, unavailable := auth.NextRetryAfter, auth.Unavailable
+					if scope == cliproxyexecutor.StateEffectScopeExactModel {
+						deadline, unavailable = auth.ModelStates["model-a"].NextRetryAfter,
+							auth.ModelStates["model-a"].Unavailable
+					}
+					want := time.Time{}
+					if tc.wantDuration != 0 {
+						want = now.Add(tc.wantDuration)
+					}
+					if !deadline.Equal(want) || unavailable == tc.disabled {
+						t.Errorf(
+							"deadline=%v unavailable=%t, want %v unavailable=%t", deadline, unavailable, want,
+							!tc.disabled,
+						)
+					}
+				},
+			)
 		}
 	}
 }

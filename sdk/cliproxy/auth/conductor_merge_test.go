@@ -451,62 +451,65 @@ func TestStreamSuccessFromBeforeQuotaBarrierDoesNotResumeModel(t *testing.T) {
 }
 
 func TestCurrentQuotaEpochSuccessRecoversAfterCooldown(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		manager := NewManager(nil, nil, nil)
-		auth := &Auth{ID: "quota-current-epoch", Provider: "plugin-provider", Status: StatusActive}
-		registered, errRegister := manager.Register(context.Background(), auth)
-		if errRegister != nil {
-			t.Fatalf("Register() error = %v", errRegister)
-		}
-		const model = "plugin-model"
-		reg := registry.GetGlobalRegistry()
-		reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
-		t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
-		manager.scheduler.upsertAuth(registered.Clone())
+	synctest.Test(
+		t, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			auth := &Auth{ID: "quota-current-epoch", Provider: "plugin-provider", Status: StatusActive}
+			registered, errRegister := manager.Register(context.Background(), auth)
+			if errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			const model = "plugin-model"
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			manager.scheduler.upsertAuth(registered.Clone())
 
-		retryAfter := time.Millisecond
-		manager.MarkResult(
-			context.Background(), Result{
-				AuthID:          auth.ID,
-				AuthGeneration:  registered.Generation,
-				Model:           model,
-				ModelQuotaEpoch: 0,
-				Error:           &Error{HTTPStatus: 429, Message: "quota exhausted"},
-				RetryAfter:      &retryAfter,
-			},
-		)
-		time.Sleep(minQuotaCooldownFloor + time.Millisecond)
-		picked, errPick := manager.scheduler.pickSingle(
-			context.Background(), auth.Provider, model, cliproxyexecutor.Options{}, nil,
-		)
-		if errPick != nil || picked == nil {
-			t.Fatalf("pickSingle() = (%#v, %v), want recovered auth", picked, errPick)
-		}
-		if epoch := modelQuotaEpoch(picked, model); epoch != 1 {
-			t.Fatalf("picked quota epoch = %d, want 1", epoch)
-		}
-		manager.MarkResult(
-			context.Background(), Result{
-				AuthID:          picked.ID,
-				AuthGeneration:  picked.Generation,
-				Model:           model,
-				ModelQuotaEpoch: modelQuotaEpoch(picked, model),
-				Success:         true,
-			},
-		)
+			retryAfter := time.Millisecond
+			manager.MarkResult(
+				context.Background(), Result{
+					AuthID:          auth.ID,
+					AuthGeneration:  registered.Generation,
+					Model:           model,
+					ModelQuotaEpoch: 0,
+					Error:           &Error{HTTPStatus: 429, Message: "quota exhausted"},
+					RetryAfter:      &retryAfter,
+				},
+			)
+			time.Sleep(minQuotaCooldownFloor + time.Millisecond)
+			picked, errPick := manager.scheduler.pickSingle(
+				context.Background(), auth.Provider, model, cliproxyexecutor.Options{}, nil,
+			)
+			if errPick != nil || picked == nil {
+				t.Fatalf("pickSingle() = (%#v, %v), want recovered auth", picked, errPick)
+			}
+			if epoch := modelQuotaEpoch(picked, model); epoch != 1 {
+				t.Fatalf("picked quota epoch = %d, want 1", epoch)
+			}
+			manager.MarkResult(
+				context.Background(), Result{
+					AuthID:          picked.ID,
+					AuthGeneration:  picked.Generation,
+					Model:           model,
+					ModelQuotaEpoch: modelQuotaEpoch(picked, model),
+					Success:         true,
+				},
+			)
 
-		current, ok := manager.GetByID(auth.ID)
-		if !ok {
-			t.Fatal("auth missing after current epoch success")
-		}
-		state := current.ModelStates[model]
-		if state == nil || state.Quota.Exceeded || state.Unavailable || state.QuotaEpoch != 1 {
-			t.Fatalf("current epoch success did not recover model: %#v", state)
-		}
-		if available, errAvailable := reg.GetFirstAvailableModel(auth.Provider); errAvailable != nil || available != model {
-			t.Fatalf("registry model after recovery = %q, %v; want %q", available, errAvailable, model)
-		}
-	})
+			current, ok := manager.GetByID(auth.ID)
+			if !ok {
+				t.Fatal("auth missing after current epoch success")
+			}
+			state := current.ModelStates[model]
+			if state == nil || state.Quota.Exceeded || state.Unavailable || state.QuotaEpoch != 1 {
+				t.Fatalf("current epoch success did not recover model: %#v", state)
+			}
+			if available, errAvailable := reg.GetFirstAvailableModel(auth.Provider); errAvailable != nil ||
+				available != model {
+				t.Fatalf("registry model after recovery = %q, %v; want %q", available, errAvailable, model)
+			}
+		},
+	)
 }
 
 func TestRemovePreventsInFlightMarkResultSideEffects(t *testing.T) {
@@ -1100,7 +1103,7 @@ func TestMergeRefreshedAuthStateUsesCodexAccountEntitlement(t *testing.T) {
 	rotated.Metadata["refresh_token"] = "refresh-b"
 	rotated.Metadata["access_token"] = "access-b"
 	rotated.Metadata["id_token"] = testCodexBindingToken(t, "account-a", "plus", 2)
-	preserved, bindingChanged := mergeRefreshedAuthState(current, rotated)
+	preserved, bindingChanged := mergeRefreshedAuthState(current, current, rotated)
 	if bindingChanged || preserved.Runtime != runtimeState || !preserved.Quota.Exceeded ||
 		len(preserved.ModelStates) != 1 || preserved.LastError == nil {
 		t.Fatalf("same-entitlement refresh state = %#v, binding changed = %t", preserved, bindingChanged)
@@ -1108,7 +1111,7 @@ func TestMergeRefreshedAuthStateUsesCodexAccountEntitlement(t *testing.T) {
 
 	upgraded := rotated.Clone()
 	upgraded.Metadata["id_token"] = testCodexBindingToken(t, "account-a", "pro", 3)
-	cleared, bindingChanged := mergeRefreshedAuthState(current, upgraded)
+	cleared, bindingChanged := mergeRefreshedAuthState(current, current, upgraded)
 	if !bindingChanged || cleared.Status != StatusActive || cleared.Runtime != nil || cleared.Unavailable ||
 		cleared.Quota.Exceeded || len(cleared.ModelStates) != 0 || cleared.LastError != nil {
 		t.Fatalf("changed-entitlement refresh state = %#v, binding changed = %t", cleared, bindingChanged)

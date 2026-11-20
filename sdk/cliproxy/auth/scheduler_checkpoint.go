@@ -30,6 +30,8 @@ const (
 )
 
 // SchedulerCheckpointStore persists opaque scheduler progress without owning auth or routing facts.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type SchedulerCheckpointStore interface {
 	Load(context.Context) ([]byte, error)
 	Save(context.Context, []byte) error
@@ -265,8 +267,8 @@ type schedulerCheckpointViewCursor struct {
 	LastPickedAuth   string                         `json:"last_picked_auth,omitempty"`
 	LastPickedParent string                         `json:"last_picked_parent,omitempty"`
 	ChildLastPicked  map[string]string              `json:"child_last_picked,omitempty"`
-	Weighted         schedulerCheckpointWeightState `json:"weighted,omitempty"`
-	Quota            schedulerCheckpointQuotaState  `json:"quota,omitempty"`
+	Weighted         schedulerCheckpointWeightState `json:"weighted"`
+	Quota            schedulerCheckpointQuotaState  `json:"quota"`
 }
 
 type schedulerCheckpointQuotaState struct {

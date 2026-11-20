@@ -14,6 +14,25 @@ import (
 
 const cooldownStatePersistenceTimeout = 5 * time.Second
 
+func authAutoRefreshRestricted(auth *Auth) bool {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled ||
+		hasUnauthorizedAuthFailure(auth) || hasQuotaCooldownState(auth.Quota, auth.LastError) {
+		return true
+	}
+	if auth.LastError == nil {
+		return false
+	}
+	scope := auth.StateEffectScope
+	if scope == "" {
+		scope = auth.LastError.executionState().EffectScope
+	}
+	if scope != cliproxyexecutor.StateEffectScopeCredential && (scope != "" || len(auth.ModelStates) > 0) {
+		return false
+	}
+	return auth.LastError.HTTPStatus == http.StatusPaymentRequired ||
+		auth.LastError.HTTPStatus == http.StatusForbidden
+}
+
 // SetCooldownStateStore swaps the independent runtime cooldown state store.
 func (m *Manager) SetCooldownStateStore(store CooldownStateStore) {
 	if m == nil {
@@ -24,6 +43,37 @@ func (m *Manager) SetCooldownStateStore(store CooldownStateStore) {
 	m.cooldownStore = store
 	m.mu.Unlock()
 	m.configCooldownMu.Unlock()
+}
+
+// SwapCooldownStateStore 保存待清理的旧冷却快照，再发布替换存储
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (m *Manager) SwapCooldownStateStore(ctx context.Context, store CooldownStateStore, persistOld bool) bool {
+	if m == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	m.configCooldownMu.Lock()
+	defer m.configCooldownMu.Unlock()
+	m.mu.Lock()
+	storeToPersist := m.pendingCooldownStateStore
+	if storeToPersist == nil && persistOld {
+		storeToPersist = m.cooldownStore
+		m.pendingCooldownStateStore = storeToPersist
+	}
+	m.mu.Unlock()
+	if !m.persistCooldownStatesToLocked(ctx, storeToPersist) || ctx.Err() != nil {
+		return false
+	}
+	m.mu.Lock()
+	m.cooldownStore = store
+	m.mu.Unlock()
+	return true
 }
 
 // ApplyConfigWithCooldownStateStore serializes a config update with its cooldown
@@ -42,27 +92,45 @@ func (m *Manager) ApplyConfigWithCooldownStateStore(
 	if errCtx := ctx.Err(); errCtx != nil {
 		return false
 	}
+	snapshot, err := internalconfig.Clone(cfg)
+	if err != nil {
+		logEntryWithRequestID(ctx).Warnf("failed to copy runtime config snapshot: %v", err)
+		return false
+	}
+	cfg = snapshot
 
 	m.configCooldownMu.Lock()
 	defer m.configCooldownMu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
 	m.mu.RLock()
 	oldStore := m.cooldownStore
+	pendingStore := m.pendingCooldownStateStore
 	m.mu.RUnlock()
+	if pendingStore != nil && pendingStore != oldStore && !m.persistCooldownStatesToLocked(ctx, pendingStore) {
+		return false
+	}
 	if oldStore != nil {
 		records := m.cooldownStateRecordsSnapshotForConfig(cfg)
 		if store == nil {
 			records = nil
 		}
 		if errSave := oldStore.Save(ctx, records); errSave != nil {
-			logEntryWithRequestID(ctx).Warnf("failed to persist cooldown state before config transition: %v", errSave)
+			logEntryWithRequestID(
+				ctx,
+			).Warnf("failed to persist cooldown state before config transition: %v", errSave)
 			return false
 		}
 	}
-	if errCtx := ctx.Err(); errCtx != nil {
+	if oldStore == nil && ctx.Err() != nil {
 		return false
 	}
 	m.setConfigSnapshotLocked(cfg)
 	m.mu.Lock()
+	if m.pendingCooldownStateStore == oldStore {
+		m.pendingCooldownStateStore = nil
+	}
 	m.cooldownStore = store
 	m.mu.Unlock()
 	return true
@@ -111,7 +179,15 @@ func (m *Manager) persistCooldownStatesToLocked(ctx context.Context, store Coold
 		logEntryWithRequestID(ctx).Warnf("failed to persist cooldown state: %v", errSave)
 		return false
 	}
-	return ctx.Err() == nil
+	if ctx.Err() != nil {
+		return false
+	}
+	m.mu.Lock()
+	if m.pendingCooldownStateStore == store {
+		m.pendingCooldownStateStore = nil
+	}
+	m.mu.Unlock()
+	return true
 }
 
 // RestoreCooldownStates restores unexpired persisted cooldown records into registered auths.
@@ -209,7 +285,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	}
 	reason := strings.TrimSpace(record.Reason)
 	model := strings.TrimSpace(record.Model)
-	quota := record.Quota
+	quota := quotaForCooldownRecord(auth.Provider, record.Quota)
 	if quota.Exceeded && quota.NextRecoverAt.IsZero() && !record.NextRetryAfter.IsZero() {
 		quota.NextRecoverAt = record.NextRetryAfter
 	}
@@ -220,6 +296,9 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	stateGeneration := normalizedStateGeneration(record.StateGeneration)
 
 	if model == "" {
+		if normalizedStateGeneration(auth.StateGeneration) > stateGeneration {
+			return false
+		}
 		effectScope := record.EffectScope
 		if effectScope == "" {
 			effectScope = cliproxyexecutor.StateEffectScopeCredential
@@ -234,6 +313,10 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		}
 		auth.NextRetryAfter = record.NextRetryAfter
 		applyCooldownFields(&auth.Quota, quota)
+		if quota.ObservedAt.After(auth.Quota.ObservedAt) {
+			auth.Quota.ObservedAt = quota.ObservedAt
+			auth.Quota.Signals = quota.Signals
+		}
 		auth.StateEffectScope = effectScope
 		auth.StateEffectKey = effectKey
 		auth.ResetAuthority = resetAuthority
@@ -244,7 +327,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		}
 		auth.LastError = cloneError(record.LastError)
 		if auth.LastError != nil {
-			auth.LastError.StateGeneration = auth.StateGeneration
+			auth.LastError.executionState().StateGeneration = auth.StateGeneration
 		}
 		return true
 	}
@@ -266,33 +349,51 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			effectKey = canonicalModelKey(model)
 		}
 	}
+	if effectScope == cliproxyexecutor.StateEffectScopeExactModel &&
+		canonicalModelKey(effectKey) == canonicalModelKey(model) {
+		effectKey = canonicalModelKey(model)
+	}
 	if quota.Exceeded {
-		stateGeneration = max(stateGeneration, normalizedStateGeneration(quota.Generation))
-		quota.Generation = stateGeneration
+		if quota.Generation == 0 {
+			quota.Generation = stateGeneration
+		}
 		if quota.ResetAuthority == "" {
 			quota.ResetAuthority = resetAuthority
 		}
 	}
+	current, modelKey := findModelState(auth, model)
+	if current != nil {
+		newerQuota := quota.Exceeded && (quota.Generation > current.Quota.Generation ||
+			(quota.Generation == current.Quota.Generation && quota.ObservedAt.After(current.Quota.ObservedAt)))
+		if (normalizedStateGeneration(current.Generation) > stateGeneration ||
+			(normalizedStateGeneration(current.Generation) ==
+				stateGeneration &&
+				current.UpdatedAt.After(updatedAt))) &&
+			!newerQuota {
+			return false
+		}
+	}
 	state := ensureModelState(auth, model)
+	candidate := &ModelState{
+		Status: StatusError, StatusMessage: reason, Unavailable: true, NextRetryAfter: record.NextRetryAfter,
+		Quota: quota, EffectScope: effectScope, EffectKey: effectKey, ResetAuthority: resetAuthority,
+		Generation: stateGeneration, UpdatedAt: updatedAt, LastError: cloneError(record.LastError),
+		QuotaEpoch: state.QuotaEpoch,
+	}
+	if !candidate.Quota.ObservedAt.After(state.Quota.ObservedAt) {
+		candidate.Quota.ObservedAt = state.Quota.ObservedAt
+		candidate.Quota.Signals = state.Quota.Clone().Signals
+	}
 	if quota.Exceeded {
-		state.QuotaEpoch++
+		candidate.QuotaEpoch++
 	}
-	state.Unavailable = true
-	state.Status = StatusError
-	state.NextRetryAfter = record.NextRetryAfter
-	applyCooldownFields(&state.Quota, quota)
-	state.EffectScope = effectScope
-	state.EffectKey = effectKey
-	state.ResetAuthority = resetAuthority
-	state.Generation = max(normalizedStateGeneration(state.Generation), stateGeneration)
-	state.UpdatedAt = updatedAt
-	if reason != "" {
-		state.StatusMessage = reason
+	if reason == "" {
+		candidate.StatusMessage = state.StatusMessage
 	}
-	state.LastError = cloneError(record.LastError)
-	if state.LastError != nil {
-		state.LastError.StateGeneration = stateGeneration
+	if candidate.LastError != nil {
+		candidate.LastError.executionState().StateGeneration = stateGeneration
 	}
+	auth.ModelStates[modelKey] = mergeModelStates(state, candidate, model == modelKey)
 	updateAggregatedAvailability(auth, now)
 	return true
 }
@@ -302,6 +403,11 @@ func (m *Manager) cooldownDisabledForAuth(auth *Auth) bool {
 		return quotaCooldownDisabledForAuth(auth)
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	return quotaCooldownDisabledForAuthWithConfig(auth, cfg)
+}
+
+// QuotaCooldownDisabledForAuthWithConfig 按凭据、Provider 配置和全局设置读取冷却策略
+func QuotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Config) bool {
 	return quotaCooldownDisabledForAuthWithConfig(auth, cfg)
 }
 
@@ -340,7 +446,7 @@ func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) (boo
 	if providerKey == "" {
 		providerKey = provider
 	}
-	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, provider)
+	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, provider, auth)
 	if entry == nil || entry.DisableCooling == nil {
 		return false, false
 	}
@@ -358,7 +464,8 @@ func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {
 		if auth == nil {
 			continue
 		}
-		if !quotaCooldownDisabledForAuthWithConfig(auth, cfg) && !auth.Disabled && auth.Status != StatusDisabled {
+		if !quotaCooldownDisabledForAuthWithConfig(auth, cfg) && !auth.Disabled &&
+			auth.Status != StatusDisabled {
 			continue
 		}
 		if clearCooldownStateForAuth(auth, now) {
@@ -379,14 +486,16 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		return false
 	}
 	changed := false
-	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
+	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded ||
+		!auth.Quota.NextRecoverAt.IsZero() {
 		changed = clearAuthState(auth, now, StateResetAuthorityOperator)
 	}
 	for _, state := range auth.ModelStates {
 		if state == nil {
 			continue
 		}
-		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() {
+		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded ||
+			!state.Quota.NextRecoverAt.IsZero() {
 			if state.Quota.Exceeded {
 				state.QuotaEpoch++
 			}
@@ -440,7 +549,8 @@ func (m *Manager) cooldownStateRecordsForAuthWithConfigLocked(
 		return nil
 	}
 	terminal := hasTerminalUnauthorizedAuthFailure(auth)
-	skipCooldown := auth.Disabled || auth.Status == StatusDisabled || quotaCooldownDisabledForAuthWithConfig(auth, cfg)
+	skipCooldown := auth.Disabled || auth.Status == StatusDisabled ||
+		quotaCooldownDisabledForAuthWithConfig(auth, cfg)
 	if skipCooldown && !terminal {
 		return nil
 	}
@@ -502,9 +612,20 @@ func cooldownErrorEqual(a, b *Error) bool {
 		return false
 	}
 	return a.Code == b.Code && a.Message == b.Message && a.Retryable == b.Retryable &&
-		a.HTTPStatus == b.HTTPStatus && a.DispatchPhase == b.DispatchPhase && a.Outcome == b.Outcome &&
-		a.RetryDirective == b.RetryDirective && a.EffectScope == b.EffectScope &&
-		a.EffectKey == b.EffectKey && a.StateGeneration == b.StateGeneration
+		a.HTTPStatus ==
+			b.HTTPStatus &&
+		a.executionState().DispatchPhase ==
+			b.executionState().DispatchPhase &&
+		a.executionState().Outcome ==
+			b.executionState().Outcome &&
+		a.executionState().RetryDirective ==
+			b.executionState().RetryDirective &&
+		a.executionState().EffectScope ==
+			b.executionState().EffectScope &&
+		a.executionState().EffectKey ==
+			b.executionState().EffectKey &&
+		a.executionState().StateGeneration ==
+			b.executionState().StateGeneration
 }
 
 func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bool) {
@@ -518,7 +639,7 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 		Status:          persistedCooldownStatus(auth.NextRetryAfter),
 		NextRetryAfter:  auth.NextRetryAfter,
 		Reason:          cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
-		Quota:           auth.Quota,
+		Quota:           quotaForCooldownRecord(auth.Provider, auth.Quota),
 		LastError:       cloneError(auth.LastError),
 		EffectScope:     auth.StateEffectScope,
 		EffectKey:       auth.StateEffectKey,
@@ -529,7 +650,12 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 	}, true
 }
 
-func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now time.Time) (CooldownStateRecord, bool) {
+func modelCooldownStateRecord(
+	auth *Auth,
+	model string,
+	state *ModelState,
+	now time.Time,
+) (CooldownStateRecord, bool) {
 	model = strings.TrimSpace(model)
 	if auth == nil || state == nil || model == "" ||
 		!persistableUnavailableState(state.Unavailable, state.NextRetryAfter, now) {
@@ -547,7 +673,7 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 		Status:          persistedCooldownStatus(state.NextRetryAfter),
 		NextRetryAfter:  state.NextRetryAfter,
 		Reason:          cooldownReason(state.StatusMessage, state.Quota, state.LastError),
-		Quota:           state.Quota,
+		Quota:           quotaForCooldownRecord(auth.Provider, state.Quota),
 		LastError:       cloneError(state.LastError),
 		EffectScope:     state.EffectScope,
 		EffectKey:       state.EffectKey,

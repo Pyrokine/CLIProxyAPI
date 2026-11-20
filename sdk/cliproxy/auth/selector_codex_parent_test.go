@@ -12,10 +12,12 @@ import (
 func TestSessionAffinityCodexSubagentWithOmittedThreadIDRetainsParent(t *testing.T) {
 	t.Parallel()
 
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Minute,
-	})
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Minute,
+		},
+	)
 	defer selector.Stop()
 
 	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
@@ -54,7 +56,9 @@ func TestSessionAffinityCodexSubagentWithOmittedThreadIDRetainsParent(t *testing
 	if got := subOpts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey]; got != "codex:sess-main-999" {
 		t.Fatalf("expected ParentSessionID=codex:sess-main-999, got %v", got)
 	}
-	if got := subOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey]; got != "codex:sess-main-999:agent:worker" {
+	if got := subOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey]; got !=
+		("codex:sess-main-999:" +
+			"agent:worker") {
 		t.Fatalf("expected CanonicalSessionID=codex:sess-main-999:agent:worker, got %v", got)
 	}
 }

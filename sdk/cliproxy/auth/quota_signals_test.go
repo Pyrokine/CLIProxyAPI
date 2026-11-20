@@ -19,13 +19,15 @@ import (
 func TestQuotaObservationBoundsAndSnapshotSemantics(t *testing.T) {
 	observedAt := time.Unix(100, 0)
 	var quota QuotaState
-	if !quota.ObserveResponseHeadersForProvider("codex", http.Header{
-		"x-codex-plan-type":            {"pro"},
-		"X-Codex-Primary-Used-Percent": {"91"},
-		"Retry-After":                  {"120"},
-		"Authorization":                {"Bearer secret"},
-		"X-Codex-Turn-State":           {"opaque"},
-	}, observedAt) {
+	if !quota.ObserveResponseHeadersForProvider(
+		"codex", http.Header{
+			"x-codex-plan-type":            {"pro"},
+			"X-Codex-Primary-Used-Percent": {"91"},
+			"Retry-After":                  {"120"},
+			"Authorization":                {"Bearer secret"},
+			"X-Codex-Turn-State":           {"opaque"},
+		}, observedAt,
+	) {
 		t.Fatal("initial observation reported no change")
 	}
 	if !quota.ObservedAt.Equal(observedAt) {
@@ -43,9 +45,11 @@ func TestQuotaObservationBoundsAndSnapshotSemantics(t *testing.T) {
 		t.Fatal("non-quota Codex header was retained")
 	}
 
-	if !quota.ObserveResponseHeadersForProvider("codex", http.Header{
-		"X-Codex-Primary-Used-Percent": {"5"},
-	}, time.Unix(200, 0)) {
+	if !quota.ObserveResponseHeadersForProvider(
+		"codex", http.Header{
+			"X-Codex-Primary-Used-Percent": {"5"},
+		}, time.Unix(200, 0),
+	) {
 		t.Fatal("replacement observation reported no change")
 	}
 	if _, ok := quota.Signals["Retry-After"]; ok {
@@ -57,18 +61,22 @@ func TestQuotaObservationBoundsAndSnapshotSemantics(t *testing.T) {
 	}
 
 	before := quota.Clone()
-	if quota.ObserveResponseHeadersForProvider("codex", http.Header{
-		"Content-Type": {"application/json"},
-	}, time.Unix(300, 0)) {
+	if quota.ObserveResponseHeadersForProvider(
+		"codex", http.Header{
+			"Content-Type": {"application/json"},
+		}, time.Unix(300, 0),
+	) {
 		t.Fatal("signal-free response reported a change")
 	}
 	if !reflect.DeepEqual(quota, before) {
 		t.Fatalf("signal-free response changed snapshot: got %#v want %#v", quota, before)
 	}
 
-	if !quota.ObserveResponseHeadersForProvider("gemini", http.Header{
-		"X-Codex-Primary-Used-Percent": {"100"},
-	}, time.Unix(400, 0)) {
+	if !quota.ObserveResponseHeadersForProvider(
+		"gemini", http.Header{
+			"X-Codex-Primary-Used-Percent": {"100"},
+		}, time.Unix(400, 0),
+	) {
 		t.Fatal("unsupported provider did not clear an old snapshot")
 	}
 	if !quota.ObservedAt.IsZero() || len(quota.Signals) != 0 {
@@ -87,9 +95,11 @@ func TestQuotaObservationRejectsInvalidValuesAndTruncatesDeterministically(t *te
 	}
 	for index, value := range invalid {
 		var quota QuotaState
-		if quota.ObserveResponseHeadersForProvider("codex", http.Header{
-			"X-Codex-Bengalfox-Limit-Name": {value},
-		}, time.Unix(int64(index+1), 0)) {
+		if quota.ObserveResponseHeadersForProvider(
+			"codex", http.Header{
+				"X-Codex-Bengalfox-Limit-Name": {value},
+			}, time.Unix(int64(index+1), 0),
+		) {
 			t.Fatalf("invalid value %q was accepted", value)
 		}
 		if len(quota.Signals) != 0 || !quota.ObservedAt.IsZero() {
@@ -101,7 +111,7 @@ func TestQuotaObservationRejectsInvalidValuesAndTruncatesDeterministically(t *te
 	headers.Set("X-Codex-Plan-Type", "pro")
 	headers.Set("X-Codex-Primary-Used-Percent", "81")
 	headers.Set("X-Codex-Credits-Balance", "0")
-	for index := 0; index < maxQuotaSignalHeaders*2; index++ {
+	for index := range maxQuotaSignalHeaders * 2 {
 		headers.Set(
 			fmt.Sprintf("X-Codex-Additional-L%03d-Primary-Used-Percent", index),
 			strconv.Itoa(index),
@@ -121,7 +131,7 @@ func TestQuotaObservationRejectsInvalidValuesAndTruncatesDeterministically(t *te
 			t.Fatalf("priority signal %q was truncated: %#v", key, first.Signals)
 		}
 	}
-	for iteration := 0; iteration < 10; iteration++ {
+	for range 10 {
 		var next QuotaState
 		next.ObserveResponseHeadersForProvider("codex", headers, time.Unix(100, 0))
 		if !reflect.DeepEqual(first.Signals, next.Signals) {
@@ -145,12 +155,14 @@ func TestQuotaObservationCloneAndCooldownUpdatesAreIndependent(t *testing.T) {
 		t.Fatal("QuotaState.Clone shared the signal map")
 	}
 
-	applyCooldownFields(&quota, QuotaState{
-		Exceeded:      true,
-		Reason:        "credential_quota",
-		NextRecoverAt: time.Unix(40, 0),
-		BackoffLevel:  2,
-	})
+	applyCooldownFields(
+		&quota, QuotaState{
+			Exceeded:      true,
+			Reason:        "credential_quota",
+			NextRecoverAt: time.Unix(40, 0),
+			BackoffLevel:  2,
+		},
+	)
 	if quota.Reason != "credential_quota" || quota.BackoffLevel != 2 ||
 		!quota.NextRecoverAt.Equal(time.Unix(40, 0)) {
 		t.Fatalf("cooldown fields were not updated: %#v", quota)
@@ -264,17 +276,19 @@ func TestExecuteCountDoesNotAdvanceObservationOrRecoverAvailability(t *testing.T
 	manager.RegisterExecutor(executor)
 	registerSchedulerModels(t, provider, model, authID)
 	originalObservation := time.Unix(10, 0)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID:            authID,
-		Provider:      provider,
-		Status:        StatusError,
-		StatusMessage: "existing failure",
-		LastError:     &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "existing failure"},
-		Quota: QuotaState{
-			ObservedAt: originalObservation,
-			Signals:    map[string]string{"X-Codex-Primary-Used-Percent": "40"},
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID:            authID,
+			Provider:      provider,
+			Status:        StatusError,
+			StatusMessage: "existing failure",
+			LastError:     &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "existing failure"},
+			Quota: QuotaState{
+				ObservedAt: originalObservation,
+				Signals:    map[string]string{"X-Codex-Primary-Used-Percent": "40"},
+			},
 		},
-	})
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -402,39 +416,44 @@ func TestExecutionAttemptsDoNotReuseQuotaResponseHeaders(t *testing.T) {
 			name: "stream",
 			run: func(manager *Manager, ctx context.Context, model string) error {
 				_, errExecute := manager.ExecuteStream(
-					ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true},
+					ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model},
+					cliproxyexecutor.Options{Stream: true},
 				)
 				return errExecute
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			manager := NewManager(nil, quotaAttemptIsolationSelector{}, nil)
-			manager.RegisterExecutor(&quotaAttemptIsolationExecutor{})
-			model := "quota-attempt-isolation-" + test.name
-			firstID := "quota-attempt-" + test.name + "-a"
-			secondID := "quota-attempt-" + test.name + "-b"
-			registerSchedulerModels(t, "codex", model, firstID, secondID)
-			for _, authID := range []string{firstID, secondID} {
-				if _, errRegister := manager.Register(context.Background(), &Auth{
-					ID: authID, Provider: "codex", Status: StatusActive,
-				}); errRegister != nil {
-					t.Fatalf("Register(%s) error = %v", authID, errRegister)
+		t.Run(
+			test.name, func(t *testing.T) {
+				manager := NewManager(nil, quotaAttemptIsolationSelector{}, nil)
+				manager.RegisterExecutor(&quotaAttemptIsolationExecutor{})
+				model := "quota-attempt-isolation-" + test.name
+				firstID := "quota-attempt-" + test.name + "-a"
+				secondID := "quota-attempt-" + test.name + "-b"
+				registerSchedulerModels(t, "codex", model, firstID, secondID)
+				for _, authID := range []string{firstID, secondID} {
+					if _, errRegister := manager.Register(
+						context.Background(), &Auth{
+							ID: authID, Provider: "codex", Status: StatusActive,
+						},
+					); errRegister != nil {
+						t.Fatalf("Register(%s) error = %v", authID, errRegister)
+					}
 				}
-			}
 
-			if errExecute := test.run(manager, context.Background(), model); errExecute == nil {
-				t.Fatal("execution error = nil, want terminal prepare failure")
-			}
-			first, _ := manager.GetByID(firstID)
-			second, _ := manager.GetByID(secondID)
-			if first.Quota.Signals["X-Codex-Primary-Used-Percent"] != "91" {
-				t.Fatalf("first attempt observation = %#v", first.Quota)
-			}
-			if len(second.Quota.Signals) != 0 || !second.Quota.ObservedAt.IsZero() {
-				t.Fatalf("pre-response failure inherited first attempt headers: %#v", second.Quota)
-			}
-		})
+				if errExecute := test.run(manager, context.Background(), model); errExecute == nil {
+					t.Fatal("execution error = nil, want terminal prepare failure")
+				}
+				first, _ := manager.GetByID(firstID)
+				second, _ := manager.GetByID(secondID)
+				if first.Quota.Signals["X-Codex-Primary-Used-Percent"] != "91" {
+					t.Fatalf("first attempt observation = %#v", first.Quota)
+				}
+				if len(second.Quota.Signals) != 0 || !second.Quota.ObservedAt.IsZero() {
+					t.Fatalf("pre-response failure inherited first attempt headers: %#v", second.Quota)
+				}
+			},
+		)
 	}
 }
 

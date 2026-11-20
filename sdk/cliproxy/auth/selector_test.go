@@ -110,7 +110,13 @@ func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	}
 	low := &Auth{ID: "low", Attributes: map[string]string{"priority": "0"}}
 
-	got, err := selector.Pick(context.Background(), "mixed", model, cliproxyexecutor.Options{}, []*Auth{high, low})
+	got, err := selector.Pick(
+		context.Background(),
+		"mixed",
+		model,
+		cliproxyexecutor.Options{},
+		[]*Auth{high, low},
+	)
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
@@ -141,7 +147,13 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 			func() {
 				<-start
 				for range iterations {
-					got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+					got, err := selector.Pick(
+						context.Background(),
+						"gemini",
+						"",
+						cliproxyexecutor.Options{},
+						auths,
+					)
 					if err != nil {
 						select {
 						case errCh <- err:
@@ -425,10 +437,12 @@ func TestSessionAffinitySelector_PicksStickyAuth(t *testing.T) {
 }
 
 func TestSessionAffinitySelector_RespectsAvailablePriority(t *testing.T) {
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &FillFirstSelector{},
-		TTL:      time.Hour,
-	})
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &FillFirstSelector{},
+			TTL:      time.Hour,
+		},
+	)
 	defer selector.Stop()
 
 	const model = "model-a"
@@ -518,77 +532,115 @@ func TestHeaderValueIgnoreCase(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_ClaudeCodeSessionIDPriorityOverHeader(t *testing.T) {
+func TestCanonicalSessionID_ClaudeCodeSessionIDPriorityOverHeader(t *testing.T) {
 	t.Parallel()
 
 	headers := http.Header{"X-Session-ID": {"header-session"}}
 	body := []byte(`{"metadata":{"user_id":"{\"session_id\":\"claude-session-1\"}"}}`)
-	if got := ExtractSessionID(headers, body, nil); got != "claude:claude-session-1" {
-		t.Fatalf("ExtractSessionID() = %q, want %q", got, "claude:claude-session-1")
+	if got := CanonicalSessionID(headers, body, nil); got != "claude:claude-session-1" {
+		t.Fatalf("CanonicalSessionID() = %q, want %q", got, "claude:claude-session-1")
 	}
 }
 
-func TestExtractSessionID_ClaudeCodeSuffixSessionID(t *testing.T) {
+func TestCanonicalSessionID_ClaudeCodeSuffixSessionID(t *testing.T) {
 	t.Parallel()
 
-	body := []byte(`{"metadata":{"user_id":"user_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_account_x_session_9fbc3f7a-390a-4acf-aecf-11b2ed8d511e"}}`)
-	if got := ExtractSessionID(nil, body, nil); got != "claude:9fbc3f7a-390a-4acf-aecf-11b2ed8d511e" {
-		t.Fatalf("ExtractSessionID() = %q, want %q", got, "claude:9fbc3f7a-390a-4acf-aecf-11b2ed8d511e")
+	body := []byte((`{"metadata":{"user_id":"user_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` +
+		`aaaaaaaaaaaaaaaaaaaaaaa_account_x_session_9fbc3f7a-390a-4acf-aecf-11b2` +
+		`ed8d511e"}}`))
+	if got := CanonicalSessionID(nil, body, nil); got != "claude:9fbc3f7a-390a-4acf-aecf-11b2ed8d511e" {
+		t.Fatalf("CanonicalSessionID() = %q, want %q", got, "claude:9fbc3f7a-390a-4acf-aecf-11b2ed8d511e")
 	}
 }
 
-func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
+func TestCanonicalSessionID_CodexSessionIDHeader(t *testing.T) {
 	t.Parallel()
 
-	headers := http.Header{"Session_id": {"codex-session-1"}}
-	if got := ExtractSessionID(headers, nil, nil); got != "codex-session-1" {
-		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-session-1")
+	originalHeaders := make(http.Header)
+	originalHeaders.Set("Session_id", "codex-session-123")
+	for _, test := range []struct {
+		name    string
+		headers http.Header
+		want    string
+	}{
+		{"map", http.Header{"Session_id": {"codex-session-1"}}, "codex:codex-session-1"},
+		{"original-set", originalHeaders, "codex:codex-session-123"},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				if got := CanonicalSessionID(test.headers, nil, nil); got != test.want {
+					t.Fatalf("CanonicalSessionID() = %q, want %q", got, test.want)
+				}
+			},
+		)
 	}
 }
 
-func TestExtractSessionID_CodexSessionIDPriorityOverClientRequestID(t *testing.T) {
+func TestCanonicalSessionID_CodexSessionIDPriorityOverClientRequestID(t *testing.T) {
 	t.Parallel()
 
-	headers := http.Header{"Session_id": {"codex-session-1"}, "X-Client-Request-Id": {"client-session-1"}}
-	if got := ExtractSessionID(headers, nil, nil); got != "codex-session-1" {
-		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-session-1")
+	originalHeaders := make(http.Header)
+	originalHeaders.Set("X-Client-Request-Id", "pi-session-123")
+	originalHeaders.Set("Session_id", "codex-session-456")
+	for _, test := range []struct {
+		name    string
+		headers http.Header
+		want    string
+	}{
+		{
+			"map", http.Header{"Session_id": {"codex-session-1"}, "X-Client-Request-Id": {"client-session-1"}},
+			"codex:codex-session-1",
+		},
+		{"original-set", originalHeaders, "codex:codex-session-456"},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				if got := CanonicalSessionID(test.headers, nil, nil); got != test.want {
+					t.Fatalf("CanonicalSessionID() = %q, want %q", got, test.want)
+				}
+			},
+		)
 	}
 }
 
-func TestExtractSessionID_CodexHyphenSessionIDHeader(t *testing.T) {
+func TestCanonicalSessionID_CodexHyphenSessionIDHeader(t *testing.T) {
 	t.Parallel()
 
 	headers := http.Header{"Session-Id": {"codex-session-2"}}
-	if got := ExtractSessionID(headers, nil, nil); got != "codex-session-2" {
-		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-session-2")
+	if got := CanonicalSessionID(headers, nil, nil); got != "codex:codex-session-2" {
+		t.Fatalf("CanonicalSessionID() = %q, want %q", got, "codex:codex-session-2")
 	}
 }
 
-func TestExtractSessionID_CodexConversationIDHeader(t *testing.T) {
+func TestCanonicalSessionID_CodexConversationIDHeader(t *testing.T) {
 	t.Parallel()
 
 	headers := http.Header{"Conversation_id": {"codex-conversation-1"}}
-	if got := ExtractSessionID(headers, nil, nil); got != "codex-conversation-1" {
-		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-conversation-1")
+	if got := CanonicalSessionID(headers, nil, nil); got != "conv:codex-conversation-1" {
+		t.Fatalf("CanonicalSessionID() = %q, want %q", got, "conv:codex-conversation-1")
 	}
 }
 
-func TestExtractSessionID_ClientRequestIDPriorityOverCodexPromptCacheKey(t *testing.T) {
+func TestCanonicalSessionID_ClientRequestIDPriorityOverCodexPromptCacheKey(t *testing.T) {
 	t.Parallel()
 
 	headers := http.Header{"X-Client-Request-Id": {"client-session-1"}}
 	body := []byte(`{"prompt_cache_key":"codex-cache-1"}`)
-	if got := ExtractSessionID(headers, body, nil); got != "client-session-1" {
-		t.Fatalf("ExtractSessionID() = %q, want %q", got, "client-session-1")
+	if got := CanonicalSessionID(headers, body, nil); got != "clientreq:client-session-1" {
+		t.Fatalf("CanonicalSessionID() = %q, want %q", got, "clientreq:client-session-1")
 	}
 }
 
-func TestExtractSessionID_CodexTurnMetadataPromptCacheKeyBody(t *testing.T) {
+func TestCanonicalSessionID_CodexTurnMetadataPromptCacheKeyBody(t *testing.T) {
 	t.Parallel()
 
-	body := []byte(`{"client_metadata":{"x-codex-turn-metadata":"{\"prompt_cache_key\":\"turn-cache-1\",\"window_id\":\"window-1\"}"}}`)
-	if got := ExtractSessionID(nil, body, nil); got != "turn-cache-1" {
-		t.Fatalf("ExtractSessionID() = %q, want %q", got, "turn-cache-1")
+	body := []byte(
+		(`{"client_metadata":{"x-codex-turn-metadata":"{\"prompt_cache_key\":` +
+			`\"turn-cache-1\",\"window_id\":` +
+			`\"window-1\"}"}}`),
+	)
+	if got := CanonicalSessionID(nil, body, nil); got != "pck:turn-cache-1" {
+		t.Fatalf("CanonicalSessionID() = %q, want %q", got, "pck:turn-cache-1")
 	}
 }
 
@@ -659,7 +711,9 @@ func TestSessionAffinitySelector_CodexSessionIDPriorityOverPromptCacheKey(t *tes
 
 	auths := []*Auth{{ID: "a"}, {ID: "b"}}
 	selector.Remember(
-		"codex", cliproxyexecutor.Options{Headers: http.Header{"Session_id": {"codex-client-session"}}}, auths[0],
+		"codex",
+		cliproxyexecutor.Options{Headers: http.Header{"Session_id": {"codex-client-session"}}},
+		auths[0],
 	)
 
 	opts := cliproxyexecutor.Options{
@@ -738,7 +792,9 @@ func TestSessionAffinitySelector_UsesExecutionSessionMetadata(t *testing.T) {
 	defer selector.Stop()
 
 	auths := []*Auth{{ID: "a"}, {ID: "b"}}
-	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "exec-1"}}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "exec-1"},
+	}
 
 	first, err := selector.Pick(context.Background(), "gemini", "m1", opts, auths)
 	if err != nil {
@@ -834,11 +890,23 @@ func TestRoundRobinSelectorPick_ThinkingSuffixSharesCursor(t *testing.T) {
 		{ID: "a"},
 	}
 
-	first, err := selector.Pick(context.Background(), "gemini", "test-model(high)", cliproxyexecutor.Options{}, auths)
+	first, err := selector.Pick(
+		context.Background(),
+		"gemini",
+		"test-model(high)",
+		cliproxyexecutor.Options{},
+		auths,
+	)
 	if err != nil {
 		t.Fatalf("Pick() first error = %v", err)
 	}
-	second, err := selector.Pick(context.Background(), "gemini", "test-model(low)", cliproxyexecutor.Options{}, auths)
+	second, err := selector.Pick(
+		context.Background(),
+		"gemini",
+		"test-model(low)",
+		cliproxyexecutor.Options{},
+		auths,
+	)
 	if err != nil {
 		t.Fatalf("Pick() second error = %v", err)
 	}
@@ -1037,6 +1105,7 @@ func (s *selectorStopProbe) stopCount() int {
 
 type uncomparableSelector struct {
 	values []string
+	fn     func()
 }
 
 func (uncomparableSelector) Pick(
@@ -1051,10 +1120,27 @@ func (uncomparableSelector) Pick(
 
 func TestManagerSetSelectorUncomparableTypes(t *testing.T) {
 	t.Parallel()
-	manager := NewManager(nil, nil, nil)
-	manager.SetSelector(uncomparableSelector{values: []string{"first"}})
-	manager.SetSelector(uncomparableSelector{values: []string{"second"}})
-	manager.SetSelector(nil)
+	for _, test := range []struct {
+		name      string
+		selectors []Selector
+	}{
+		{
+			"slice", []Selector{
+				uncomparableSelector{values: []string{"first"}}, uncomparableSelector{values: []string{"second"}},
+			},
+		},
+		{"function", []Selector{uncomparableSelector{fn: func() {}}, uncomparableSelector{fn: func() {}}}},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				manager := NewManager(nil, nil, nil)
+				for _, selector := range test.selectors {
+					manager.SetSelector(selector)
+				}
+				manager.SetSelector(nil)
+			},
+		)
+	}
 }
 
 func TestManagerSetSelectorSameInstanceDoesNotStop(t *testing.T) {
@@ -1077,13 +1163,13 @@ func TestManagerSetSelectorConcurrent(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	var workers sync.WaitGroup
 	for range 20 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for range 10 {
-				manager.SetSelector(&selectorStopProbe{})
-			}
-		}()
+		workers.Go(
+			func() {
+				for range 10 {
+					manager.SetSelector(&selectorStopProbe{})
+				}
+			},
+		)
 	}
 	workers.Wait()
 	if manager.Selector() == nil {

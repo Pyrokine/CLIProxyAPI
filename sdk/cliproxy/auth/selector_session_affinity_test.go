@@ -39,43 +39,47 @@ func TestSessionAffinitySubagentInheritanceCanBeDisabled(t *testing.T) {
 		{name: "default enabled", want: "a"},
 		{name: "explicitly disabled", enabled: new(false), want: "b"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-				Fallback:         affinityLastSelector{},
-				TTL:              time.Hour,
-				SubagentAffinity: test.enabled,
-			})
-			defer selector.Stop()
+		t.Run(
+			test.name, func(t *testing.T) {
+				t.Parallel()
+				selector := NewSessionAffinitySelectorWithConfig(
+					SessionAffinityConfig{
+						Fallback:         affinityLastSelector{},
+						TTL:              time.Hour,
+						SubagentAffinity: test.enabled,
+					},
+				)
+				defer selector.Stop()
 
-			rootOptions := cliproxyexecutor.Options{
-				OriginalRequest: []byte(`{"session_id":"root"}`),
-				Metadata:        map[string]any{},
-			}
-			selectedRoot, errRoot := selector.Pick(context.Background(), "gemini", "model", rootOptions, auths[:1])
-			if errRoot != nil || selectedRoot == nil || selectedRoot.ID != "a" {
-				t.Fatalf("root Pick() = %#v, %v, want auth a", selectedRoot, errRoot)
-			}
-			childOptions := cliproxyexecutor.Options{
-				OriginalRequest: []byte(`{"session_id":"child","parent_session_id":"root"}`),
-				Metadata:        map[string]any{},
-			}
-			selected, err := selector.Pick(context.Background(), "gemini", "model", childOptions, auths)
-			if err != nil {
-				t.Fatalf("Pick() error = %v", err)
-			}
-			if selected == nil || selected.ID != test.want {
-				t.Fatalf("Pick() = %#v, want auth %s", selected, test.want)
-			}
-			parentKey := "gemini::session:root::model"
-			childKey := "gemini::session:child::model"
-			if got, ok := selector.cache.Get(parentKey); !ok || got != "a" {
-				t.Fatalf("parent binding = %q, %v, want auth a", got, ok)
-			}
-			if got, ok := selector.cache.Get(childKey); !ok || got != test.want {
-				t.Fatalf("child binding = %q, %v, want auth %s", got, ok, test.want)
-			}
-		})
+				rootOptions := cliproxyexecutor.Options{
+					OriginalRequest: []byte(`{"session_id":"root"}`),
+					Metadata:        map[string]any{},
+				}
+				selectedRoot, errRoot := selector.Pick(context.Background(), "gemini", "model", rootOptions, auths[:1])
+				if errRoot != nil || selectedRoot == nil || selectedRoot.ID != "a" {
+					t.Fatalf("root Pick() = %#v, %v, want auth a", selectedRoot, errRoot)
+				}
+				childOptions := cliproxyexecutor.Options{
+					OriginalRequest: []byte(`{"session_id":"child","parent_session_id":"root"}`),
+					Metadata:        map[string]any{},
+				}
+				selected, err := selector.Pick(context.Background(), "gemini", "model", childOptions, auths)
+				if err != nil {
+					t.Fatalf("Pick() error = %v", err)
+				}
+				if selected == nil || selected.ID != test.want {
+					t.Fatalf("Pick() = %#v, want auth %s", selected, test.want)
+				}
+				parentKey := "gemini::session:root::model"
+				childKey := "gemini::session:child::model"
+				if got, ok := selector.cache.Get(parentKey); !ok || got != "a" {
+					t.Fatalf("parent binding = %q, %v, want auth a", got, ok)
+				}
+				if got, ok := selector.cache.Get(childKey); !ok || got != test.want {
+					t.Fatalf("child binding = %q, %v, want auth %s", got, ok, test.want)
+				}
+			},
+		)
 	}
 }
 
@@ -83,17 +87,21 @@ func TestSessionAffinityForkInheritsWhenSubagentsDisabled(t *testing.T) {
 	t.Parallel()
 
 	disabled := false
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback:         affinityLastSelector{},
-		TTL:              time.Hour,
-		SubagentAffinity: &disabled,
-	})
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback:         affinityLastSelector{},
+			TTL:              time.Hour,
+			SubagentAffinity: &disabled,
+		},
+	)
 	defer selector.Stop()
 	auths := []*Auth{{ID: "a"}, {ID: "b"}}
-	selector.Remember("codex", cliproxyexecutor.Options{
-		Headers:  http.Header{"Session-Id": {"parent"}},
-		Metadata: map[string]any{cliproxyexecutor.SessionAffinityModelMetadataKey: "model"},
-	}, auths[0])
+	selector.Remember(
+		"codex", cliproxyexecutor.Options{
+			Headers:  http.Header{"Session-Id": {"parent"}},
+			Metadata: map[string]any{cliproxyexecutor.SessionAffinityModelMetadataKey: "model"},
+		}, auths[0],
+	)
 
 	forkOptions := cliproxyexecutor.Options{
 		Headers: http.Header{
@@ -120,10 +128,12 @@ func TestSessionAffinityForkInheritsWhenSubagentsDisabled(t *testing.T) {
 func TestSessionAffinityLCPExtensionAndBranch(t *testing.T) {
 	t.Parallel()
 
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: affinityLastSelector{},
-		TTL:      time.Hour,
-	})
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: affinityLastSelector{},
+			TTL:      time.Hour,
+		},
+	)
 	defer selector.Stop()
 	auths := []*Auth{{ID: "a"}, {ID: "b"}}
 	baseMetadata := func() map[string]any {
@@ -144,22 +154,26 @@ func TestSessionAffinityLCPExtensionAndBranch(t *testing.T) {
 	}
 
 	grown := cliproxyexecutor.Options{
-		OriginalRequest: []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"one"},{"role":"assistant","content":"answer"},{"role":"user","content":"two"}]}`),
-		SourceFormat:    sdktranslator.FormatOpenAI,
-		Metadata:        baseMetadata(),
+		OriginalRequest: []byte((`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"` +
+			`one"},{"role":"assistant","content":"answer"},{"role":"user","content":"two"}]}`)),
+		SourceFormat: sdktranslator.FormatOpenAI,
+		Metadata:     baseMetadata(),
 	}
 	selected, err = selector.Pick(context.Background(), "openai", "model", grown, auths)
 	if err != nil || selected == nil || selected.ID != "b" {
 		t.Fatalf("grown Pick() = %#v, %v, want auth b", selected, err)
 	}
-	if got := sessionMetadataString(grown.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey); got != firstSession {
+	if got := sessionMetadataString(
+		grown.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey,
+	); got != firstSession {
 		t.Fatalf("linear session = %q, want %q", got, firstSession)
 	}
 
 	branch := cliproxyexecutor.Options{
-		OriginalRequest: []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"one"},{"role":"assistant","content":"different"},{"role":"user","content":"branch"}]}`),
-		SourceFormat:    sdktranslator.FormatOpenAI,
-		Metadata:        baseMetadata(),
+		OriginalRequest: []byte((`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"` +
+			`one"},{"role":"assistant","content":"different"},{"role":"user","content":"branch"}]}`)),
+		SourceFormat: sdktranslator.FormatOpenAI,
+		Metadata:     baseMetadata(),
 	}
 	selected, err = selector.Pick(context.Background(), "openai", "model", branch, auths)
 	if err != nil || selected == nil || selected.ID != "b" {
@@ -177,7 +191,11 @@ func TestSessionAffinityLCPExtensionAndBranch(t *testing.T) {
 func TestSessionAffinityLCPCompactionPropagatesToExecutionContext(t *testing.T) {
 	t.Parallel()
 
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: affinityLastSelector{}, TTL: time.Hour})
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: affinityLastSelector{}, TTL: time.Hour,
+		},
+	)
 	defer selector.Stop()
 	auths := []*Auth{{ID: "a"}}
 	request := func(messages string) cliproxyexecutor.Options {
@@ -187,8 +205,14 @@ func TestSessionAffinityLCPCompactionPropagatesToExecutionContext(t *testing.T) 
 			Metadata:        map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "compaction-test"},
 		}
 	}
-	parent := request(`{"role":"user","content":"one"},{"role":"user","content":"two"},{"role":"user","content":"three"},{"role":"user","content":"four"},{"role":"user","content":"five"}`)
-	if selected, err := selector.Pick(context.Background(), "openai", "model", parent, auths); err != nil || selected == nil {
+	parent := request(
+		`{"role":"user","content":"one"},{"role":"user","content":"two"},{"role` +
+			`":"user","content":"three"},{"role":"user","content":"four"},{"role":"` +
+			`user","content":"five"}`,
+	)
+	if selected, err := selector.Pick(
+		context.Background(), "openai", "model", parent, auths,
+	); err != nil || selected == nil {
 		t.Fatalf("parent selection = %#v, error = %v", selected, err)
 	}
 	parentID := sessionMetadataString(parent.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey)
@@ -196,8 +220,13 @@ func TestSessionAffinityLCPCompactionPropagatesToExecutionContext(t *testing.T) 
 		t.Fatal("parent session was not bound")
 	}
 
-	compacted := request(`{"role":"user","content":"summary of one to three"},{"role":"user","content":"four"},{"role":"user","content":"five"},{"role":"user","content":"six"}`)
-	if selected, err := selector.Pick(context.Background(), "openai", "model", compacted, auths); err != nil || selected == nil || selected.ID != "a" {
+	compacted := request(
+		`{"role":"user","content":"summary of one to three"},{"role":"user","content":"four"` +
+			`},{"role":"user","content":"five"},{"role":"user","content":"six"}`,
+	)
+	if selected, err := selector.Pick(
+		context.Background(), "openai", "model", compacted, auths,
+	); err != nil || selected == nil || selected.ID != "a" {
 		t.Fatalf("compaction selection = %#v, error = %v", selected, err)
 	}
 	if !metadataBool(compacted.Metadata, cliproxyexecutor.IsCompactionMetadataKey) ||
@@ -214,7 +243,8 @@ func TestSessionAffinityLCPCompactionPropagatesToExecutionContext(t *testing.T) 
 		t.Fatalf("execution session metadata = %#v", clientMeta)
 	}
 	cleared := logging.GetClientRequestMetadata(syncMetadataSessionToContext(ctx, nil))
-	if cleared.SessionID != "" || cleared.ParentSessionID != "" || cleared.NodeKind != "" || cleared.IsCompaction || cleared.IsFork {
+	if cleared.SessionID != "" || cleared.ParentSessionID != "" || cleared.NodeKind != "" || cleared.IsCompaction ||
+		cleared.IsFork {
 		t.Fatalf("stale compaction metadata persisted: %#v", cleared)
 	}
 }
@@ -222,10 +252,12 @@ func TestSessionAffinityLCPCompactionPropagatesToExecutionContext(t *testing.T) 
 func TestSessionAffinityRecordResultDoesNotDeleteReboundExplicitSession(t *testing.T) {
 	t.Parallel()
 
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: affinityLastSelector{},
-		TTL:      time.Hour,
-	})
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: affinityLastSelector{},
+			TTL:      time.Hour,
+		},
+	)
 	defer selector.Stop()
 	options := cliproxyexecutor.Options{
 		Headers: http.Header{"X-Session-ID": {"session"}},
@@ -249,12 +281,12 @@ func TestSessionAffinityConcurrentStop(t *testing.T) {
 
 	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
 	var done sync.WaitGroup
-	for index := 0; index < 32; index++ {
-		done.Add(1)
-		go func() {
-			defer done.Done()
-			selector.Stop()
-		}()
+	for range 32 {
+		done.Go(
+			func() {
+				selector.Stop()
+			},
+		)
 	}
 	done.Wait()
 }
@@ -262,10 +294,12 @@ func TestSessionAffinityConcurrentStop(t *testing.T) {
 func TestSessionContextSynchronizationPreservesExplicitCallerOverrides(t *testing.T) {
 	for _, value := range []string{"", "caller-session"} {
 		ctx := util.WithSessionID(context.Background(), value)
-		ctx = syncMetadataSessionToContext(ctx, map[string]any{
-			cliproxyexecutor.CanonicalSessionIDMetadataKey:   "lcp:v1:current",
-			cliproxyexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:current",
-		})
+		ctx = syncMetadataSessionToContext(
+			ctx, map[string]any{
+				cliproxyexecutor.CanonicalSessionIDMetadataKey:   "lcp:v1:current",
+				cliproxyexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:current",
+			},
+		)
 		if got := util.SessionIDFromContext(ctx); got != value {
 			t.Fatalf("caller override=%q, want %q", got, value)
 		}

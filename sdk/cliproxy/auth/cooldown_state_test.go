@@ -155,7 +155,8 @@ func TestFileCooldownStateStore_SaveLoadAndCleanStale(t *testing.T) {
 	if len(loaded) != 1 {
 		t.Fatalf("loaded records = %d, want 1", len(loaded))
 	}
-	if loaded[0].AuthID != record.AuthID || loaded[0].Model != record.Model || !loaded[0].NextRetryAfter.Equal(nextRetry) {
+	if loaded[0].AuthID != record.AuthID || loaded[0].Model != record.Model ||
+		!loaded[0].NextRetryAfter.Equal(nextRetry) {
 		t.Fatalf("loaded record = %+v, want auth/model/retry from %+v", loaded[0], record)
 	}
 	if loaded[0].LastError == nil || loaded[0].LastError.HTTPStatus != 429 {
@@ -179,21 +180,23 @@ func TestFileCooldownStateStore_ConcurrentSave(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 16)
 	for i := range 16 {
-		wg.Go(func() {
-			errs <- store.Save(
-				ctx, []CooldownStateRecord{
-					{
-						Provider:       "xai",
-						AuthID:         "auth-1",
-						AuthFile:       filepath.Join(authDir, "xai.json"),
-						Model:          "grok-4",
-						Status:         "cooling",
-						NextRetryAfter: nextRetry.Add(time.Duration(i) * time.Second),
-						UpdatedAt:      nextRetry,
+		wg.Go(
+			func() {
+				errs <- store.Save(
+					ctx, []CooldownStateRecord{
+						{
+							Provider:       "xai",
+							AuthID:         "auth-1",
+							AuthFile:       filepath.Join(authDir, "xai.json"),
+							Model:          "grok-4",
+							Status:         "cooling",
+							NextRetryAfter: nextRetry.Add(time.Duration(i) * time.Second),
+							UpdatedAt:      nextRetry,
+						},
 					},
-				},
-			)
-		})
+				)
+			},
+		)
 	}
 	wg.Wait()
 	close(errs)

@@ -612,30 +612,42 @@ func TestManager_PickNextMixed_UsesProviderRotationBeforeCredentialRotation(t *t
 func TestManagerCustomSelector_FallsBackToLegacyPath(t *testing.T) {
 	t.Parallel()
 
-	selector := &trackingSelector{}
-	manager := NewManager(nil, selector, nil)
-	manager.executors["gemini"] = schedulerTestExecutor{}
-	manager.auths["auth-a"] = &Auth{ID: "auth-a", Provider: "gemini"}
-	manager.auths["auth-b"] = &Auth{ID: "auth-b", Provider: "gemini"}
+	for _, entry := range []string{"single", "mixed"} {
+		t.Run(
+			entry, func(t *testing.T) {
+				selector := &trackingSelector{}
+				manager := NewManager(nil, selector, nil)
+				manager.executors["gemini"] = schedulerTestExecutor{}
+				manager.auths["auth-a"] = &Auth{ID: "auth-a", Provider: "gemini"}
+				manager.auths["auth-b"] = &Auth{ID: "auth-b", Provider: "gemini"}
 
-	got, _, _, errPick := manager.pickNextMixed(
-		context.Background(), []string{"gemini"}, "", cliproxyexecutor.Options{}, map[string]struct{}{},
-	)
-	if errPick != nil {
-		t.Fatalf("pickNext() error = %v", errPick)
-	}
-	if got == nil {
-		t.Fatalf("pickNext() auth = nil")
-	}
-	if selector.calls != 1 {
-		t.Fatalf("selector.calls = %d, want %d", selector.calls, 1)
-	}
-	if len(selector.lastAuthID) != 2 {
-		t.Fatalf("len(selector.lastAuthID) = %d, want %d", len(selector.lastAuthID), 2)
-	}
-	if got.ID != selector.lastAuthID[len(selector.lastAuthID)-1] {
-		t.Fatalf(
-			"pickNext() auth.ID = %q, want selector-picked %q", got.ID, selector.lastAuthID[len(selector.lastAuthID)-1],
+				var got *Auth
+				var errPick error
+				if entry == "single" {
+					got, _, errPick = manager.PickNext(
+						context.Background(), "gemini", "", cliproxyexecutor.Options{}, map[string]struct{}{},
+					)
+				} else {
+					got, _, _, errPick = manager.pickNextMixed(
+						context.Background(), []string{"gemini"}, "", cliproxyexecutor.Options{}, map[string]struct{}{},
+					)
+				}
+				if errPick != nil {
+					t.Fatalf("selection error = %v", errPick)
+				}
+				if got == nil {
+					t.Fatal("selected auth is nil")
+				}
+				if selector.calls != 1 {
+					t.Fatalf("selector.calls = %d, want 1", selector.calls)
+				}
+				if len(selector.lastAuthID) != 2 {
+					t.Fatalf("len(selector.lastAuthID) = %d, want 2", len(selector.lastAuthID))
+				}
+				if got.ID != selector.lastAuthID[len(selector.lastAuthID)-1] {
+					t.Fatalf("selected auth.ID = %q, want %q", got.ID, selector.lastAuthID[len(selector.lastAuthID)-1])
+				}
+			},
 		)
 	}
 }

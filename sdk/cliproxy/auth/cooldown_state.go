@@ -26,7 +26,7 @@ type CooldownStateRecord struct {
 	Status          string                            `json:"status,omitempty"`
 	NextRetryAfter  time.Time                         `json:"next_retry_after"`
 	Reason          string                            `json:"reason,omitempty"`
-	Quota           QuotaState                        `json:"quota,omitempty"`
+	Quota           QuotaState                        `json:"quota"`
 	LastError       *Error                            `json:"last_error,omitempty"`
 	EffectScope     cliproxyexecutor.StateEffectScope `json:"effect_scope,omitempty"`
 	EffectKey       string                            `json:"effect_key,omitempty"`

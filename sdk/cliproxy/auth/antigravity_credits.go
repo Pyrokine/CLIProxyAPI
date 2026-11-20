@@ -2,9 +2,14 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
+	log "github.com/sirupsen/logrus"
 )
 
 type antigravityUseCreditsContextKey struct{}
@@ -68,19 +73,113 @@ func storeAntigravityCreditsHint(authID string, hint AntigravityCreditsHint, exp
 
 // PublishAntigravityCreditsHint 仅发布仍属于当前凭证的积分观察值
 func (a *Auth) PublishAntigravityCreditsHint(hint AntigravityCreditsHint) bool {
+	return a.publishAntigravityCreditsHint(
+		func() bool {
+			return storeAntigravityCreditsHint(a.ID, hint, a)
+		},
+	)
+}
+
+type homeSelectionContextKey struct{}
+
+// PublishAntigravityCreditsHintWithContext 将当前凭证的观察值写入请求所属的缓存
+func (a *Auth) PublishAntigravityCreditsHintWithContext(ctx context.Context, hint AntigravityCreditsHint) bool {
+	if a == nil || strings.TrimSpace(a.ID) == "" {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	client, homeMode, err := home.KVClientFromContext(ctx)
+	if err != nil {
+		log.Errorf("antigravity credits: Home publication failed prefix=cpa:antigravity:*: %v", err)
+		return false
+	}
+	if !homeMode {
+		return a.PublishAntigravityCreditsHint(hint)
+	}
+	cas, ok := client.(interface {
+		KVCompareAndSwap(context.Context, string, []byte, bool, []byte, time.Duration) (bool, error)
+	})
+	if !ok {
+		log.Errorf(
+			"antigravity credits: Home publication failed prefix=cpa:antigravity:*: %v",
+			home.ErrCompareAndSwapUnsupported,
+		)
+		return false
+	}
+	if selection, ok := ctx.Value(homeSelectionContextKey{}).(*HomeDispatchSelection); ok {
+		selection.authMu.RLock()
+		defer selection.authMu.RUnlock()
+		if !selection.Active() || selection.Auth == nil || !runtimeAuthCredentialsEqual(selection.Auth, a) {
+			return false
+		}
+	}
+	if hint.UpdatedAt.IsZero() {
+		hint.UpdatedAt = time.Now()
+	}
+	raw, err := json.Marshal(hint)
+	if err != nil {
+		log.Errorf("antigravity credits: Home publication failed prefix=cpa:antigravity:*: %v", err)
+		return false
+	}
+	return a.publishAntigravityCreditsHint(
+		func() bool {
+			keys := []string{"cpa:antigravity:credits-hint:" + strings.TrimSpace(a.ID)}
+			// 没有余额的 paidTier 仅发布不可用提示，避免零值被旧读取方判为可用余额
+			if hint.Available || hint.CreditAmount != 0 || hint.MinCreditAmount != 0 {
+				keys = append(keys, "cpa:antigravity:credits-balance:"+strings.TrimSpace(a.ID))
+			}
+			for _, key := range keys {
+				previous, found, errGet := client.KVGet(ctx, key)
+				if errGet != nil {
+					log.Errorf("antigravity credits: Home publication read failed prefix=cpa:antigravity:*: %v", errGet)
+					return false
+				}
+				if found {
+					var prior AntigravityCreditsHint
+					if errDecode := json.Unmarshal(previous, &prior); errDecode != nil {
+						log.Errorf(
+							"antigravity credits: Home publication decode failed prefix=cpa:antigravity:*: %v",
+							errDecode,
+						)
+						return false
+					}
+					if prior.UpdatedAt.After(hint.UpdatedAt) {
+						return false
+					}
+				}
+				written, errSet := cas.KVCompareAndSwap(ctx, key, previous, found, raw, 30*time.Minute)
+				if errSet != nil || !written {
+					log.Warnf(
+						"antigravity credits: Home publication failed prefix=cpa:antigravity:* written=%t: %v", written,
+						errSet,
+					)
+					return false
+				}
+			}
+			return true
+		},
+	)
+}
+
+func (a *Auth) publishAntigravityCreditsHint(publish func() bool) bool {
 	if a == nil {
 		return false
 	}
 	if a.creditsHintManager != nil {
-		return a.creditsHintManager.publishAntigravityCreditsHint(a, hint)
+		return a.creditsHintManager.publishAntigravityCreditsHint(a, publish)
 	}
 	if a.Generation != 0 {
 		return false
 	}
-	return storeAntigravityCreditsHint(a.ID, hint, a)
+	return publish()
 }
 
-func (m *Manager) publishAntigravityCreditsHint(expected *Auth, hint AntigravityCreditsHint) bool {
+func (m *Manager) publishAntigravityCreditsHint(expected *Auth, publish func() bool) bool {
 	m.authIntentMu.Lock()
 	defer m.authIntentMu.Unlock()
 	m.mu.RLock()
@@ -94,7 +193,7 @@ func (m *Manager) publishAntigravityCreditsHint(expected *Auth, hint Antigravity
 	if current.Generation != expected.Generation && !runtimeAuthCredentialsEqual(current, expected) {
 		return false
 	}
-	return storeAntigravityCreditsHint(expected.ID, hint, expected)
+	return publish()
 }
 
 func invalidateAntigravityCreditsHint(auth, previous *Auth) {
@@ -110,7 +209,9 @@ func invalidateAntigravityCreditsHint(auth, previous *Auth) {
 	}
 	if ok && entry.auth != nil && entry.auth.creditsHintManager == auth.creditsHintManager &&
 		entry.auth.creditsHintGeneration == auth.creditsHintGeneration &&
-		entry.auth.creditsHintRemovalEpoch == auth.creditsHintRemovalEpoch && runtimeAuthCredentialsEqual(entry.auth, auth) {
+		entry.auth.creditsHintRemovalEpoch == auth.creditsHintRemovalEpoch && runtimeAuthCredentialsEqual(
+		entry.auth, auth,
+	) {
 		return
 	}
 	antigravityCreditsHintByAuth.Delete(auth.ID)
@@ -135,6 +236,8 @@ func GetAntigravityCreditsHint(authID string) (AntigravityCreditsHint, bool) {
 }
 
 // HasKnownAntigravityCreditsHint reports whether credits state has been discovered for an auth.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func HasKnownAntigravityCreditsHint(authID string) bool {
 	hint, ok := GetAntigravityCreditsHint(authID)
 	return ok && hint.Known
@@ -155,4 +258,32 @@ func antigravityCreditsAvailableForModel(auth *Auth, model string) bool {
 	}
 	hint, _ := GetAntigravityCreditsHint(auth.ID)
 	return hint.Available
+}
+
+// GetAntigravityCreditsHintRequired reads Home-owned observations when Home is active.
+func GetAntigravityCreditsHintRequired(ctx context.Context, authID string) (AntigravityCreditsHint, bool, error) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return AntigravityCreditsHint{}, false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, err := home.KVClientFromContext(ctx)
+	if err != nil {
+		return AntigravityCreditsHint{}, false, err
+	}
+	if !homeMode {
+		hint, found := GetAntigravityCreditsHint(authID)
+		return hint, found, nil
+	}
+	raw, found, err := client.KVGet(ctx, "cpa:antigravity:credits-hint:"+authID)
+	if err != nil || !found {
+		return AntigravityCreditsHint{}, false, err
+	}
+	var hint AntigravityCreditsHint
+	if err := json.Unmarshal(raw, &hint); err != nil {
+		return AntigravityCreditsHint{}, false, fmt.Errorf("decode Home credits observation: %w", err)
+	}
+	return hint, true, nil
 }

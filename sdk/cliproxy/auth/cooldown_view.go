@@ -28,7 +28,7 @@ func CooldownSnapshotForAuth(auth *Auth, now time.Time) []CooldownView {
 	credentialScoped := auth.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential ||
 		auth.Quota.Reason == "credential_quota"
 	if !credentialScoped && auth.LastError != nil {
-		credentialScoped = auth.LastError.EffectScope == cliproxyexecutor.StateEffectScopeCredential
+		credentialScoped = auth.LastError.executionState().EffectScope == cliproxyexecutor.StateEffectScopeCredential
 	}
 	if credentialScoped {
 		if blocked, _, next := cooldownViewBlock(

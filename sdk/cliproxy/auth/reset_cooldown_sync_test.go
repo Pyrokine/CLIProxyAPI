@@ -33,7 +33,8 @@ func TestResetCooldownClearsTimedNonQuotaRoutingStateWithoutChangingQuotaReset(t
 	if _, models, err := manager.ResetQuota(context.Background(), auth.ID); err != nil || len(models) != 0 {
 		t.Fatalf("quota-only reset = %v, %v", models, err)
 	}
-	if unchanged, ok := manager.GetByID(auth.ID); !ok || !unchanged.Unavailable || !unchanged.ModelStates["model-a"].Unavailable {
+	if unchanged, ok := manager.GetByID(auth.ID); !ok || !unchanged.Unavailable ||
+		!unchanged.ModelStates["model-a"].Unavailable {
 		t.Fatalf("quota-only reset changed non-quota state: %+v", unchanged)
 	}
 	updated, models, err := manager.ResetCooldown(context.Background(), auth.ID)
@@ -75,7 +76,8 @@ func TestResetCooldownClearsCredentialTimerWithPermanentModelFailure(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.NextRetryAfter.After(time.Now()) || updated.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential {
+	if updated.NextRetryAfter.After(time.Now()) ||
+		updated.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential {
 		t.Fatalf("credential retry timer remains: %+v", updated)
 	}
 	if !updated.ModelStates["permanent"].Unavailable || updated.ModelStates["permanent"].LastError == nil {
@@ -101,7 +103,8 @@ func TestResetCooldownDoesNotEnableDisabledCredentialOrModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !updated.Disabled || updated.Status != StatusDisabled || updated.ModelStates["disabled-model"].Status != StatusDisabled ||
+	if !updated.Disabled || updated.Status != StatusDisabled ||
+		updated.ModelStates["disabled-model"].Status != StatusDisabled ||
 		len(models) != 0 {
 		t.Fatalf("disabled routing state changed: %+v, %v", updated, models)
 	}

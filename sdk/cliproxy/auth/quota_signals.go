@@ -11,6 +11,7 @@ import (
 
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"golang.org/x/net/http/httpguts"
 )
 
 const (
@@ -86,6 +87,7 @@ func ProviderSupportsQuotaObservation(provider string) bool {
 // ObserveResponseHeadersForProvider replaces the passive quota snapshot with
 // signals carried by the current upstream response. A response without quota
 // signals leaves the previous snapshot unchanged.
+// noinspection GoMixedReceiverTypes
 func (q *QuotaState) ObserveResponseHeadersForProvider(
 	provider string,
 	headers http.Header,
@@ -111,6 +113,8 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(
 
 // ClearObservationSignals clears passive observations without changing
 // cooldown or scheduler state.
+//
+//goland:noinspection GoMixedReceiverTypes,GoUnnecessarilyExportedIdentifiers
 func (q *QuotaState) ClearObservationSignals() bool {
 	if q == nil || (len(q.Signals) == 0 && q.ObservedAt.IsZero()) {
 		return false
@@ -118,6 +122,36 @@ func (q *QuotaState) ClearObservationSignals() bool {
 	q.Signals = nil
 	q.ObservedAt = time.Time{}
 	return true
+}
+
+func quotaForCooldownRecord(provider string, quota QuotaState) QuotaState {
+	signals := quota.Signals
+	quota.Signals = nil
+	if quota.ObservedAt.IsZero() {
+		return quota
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "devin") {
+		quota.Signals = make(map[string]string)
+		for _, name := range []string{
+			"daily_quota_present", "weekly_quota_present", "plan",
+			"daily_quota_remaining_percent", "daily_quota_reset_at",
+			"weekly_quota_remaining_percent", "weekly_quota_reset_at", "plan_start", "plan_end",
+		} {
+			if value := signals[name]; validQuotaSignalValue(value) {
+				quota.Signals[name] = value
+			}
+		}
+	} else {
+		headers := make(http.Header, len(signals))
+		for name, value := range signals {
+			headers[name] = []string{value}
+		}
+		quota.Signals = collectQuotaSignals(provider, headers)
+	}
+	if len(quota.Signals) == 0 {
+		quota.ClearObservationSignals()
+	}
+	return quota
 }
 
 // applyCooldownFields updates scheduler state while preserving the latest
@@ -143,7 +177,9 @@ func collectQuotaSignals(provider string, headers http.Header) map[string]string
 	values := make(map[string]string, len(headers))
 	for key, headerValues := range headers {
 		canonicalKey := http.CanonicalHeaderKey(strings.TrimSpace(key))
-		if !isQuotaSignalHeaderForProvider(provider, canonicalKey) || len(headerValues) == 0 {
+		if !httpguts.ValidHeaderFieldName(canonicalKey) || !isQuotaSignalHeaderForProvider(
+			provider, canonicalKey,
+		) || len(headerValues) == 0 {
 			continue
 		}
 		value := strings.TrimSpace(headerValues[len(headerValues)-1])
@@ -158,14 +194,16 @@ func collectQuotaSignals(provider string, headers http.Header) map[string]string
 	if len(names) == 0 {
 		return nil
 	}
-	sort.Slice(names, func(i, j int) bool {
-		leftRank := quotaSignalRetentionRank(names[i])
-		rightRank := quotaSignalRetentionRank(names[j])
-		if leftRank != rightRank {
-			return leftRank < rightRank
-		}
-		return names[i] < names[j]
-	})
+	sort.Slice(
+		names, func(i, j int) bool {
+			leftRank := quotaSignalRetentionRank(names[i])
+			rightRank := quotaSignalRetentionRank(names[j])
+			if leftRank != rightRank {
+				return leftRank < rightRank
+			}
+			return names[i] < names[j]
+		},
+	)
 	if len(names) > maxQuotaSignalHeaders {
 		names = names[:maxQuotaSignalHeaders]
 	}

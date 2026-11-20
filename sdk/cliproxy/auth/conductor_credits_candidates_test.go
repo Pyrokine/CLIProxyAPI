@@ -4,8 +4,10 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -133,22 +135,30 @@ func TestPreparedCreditsAndHomeContextsUseConsumerTransportKey(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetRoundTripperProvider(creditsContextTransportProvider{transport})
 	auth := &Auth{ID: "prepared-transport-context", Provider: "test", Status: StatusActive}
-	t.Run("credits", func(t *testing.T) {
-		ctx, _, _ := manager.prepareAntigravityCreditsExecution(context.Background(), auth, "test-model", cliproxyexecutor.Options{})
-		if util.RoundTripperValue(ctx) != transport {
-			t.Fatal("credits context did not publish the consumer transport key")
-		}
-	})
-	t.Run("home", func(t *testing.T) {
-		attempt, err := manager.prepareHomeAttempt(context.Background(), &HomeDispatchSelection{Provider: "test", Executor: schedulerTestExecutor{}}, auth,
-			cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{}, "test-model")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if util.RoundTripperValue(attempt.ctx) != transport {
-			t.Fatal("Home context did not publish the consumer transport key")
-		}
-	})
+	t.Run(
+		"credits", func(t *testing.T) {
+			ctx, _, _, err := manager.prepareAntigravityCreditsExecution(
+				context.Background(), schedulerTestExecutor{}, auth, "test-model", cliproxyexecutor.Options{},
+			)
+			if err != nil || util.RoundTripperValue(ctx) != transport {
+				t.Fatalf("credits preparation error=%v, transport=%v", err, util.RoundTripperValue(ctx))
+			}
+		},
+	)
+	t.Run(
+		"home", func(t *testing.T) {
+			attempt, err := manager.prepareHomeAttempt(
+				context.Background(), &HomeDispatchSelection{Provider: "test", Executor: schedulerTestExecutor{}}, auth,
+				cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{}, "test-model",
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if util.RoundTripperValue(attempt.ctx) != transport {
+				t.Fatal("Home context did not publish the consumer transport key")
+			}
+		},
+	)
 }
 
 func TestAntigravityCreditsPublicationFollowsCredentialLifecycle(t *testing.T) {
@@ -165,67 +175,79 @@ func TestAntigravityCreditsPublicationFollowsCredentialLifecycle(t *testing.T) {
 		{name: "forgotten-and-recreated"},
 		{name: "loaded-replacement"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			ctx := context.Background()
-			store := &credentialWeightValidationStore{}
-			manager := NewManager(store, nil, nil)
-			manager.SetHomeClientProvider(func() HomeClient { return nil })
-			auth, err := manager.Register(ctx, &Auth{ID: t.Name(), Provider: "antigravity", Metadata: map[string]any{"access_token": "synthetic-access"}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer antigravityCreditsHintByAuth.Delete(auth.ID)
-			if !auth.PublishAntigravityCreditsHint(AntigravityCreditsHint{Known: true, Available: true, CreditAmount: 1500}) {
-				t.Fatal("current credential publication was rejected")
-			}
-			switch test.name {
-			case "label-update", "token-update", "disabled":
-				updated := auth.Clone()
-				if test.name == "label-update" {
-					updated.Label = "renamed"
-				}
-				if test.name == "token-update" {
-					updated.Metadata["access_token"] = "replacement-access"
-				}
-				if test.name == "disabled" {
-					updated.Disabled = true
-				}
-				if _, err := manager.Update(ctx, updated); err != nil {
+		t.Run(
+			test.name, func(t *testing.T) {
+				ctx := context.Background()
+				store := &credentialWeightValidationStore{}
+				manager := NewManager(store, nil, nil)
+				manager.SetHomeClientProvider(func() HomeClient { return nil })
+				auth, err := manager.Register(
+					ctx, &Auth{
+						ID: t.Name(), Provider: "antigravity",
+						Metadata: map[string]any{"access_token": "synthetic-access"},
+					},
+				)
+				if err != nil {
 					t.Fatal(err)
 				}
-			case "removed", "recreated", "forgotten-and-recreated":
-				if err := manager.Remove(ctx, auth.ID); err != nil {
-					t.Fatal(err)
+				defer antigravityCreditsHintByAuth.Delete(auth.ID)
+				if !auth.PublishAntigravityCreditsHint(
+					AntigravityCreditsHint{
+						Known: true, Available: true, CreditAmount: 1500,
+					},
+				) {
+					t.Fatal("current credential publication was rejected")
 				}
-				if test.name == "forgotten-and-recreated" {
-					manager.ForgetRemovedRuntimeAuth(auth.ID)
-				}
-				if test.name != "removed" {
-					recreated, err := manager.Register(WithAllowAuthRecreate(ctx), auth.Clone())
-					if err != nil {
+				switch test.name {
+				case "label-update", "token-update", "disabled":
+					updated := auth.Clone()
+					if test.name == "label-update" {
+						updated.Label = "renamed"
+					}
+					if test.name == "token-update" {
+						updated.Metadata["access_token"] = "replacement-access"
+					}
+					if test.name == "disabled" {
+						updated.Disabled = true
+					}
+					if _, err := manager.Update(ctx, updated); err != nil {
 						t.Fatal(err)
 					}
-					current, exists := manager.GetByID(auth.ID)
-					if recreated == nil || !exists || current.Generation == auth.Generation || current.Generation != recreated.Generation {
-						t.Fatal("removed credential was not recreated with a new published generation")
+				case "removed", "recreated", "forgotten-and-recreated":
+					if err := manager.Remove(ctx, auth.ID); err != nil {
+						t.Fatal(err)
+					}
+					if test.name == "forgotten-and-recreated" {
+						manager.ForgetRemovedRuntimeAuth(auth.ID)
+					}
+					if test.name != "removed" {
+						recreated, err := manager.Register(WithAllowAuthRecreate(ctx), auth.Clone())
+						if err != nil {
+							t.Fatal(err)
+						}
+						current, exists := manager.GetByID(auth.ID)
+						if recreated == nil || !exists || current.Generation == auth.Generation ||
+							current.Generation != recreated.Generation {
+							t.Fatal("removed credential was not recreated with a new published generation")
+						}
+					}
+				case "loaded-replacement":
+					replacement := auth.Clone()
+					replacement.Metadata["access_token"] = "replacement-access"
+					store.auths = []*Auth{replacement}
+					if err := manager.Load(ctx); err != nil {
+						t.Fatal(err)
+					}
+					if hint, ok := GetAntigravityCreditsHint(auth.ID); ok {
+						t.Fatalf("load retained an old credential balance: %+v", hint)
 					}
 				}
-			case "loaded-replacement":
-				replacement := auth.Clone()
-				replacement.Metadata["access_token"] = "replacement-access"
-				store.auths = []*Auth{replacement}
-				if err := manager.Load(ctx); err != nil {
-					t.Fatal(err)
+				accepted := auth.PublishAntigravityCreditsHint(AntigravityCreditsHint{Known: true, CreditAmount: 10})
+				if accepted != test.accepted {
+					t.Fatalf("old publication accepted=%t, want %t", accepted, test.accepted)
 				}
-				if hint, ok := GetAntigravityCreditsHint(auth.ID); ok {
-					t.Fatalf("load retained an old credential balance: %+v", hint)
-				}
-			}
-			accepted := auth.PublishAntigravityCreditsHint(AntigravityCreditsHint{Known: true, CreditAmount: 10})
-			if accepted != test.accepted {
-				t.Fatalf("old publication accepted=%t, want %t", accepted, test.accepted)
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -238,14 +260,145 @@ func TestAntigravityCreditsPublicationRejectsOlderObservation(t *testing.T) {
 	}
 	defer antigravityCreditsHintByAuth.Delete(auth.ID)
 	now := time.Now()
-	if !auth.PublishAntigravityCreditsHint(AntigravityCreditsHint{Known: true, Available: true, CreditAmount: 1500, UpdatedAt: now}) {
+	if !auth.PublishAntigravityCreditsHint(
+		AntigravityCreditsHint{
+			Known: true, Available: true, CreditAmount: 1500, UpdatedAt: now,
+		},
+	) {
 		t.Fatal("latest observation was rejected")
 	}
-	if auth.PublishAntigravityCreditsHint(AntigravityCreditsHint{Known: true, CreditAmount: 10, UpdatedAt: now.Add(-time.Second)}) {
+	if auth.PublishAntigravityCreditsHint(
+		AntigravityCreditsHint{
+			Known: true, CreditAmount: 10, UpdatedAt: now.Add(-time.Second),
+		},
+	) {
 		t.Fatal("older observation was accepted")
 	}
 	if hint, ok := GetAntigravityCreditsHint(auth.ID); !ok || hint.CreditAmount != 1500 {
 		t.Fatalf("latest observation changed: %+v, present=%t", hint, ok)
+	}
+}
+
+func TestAntigravityCreditsFailureKeepsOriginalFiveHourPause(t *testing.T) {
+	for _, name := range []string{
+		"before-expiry", "at-expiry", "credits-success", "normal-success",
+		"label-update", "token-update", "recreated", "stale-failure",
+		"reload", "reload-token", "local-reset", "cooling-disabled", "feature-disabled",
+	} {
+		t.Run(
+			name, func(t *testing.T) {
+				synctest.Test(
+					t, func(t *testing.T) {
+						store := &credentialWeightValidationStore{}
+						manager := NewManager(store, nil, nil)
+						manager.SetHomeClientProvider(func() HomeClient { return nil })
+						manager.SetConfig(&config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}})
+						if name == "feature-disabled" {
+							manager.SetConfig(&config.Config{})
+						}
+						if name == "cooling-disabled" {
+							manager.SetConfig(
+								&config.Config{
+									DisableCooling: true, QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+								},
+							)
+						}
+						manager.RegisterExecutor(&forceMappingCreditsFallbackExecutor{id: "antigravity"})
+						ctx := WithSkipPersist(t.Context())
+						credential, err := manager.Register(
+							ctx, &Auth{
+								ID: t.Name(), Provider: "antigravity",
+								Metadata: map[string]any{"access_token": "original-credits-token"},
+							},
+						)
+						if err != nil {
+							t.Fatal(err)
+						}
+						const model = "claude-sonnet-4-6"
+						creditsCtx := WithAntigravityCredits(ctx)
+						if len(
+							manager.findAllAntigravityCreditsCandidateAuths(
+								model, cliproxyexecutor.Options{},
+							),
+						) != 1 {
+							t.Fatal("original credential was not a credits candidate")
+						}
+						failure := executionResult(
+							credential, "antigravity", model,
+							&Error{HTTPStatus: http.StatusTooManyRequests, Message: "original credits quota exhausted"},
+							cliproxyexecutor.DispatchPhaseResponseStarted,
+						)
+						manager.MarkResult(creditsCtx, failure)
+						wantCandidate := false
+						switch name {
+						case "before-expiry":
+							time.Sleep(5*time.Hour - time.Nanosecond)
+						case "at-expiry":
+							time.Sleep(5 * time.Hour)
+							wantCandidate = true
+						case "credits-success", "normal-success":
+							current, _ := manager.GetByID(credential.ID)
+							successCtx := ctx
+							if name == "credits-success" {
+								successCtx = creditsCtx
+								wantCandidate = true
+							}
+							manager.MarkResult(
+								successCtx, executionResult(
+									current, "antigravity", model, nil,
+									cliproxyexecutor.DispatchPhaseResponseStarted,
+								),
+							)
+						case "label-update", "token-update", "stale-failure":
+							updated, _ := manager.GetByID(credential.ID)
+							if name == "label-update" {
+								updated.Label = "updated label"
+							} else {
+								updated.Metadata["access_token"] = "replacement-credits-token"
+								wantCandidate = true
+							}
+							if _, err := manager.Update(ctx, updated); err != nil {
+								t.Fatal(err)
+							}
+							if name == "stale-failure" {
+								manager.MarkResult(creditsCtx, failure)
+							}
+						case "recreated":
+							if err := manager.Remove(ctx, credential.ID); err != nil {
+								t.Fatal(err)
+							}
+							if _, err := manager.Register(WithAllowAuthRecreate(t.Context()), credential); err != nil {
+								t.Fatal(err)
+							}
+							manager.MarkResult(creditsCtx, failure)
+							wantCandidate = true
+						case "reload", "reload-token":
+							stored := credential.Clone()
+							if name == "reload-token" {
+								stored.Metadata["access_token"] = "reloaded-credits-token"
+								wantCandidate = true
+							}
+							store.auths = []*Auth{stored}
+							if err := manager.Load(ctx); err != nil {
+								t.Fatal(err)
+							}
+						case "local-reset":
+							if _, _, err := manager.ResetCooldown(ctx, credential.ID); err != nil {
+								t.Fatal(err)
+							}
+							manager.MarkResult(creditsCtx, failure)
+							wantCandidate = true
+						case "cooling-disabled", "feature-disabled":
+							wantCandidate = true
+						}
+						candidates := manager.findAllAntigravityCreditsCandidateAuths(model, cliproxyexecutor.Options{})
+						if got := len(candidates) == 1; got != wantCandidate {
+							t.Fatalf("credits candidate available=%t, want %t", got, wantCandidate)
+						}
+					},
+				)
+			},
+		)
 	}
 }
 

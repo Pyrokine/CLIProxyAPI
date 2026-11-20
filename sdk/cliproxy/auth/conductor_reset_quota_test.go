@@ -352,7 +352,8 @@ func TestManagerResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 	if len(models) != 1 || models[0] != model {
 		t.Fatalf("ResetQuota() models = %v, want [%s]", models, model)
 	}
-	if updated.Status != StatusActive || updated.StatusMessage != "" || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+	if updated.Status != StatusActive || updated.StatusMessage != "" || updated.Unavailable ||
+		!updated.NextRetryAfter.IsZero() {
 		t.Fatalf(
 			"updated auth state = status %q message %q unavailable %v next %v",
 			updated.Status,
@@ -361,14 +362,16 @@ func TestManagerResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 			updated.NextRetryAfter,
 		)
 	}
-	if updated.Quota.Exceeded || updated.Quota.Reason != "" || !updated.Quota.NextRecoverAt.IsZero() || updated.Quota.BackoffLevel != 0 {
+	if updated.Quota.Exceeded || updated.Quota.Reason != "" || !updated.Quota.NextRecoverAt.IsZero() ||
+		updated.Quota.BackoffLevel != 0 {
 		t.Fatalf("updated auth quota = %+v, want cleared", updated.Quota)
 	}
 	state := updated.ModelStates[model]
 	if state == nil {
 		t.Fatalf("updated model state missing")
 	}
-	if state.Status != StatusActive || state.StatusMessage != "" || state.Unavailable || !state.NextRetryAfter.IsZero() {
+	if state.Status != StatusActive || state.StatusMessage != "" || state.Unavailable ||
+		!state.NextRetryAfter.IsZero() {
 		t.Fatalf(
 			"updated model state = status %q message %q unavailable %v next %v",
 			state.Status,
@@ -377,7 +380,8 @@ func TestManagerResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 			state.NextRetryAfter,
 		)
 	}
-	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() ||
+		state.Quota.BackoffLevel != 0 {
 		t.Fatalf("updated model quota = %+v, want cleared", state.Quota)
 	}
 	if available, err := reg.GetFirstAvailableModel("claude"); err != nil || available != model {

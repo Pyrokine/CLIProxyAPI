@@ -179,7 +179,8 @@ func TestManager_MarkResult_HTTPStatusControlsEffectScopeDespiteLifecycleText(t 
 					}
 				case cliproxyexecutor.StateEffectScopeQuotaFamily:
 					state := updated.ModelStates[model]
-					if state == nil || !state.Unavailable || state.EffectScope != tc.wantScope || !state.Quota.Exceeded {
+					if state == nil || !state.Unavailable || state.EffectScope != tc.wantScope ||
+						!state.Quota.Exceeded {
 						t.Fatalf("quota-family state = %+v, want unavailable scope %s", state, tc.wantScope)
 					}
 				case cliproxyexecutor.StateEffectScopeProvider:

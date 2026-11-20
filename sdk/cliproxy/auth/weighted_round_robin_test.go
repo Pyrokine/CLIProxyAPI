@@ -73,17 +73,19 @@ func TestWeightedRoundRobinSelectorPreservesCreditsAcrossRetryExclusions(t *test
 		{ID: "d", Attributes: map[string]string{AttributeWeight: "1"}},
 	}
 
-	assertWeightedRetryDistribution(t, func(tried map[string]struct{}) (*Auth, error) {
-		candidates := make([]*Auth, 0, len(auths)-len(tried))
-		for _, auth := range auths {
-			if _, alreadyTried := tried[auth.ID]; !alreadyTried {
-				candidates = append(candidates, auth)
+	assertWeightedRetryDistribution(
+		t, func(tried map[string]struct{}) (*Auth, error) {
+			candidates := make([]*Auth, 0, len(auths)-len(tried))
+			for _, auth := range auths {
+				if _, alreadyTried := tried[auth.ID]; !alreadyTried {
+					candidates = append(candidates, auth)
+				}
 			}
-		}
-		return selector.Pick(
-			context.Background(), "gemini", "model", cliproxyexecutor.Options{}, candidates,
-		)
-	})
+			return selector.Pick(
+				context.Background(), "gemini", "model", cliproxyexecutor.Options{}, candidates,
+			)
+		},
+	)
 }
 
 func TestSmoothWeightedStatePreservesTransientCreditsAndBoundsStaleEntries(t *testing.T) {
@@ -182,11 +184,13 @@ func TestSchedulerWeightedRoundRobinPreservesCreditsAcrossRetryTriedFilter(t *te
 		&Auth{ID: "d", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1"}},
 	)
 
-	assertWeightedRetryDistribution(t, func(tried map[string]struct{}) (*Auth, error) {
-		return scheduler.pickSingle(
-			context.Background(), "gemini", "", cliproxyexecutor.Options{}, tried,
-		)
-	})
+	assertWeightedRetryDistribution(
+		t, func(tried map[string]struct{}) (*Auth, error) {
+			return scheduler.pickSingle(
+				context.Background(), "gemini", "", cliproxyexecutor.Options{}, tried,
+			)
+		},
+	)
 }
 
 func TestSchedulerWeightedRoundRobinPreservesSurvivorCreditsDuringCooldown(t *testing.T) {
@@ -252,12 +256,14 @@ func TestSchedulerMixedProvidersPreservesCreditsAcrossRetryTriedFilter(t *testin
 	)
 	providers := []string{"provider-a", "provider-b", "provider-c", "provider-d"}
 
-	assertWeightedRetryDistribution(t, func(tried map[string]struct{}) (*Auth, error) {
-		picked, _, errPick := scheduler.pickMixed(
-			context.Background(), providers, "", cliproxyexecutor.Options{}, tried,
-		)
-		return picked, errPick
-	})
+	assertWeightedRetryDistribution(
+		t, func(tried map[string]struct{}) (*Auth, error) {
+			picked, _, errPick := scheduler.pickMixed(
+				context.Background(), providers, "", cliproxyexecutor.Options{}, tried,
+			)
+			return picked, errPick
+		},
+	)
 }
 
 func TestSchedulerWeightedRoundRobinResetsCreditsWhenWeightsChange(t *testing.T) {

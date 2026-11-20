@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand/v2"
 	"net/http"
@@ -52,6 +53,8 @@ type smoothWeightedState struct {
 type FillFirstSelector struct{}
 
 // StoppableSelector releases resources held by a selector.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type StoppableSelector interface {
 	Stop()
 }
@@ -101,6 +104,15 @@ func (s *SessionAffinitySelector) FallbackSelector() Selector {
 	return s.fallback
 }
 
+// Trees 返回由调用方管理的独立会话记录，路由仍使用现有绑定
+// Deprecated: 层级会话管理由 Home 提供
+//
+// noinspection GoDeprecation
+func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeStore {
+	return cliproxysession.NewInMemorySessionTreeStore(0, time.Hour)
+}
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *SessionAffinitySelector) PickSticky(provider string, opts cliproxyexecutor.Options, auths []*Auth) *Auth {
 	return s.pickStickyForModel(provider, "", opts, auths)
 }
@@ -111,7 +123,7 @@ func (s *SessionAffinitySelector) pickStickyForModel(
 	opts cliproxyexecutor.Options,
 	auths []*Auth,
 ) *Auth {
-	auth, _ := s.pickStickyForModelWithRule(provider, model, opts, auths)
+	auth, _ := s.pickStickyForModelWithRule(provider, model, opts, auths, nil)
 	return auth
 }
 
@@ -120,6 +132,7 @@ func (s *SessionAffinitySelector) pickStickyForModelWithRule(
 	model string,
 	opts cliproxyexecutor.Options,
 	auths []*Auth,
+	resolveModel func(*Auth, string) string,
 ) (*Auth, string) {
 	if s == nil {
 		return nil, ""
@@ -129,7 +142,7 @@ func (s *SessionAffinitySelector) pickStickyForModelWithRule(
 	if selectorUsesPositiveWeights(s.fallback) {
 		availabilityCandidates = positiveWeightAuths(auths, opts, model)
 	}
-	available := availableAffinityAuths(availabilityCandidates, provider, model, opts)
+	available := availableAffinityAuths(availabilityCandidates, provider, model, opts, resolveModel)
 	if len(available) == 0 {
 		return nil, ""
 	}
@@ -210,13 +223,20 @@ func (s *SessionAffinitySelector) pickLCPAffinity(
 		return nil, false
 	}
 	auth := authByID(available, match.AuthID)
-	if auth == nil || !s.matcher.TouchFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum, match.AuthID) {
+	if auth == nil || !s.matcher.TouchFingerprintsWithContext(
+		namespace, fingerprints, tails, envDigest, minimum, match.AuthID,
+	) {
 		return nil, false
 	}
-	if bound, boundOK := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum); boundOK {
+	if bound, boundOK := s.matcher.MatchFingerprintsWithContext(
+		namespace, fingerprints, tails, envDigest, minimum,
+	); boundOK {
+		bound.IsFork = match.IsFork
 		match = bound
 	}
-	setLCPMatchMetadata(opts.Metadata, match.SessionID, match.ParentSessionID, match.IsFork, match.IsCompaction, match.AccessNumber)
+	setLCPMatchMetadata(
+		opts.Metadata, match.SessionID, match.ParentSessionID, match.IsFork, match.IsCompaction, match.AccessNumber,
+	)
 	publishSessionAffinitySelection(opts, auth, provider, model, "session_affinity_lcp")
 	return auth, true
 }
@@ -274,11 +294,20 @@ func (s *SessionAffinitySelector) rememberLCP(
 	if result.SessionID == "" {
 		return false
 	}
-	setLCPMatchMetadata(opts.Metadata, result.SessionID, result.ParentSessionID, result.IsFork, result.IsCompaction, result.AccessNumber)
+	setLCPMatchMetadata(
+		opts.Metadata,
+		result.SessionID,
+		result.ParentSessionID,
+		result.IsFork,
+		result.IsCompaction,
+		result.AccessNumber,
+	)
 	return true
 }
 
 // RecordResult applies expected-auth and generation guards to one completed attempt.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *SessionAffinitySelector) RecordResult(
 	provider,
 	model string,
@@ -289,10 +318,14 @@ func (s *SessionAffinitySelector) RecordResult(
 	if s == nil || strings.TrimSpace(authID) == "" {
 		return
 	}
-	if metadataProvider := sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityProviderMetadataKey); metadataProvider != "" {
+	if metadataProvider := sessionMetadataString(
+		opts.Metadata, cliproxyexecutor.SessionAffinityProviderMetadataKey,
+	); metadataProvider != "" {
 		provider = metadataProvider
 	}
-	if metadataModel := sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityModelMetadataKey); metadataModel != "" {
+	if metadataModel := sessionMetadataString(
+		opts.Metadata, cliproxyexecutor.SessionAffinityModelMetadataKey,
+	); metadataModel != "" {
 		model = metadataModel
 	}
 	primaryID, parentID := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
@@ -347,6 +380,8 @@ func (s *SessionAffinitySelector) RecordResult(
 }
 
 // OnResult refreshes or releases affinity only for credential-attributed outcomes.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *SessionAffinitySelector) OnResult(result Result) {
 	if s == nil || strings.TrimSpace(result.AuthID) == "" {
 		return
@@ -357,6 +392,7 @@ func (s *SessionAffinitySelector) OnResult(result Result) {
 	s.RecordResult(result.Provider, result.Model, result.Options, result.AuthID, result.Success)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	if s == nil {
 		return
@@ -433,7 +469,7 @@ func (s *SessionAffinitySelector) LookupAffinity(
 			namespaceProvider, namespaceModel, _, parsed := parseLCPNamespace(namespace)
 			if parsed && ((provider != "mixed" && namespaceProvider != "mixed" &&
 				canonicalLCPProvider(namespaceProvider) != canonicalLCPProvider(provider)) ||
-				(modelKey != "" && namespaceModel != modelKey)) {
+				namespaceModel != modelKey) {
 				continue
 			}
 			for _, authID := range authIDs {
@@ -468,8 +504,24 @@ func (s *SessionAffinitySelector) Stop() {
 	}
 }
 
-func availableAffinityAuths(auths []*Auth, provider, model string, opts cliproxyexecutor.Options) []*Auth {
-	available, _ := getAvailableAuths(auths, provider, model, opts, time.Now())
+func availableAffinityAuths(
+	auths []*Auth,
+	provider, model string,
+	opts cliproxyexecutor.Options,
+	resolveModel func(*Auth, string) string,
+) []*Auth {
+	now := time.Now()
+	if resolveModel == nil {
+		available, _ := getAvailableAuths(auths, provider, model, opts, now)
+		return available
+	}
+	// Manager 的会话绑定可跨优先级保留，候选按各自实际目标检查
+	available := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if blocked, _, _ := isAuthBlockedForModel(auth, resolveModel(auth, model), now); !blocked {
+			available = append(available, auth)
+		}
+	}
 	return available
 }
 
@@ -499,12 +551,14 @@ func publishSessionAffinitySelection(
 	model,
 	reason string,
 ) {
-	publishAuthRouteTraceEvent(opts, auth, cliproxyexecutor.RouteTraceEvent{
-		Provider: provider,
-		Model:    model,
-		Action:   "candidate.selected",
-		Reason:   reason,
-	})
+	publishAuthRouteTraceEvent(
+		opts, auth, cliproxyexecutor.RouteTraceEvent{
+			Provider: provider,
+			Model:    model,
+			Action:   "candidate.selected",
+			Reason:   reason,
+		},
+	)
 }
 
 func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
@@ -649,7 +703,12 @@ func setLCPMetadata(metadata map[string]any, fingerprints []string, minimum int,
 	metadata[cliproxyexecutor.LCPEnvironmentDigestMetadataKey] = envDigest
 }
 
-func setLCPMatchMetadata(metadata map[string]any, sessionID, parentID string, isFork, isCompaction bool, accessNumber uint64) {
+func setLCPMatchMetadata(
+	metadata map[string]any,
+	sessionID, parentID string,
+	isFork, isCompaction bool,
+	accessNumber uint64,
+) {
 	if metadata == nil {
 		return
 	}
@@ -742,7 +801,8 @@ func CanonicalSessionID(headers http.Header, payload []byte, metadata map[string
 			return cliproxysession.BoundSessionIdentity(value)
 		}
 	}
-	return cliproxysession.BoundSessionIdentity(ExtractSessionID(headers, payload, metadata))
+	primary, _ := extractSessionIDs(headers, payload, metadata)
+	return cliproxysession.BoundSessionIdentity(primary)
 }
 
 type blockReason int
@@ -783,10 +843,12 @@ func newModelCooldownErrorWithCause(
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *modelCooldownError) IsModelCooldown() bool {
 	return e != nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *modelCooldownError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -832,6 +894,7 @@ func (e *modelCooldownError) StatusCode() int {
 	return http.StatusTooManyRequests
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *modelCooldownError) Headers() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
@@ -951,7 +1014,7 @@ func collectAvailableByPriority(
 	model string,
 	opts cliproxyexecutor.Options,
 	now time.Time,
-) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+) (available map[int][]*Auth, cooldownCount, unauthorizedCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := range auths {
 		candidate := auths[i]
@@ -960,6 +1023,9 @@ func collectAvailableByPriority(
 			priority := authPriority(candidate)
 			available[priority] = append(available[priority], candidate)
 			continue
+		}
+		if hasUnauthorizedAuthFailure(candidate) {
+			unauthorizedCount++
 		}
 		reasonCode := "blocked"
 		retryAfterMS := int64(0)
@@ -988,7 +1054,7 @@ func collectAvailableByPriority(
 			},
 		)
 	}
-	return available, cooldownCount, earliest
+	return available, cooldownCount, unauthorizedCount, earliest
 }
 
 func getAvailableAuths(
@@ -1002,7 +1068,9 @@ func getAvailableAuths(
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, provider, model, opts, now)
+	availableByPriority, cooldownCount, unauthorizedCount, earliest := collectAvailableByPriority(
+		auths, provider, model, opts, now,
+	)
 	if len(availableByPriority) == 0 {
 		lastCandidateErr := latestSelectionCandidateError(auths, model)
 		if cooldownCount == len(auths) && !earliest.IsZero() {
@@ -1012,6 +1080,13 @@ func getAvailableAuths(
 			}
 			resetIn := max(earliest.Sub(now), 0)
 			return nil, newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr)
+		}
+		if unauthorizedCount == len(auths) {
+			return nil, NewTerminalAuthError(
+				&Error{
+					Code: "auth_unavailable", Message: "no auth available", HTTPStatus: http.StatusServiceUnavailable,
+				}, latestSelectionCandidateError(auths, ""),
+			)
 		}
 		return nil, newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 	}
@@ -1287,9 +1362,7 @@ func (s *smoothWeightedState) prepare(weights map[string]int64) {
 	if s.weights == nil {
 		s.weights = make(map[string]int64, len(weights))
 	}
-	for authID, weight := range weights {
-		s.weights[authID] = weight
-	}
+	maps.Copy(s.weights, weights)
 	s.pruneStale(weights)
 }
 
@@ -1467,7 +1540,7 @@ func (s *SessionAffinitySelector) Pick(
 		opts.Metadata = make(map[string]any)
 	}
 	setSessionAffinityNamespaceMetadata(opts.Metadata, provider, model)
-	if auth, _ := s.pickStickyForModelWithRule(provider, model, opts, auths); auth != nil {
+	if auth, _ := s.pickStickyForModelWithRule(provider, model, opts, auths, nil); auth != nil {
 		return auth, nil
 	}
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
@@ -1485,7 +1558,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
-	if hasTerminalUnauthorizedAuthFailure(auth) || auth.hasRejectedAccessToken() {
+	if hasUnauthorizedAuthFailure(auth) || auth.hasRejectedAccessToken() {
 		return true, blockReasonOther, time.Time{}
 	}
 	if expiresAt, ok := auth.AccessTokenExpirationTime(); ok && !expiresAt.IsZero() && !expiresAt.After(now) {
@@ -1493,7 +1566,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	credentialScoped := auth.StateEffectScope == cliproxyexecutor.StateEffectScopeCredential
 	if !credentialScoped && auth.LastError != nil {
-		credentialScoped = auth.LastError.EffectScope == cliproxyexecutor.StateEffectScopeCredential
+		credentialScoped = auth.LastError.executionState().EffectScope == cliproxyexecutor.StateEffectScopeCredential
 	}
 	if credentialScoped {
 		if blocked, reason, next := unavailableRoutingBlock(

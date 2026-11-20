@@ -4,7 +4,10 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
@@ -29,6 +32,7 @@ type authSelectionEligibility struct {
 	credentialPolicy    string
 	disallowFreeAuth    bool
 	requireContinuation bool
+	requireAPIKey       bool
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -48,7 +52,9 @@ func credentialPolicyFromContext(ctx context.Context) string {
 }
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
+	requireAPIKey, _ := opts.Metadata[cliproxyexecutor.RequireAPIKeyAuthMetadataKey].(bool)
 	eligibility := authSelectionEligibility{
+		requireAPIKey:       requireAPIKey,
 		excluded:            excludedAuthIDs(opts),
 		disallowFreeAuth:    disallowFreeAuthFromMetadata(opts.Metadata),
 		requireContinuation: requireResponsesContinuationFromMetadata(opts.Metadata),
@@ -64,7 +70,9 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 }
 
 func (e authSelectionEligibility) unrestricted() bool {
-	return e.retryRound == 0 && len(e.excluded) == 0 && e.requiredKind == "" && e.credentialPolicy == "" && !e.disallowFreeAuth && !e.requireContinuation
+	return e.retryRound == 0 && len(e.excluded) == 0 && e.requiredKind == "" && e.credentialPolicy == "" &&
+		!e.disallowFreeAuth &&
+		!e.requireContinuation && !e.requireAPIKey
 }
 
 func (e authSelectionEligibility) allows(auth *Auth) bool {
@@ -78,6 +86,9 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 		return false
 	}
 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
+		return false
+	}
+	if e.requireAPIKey && auth.AuthKind() != AuthKindAPIKey {
 		return false
 	}
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
@@ -104,12 +115,124 @@ func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
 	if m == nil {
 		return resolved
 	}
-	if aliasResult := m.resolveExecutionAliasResultForRequested(
-		auth, resolved,
-	); strings.TrimSpace(aliasResult.UpstreamModel) != "" {
-		return strings.TrimSpace(aliasResult.UpstreamModel)
+	aliases := m.executionModelAliases(auth, resolved)
+	fallback := aliases[0].UpstreamModel
+	var earliest time.Time
+	foundEligible := false
+	now := time.Now()
+	for _, alias := range aliases {
+		target := strings.TrimSpace(alias.UpstreamModel)
+		if thinking.HasContext1MTag(routeModel) && !m.executionModelSupportsContext1M(auth, resolved, target) {
+			continue
+		}
+		blocked, _, retryAt := isAuthBlockedForModel(auth, target, now)
+		if !blocked {
+			return target
+		}
+		if !foundEligible || !retryAt.IsZero() && (earliest.IsZero() || retryAt.Before(earliest)) {
+			fallback, earliest = target, retryAt
+			foundEligible = true
+		}
 	}
-	return resolved
+	return fallback
+}
+
+func (m *Manager) executionModelAliases(auth *Auth, requestedModel string) []OAuthModelAliasResult {
+	if !m.HomeEnabled() && auth != nil {
+		if kind, _ := auth.AccountInfo(); strings.EqualFold(kind, "api_key") {
+			if pool := resolveModelAliasPoolFromConfigModels(
+				requestedModel, m.apiKeyModelAliasEntries(auth),
+			); len(pool) > 0 {
+				return pool
+			}
+		}
+	}
+	result := m.resolveExecutionAliasResultForRequested(auth, requestedModel)
+	if auth != nil && strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]) != "" {
+		result.UpstreamModel = strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey])
+	}
+	if result.UpstreamModel == "" {
+		result.UpstreamModel = requestedModel
+	}
+	return []OAuthModelAliasResult{result}
+}
+
+func (m *Manager) rotateExecutionModelAliases(
+	auth *Auth,
+	requestedModel string,
+	aliases []OAuthModelAliasResult,
+) []OAuthModelAliasResult {
+	if len(aliases) < 2 {
+		return aliases
+	}
+	key := canonicalModelKey(requestedModel)
+	m.mu.Lock()
+	if current := m.auths[auth.ID]; current == nil || current.credentialGeneration != auth.credentialGeneration {
+		m.mu.Unlock()
+		return aliases
+	}
+	if m.modelPoolOffsets == nil {
+		m.modelPoolOffsets = make(map[string]map[string]int)
+	}
+	offsets := m.modelPoolOffsets[auth.ID]
+	if offsets == nil {
+		offsets = make(map[string]int)
+		m.modelPoolOffsets[auth.ID] = offsets
+	}
+	offset := offsets[key] % len(aliases)
+	offsets[key] = (offset + 1) % len(aliases)
+	m.mu.Unlock()
+	return append(append(make([]OAuthModelAliasResult, 0, len(aliases)), aliases[offset:]...), aliases[:offset]...)
+}
+
+func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
+	// 别名改变实际模型时使用目标状态，显式前缀键沿用原作用域
+	target := m.ResolveExecutionModel(auth, routeModel)
+	if canonicalModelKey(target) == canonicalModelKey(rewriteModelForAuth(routeModel, auth)) {
+		return routeModel
+	}
+	return target
+}
+
+func stateModelForExecution(auth *Auth, routeModel, upstreamModel string) string {
+	if strings.TrimSpace(upstreamModel) == "" ||
+		canonicalModelKey(upstreamModel) == canonicalModelKey(rewriteModelForAuth(routeModel, auth)) {
+		return routeModel
+	}
+	return upstreamModel
+}
+
+func (m *Manager) authSupportsRouteModel(auth *Auth, routeModel string) bool {
+	routeKey := canonicalModelKey(routeModel)
+	if routeKey == "" {
+		return true
+	}
+	reg := registry.GetGlobalRegistry()
+	if reg.ClientSupportsModel(auth.ID, routeKey) {
+		return true
+	}
+	target := canonicalModelKey(m.ResolveExecutionModel(auth, routeModel))
+	return target != "" && target != routeKey && reg.ClientSupportsModel(auth.ID, target)
+}
+
+func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeModel string) ([]*Auth, error) {
+	available := auths[:0]
+	var unavailable []*Auth
+	now := time.Now()
+	for _, candidate := range auths {
+		target := m.selectionModelForAuth(candidate, routeModel)
+		if target != routeModel {
+			if blocked, _, _ := isAuthBlockedForModel(candidate, target, now); blocked {
+				unavailable = append(unavailable, candidate)
+				continue
+			}
+		}
+		available = append(available, candidate)
+	}
+	if len(available) == 0 {
+		return nil, m.unavailableSelectionError(unavailable, provider, routeModel)
+	}
+	return available, nil
 }
 
 // SelectAuth selects one local credential through the configured scheduling strategy.
@@ -221,6 +344,16 @@ func (m *Manager) SelectHomeAuthWithCredentialPolicy(
 			return credentialPolicyAllows(policy, auth)
 		},
 	)
+}
+
+func (m *Manager) selectHomeAuthForExecution(
+	ctx context.Context, model string, opts cliproxyexecutor.Options,
+) (*HomeDispatchSelection, error) {
+	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	if eligibility.requireAPIKey {
+		return m.selectHomeAuth(ctx, "", model, ctx, opts, eligibility.allows)
+	}
+	return m.pickHomeDispatchSelection(ctx, model, opts)
 }
 
 func (m *Manager) selectHomeAuth(

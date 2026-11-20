@@ -50,7 +50,9 @@ func (store *resultPolicyRecordingStore) snapshot() []*Auth {
 	return result
 }
 
-func TestManagerMarkResultResultPolicyUsesObservedGenerationBeforeMutationPersistenceAndPublication(t *testing.T) {
+func TestManagerMarkResultResultPolicyUsesObservedGenerationBeforeMutationPersistenceAndPublication(
+	t *testing.T,
+) {
 	const (
 		authID   = "result-policy-auth"
 		provider = "result-policy-provider"
@@ -91,26 +93,28 @@ func TestManagerMarkResultResultPolicyUsesObservedGenerationBeforeMutationPersis
 	var policyInvoked atomic.Bool
 	var stateUnchanged atomic.Bool
 	manager.SetResultPolicy(
-		ResultPolicyFunc(func(ctx context.Context, result Result) Result {
-			policyInvoked.Store(ctx != nil)
-			current, exists := manager.GetByID(authID)
-			if exists && current != nil && !current.Unavailable &&
-				current.ModelStates[model] != nil && !current.ModelStates[model].Unavailable &&
-				current.ModelStates[model].Generation == 7 {
-				stateUnchanged.Store(true)
-			}
+		ResultPolicyFunc(
+			func(ctx context.Context, result Result) Result {
+				policyInvoked.Store(ctx != nil)
+				current, exists := manager.GetByID(authID)
+				if exists && current != nil && !current.Unavailable &&
+					current.ModelStates[model] != nil && !current.ModelStates[model].Unavailable &&
+					current.ModelStates[model].Generation == 7 {
+					stateUnchanged.Store(true)
+				}
 
-			result.AuthID = "different-auth"
-			result.AuthGeneration = 0
-			result.RuntimeOnly = true
-			result.Provider = "different-provider"
-			result.Model = sibling
-			result.ModelQuotaEpoch = 0
-			result.StateGeneration = 0
-			result.Disposition.EffectScope = cliproxyexecutor.StateEffectScopeExactModel
-			result.Disposition.EffectKey = sibling
-			return result
-		}),
+				result.AuthID = "different-auth"
+				result.AuthGeneration = 0
+				result.RuntimeOnly = true
+				result.Provider = "different-provider"
+				result.Model = sibling
+				result.ModelQuotaEpoch = 0
+				result.StateGeneration = 0
+				result.Disposition.EffectScope = cliproxyexecutor.StateEffectScopeExactModel
+				result.Disposition.EffectKey = sibling
+				return result
+			},
+		),
 	)
 
 	first := executionResult(
@@ -183,14 +187,26 @@ func TestManagerMarkResultResultPolicyUsesObservedGenerationBeforeMutationPersis
 	if cooldownSaves != 1 || len(cooldownRecords) != 1 || cooldownRecords[0].Model != model ||
 		cooldownRecords[0].EffectScope != cliproxyexecutor.StateEffectScopeExactModel ||
 		cooldownRecords[0].StateGeneration != 8 {
-		t.Fatalf("persisted cooldown records after policy = saves:%d records:%+v", cooldownSaves, cooldownRecords)
+		t.Fatalf(
+			"persisted cooldown records after policy = saves:%d records:%+v",
+			cooldownSaves,
+			cooldownRecords,
+		)
 	}
 
 	received := hook.last.Load()
 	if received == nil || received.AuthID != authID || received.AuthGeneration != registered.Generation ||
 		received.RuntimeOnly || received.Provider != provider || received.Model != model ||
-		received.StateGeneration != 7 || received.Disposition.EffectScope != cliproxyexecutor.StateEffectScopeExactModel ||
-		received.Disposition.EffectKey != model || received.Error == nil || received.Error.StateGeneration != 7 {
+		received.StateGeneration !=
+			7 ||
+		received.Disposition.EffectScope !=
+			cliproxyexecutor.StateEffectScopeExactModel ||
+		received.Disposition.EffectKey !=
+			model ||
+		received.Error ==
+			nil ||
+		received.Error.executionState().StateGeneration !=
+			7 {
 		t.Fatalf("hook result after policy = %+v", received)
 	}
 
@@ -233,14 +249,16 @@ func TestManagerMarkResultResultPolicyPreservesQuotaFamilyGenerationAndEpoch(t *
 		},
 	)
 	manager.SetResultPolicy(
-		ResultPolicyFunc(func(_ context.Context, result Result) Result {
-			result.ModelQuotaEpoch = 0
-			result.StateGeneration = 0
-			result.Disposition.EffectScope = cliproxyexecutor.StateEffectScopeQuotaFamily
-			result.Disposition.EffectKey = "different-family"
-			result.Error.HTTPStatus = http.StatusTooManyRequests
-			return result
-		}),
+		ResultPolicyFunc(
+			func(_ context.Context, result Result) Result {
+				result.ModelQuotaEpoch = 0
+				result.StateGeneration = 0
+				result.Disposition.EffectScope = cliproxyexecutor.StateEffectScopeQuotaFamily
+				result.Disposition.EffectKey = "different-family"
+				result.Error.HTTPStatus = http.StatusTooManyRequests
+				return result
+			},
+		),
 	)
 
 	first := executionResult(
@@ -308,11 +326,13 @@ func TestManagerMarkResultResultPolicyDropAndClear(t *testing.T) {
 
 	var calls atomic.Int32
 	manager.SetResultPolicy(
-		ResultPolicyFunc(func(_ context.Context, result Result) Result {
-			calls.Add(1)
-			result.AuthID = ""
-			return result
-		}),
+		ResultPolicyFunc(
+			func(_ context.Context, result Result) Result {
+				calls.Add(1)
+				result.AuthID = ""
+				return result
+			},
+		),
 	)
 	manager.MarkResult(context.Background(), Result{})
 	if calls.Load() != 0 {
@@ -336,7 +356,8 @@ func TestManagerMarkResultResultPolicyDropAndClear(t *testing.T) {
 			len(store.snapshot()),
 		)
 	}
-	if current := getExecutionOutcomeTestAuth(t, manager, registered.ID); current.Failed != 0 || current.Unavailable {
+	if current := getExecutionOutcomeTestAuth(t, manager, registered.ID); current.Failed != 0 ||
+		current.Unavailable {
 		t.Fatalf("dropped result changed auth = %+v", current)
 	}
 
@@ -354,7 +375,8 @@ func TestManagerMarkResultResultPolicyDropAndClear(t *testing.T) {
 			cliproxyexecutor.DispatchPhaseMaybeSent,
 		),
 	)
-	if current := getExecutionOutcomeTestAuth(t, manager, registered.ID); current.Failed != 1 || !current.Unavailable {
+	if current := getExecutionOutcomeTestAuth(t, manager, registered.ID); current.Failed != 1 ||
+		!current.Unavailable {
 		t.Fatalf("result after clearing policy = %+v", current)
 	}
 }
@@ -397,41 +419,49 @@ func TestManagerMarkResultResultPolicyCannotAuthorizeUnsafeReplay(t *testing.T) 
 		},
 	}
 	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			hook := &resultPolicyRecordingHook{}
-			manager := NewManager(nil, nil, hook)
-			registered, errRegister := manager.Register(
-				WithSkipPersist(context.Background()),
-				&Auth{ID: "result-policy-replay-" + testCase.name, Provider: "provider-a", Status: StatusActive},
-			)
-			if errRegister != nil {
-				t.Fatalf("Register() error = %v", errRegister)
-			}
-			manager.SetResultPolicy(
-				ResultPolicyFunc(func(_ context.Context, result Result) Result {
-					result.Disposition.DispatchPhase = cliproxyexecutor.DispatchPhaseNotSent
-					result.Disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
-					result.Disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
-					return result
-				}),
-			)
-			manager.MarkResult(
-				context.Background(),
-				Result{
-					AuthID:         registered.ID,
-					AuthGeneration: registered.Generation,
-					Provider:       registered.Provider,
-					Model:          "model-a",
-					Error:          &Error{Message: "request failed"},
-					Disposition:    testCase.disposition,
-				},
-			)
-			received := hook.last.Load()
-			if received == nil || received.Disposition.DispatchPhase != testCase.wantPhase ||
-				received.Disposition.RetryDirective != cliproxyexecutor.RetryDirectiveNoRetry {
-				t.Fatalf("policy replay disposition = %+v", received)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				hook := &resultPolicyRecordingHook{}
+				manager := NewManager(nil, nil, hook)
+				registered, errRegister := manager.Register(
+					WithSkipPersist(context.Background()),
+					&Auth{
+						ID:       "result-policy-replay-" + testCase.name,
+						Provider: "provider-a",
+						Status:   StatusActive,
+					},
+				)
+				if errRegister != nil {
+					t.Fatalf("Register() error = %v", errRegister)
+				}
+				manager.SetResultPolicy(
+					ResultPolicyFunc(
+						func(_ context.Context, result Result) Result {
+							result.Disposition.DispatchPhase = cliproxyexecutor.DispatchPhaseNotSent
+							result.Disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
+							result.Disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
+							return result
+						},
+					),
+				)
+				manager.MarkResult(
+					context.Background(),
+					Result{
+						AuthID:         registered.ID,
+						AuthGeneration: registered.Generation,
+						Provider:       registered.Provider,
+						Model:          "model-a",
+						Error:          &Error{Message: "request failed"},
+						Disposition:    testCase.disposition,
+					},
+				)
+				received := hook.last.Load()
+				if received == nil || received.Disposition.DispatchPhase != testCase.wantPhase ||
+					received.Disposition.RetryDirective != cliproxyexecutor.RetryDirectiveNoRetry {
+					t.Fatalf("policy replay disposition = %+v", received)
+				}
+			},
+		)
 	}
 }
 
@@ -441,10 +471,12 @@ func TestManagerResultPolicyConcurrentSwap(t *testing.T) {
 		&Auth{ID: "result-policy-concurrent", Provider: "provider-a", Status: StatusActive},
 	)
 	var calls atomic.Int64
-	policy := ResultPolicyFunc(func(_ context.Context, result Result) Result {
-		calls.Add(1)
-		return result
-	})
+	policy := ResultPolicyFunc(
+		func(_ context.Context, result Result) Result {
+			calls.Add(1)
+			return result
+		},
+	)
 	manager.SetResultPolicy(policy)
 	manager.MarkResult(
 		context.Background(),
@@ -457,22 +489,26 @@ func TestManagerResultPolicyConcurrentSwap(t *testing.T) {
 	const workers = 30
 	var wait sync.WaitGroup
 	wait.Add(workers)
-	for worker := 0; worker < 20; worker++ {
+	for range 20 {
 		go func() {
 			defer wait.Done()
-			for attempt := 0; attempt < 10; attempt++ {
+			for range 10 {
 				manager.MarkResult(
 					context.Background(),
-					Result{AuthID: registered.ID, Provider: registered.Provider, Model: "model-a", Success: true},
+					Result{
+						AuthID:   registered.ID,
+						Provider: registered.Provider,
+						Model:    "model-a",
+						Success:  true,
+					},
 				)
 			}
 		}()
 	}
-	for worker := 0; worker < 10; worker++ {
-		worker := worker
+	for worker := range 10 {
 		go func() {
 			defer wait.Done()
-			for attempt := 0; attempt < 10; attempt++ {
+			for attempt := range 10 {
 				if (worker+attempt)%2 == 0 {
 					manager.SetResultPolicy(policy)
 				} else {

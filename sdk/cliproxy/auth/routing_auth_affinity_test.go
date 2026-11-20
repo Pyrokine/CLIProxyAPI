@@ -30,57 +30,80 @@ func TestLCPProviderAliasesShareNamespaceWithoutCrossProviderAuth(t *testing.T) 
 		{name: "google gemini", storedProvider: "google", lookupProvider: "gemini"},
 		{name: "openai codex", storedProvider: "openai", lookupProvider: "codex"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			selector := NewSessionAffinitySelector(nil)
-			defer selector.Stop()
-			manager := NewManager(nil, selector, nil)
-			const model = "lcp-alias-model"
-			auth, err := manager.Register(WithSkipPersist(context.Background()), &Auth{
-				ID: "lcp-alias-auth", Provider: test.lookupProvider,
-			})
-			if err != nil {
-				t.Fatalf("Register() error = %v", err)
-			}
-			opts := cliproxyexecutor.Options{
-				SourceFormat:    "openai",
-				OriginalRequest: []byte(`{"messages":[{"role":"user","content":"one"},{"role":"user","content":"two"},{"role":"user","content":"three"},{"role":"user","content":"four"},{"role":"user","content":"five"}]}`),
-				Metadata:        map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "lcp-alias-scope"},
-			}
-			namespace := lcpAffinityNamespace(test.storedProvider, model, opts.Metadata)
-			sessionID := selector.matcher.Bind(namespace, cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest), auth.ID)
-			if sessionID == "" {
-				t.Fatal("LCP session was not bound")
-			}
-			if found, state := manager.LookupSessionAffinity(test.lookupProvider, model, sessionID); state != "bound" || found == nil || found.ID != auth.ID {
-				t.Fatalf("alias lookup = (%#v, %q)", found, state)
-			}
-			if found, state := manager.LookupSessionAffinity(test.storedProvider, model, sessionID); state != "unbound" || found != nil {
-				t.Fatalf("lookup crossed credential provider = (%#v, %q)", found, state)
-			}
-			if selected, matched := selector.pickLCPAffinity(test.lookupProvider, model, opts, []*Auth{auth}); !matched || selected == nil || selected.ID != auth.ID {
-				t.Fatalf("alias route = (%#v, %t)", selected, matched)
-			}
-			legacyNamespace := "lcp:v1::" + test.lookupProvider + "::" + model + "::lcp-alias-scope"
-			legacySession := selector.matcher.Bind(legacyNamespace, cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest), auth.ID)
-			if id, state := selector.LookupAffinity(test.storedProvider, model, legacySession); state != "bound" || id != auth.ID {
-				t.Fatalf("legacy namespace lookup = (%q, %q)", id, state)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				selector := NewSessionAffinitySelector(nil)
+				defer selector.Stop()
+				manager := NewManager(nil, selector, nil)
+				const model = "lcp-alias-model"
+				auth, err := manager.Register(
+					WithSkipPersist(context.Background()), &Auth{
+						ID: "lcp-alias-auth", Provider: test.lookupProvider,
+					},
+				)
+				if err != nil {
+					t.Fatalf("Register() error = %v", err)
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat: "openai",
+					OriginalRequest: []byte((`{"messages":[{"role":"user","content":"one"},{"role":"user","content":` +
+						`"two"},{"role":"user","content":"three"},{"role":"user","content":"fou` +
+						`r"},{"role":"user","content":"five"}]}`)),
+					Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "lcp-alias-scope"},
+				}
+				namespace := lcpAffinityNamespace(test.storedProvider, model, opts.Metadata)
+				sessionID := selector.matcher.Bind(
+					namespace, cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest), auth.ID,
+				)
+				if sessionID == "" {
+					t.Fatal("LCP session was not bound")
+				}
+				if found, state := manager.LookupSessionAffinity(
+					test.lookupProvider, model, sessionID,
+				); state != "bound" || found == nil || found.ID != auth.ID {
+					t.Fatalf("alias lookup = (%#v, %q)", found, state)
+				}
+				if found, state := manager.LookupSessionAffinity(
+					test.storedProvider, model, sessionID,
+				); state != "unbound" || found != nil {
+					t.Fatalf("lookup crossed credential provider = (%#v, %q)", found, state)
+				}
+				if selected, matched := selector.pickLCPAffinity(
+					test.lookupProvider, model, opts, []*Auth{auth},
+				); !matched || selected == nil || selected.ID != auth.ID {
+					t.Fatalf("alias route = (%#v, %t)", selected, matched)
+				}
+				legacyNamespace := "lcp:v1::" + test.lookupProvider + "::" + model + "::lcp-alias-scope"
+				legacySession := selector.matcher.Bind(
+					legacyNamespace, cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest),
+					auth.ID,
+				)
+				if id, state := selector.LookupAffinity(
+					test.storedProvider, model, legacySession,
+				); state != "bound" || id != auth.ID {
+					t.Fatalf("legacy namespace lookup = (%q, %q)", id, state)
+				}
+			},
+		)
 	}
 }
 
 func TestLookupSessionAffinityIsReadOnlyAndReturnsDetachedAuth(t *testing.T) {
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Hour,
-	})
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Hour,
+		},
+	)
 	defer selector.Stop()
 	manager := NewManager(nil, selector, nil)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID:       "affinity-read-auth",
-		Provider: "claude",
-		Metadata: map[string]any{"marker": "original"},
-	})
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID:       "affinity-read-auth",
+			Provider: "claude",
+			Metadata: map[string]any{"marker": "original"},
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -98,7 +121,7 @@ func TestLookupSessionAffinityIsReadOnlyAndReturnsDetachedAuth(t *testing.T) {
 		t.Fatalf("binding %q was not created", key)
 	}
 
-	for iteration := 0; iteration < 10; iteration++ {
+	for iteration := range 10 {
 		found, status := manager.LookupSessionAffinity("claude", "claude-model", "session-read")
 		if status != "bound" || found == nil || found.ID != registered.ID {
 			t.Fatalf("lookup %d = (%#v, %q)", iteration, found, status)
@@ -126,7 +149,9 @@ func TestLookupSessionAffinityIsReadOnlyAndReturnsDetachedAuth(t *testing.T) {
 	selector.cache.mu.RLock()
 	entriesBeforeMiss := len(selector.cache.entries)
 	selector.cache.mu.RUnlock()
-	if found, status := manager.LookupSessionAffinity("claude", "claude-model", "missing-session"); status != "unbound" || found != nil {
+	if found, status := manager.LookupSessionAffinity(
+		"claude", "claude-model", "missing-session",
+	); status != "unbound" || found != nil {
 		t.Fatalf("missing lookup = (%#v, %q)", found, status)
 	}
 	selector.cache.mu.RLock()
@@ -151,37 +176,51 @@ func TestLookupSessionAffinityBoundUnboundAmbiguousUnsupportedAndProviderFilter(
 	}
 
 	selector.cache.Set("openai::header:bound-session::model", "affinity-openai")
-	if found, status := manager.LookupSessionAffinity("openai", "model", "bound-session"); status != "bound" || found == nil || found.ID != "affinity-openai" {
+	if found, status := manager.LookupSessionAffinity(
+		"openai", "model", "bound-session",
+	); status != "bound" || found == nil || found.ID != "affinity-openai" {
 		t.Fatalf("bound lookup = (%#v, %q)", found, status)
 	}
-	if found, status := manager.LookupSessionAffinity("openai", "model", "unbound-session"); status != "unbound" || found != nil {
+	if found, status := manager.LookupSessionAffinity(
+		"openai", "model", "unbound-session",
+	); status != "unbound" || found != nil {
 		t.Fatalf("unbound lookup = (%#v, %q)", found, status)
 	}
 
 	selector.cache.Set("mixed::header:bound-session::model", "affinity-claude")
 	selector.cache.Set("mixed::session:bound-session::model", "affinity-openai")
-	if found, status := manager.LookupSessionAffinity("openai", "model", "bound-session"); status != "bound" || found == nil || found.ID != "affinity-openai" {
+	if found, status := manager.LookupSessionAffinity(
+		"openai", "model", "bound-session",
+	); status != "bound" || found == nil || found.ID != "affinity-openai" {
 		t.Fatalf("provider filter produced false ambiguity: (%#v, %q)", found, status)
 	}
-	if authID, status := selector.LookupAffinity("mixed", "model", "bound-session"); status != "ambiguous" || authID != "" {
+	if authID, status := selector.LookupAffinity(
+		"mixed", "model", "bound-session",
+	); status != "ambiguous" || authID != "" {
 		t.Fatalf("mixed ambiguous lookup = (%q, %q)", authID, status)
 	}
 
 	roundRobinManager := NewManager(nil, &RoundRobinSelector{}, nil)
-	if found, status := roundRobinManager.LookupSessionAffinity("openai", "model", "bound-session"); status != "unsupported" || found != nil {
+	if found, status := roundRobinManager.LookupSessionAffinity(
+		"openai", "model", "bound-session",
+	); status != "unsupported" || found != nil {
 		t.Fatalf("selector without lookup = (%#v, %q)", found, status)
 	}
 	manager.SetPluginScheduler(&affinityUnsupportedPluginScheduler{})
-	if found, status := manager.LookupSessionAffinity("openai", "model", "bound-session"); status != "unsupported" || found != nil {
+	if found, status := manager.LookupSessionAffinity(
+		"openai", "model", "bound-session",
+	); status != "unsupported" || found != nil {
 		t.Fatalf("plugin scheduler lookup = (%#v, %q)", found, status)
 	}
 }
 
 func TestLookupSessionAffinityLCPDoesNotExtendTTL(t *testing.T) {
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      80 * time.Millisecond,
-	})
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      80 * time.Millisecond,
+		},
+	)
 	defer selector.Stop()
 	auth := &Auth{ID: "affinity-lcp", Provider: "openai"}
 	options := cliproxyexecutor.Options{
@@ -199,7 +238,7 @@ func TestLookupSessionAffinityLCPDoesNotExtendTTL(t *testing.T) {
 	if sessionID == "" {
 		t.Fatal("LCP session ID was not published")
 	}
-	for iteration := 0; iteration < 3; iteration++ {
+	for iteration := range 3 {
 		time.Sleep(20 * time.Millisecond)
 		if authID, status := selector.LookupAffinity("openai", "model", sessionID); iteration < 2 &&
 			(status != "bound" || authID != auth.ID) {
@@ -216,9 +255,11 @@ func TestAffinityResultOnlyMutatesCredentialAttributedFailures(t *testing.T) {
 	selector := NewSessionAffinitySelector(nil)
 	defer selector.Stop()
 	manager := NewManager(nil, selector, nil)
-	registered, errRegister := manager.Register(context.Background(), &Auth{
-		ID: "affinity-result-auth", Provider: "openai", Status: StatusActive,
-	})
+	registered, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: "affinity-result-auth", Provider: "openai", Status: StatusActive,
+		},
+	)
 	if errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
@@ -247,42 +288,59 @@ func TestAffinityResultOnlyMutatesCredentialAttributedFailures(t *testing.T) {
 		err  *Error
 	}{
 		{name: "request scoped", err: NewRequestScopedError("caller request failed", http.StatusBadRequest)},
-		{name: "caller attributed", err: &Error{Code: requestScopedErrorCode, HTTPStatus: http.StatusUnprocessableEntity, Message: "caller input"}},
+		{
+			name: "caller attributed", err: &Error{
+				Code: requestScopedErrorCode, HTTPStatus: http.StatusUnprocessableEntity, Message: "caller input",
+			},
+		},
 		{name: "connection lifecycle", err: &Error{Code: connectionLifecycleErrorCode, Message: "unexpected EOF"}},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			session := "preserve-" + test.name
-			options := bind(session)
-			selector.cache.mu.RLock()
-			key := "openai::header:" + session + "::" + model
-			before := selector.cache.entries[key]
-			selector.cache.mu.RUnlock()
-			selector.OnResult(Result{
-				AuthID: registered.ID, Provider: "openai", Model: model, Options: options, Error: test.err,
-			})
-			assertBound(session)
-			selector.cache.mu.RLock()
-			after := selector.cache.entries[key]
-			selector.cache.mu.RUnlock()
-			if !after.expiresAt.Equal(before.expiresAt) {
-				t.Fatalf("availability-neutral failure touched TTL: before=%v after=%v", before.expiresAt, after.expiresAt)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				session := "preserve-" + test.name
+				options := bind(session)
+				selector.cache.mu.RLock()
+				key := "openai::header:" + session + "::" + model
+				before := selector.cache.entries[key]
+				selector.cache.mu.RUnlock()
+				selector.OnResult(
+					Result{
+						AuthID: registered.ID, Provider: "openai", Model: model, Options: options, Error: test.err,
+					},
+				)
+				assertBound(session)
+				selector.cache.mu.RLock()
+				after := selector.cache.entries[key]
+				selector.cache.mu.RUnlock()
+				if !after.expiresAt.Equal(before.expiresAt) {
+					t.Fatalf(
+						"availability-neutral failure touched TTL: before=%v after=%v", before.expiresAt,
+						after.expiresAt,
+					)
+				}
+			},
+		)
 	}
 
 	requestOptions := bind("manager-request-scoped")
-	manager.MarkResult(context.Background(), Result{
-		AuthID: registered.ID, Provider: "openai", Model: model, Options: requestOptions,
-		Error: NewRequestScopedError("bad caller request", http.StatusBadRequest),
-	})
+	manager.MarkResult(
+		context.Background(), Result{
+			AuthID: registered.ID, Provider: "openai", Model: model, Options: requestOptions,
+			Error: NewRequestScopedError("bad caller request", http.StatusBadRequest),
+		},
+	)
 	assertBound("manager-request-scoped")
 
 	credentialOptions := bind("manager-credential")
-	manager.MarkResult(context.Background(), Result{
-		AuthID: registered.ID, Provider: "openai", Model: model, Options: credentialOptions,
-		Error: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
-	})
-	if found, status := manager.LookupSessionAffinity("openai", model, "manager-credential"); status != "unbound" || found != nil {
+	manager.MarkResult(
+		context.Background(), Result{
+			AuthID: registered.ID, Provider: "openai", Model: model, Options: credentialOptions,
+			Error: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+		},
+	)
+	if found, status := manager.LookupSessionAffinity(
+		"openai", model, "manager-credential",
+	); status != "unbound" || found != nil {
 		t.Fatalf("credential failure kept affinity: (%#v, %q)", found, status)
 	}
 }
@@ -351,9 +409,11 @@ func TestRouteTracePreservesLCPAffinityIdentityForResultMutation(t *testing.T) {
 	executor := &affinityResultPropagationExecutor{provider: provider}
 	manager.RegisterExecutor(executor)
 	registerSchedulerModels(t, provider, model, authID)
-	if _, errRegister := manager.Register(context.Background(), &Auth{
-		ID: authID, Provider: provider, Status: StatusActive,
-	}); errRegister != nil {
+	if _, errRegister := manager.Register(
+		context.Background(), &Auth{
+			ID: authID, Provider: provider, Status: StatusActive,
+		},
+	); errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
 
@@ -388,7 +448,9 @@ func TestRouteTracePreservesLCPAffinityIdentityForResultMutation(t *testing.T) {
 	); errExecute == nil {
 		t.Fatal("credential-attributed Execute() error = nil")
 	}
-	if found, status := manager.LookupSessionAffinity(provider, model, match.SessionID); status != "unbound" || found != nil {
+	if found, status := manager.LookupSessionAffinity(
+		provider, model, match.SessionID,
+	); status != "unbound" || found != nil {
 		t.Fatalf("credential failure kept route-traced LCP affinity: (%#v, %q)", found, status)
 	}
 }
