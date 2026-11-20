@@ -87,7 +87,9 @@ func TestPostProviderEntryUsesFullRouteIdentity(t *testing.T) {
 			recorder := runConfigListRequest(h.PostGeminiKey, http.MethodPost, "/gemini-api-key", body)
 			if recorder.Code != http.StatusCreated {
 				t.Fatalf(
-					"PostGeminiKey distinct route status = %d, want 201: %s", recorder.Code, recorder.Body.String(),
+					"PostGeminiKey distinct route status = %d, want 201: %s",
+					recorder.Code,
+					recorder.Body.String(),
 				)
 			}
 			if len(h.configSnapshot().GeminiKey) != 2 {
@@ -97,7 +99,9 @@ func TestPostProviderEntryUsesFullRouteIdentity(t *testing.T) {
 			recorder = runConfigListRequest(h.PostGeminiKey, http.MethodPost, "/gemini-api-key", body)
 			if recorder.Code != http.StatusConflict {
 				t.Fatalf(
-					"PostGeminiKey duplicate route status = %d, want 409: %s", recorder.Code, recorder.Body.String(),
+					"PostGeminiKey duplicate route status = %d, want 409: %s",
+					recorder.Code,
+					recorder.Body.String(),
 				)
 			}
 		},
@@ -128,61 +132,77 @@ func TestPostProviderEntryUsesFullRouteIdentity(t *testing.T) {
 				},
 			}
 			for _, resource := range resources {
-				resource := resource
 				for _, route := range []struct {
 					name       string
 					body       string
 					wantStatus int
 				}{
 					{
-						name:       "different proxy",
-						body:       `{"api-key":"shared-secret","base-url":"https://gateway.example/v1","proxy-url":"https://proxy-b.example","prefix":"team-a","headers":{"X-A":"1","X-B":"2"}}`,
+						name: "different proxy",
+						body: `{"api-key":"shared-secret","base-url":"https://gateway.example/v1","pr` +
+							`oxy-url":"https://proxy-b.example","prefix":"team-a","headers":{"X-A":` +
+							`"1","X-B":"2"}}`,
 						wantStatus: http.StatusCreated,
 					},
 					{
-						name:       "different prefix",
-						body:       `{"api-key":"shared-secret","base-url":"https://gateway.example/v1","proxy-url":"https://proxy-a.example","prefix":"team-b","headers":{"X-A":"1","X-B":"2"}}`,
+						name: "different prefix",
+						body: `{"api-key":"shared-secret","base-url":"https://gateway.example/v1","pr` +
+							`oxy-url":"https://proxy-a.example","prefix":"team-b","headers":{"X-A":` +
+							`"1","X-B":"2"}}`,
 						wantStatus: http.StatusCreated,
 					},
 					{
-						name:       "different header value",
-						body:       `{"api-key":"shared-secret","base-url":"https://gateway.example/v1","proxy-url":"https://proxy-a.example","prefix":"team-a","headers":{"X-A":"1","X-B":"3"}}`,
+						name: "different header value",
+						body: `{"api-key":"shared-secret","base-url":"https://gateway.example/v1","pr` +
+							`oxy-url":"https://proxy-a.example","prefix":"team-a","headers":{"X-A":` +
+							`"1","X-B":"3"}}`,
 						wantStatus: http.StatusCreated,
 					},
 					{
-						name:       "same normalized route",
-						body:       `{"api-key":" shared-secret ","base-url":" https://gateway.example/v1 ","proxy-url":" https://proxy-a.example ","prefix":" /team-a/ ","headers":{"X-B":"2","X-A":"1"}}`,
+						name: "same normalized route",
+						body: `{"api-key":" shared-secret ","base-url":" https://gateway.example/v1 "` +
+							`,"proxy-url":" https://proxy-a.example ","prefix":" /team-a/ ","header` +
+							`s":{"X-B":"2","X-A":"1"}}`,
 						wantStatus: http.StatusConflict,
 					},
 				} {
-					route := route
-					t.Run(resource.name+"/"+route.name, func(t *testing.T) {
-						cfg := &config.Config{}
-						resource.set(
-							cfg,
-							[]config.GeminiKey{{
-								APIKey:   "shared-secret",
-								BaseURL:  "https://gateway.example/v1",
-								ProxyURL: "https://proxy-a.example",
-								Prefix:   "team-a",
-								Headers:  map[string]string{"X-A": "1", "X-B": "2"},
-							}},
-						)
-						h := newConfigListTestHandler(t, cfg)
-						recorder := runConfigListRequest(
-							func(c *gin.Context) { resource.post(h, c) }, http.MethodPost, resource.path, route.body,
-						)
-						if recorder.Code != route.wantStatus {
-							t.Fatalf("status = %d, want %d: %s", recorder.Code, route.wantStatus, recorder.Body.String())
-						}
-						wantCount := 2
-						if route.wantStatus == http.StatusConflict {
-							wantCount = 1
-						}
-						if got := len(resource.get(h.configSnapshot())); got != wantCount {
-							t.Fatalf("credential count = %d, want %d", got, wantCount)
-						}
-					})
+					t.Run(
+						resource.name+"/"+route.name, func(t *testing.T) {
+							cfg := &config.Config{}
+							resource.set(
+								cfg,
+								[]config.GeminiKey{
+									{
+										APIKey:   "shared-secret",
+										BaseURL:  "https://gateway.example/v1",
+										ProxyURL: "https://proxy-a.example",
+										Prefix:   "team-a",
+										Headers:  map[string]string{"X-A": "1", "X-B": "2"},
+									},
+								},
+							)
+							h := newConfigListTestHandler(t, cfg)
+							recorder := runConfigListRequest(
+								func(c *gin.Context) { resource.post(h, c) }, http.MethodPost, resource.path,
+								route.body,
+							)
+							if recorder.Code != route.wantStatus {
+								t.Fatalf(
+									"status = %d, want %d: %s",
+									recorder.Code,
+									route.wantStatus,
+									recorder.Body.String(),
+								)
+							}
+							wantCount := 2
+							if route.wantStatus == http.StatusConflict {
+								wantCount = 1
+							}
+							if got := len(resource.get(h.configSnapshot())); got != wantCount {
+								t.Fatalf("credential count = %d, want %d", got, wantCount)
+							}
+						},
+					)
 				}
 			}
 		},
@@ -200,12 +220,16 @@ func TestPostProviderEntryUsesFullRouteIdentity(t *testing.T) {
 				},
 			}
 			h := newConfigListTestHandler(t, cfg)
-			body := `{"api-key":"shared-claude-secret","base-url":"https://api.anthropic.com","priority":10,"prefix":"second","proxy-url":"http://127.0.0.1:8080","models":[{"name":"claude-upstream","alias":"claude-alias"}]}`
+			body := `{"api-key":"shared-claude-secret","base-url":"https://api.anthropic.co` +
+				`m","priority":10,"prefix":"second","proxy-url":"http://127.0.0.1:8080"` +
+				`,"models":[{"name":"claude-upstream","alias":"claude-alias"}]}`
 
 			recorder := runConfigListRequest(h.PostClaudeKey, http.MethodPost, "/claude-api-key", body)
 			if recorder.Code != http.StatusCreated {
 				t.Fatalf(
-					"PostClaudeKey distinct route status = %d, want 201: %s", recorder.Code, recorder.Body.String(),
+					"PostClaudeKey distinct route status = %d, want 201: %s",
+					recorder.Code,
+					recorder.Body.String(),
 				)
 			}
 			if len(h.configSnapshot().ClaudeKey) != 2 {
@@ -215,7 +239,9 @@ func TestPostProviderEntryUsesFullRouteIdentity(t *testing.T) {
 			recorder = runConfigListRequest(h.PostClaudeKey, http.MethodPost, "/claude-api-key", body)
 			if recorder.Code != http.StatusConflict {
 				t.Fatalf(
-					"PostClaudeKey duplicate route status = %d, want 409: %s", recorder.Code, recorder.Body.String(),
+					"PostClaudeKey duplicate route status = %d, want 409: %s",
+					recorder.Code,
+					recorder.Body.String(),
 				)
 			}
 		},
@@ -233,11 +259,18 @@ func TestPostProviderEntryUsesFullRouteIdentity(t *testing.T) {
 				},
 			}
 			h := newConfigListTestHandler(t, cfg)
-			body := `{"api-key":"shared-codex-secret","base-url":"https://api.openai.com","priority":10,"prefix":"second","websockets":true,"proxy-url":"http://127.0.0.1:8080","models":[{"name":"gpt-upstream","alias":"gpt-alias"}]}`
+			//goland:noinspection HttpUrlsUsage
+			body := `{"api-key":"shared-codex-secret","base-url":"https://api.openai.com","` +
+				`priority":10,"prefix":"second","websockets":true,"proxy-url":"http://1` +
+				`27.0.0.1:8080","models":[{"name":"gpt-upstream","alias":"gpt-alias"}]}`
 
 			recorder := runConfigListRequest(h.PostCodexKey, http.MethodPost, "/codex-api-key", body)
 			if recorder.Code != http.StatusCreated {
-				t.Fatalf("PostCodexKey distinct route status = %d, want 201: %s", recorder.Code, recorder.Body.String())
+				t.Fatalf(
+					"PostCodexKey distinct route status = %d, want 201: %s",
+					recorder.Code,
+					recorder.Body.String(),
+				)
 			}
 			if len(h.configSnapshot().CodexKey) != 2 {
 				t.Fatalf("CodexKey length = %d, want 2", len(h.configSnapshot().CodexKey))
@@ -246,7 +279,9 @@ func TestPostProviderEntryUsesFullRouteIdentity(t *testing.T) {
 			recorder = runConfigListRequest(h.PostCodexKey, http.MethodPost, "/codex-api-key", body)
 			if recorder.Code != http.StatusConflict {
 				t.Fatalf(
-					"PostCodexKey duplicate route status = %d, want 409: %s", recorder.Code, recorder.Body.String(),
+					"PostCodexKey duplicate route status = %d, want 409: %s",
+					recorder.Code,
+					recorder.Body.String(),
 				)
 			}
 		},
@@ -258,62 +293,96 @@ func TestCodexConfigurationUpdateCapabilityMutations(t *testing.T) {
 		name    string
 		support bool
 	}{{"enabled", true}, {"disabled", false}} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newConfigListTestHandler(t, &config.Config{})
-			payload := func(support bool) string {
-				body, err := json.Marshal(map[string]any{
-					"api-key": "test-codex-key", "base-url": "https://codex.example/v1",
-					"models": []map[string]any{{
-						"name": "model", "alias": "alias", "support-configuration-update": support,
-					}},
-				})
-				if err != nil {
-					t.Fatal(err)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				h := newConfigListTestHandler(t, &config.Config{})
+				payload := func(support bool) string {
+					body, err := json.Marshal(
+						map[string]any{
+							"api-key": "test-codex-key", "base-url": "https://codex.example/v1",
+							"models": []map[string]any{
+								{
+									"name": "model", "alias": "alias", "support-configuration-update": support,
+								},
+							},
+						},
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return string(body)
 				}
-				return string(body)
-			}
-			assertCapabilities := func(want ...bool) {
-				t.Helper()
-				recorder := runConfigListRequest(h.GetCodexKeys, http.MethodGet, "/codex-api-key", "")
-				var response map[string][]config.CodexKey
-				if recorder.Code != http.StatusOK {
-					t.Fatalf("GET status = %d: %s", recorder.Code, recorder.Body.String())
-				}
-				if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-					t.Fatal(err)
-				}
-				entries := response["codex-api-key"]
-				if len(entries) != len(want) {
-					t.Fatalf("GET entries = %d, want %d", len(entries), len(want))
-				}
-				for i, support := range want {
-					if len(entries[i].Models) != 1 || entries[i].Models[0].SupportConfigurationUpdate != support {
-						t.Fatalf("GET entry %d models = %+v, want capability %t", i, entries[i].Models, support)
+				assertCapabilities := func(want ...bool) {
+					t.Helper()
+					recorder := runConfigListRequest(h.GetCodexKeys, http.MethodGet, "/codex-api-key", "")
+					var response map[string][]config.CodexKey
+					if recorder.Code != http.StatusOK {
+						t.Fatalf("GET status = %d: %s", recorder.Code, recorder.Body.String())
+					}
+					if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+						t.Fatal(err)
+					}
+					entries := response["codex-api-key"]
+					if len(entries) != len(want) {
+						t.Fatalf("GET entries = %d, want %d", len(entries), len(want))
+					}
+					for i, support := range want {
+						if len(entries[i].Models) != 1 ||
+							entries[i].Models[0].SupportConfigurationUpdate != support {
+							t.Fatalf(
+								"GET entry %d models = %+v, want capability %t",
+								i,
+								entries[i].Models,
+								support,
+							)
+						}
 					}
 				}
-			}
-			recorder := runConfigListRequest(h.PutCodexKeys, http.MethodPut, "/codex-api-key", "["+payload(tc.support)+"]")
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("PUT status = %d: %s", recorder.Code, recorder.Body.String())
-			}
-			assertCapabilities(tc.support)
-			recorder = runConfigListRequest(h.PatchCodexKey, http.MethodPatch, "/codex-api-key",
-				`{"index":0,"value":`+payload(!tc.support)+`}`)
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("PATCH status = %d: %s", recorder.Code, recorder.Body.String())
-			}
-			assertCapabilities(!tc.support)
-			recorder = runConfigListRequest(h.PostCodexKey, http.MethodPost, "/codex-api-key", payload(tc.support))
-			if recorder.Code != http.StatusCreated {
-				t.Fatalf("POST distinct capability status = %d, want 201: %s", recorder.Code, recorder.Body.String())
-			}
-			assertCapabilities(!tc.support, tc.support)
-			recorder = runConfigListRequest(h.PostCodexKey, http.MethodPost, "/codex-api-key", payload(tc.support))
-			if recorder.Code != http.StatusConflict {
-				t.Fatalf("POST duplicate capability status = %d, want 409: %s", recorder.Code, recorder.Body.String())
-			}
-			assertCapabilities(!tc.support, tc.support)
-		})
+				recorder := runConfigListRequest(
+					h.PutCodexKeys, http.MethodPut, "/codex-api-key", "["+payload(tc.support)+"]",
+				)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("PUT status = %d: %s", recorder.Code, recorder.Body.String())
+				}
+				assertCapabilities(tc.support)
+				recorder = runConfigListRequest(
+					h.PatchCodexKey, http.MethodPatch, "/codex-api-key",
+					`{"index":0,"value":`+payload(!tc.support)+`}`,
+				)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("PATCH status = %d: %s", recorder.Code, recorder.Body.String())
+				}
+				assertCapabilities(!tc.support)
+				recorder = runConfigListRequest(
+					h.PostCodexKey,
+					http.MethodPost,
+					"/codex-api-key",
+					payload(tc.support),
+				)
+				if recorder.Code != http.StatusCreated {
+					t.Fatalf(
+						"POST distinct capability status = %d, want 201: %s",
+						recorder.Code,
+						recorder.Body.String(),
+					)
+				}
+				assertCapabilities(!tc.support, tc.support)
+				recorder = runConfigListRequest(
+					h.PostCodexKey,
+					http.MethodPost,
+					"/codex-api-key",
+					payload(tc.support),
+				)
+				if recorder.Code != http.StatusConflict {
+					t.Fatalf(
+						"POST duplicate capability status = %d, want 409: %s",
+						recorder.Code,
+						recorder.Body.String(),
+					)
+				}
+				assertCapabilities(!tc.support, tc.support)
+			},
+		)
 	}
 }
 
@@ -368,7 +437,10 @@ func TestPatchProviderEntriesUpdatesAllEditableFields(t *testing.T) {
 				h.PatchGeminiKey,
 				http.MethodPatch,
 				"/gemini-api-key",
-				`{"index":0,"value":{"priority":7,"prefix":"g","base-url":"https://generativelanguage.googleapis.com","proxy-url":"http://127.0.0.1:8080","models":[{"name":"gemini-upstream","alias":"gemini-alias","display-name":"Gemini Alias","max-context-length":262144}],"headers":{"X-Test":"gemini"},"excluded-models":["gemini-old"]}}`,
+				`{"index":0,"value":{"priority":7,"prefix":"g","base-url":"https://generativelanguage.`+
+					`googleapis.com","proxy-url":"http://127.0.0.1:8080","models":[{"name":"gemini-upstream",`+
+					`"alias":"gemini-alias","display-name":"Gemini Alias","max-context-length":262144}],"`+
+					`headers":{"X-Test":"gemini"},"excluded-models":["gemini-old"]}}`,
 			)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("PatchGeminiKey status = %d, want 200: %s", recorder.Code, recorder.Body.String())
@@ -377,7 +449,8 @@ func TestPatchProviderEntriesUpdatesAllEditableFields(t *testing.T) {
 			if updated.Priority != 7 || updated.Prefix != "g" || updated.BaseURL == "" || updated.ProxyURL == "" ||
 				len(updated.Models) != 1 || updated.Models[0].Alias != "gemini-alias" ||
 				updated.Models[0].DisplayName != "Gemini Alias" || updated.Models[0].MaxContextLength != 262144 ||
-				updated.Headers["X-Test"] != "gemini" || len(updated.ExcludedModels) != 1 {
+				updated.Headers["X-Test"] != "gemini" ||
+				len(updated.ExcludedModels) != 1 {
 				t.Fatalf("updated Gemini key = %+v", updated)
 			}
 		},
@@ -397,7 +470,8 @@ func TestPatchProviderEntriesUpdatesAllEditableFields(t *testing.T) {
 				h.PatchClaudeKey,
 				http.MethodPatch,
 				"/claude-api-key",
-				`{"index":0,"value":{"models":[{"name":"claude-upstream","alias":"claude-alias","display-name":"Claude Alias","max-context-length":262144}]}}`,
+				`{"index":0,"value":{"models":[{"name":"claude-upstream","alias":"claude-alias","display-`+
+					`name":"Claude Alias","max-context-length":262144}]}}`,
 			)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("PatchClaudeKey status = %d, want 200: %s", recorder.Code, recorder.Body.String())
@@ -423,7 +497,11 @@ func TestPatchProviderEntriesUpdatesAllEditableFields(t *testing.T) {
 				h.PatchCodexKey,
 				http.MethodPatch,
 				"/codex-api-key",
-				`{"index":0,"value":{"priority":8,"prefix":"c","base-url":"https://api.openai.com/v1","websockets":true,"proxy-url":"http://127.0.0.1:8081","models":[{"name":"gpt-upstream","alias":"gpt-alias","display-name":"Codex Alias","max-context-length":262144}],"headers":{"X-Test":"codex"},"excluded-models":["gpt-old"]}}`,
+				`{"index":0,"value":{"priority":8,"prefix":"c","base-url":"https://api.`+
+					`openai.com/v1","websockets":true,"proxy-url":"http://127.0.0.1:8081","`+
+					`models":[{"name":"gpt-upstream","alias":"gpt-alias","display-name":"Co`+
+					`dex Alias","max-context-length":262144}],"headers":{"X-Test":"codex"},`+
+					`"excluded-models":["gpt-old"]}}`,
 			)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("PatchCodexKey status = %d, want 200: %s", recorder.Code, recorder.Body.String())
@@ -432,7 +510,8 @@ func TestPatchProviderEntriesUpdatesAllEditableFields(t *testing.T) {
 			if updated.Priority != 8 || updated.Prefix != "c" || !updated.Websockets || updated.ProxyURL == "" ||
 				len(updated.Models) != 1 || updated.Models[0].Alias != "gpt-alias" ||
 				updated.Models[0].DisplayName != "Codex Alias" || updated.Models[0].MaxContextLength != 262144 ||
-				updated.Headers["X-Test"] != "codex" || len(updated.ExcludedModels) != 1 {
+				updated.Headers["X-Test"] != "codex" ||
+				len(updated.ExcludedModels) != 1 {
 				t.Fatalf("updated Codex key = %+v", updated)
 			}
 		},
@@ -452,10 +531,18 @@ func TestPatchProviderEntriesUpdatesAllEditableFields(t *testing.T) {
 				h.PatchVertexCompatKey,
 				http.MethodPatch,
 				"/vertex-api-key",
-				`{"index":0,"value":{"priority":9,"prefix":"v","base-url":"https://aiplatform.googleapis.com/v1","proxy-url":"http://127.0.0.1:8082","models":[{"name":"vertex-upstream","alias":"vertex-alias","display-name":"Vertex Alias"}],"headers":{"X-Test":"vertex"},"excluded-models":["vertex-old"]}}`,
+				`{"index":0,"value":{"priority":9,"prefix":"v","base-url":"https://aipl`+
+					`atform.googleapis.com/v1","proxy-url":"http://127.0.0.1:8082","models"`+
+					`:[{"name":"vertex-upstream","alias":"vertex-alias","display-name":"Ver`+
+					`tex Alias"}],"headers":{"X-Test":"vertex"},"excluded-models":["vertex-`+
+					`old"]}}`,
 			)
 			if recorder.Code != http.StatusOK {
-				t.Fatalf("PatchVertexCompatKey status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+				t.Fatalf(
+					"PatchVertexCompatKey status = %d, want 200: %s",
+					recorder.Code,
+					recorder.Body.String(),
+				)
 			}
 			updated := h.configSnapshot().VertexCompatAPIKey[0]
 			if updated.Priority != 9 || updated.Prefix != "v" || updated.ProxyURL == "" ||
@@ -481,16 +568,31 @@ func TestPatchProviderEntriesUpdatesAllEditableFields(t *testing.T) {
 				h.PatchOpenAICompat,
 				http.MethodPatch,
 				"/openai-compatibility",
-				`{"index":0,"name":"openai","value":{"priority":10,"prefix":"o","base-url":"https://api.openai.com/v1","disabled":true,"api-key-entries":[{"api-key":"openai-secret"}],"models":[{"name":"openai-upstream","alias":"openai-alias","display-name":"OpenAI Alias","max-context-length":262144}],"headers":{"X-Test":"openai"},"support-prompt-cache-key":true,"disable-cooling":true}}`,
+				`{"index":0,"name":"openai","value":{"priority":10,"prefix":"o","base-u`+
+					`rl":"https://api.openai.com/v1","disabled":true,"api-key-entries":[{"a`+
+					`pi-key":"openai-secret"}],"models":[{"name":"openai-upstream","alias":`+
+					`"openai-alias","display-name":"OpenAI Alias","max-context-length":2621`+
+					`44}],"headers":{"X-Test":"openai"},"support-prompt-cache-key":true,"di`+
+					`sable-cooling":true}}`,
 			)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("PatchOpenAICompat status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 			}
 			updated := h.configSnapshot().OpenAICompatibility[0]
-			if updated.Priority != 10 || updated.Prefix != "o" || !updated.Disabled || !updated.SupportPromptCacheKey || updated.DisableCooling == nil || !*updated.DisableCooling ||
+			if updated.Priority !=
+				10 ||
+				updated.Prefix !=
+					"o" ||
+				!updated.Disabled ||
+				!updated.SupportPromptCacheKey ||
+				updated.DisableCooling ==
+					nil ||
+				!*updated.DisableCooling ||
 				len(updated.APIKeyEntries) != 1 || updated.APIKeyEntries[0].APIKey != "openai-secret" ||
-				len(updated.Models) != 1 || updated.Models[0].Alias != "openai-alias" ||
-				updated.Models[0].DisplayName != "OpenAI Alias" || updated.Models[0].MaxContextLength != 262144 ||
+				len(updated.Models) != 1 ||
+				updated.Models[0].Alias != "openai-alias" ||
+				updated.Models[0].DisplayName != "OpenAI Alias" ||
+				updated.Models[0].MaxContextLength != 262144 ||
 				updated.Headers["X-Test"] != "openai" {
 				t.Fatalf("updated OpenAI provider = %+v", updated)
 			}
@@ -500,7 +602,10 @@ func TestPatchProviderEntriesUpdatesAllEditableFields(t *testing.T) {
 
 func TestOpenAICompatibilityManagementRoundTripPreservesC05Fields(t *testing.T) {
 	h := newConfigListTestHandler(t, &config.Config{})
-	putBody := `[{"name":"compat","base-url":"https://compat.example/v1","support-prompt-cache-key":true,"disable-cooling":true,"models":[{"name":"gpt-5.5","alias":"configured-gpt","display-name":"Configured GPT","max-context-length":262144}]}]`
+	putBody := `[{"name":"compat","base-url":"https://compat.example/v1","support-prom` +
+		`pt-cache-key":true,"disable-cooling":true,"models":[{"name":"gpt-5.5",` +
+		`"alias":"configured-gpt","display-name":"Configured GPT","max-context-` +
+		`length":262144}]}]`
 	putRecorder := runConfigListRequest(h.PutOpenAICompat, http.MethodPut, "/openai-compatibility", putBody)
 	if putRecorder.Code != http.StatusOK {
 		t.Fatalf("PutOpenAICompat status = %d, want 200: %s", putRecorder.Code, putRecorder.Body.String())
@@ -520,7 +625,9 @@ func TestOpenAICompatibilityManagementRoundTripPreservesC05Fields(t *testing.T) 
 	if err := json.Unmarshal(getRecorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode GetOpenAICompat response: %v", err)
 	}
-	if len(response.Entries) != 1 || !response.Entries[0].SupportPromptCacheKey || !response.Entries[0].DisableCooling || len(response.Entries[0].Models) != 1 {
+	if len(response.Entries) != 1 || !response.Entries[0].SupportPromptCacheKey ||
+		!response.Entries[0].DisableCooling ||
+		len(response.Entries[0].Models) != 1 {
 		t.Fatalf("management GET response = %+v", response.Entries)
 	}
 	model := response.Entries[0].Models[0]
@@ -552,7 +659,10 @@ func TestPatchProviderUsesAuthIndexAfterListReorder(t *testing.T) {
 					},
 				},
 			},
-			reorder:   func(cfg *config.Config) { cfg.GeminiKey[0], cfg.GeminiKey[1] = cfg.GeminiKey[1], cfg.GeminiKey[0] },
+			reorder: func(cfg *config.Config) {
+				cfg.GeminiKey[0], cfg.GeminiKey[1] = cfg.GeminiKey[1],
+					cfg.GeminiKey[0]
+			},
 			authIndex: func(views configAuthIndexViews) string { return views.gemini[1] },
 			patch: func(h *Handler, body string) int {
 				return runConfigListRequest(h.PatchGeminiKey, http.MethodPatch, "/gemini-api-key", body).Code
@@ -589,15 +699,25 @@ func TestPatchProviderUsesAuthIndexAfterListReorder(t *testing.T) {
 			original: &config.Config{
 				VertexCompatAPIKey: []config.VertexCompatKey{
 					{APIKey: "vertex-first", BaseURL: "https://aiplatform.googleapis.com", Prefix: "first"},
-					{APIKey: "vertex-second", BaseURL: "https://aiplatform.googleapis.com/v1", Prefix: "second"},
+					{
+						APIKey:  "vertex-second",
+						BaseURL: "https://aiplatform.googleapis.com/v1",
+						Prefix:  "second",
+					},
 				},
 			},
 			reorder: func(cfg *config.Config) {
-				cfg.VertexCompatAPIKey[0], cfg.VertexCompatAPIKey[1] = cfg.VertexCompatAPIKey[1], cfg.VertexCompatAPIKey[0]
+				cfg.VertexCompatAPIKey[0], cfg.VertexCompatAPIKey[1] = cfg.VertexCompatAPIKey[1],
+					cfg.VertexCompatAPIKey[0]
 			},
 			authIndex: func(views configAuthIndexViews) string { return views.vertex[1] },
 			patch: func(h *Handler, body string) int {
-				return runConfigListRequest(h.PatchVertexCompatKey, http.MethodPatch, "/vertex-api-key", body).Code
+				return runConfigListRequest(
+					h.PatchVertexCompatKey,
+					http.MethodPatch,
+					"/vertex-api-key",
+					body,
+				).Code
 			},
 			updatedPrefix: func(cfg *config.Config) (string, string) {
 				return cfg.VertexCompatAPIKey[0].Prefix, cfg.VertexCompatAPIKey[1].Prefix

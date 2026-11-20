@@ -495,9 +495,11 @@ func TestLoadOrCreateConfigYAMLRedactionKeyConcurrent(t *testing.T) {
 	errs := make([]error, workers)
 	var group sync.WaitGroup
 	for index := range workers {
-		group.Go(func() {
-			keys[index], errs[index] = loadOrCreateConfigYAMLRedactionKey(configPath)
-		})
+		group.Go(
+			func() {
+				keys[index], errs[index] = loadOrCreateConfigYAMLRedactionKey(configPath)
+			},
+		)
 	}
 	group.Wait()
 	for index, err := range errs {

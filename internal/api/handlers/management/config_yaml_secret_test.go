@@ -42,8 +42,12 @@ func TestConfigYAMLWithManagementSecretRejectsAliasedMapping(t *testing.T) {
 
 func TestConfigYAMLWithManagementSecretRejectsAliasedKeys(t *testing.T) {
 	for name, body := range map[string][]byte{
-		"remote management key": []byte("remote-name: &remote-name remote-management\n*remote-name:\n  secret-key: plain\n"),
-		"secret key":            []byte("secret-name: &secret-name secret-key\nremote-management:\n  *secret-name: plain\n"),
+		"remote management key": []byte("remote-name: &remote-name remote-management\n*remote-name:\n  " +
+			"secret-key: " +
+			"plain\n"),
+		"secret key": []byte("secret-name: &secret-name secret-key\nremote-management:\n  " +
+			"*secret-name: " +
+			"plain\n"),
 	} {
 		t.Run(
 			name, func(t *testing.T) {

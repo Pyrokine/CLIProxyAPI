@@ -64,14 +64,14 @@ type rateLimitPersistedBan struct {
 type rateLimitPersistedAttempt struct {
 	IP                     string      `json:"ip"`
 	Failures               []time.Time `json:"failures,omitempty"`
-	BlockedUntil           time.Time   `json:"blocked_until,omitempty"`
-	LastActivity           time.Time   `json:"last_activity,omitempty"`
+	BlockedUntil           time.Time   `json:"blocked_until"`
+	LastActivity           time.Time   `json:"last_activity"`
 	BanCount               int         `json:"ban_count,omitempty"`
 	PendingNoticeFailures  int         `json:"pending_notice_failures,omitempty"`
-	LastFailureAt          time.Time   `json:"last_failure_at,omitempty"`
-	LastSuccessfulAuthAt   time.Time   `json:"last_successful_auth_at,omitempty"`
+	LastFailureAt          time.Time   `json:"last_failure_at"`
+	LastSuccessfulAuthAt   time.Time   `json:"last_successful_auth_at"`
 	LastFailureFingerprint string      `json:"last_failure_fingerprint,omitempty"`
-	LastCountedFailureAt   time.Time   `json:"last_counted_failure_at,omitempty"`
+	LastCountedFailureAt   time.Time   `json:"last_counted_failure_at"`
 }
 
 type rateLimitPersistedState struct {

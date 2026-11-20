@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,11 +14,10 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/gin-gonic/gin"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
-	managementMutationAuditSchemaVersion = 1
+	managementMutationAuditSchemaVersion = 2
 	managementMutationAuditWriteTimeout  = 2 * time.Second
 
 	managementMutationActorContextKey  = "management.mutation-audit.actor-kind"
@@ -40,6 +40,8 @@ type managementMutationAuditRecord struct {
 	StatusCode    int
 	Version       string
 	SchemaVersion int
+	MutationID    string
+	Result        *MutationResult
 }
 
 type managementMutationAuditSchemaExecutor interface {
@@ -67,7 +69,9 @@ func applyManagementMutationAuditSchema(
 			target TEXT NOT NULL DEFAULT '',
 			status_code INTEGER NOT NULL,
 			version TEXT NOT NULL,
-			audit_schema_version INTEGER NOT NULL
+			audit_schema_version INTEGER NOT NULL,
+			mutation_id TEXT NOT NULL DEFAULT '',
+			result_json TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_management_mutation_audit_occurred_at
 		 ON management_mutation_audit(occurred_at)`,
@@ -95,7 +99,7 @@ func (s *managementStateStore) applyManagementMutationAuditSchema(ctx context.Co
 	if err := applyManagementMutationAuditSchema(ctx, s.db); err != nil {
 		return fmt.Errorf("management state: apply mutation audit schema: %w", err)
 	}
-	return nil
+	return ensureMutationResultSchema(ctx, s.db)
 }
 
 func (s *managementStateStore) migrateManagementMutationAuditV3(ctx context.Context) error {
@@ -140,7 +144,7 @@ func (s *managementStateStore) appendManagementMutationAudit(
 	if !isManagementMutationActor(record.ActorKind) {
 		return fmt.Errorf("management state: invalid mutation audit actor")
 	}
-	if !isManagementMutationMethod(record.Method) {
+	if !isManagementMutationMethod(record.Method, record.Route) {
 		return fmt.Errorf("management state: invalid mutation audit method")
 	}
 	if record.SchemaVersion != managementMutationAuditSchemaVersion {
@@ -159,12 +163,26 @@ func (s *managementStateStore) appendManagementMutationAudit(
 	if record.OccurredAt.IsZero() {
 		record.OccurredAt = time.Now().UTC()
 	}
+	resultJSON := ""
+	if record.Result != nil {
+		if err := validateMutationResult(*record.Result); err != nil {
+			return err
+		}
+		if record.Result.MutationID != record.MutationID || record.Result.RequestID != record.RequestID {
+			return errors.New("management mutation result identity does not match audit")
+		}
+		encoded, err := json.Marshal(record.Result)
+		if err != nil {
+			return err
+		}
+		resultJSON = string(encoded)
+	}
 	_, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO management_mutation_audit(
 			occurred_at, request_id, actor_kind, client_key, client_source, method,
-			route, resource, target, status_code, version, audit_schema_version
-		 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			route, resource, target, status_code, version, audit_schema_version, mutation_id, result_json
+		 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.OccurredAt.UTC().Format(time.RFC3339Nano),
 		record.RequestID,
 		record.ActorKind,
@@ -177,6 +195,8 @@ func (s *managementStateStore) appendManagementMutationAudit(
 		record.StatusCode,
 		record.Version,
 		record.SchemaVersion,
+		record.MutationID,
+		resultJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("management state: append mutation audit: %w", err)
@@ -301,13 +321,26 @@ func isManagementMutationActor(actorKind string) bool {
 	}
 }
 
-func isManagementMutationMethod(method string) bool {
+func isManagementMutationMethod(method string, route ...string) bool {
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		return true
-	default:
-		return false
+	case http.MethodGet:
+		if len(route) == 0 {
+			return false
+		}
+		switch route[0] {
+		case pluginOAuthMutationRoute,
+			"/v0/management/anthropic-auth-url", "/v0/management/codex-auth-url",
+			"/v0/management/gemini-cli-auth-url", "/v0/management/antigravity-auth-url",
+			"/v0/management/qwen-auth-url", "/v0/management/kimi-auth-url",
+			"/v0/management/kimi-ai-auth-url", "/v0/management/xai-auth-url",
+			"/v0/management/meta-auth-url", "/v0/management/devin-auth-url",
+			"/v0/management/iflow-auth-url":
+			return true
+		}
 	}
+	return false
 }
 
 func normalizeManagementMutationRoute(route string) string {
@@ -339,7 +372,7 @@ func managementMutationResource(route string) string {
 	switch {
 	case strings.HasPrefix(segment, "usage"):
 		return "usage"
-	case strings.HasPrefix(segment, "auth"), strings.HasPrefix(segment, "oauth"),
+	case route == pluginOAuthMutationRoute, strings.HasPrefix(segment, "auth"), strings.HasPrefix(segment, "oauth"),
 		strings.Contains(segment, "api-key"), strings.Contains(segment, "credential"):
 		return "credential"
 	case strings.HasPrefix(segment, "quota"), strings.Contains(segment, "inspection"):
@@ -415,50 +448,7 @@ func managementMutationAuditRecordFromContext(c *gin.Context, statusCode int) (m
 	}, true
 }
 
-func (h *Handler) recordManagementMutation(c *gin.Context, statusCode int) {
-	record, ok := managementMutationAuditRecordFromContext(c, statusCode)
-	if !ok {
-		log.Error("management mutation audit context unavailable")
-		return
-	}
-	entry := log.WithFields(
-		log.Fields{
-			"request_id": record.RequestID,
-			"method":     record.Method,
-			"route":      record.Route,
-		},
-	)
-	if h == nil || h.stateStore == nil {
-		entry.Error("management mutation audit unavailable")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), managementMutationAuditWriteTimeout)
-	defer cancel()
-	if err := h.stateStore.appendManagementMutationAudit(ctx, record); err != nil {
-		entry.WithError(err).Error("failed to persist management mutation audit")
-	}
-}
-
-// MutationAuditMiddleware records authenticated management write requests after handler completion.
+// MutationAuditMiddleware records authenticated management write requests and their confirmed effects.
 func (h *Handler) MutationAuditMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if c == nil || c.Request == nil || !isManagementMutationMethod(c.Request.Method) {
-			if c != nil {
-				c.Next()
-			}
-			return
-		}
-		defer func() {
-			panicValue := recover()
-			statusCode := c.Writer.Status()
-			if panicValue != nil {
-				statusCode = http.StatusInternalServerError
-			}
-			h.recordManagementMutation(c, statusCode)
-			if panicValue != nil {
-				panic(panicValue)
-			}
-		}()
-		c.Next()
-	}
+	return h.mutationResultMiddleware
 }

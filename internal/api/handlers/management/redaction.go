@@ -89,11 +89,16 @@ func isConfigAPIKeyProviderSchema(fieldName, parentFieldName, semanticPath strin
 	if fieldName != "config-api-key" || parentFieldName != "providers" {
 		return false
 	}
-	path := "$/document"
+	var path strings.Builder
+	path.WriteString("$/document")
 	for _, name := range [...]string{"auth", "providers", "config-api-key"} {
-		path += "/mapping@" + configYAMLSemanticMapKey(&yaml.Node{Kind: yaml.ScalarNode, Value: name}, false) + "/value"
+		path.WriteString(
+			"/mapping@" + configYAMLSemanticMapKey(
+				&yaml.Node{Kind: yaml.ScalarNode, Value: name}, false,
+			) + "/value",
+		)
 	}
-	return semanticPath == path
+	return semanticPath == path.String()
 }
 
 const (
@@ -109,6 +114,7 @@ type configYAMLSecret struct {
 	placeholder string
 	firstPath   string
 	paths       map[string]struct{}
+	clientKey   bool
 }
 
 type configYAMLAnchor struct {
@@ -120,16 +126,17 @@ type configYAMLAnchor struct {
 }
 
 type configYAMLRedactionPlan struct {
-	placeholderKey       [32]byte
-	secrets              []*configYAMLSecret
-	secretsByNode        map[*yaml.Node]*configYAMLSecret
-	secretsByPlaceholder map[string]*configYAMLSecret
-	anchors              []*configYAMLAnchor
-	anchorsByPlaceholder map[string]*configYAMLAnchor
-	sourceScalars        map[string]struct{}
-	sourceAnchors        map[string]struct{}
-	placeholders         map[string]struct{}
-	anchorPlaceholders   map[string]struct{}
+	placeholderKey          [32]byte
+	secrets                 []*configYAMLSecret
+	secretsByNode           map[*yaml.Node]*configYAMLSecret
+	secretsByPlaceholder    map[string]*configYAMLSecret
+	clientKeysByPlaceholder map[string][]*configYAMLSecret
+	anchors                 []*configYAMLAnchor
+	anchorsByPlaceholder    map[string]*configYAMLAnchor
+	sourceScalars           map[string]struct{}
+	sourceAnchors           map[string]struct{}
+	placeholders            map[string]struct{}
+	anchorPlaceholders      map[string]struct{}
 }
 
 var configYAMLPlaceholderKey = newConfigYAMLPlaceholderKey()
@@ -188,7 +195,7 @@ func restoreConfigYAMLPlaceholdersWithKey(
 		return nil, err
 	}
 
-	usedPlaceholders := make(map[string]*yaml.Node)
+	usedPlaceholders := make(map[*configYAMLSecret]*yaml.Node)
 	restoreNodes := make(map[*yaml.Node]*configYAMLSecret)
 	err = visitConfigYAMLScalarContexts(
 		document,
@@ -202,18 +209,35 @@ func restoreConfigYAMLPlaceholdersWithKey(
 				return nil
 			}
 			expected := plan.secretsByPlaceholder[node.Value]
-			if expected == nil {
+			clientReference := false
+			if candidates := plan.clientKeysByPlaceholder[node.Value]; len(candidates) > 0 {
+				clientReference = configYAMLClientKeyLocation(semanticPath) != ""
+				if clientReference {
+					expected = candidates[0]
+				} else {
+					expected = nil
+					for _, candidate := range candidates {
+						if configYAMLSecretMatchesLocation(candidate, ordinalPath, semanticPath, sensitive) {
+							expected = candidate
+							if _,
+								ordinalMatch := candidate.paths[configYAMLOrdinalLocation(ordinalPath)]; ordinalMatch {
+								break
+							}
+						}
+					}
+				}
+			}
+			if expected == nil || (!clientReference && !configYAMLSecretMatchesLocation(
+				expected, ordinalPath, semanticPath, sensitive,
+			)) {
 				return fmt.Errorf("stale or misplaced redacted value at %s", ordinalPath)
 			}
-			_, semanticMatch := expected.paths[configYAMLSemanticLocation(semanticPath)]
-			_, ordinalMatch := expected.paths[configYAMLOrdinalLocation(ordinalPath)]
-			if !semanticMatch && !(sensitive && ordinalMatch) {
-				return fmt.Errorf("stale or misplaced redacted value at %s", ordinalPath)
+			if !clientReference {
+				if previous := usedPlaceholders[expected]; previous != nil && previous != node {
+					return fmt.Errorf("duplicated redacted value at %s", ordinalPath)
+				}
+				usedPlaceholders[expected] = node
 			}
-			if previous := usedPlaceholders[node.Value]; previous != nil && previous != node {
-				return fmt.Errorf("duplicated redacted value at %s", ordinalPath)
-			}
-			usedPlaceholders[node.Value] = node
 			restoreNodes[node] = expected
 			return nil
 		},
@@ -261,6 +285,73 @@ func restoreConfigYAMLPlaceholdersWithKey(
 	}
 	syncConfigYAMLAliasValues(document, make(map[*yaml.Node]struct{}))
 	return encodeConfigYAML(document)
+}
+
+func configYAMLClientKeyLocation(path string) string {
+	path = strings.ReplaceAll(path, "/alias", "")
+	fieldPath := func(parent, field string) string {
+		return parent + "/mapping@" + configYAMLSemanticMapKey(
+			&yaml.Node{Kind: yaml.ScalarNode, Value: field}, false,
+		) + "/value"
+	}
+	for _, field := range []string{"api-keys", "api-key-aliases", "api-key-rules"} {
+		base := fieldPath("$/document", field)
+		if field == "api-keys" && path == base+"/sequence" {
+			return field
+		}
+		if field != "api-keys" && path == base+"/mapping@secret/key" {
+			return field
+		}
+	}
+	providerPath := "$/document"
+	for _, field := range []string{"auth", "providers", "config-api-key"} {
+		providerPath = fieldPath(providerPath, field)
+	}
+	for _, field := range []string{"api-keys", "api-key-entries"} {
+		base := fieldPath(providerPath, field) + "/sequence"
+		if path == base {
+			return "api-keys"
+		}
+		if field == "api-key-entries" && strings.HasPrefix(path, base+"@") {
+			_, entryField, ok := strings.Cut(strings.TrimPrefix(path, base), "/")
+			if ok && "/"+entryField == fieldPath("", "api-key") {
+				return "api-keys"
+			}
+		}
+	}
+	return ""
+}
+
+func configYAMLSecretMatchesLocation(
+	secret *configYAMLSecret,
+	ordinalPath, semanticPath string,
+	sensitive bool,
+) bool {
+	if _, semanticMatch := secret.paths[configYAMLSemanticLocation(semanticPath)]; semanticMatch {
+		return true
+	}
+	if _, ordinalMatch := secret.paths[configYAMLOrdinalLocation(ordinalPath)]; !sensitive || !ordinalMatch {
+		return false
+	}
+	if !secret.clientKey {
+		return true
+	}
+	role := func(path string) string {
+		parts := strings.Split(path, "/")
+		for i, part := range parts {
+			if strings.HasPrefix(part, "sequence@") {
+				parts[i] = "sequence"
+			}
+		}
+		return strings.Join(parts, "/")
+	}
+	for path := range secret.paths {
+		if strings.HasPrefix(path, "semantic:") &&
+			role(strings.TrimPrefix(path, "semantic:")) == role(semanticPath) {
+			return true
+		}
+	}
+	return false
 }
 
 func configYAMLOrdinalLocation(path string) string {
@@ -327,14 +418,15 @@ func newConfigYAMLRedactionPlanWithKey(
 	placeholderKey [32]byte,
 ) (*configYAMLRedactionPlan, error) {
 	plan := &configYAMLRedactionPlan{
-		placeholderKey:       placeholderKey,
-		secretsByNode:        make(map[*yaml.Node]*configYAMLSecret),
-		secretsByPlaceholder: make(map[string]*configYAMLSecret),
-		anchorsByPlaceholder: make(map[string]*configYAMLAnchor),
-		sourceScalars:        make(map[string]struct{}),
-		sourceAnchors:        make(map[string]struct{}),
-		placeholders:         make(map[string]struct{}),
-		anchorPlaceholders:   make(map[string]struct{}),
+		placeholderKey:          placeholderKey,
+		secretsByNode:           make(map[*yaml.Node]*configYAMLSecret),
+		secretsByPlaceholder:    make(map[string]*configYAMLSecret),
+		clientKeysByPlaceholder: make(map[string][]*configYAMLSecret),
+		anchorsByPlaceholder:    make(map[string]*configYAMLAnchor),
+		sourceScalars:           make(map[string]struct{}),
+		sourceAnchors:           make(map[string]struct{}),
+		placeholders:            make(map[string]struct{}),
+		anchorPlaceholders:      make(map[string]struct{}),
 	}
 	collectConfigYAMLScalars(document, plan.sourceScalars, make(map[*yaml.Node]struct{}))
 	semanticPathCounts := make(map[string]int)
@@ -375,6 +467,17 @@ func newConfigYAMLRedactionPlanWithKey(
 			}
 		}
 	}
+	clientValues := make(map[string]struct{})
+	if err := visitConfigYAMLScalarContexts(
+		document, func(node *yaml.Node, _, path string, _ bool) error {
+			if configYAMLClientKeyLocation(path) == "api-keys" {
+				clientValues[node.Value] = struct{}{}
+			}
+			return nil
+		},
+	); err != nil {
+		return nil, err
+	}
 	if err := visitConfigYAMLSecretsWithPaths(
 		document,
 		func(node *yaml.Node, ordinalPath string, semanticPath string) error {
@@ -396,6 +499,11 @@ func newConfigYAMLRedactionPlanWithKey(
 			}
 			secret.paths[configYAMLOrdinalLocation(ordinalPath)] = struct{}{}
 			secret.paths[configYAMLSemanticLocation(semanticPath)] = struct{}{}
+			if _, configured := clientValues[node.Value]; configured &&
+				configYAMLClientKeyLocation(semanticPath) !=
+					"" {
+				secret.clientKey = true
+			}
 			return nil
 		},
 	); err != nil {
@@ -415,8 +523,20 @@ func newConfigYAMLRedactionPlanWithKey(
 	); err != nil {
 		return nil, err
 	}
+	clientPlaceholders := make(map[string]string)
 	for _, secret := range plan.secrets {
-		secret.placeholder = plan.newPlaceholder(secret)
+		if secret.clientKey {
+			secret.placeholder = clientPlaceholders[secret.value]
+		}
+		if secret.placeholder == "" {
+			secret.placeholder = plan.newPlaceholder(secret)
+		}
+		if secret.clientKey {
+			clientPlaceholders[secret.value] = secret.placeholder
+			plan.clientKeysByPlaceholder[secret.placeholder] = append(
+				plan.clientKeysByPlaceholder[secret.placeholder], secret,
+			)
+		}
 		plan.secretsByPlaceholder[secret.placeholder] = secret
 	}
 	for _, anchor := range plan.anchors {
@@ -429,7 +549,11 @@ func newConfigYAMLRedactionPlanWithKey(
 func (p *configYAMLRedactionPlan) newPlaceholder(secret *configYAMLSecret) string {
 	for salt := 0; ; salt++ {
 		mac := hmac.New(sha256.New, p.placeholderKey[:])
-		_, _ = mac.Write([]byte(secret.firstPath))
+		path := secret.firstPath
+		if secret.clientKey {
+			path = "client-api-key"
+		}
+		_, _ = mac.Write([]byte(path))
 		_, _ = mac.Write([]byte{0})
 		_, _ = mac.Write([]byte(secret.value))
 		_, _ = mac.Write([]byte{0})
@@ -709,6 +833,10 @@ func visitConfigYAMLContextNode(
 
 	valueSensitive := inheritedSensitive || isValueSensitiveConfigField(fieldName) ||
 		isCodexLiveICEServerSecretField(parentFieldName, fieldName)
+	if node.Kind == yaml.ScalarNode && fieldName == "api-key-entries" &&
+		configYAMLClientKeyLocation(semanticPath) == "api-keys" {
+		valueSensitive = true
+	}
 	if err := visit(node, ordinalPath, semanticPath, valueSensitive); err != nil {
 		return err
 	}
@@ -741,23 +869,23 @@ func visitConfigYAMLContextNode(
 			_, childFieldName, hasFieldName := yamlSemanticScalar(keyNode)
 			structuredKey := providerSchema && valueNode.Kind == yaml.SequenceNode &&
 				(childFieldName == "api-key-entries" || childFieldName == "api-keys")
-			entrySemanticPath := semanticPath + "/mapping@" + configYAMLSemanticMapKey(keyNode, redactKeys && !structuredKey)
+			entrySemanticPath := semanticPath + "/mapping@" + configYAMLSemanticMapKey(
+				keyNode, redactKeys && !structuredKey,
+			)
 			if !hasFieldName || redactMapKeys {
 				childFieldName = ""
 			}
-			if redactKeys && !structuredKey {
-				if err := visitConfigYAMLContextNode(
-					keyNode,
-					"",
-					fieldName,
-					entryOrdinalPath+"/key",
-					entrySemanticPath+"/key",
-					true,
-					seen,
-					visit,
-				); err != nil {
-					return err
-				}
+			if err := visitConfigYAMLContextNode(
+				keyNode,
+				"",
+				fieldName,
+				entryOrdinalPath+"/key",
+				entrySemanticPath+"/key",
+				redactKeys && !structuredKey,
+				seen,
+				visit,
+			); err != nil {
+				return err
 			}
 			if err := visitConfigYAMLContextNode(
 				valueNode,
@@ -854,7 +982,10 @@ func configYAMLNodeSignature(
 	case yaml.DocumentNode:
 		parts := make([]string, 0, len(node.Content))
 		for _, child := range node.Content {
-			parts = append(parts, configYAMLNodeSignature(child, fieldName, parentFieldName, valueSensitive, seen))
+			parts = append(
+				parts,
+				configYAMLNodeSignature(child, fieldName, parentFieldName, valueSensitive, seen),
+			)
 		}
 		return "document(" + strings.Join(parts, ",") + ")"
 	case yaml.MappingNode:
@@ -869,7 +1000,13 @@ func configYAMLNodeSignature(
 				childFieldName = ""
 			}
 			keySignature := configYAMLSemanticMapKey(keyNode, redactKeys)
-			valueSignature := configYAMLNodeSignature(valueNode, childFieldName, fieldName, valueSensitive, seen)
+			valueSignature := configYAMLNodeSignature(
+				valueNode,
+				childFieldName,
+				fieldName,
+				valueSensitive,
+				seen,
+			)
 			parts = append(parts, keySignature+":"+valueSignature)
 		}
 		sort.Strings(parts)
@@ -877,7 +1014,10 @@ func configYAMLNodeSignature(
 	case yaml.SequenceNode:
 		parts := make([]string, 0, len(node.Content))
 		for _, child := range node.Content {
-			parts = append(parts, configYAMLNodeSignature(child, fieldName, parentFieldName, valueSensitive, seen))
+			parts = append(
+				parts,
+				configYAMLNodeSignature(child, fieldName, parentFieldName, valueSensitive, seen),
+			)
 		}
 		sort.Strings(parts)
 		return "sequence(" + strings.Join(parts, ",") + ")"
@@ -923,7 +1063,14 @@ func isCodexLiveICEServerSecretField(parentFieldName, fieldName string) bool {
 func isStructuredSensitiveConfigContainer(fieldName string) bool {
 	normalized := strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(strings.TrimSpace(fieldName)))
 	switch normalized {
-	case "gemini_api_key", "interactions_api_key", "claude_api_key", "codex_api_key", "xai_api_key", "vertex_api_key", "api_key_entries":
+	case "gemini_api_key",
+		"interactions_api_key",
+		"claude_api_key",
+		"codex_api_key",
+		"xai_api_key",
+		"meta_api_key",
+		"vertex_api_key",
+		"api_key_entries":
 		return true
 	default:
 		return false
@@ -1196,7 +1343,10 @@ func resolveStringListPlaceholders(values []string, existing []string) ([]string
 	return out, nil
 }
 
-func resolveAliasMapPlaceholders(aliases map[string]string, existing map[string]string) (map[string]string, error) {
+func resolveAliasMapPlaceholders(
+	aliases map[string]string,
+	existing map[string]string,
+) (map[string]string, error) {
 	if len(aliases) == 0 {
 		return aliases, nil
 	}
@@ -1357,7 +1507,8 @@ func findMatchingStructEntryIndex[T any](
 
 	matches := make([]int, 0, 1)
 	for i := range existing {
-		if available(i) && equalIgnoringSensitiveValues(reflect.ValueOf(value), reflect.ValueOf(existing[i]), "") {
+		if available(i) &&
+			equalIgnoringSensitiveValues(reflect.ValueOf(value), reflect.ValueOf(existing[i]), "") {
 			matches = append(matches, i)
 		}
 	}
@@ -1383,7 +1534,8 @@ func findMatchingStructEntryIndex[T any](
 		if secondaryValue != "" {
 			matches = matches[:0]
 			for i := range existing {
-				if available(i) && strings.TrimSpace(resource.secondaryMatchKey(&existing[i])) == secondaryValue {
+				if available(i) &&
+					strings.TrimSpace(resource.secondaryMatchKey(&existing[i])) == secondaryValue {
 					matches = append(matches, i)
 				}
 			}
@@ -1949,7 +2101,9 @@ func resolveSensitiveConfigString(value, fieldName, same string, candidates []st
 	if same = strings.TrimSpace(same); same != "" && maskSensitiveConfigString(fieldName, same) == trimmed {
 		return same, nil
 	}
-	if exactMatches := matchingSensitiveConfigCandidates(trimmed, fieldName, candidates); len(exactMatches) > 0 {
+	if exactMatches := matchingSensitiveConfigCandidates(trimmed, fieldName, candidates); len(
+		exactMatches,
+	) > 0 {
 		if len(exactMatches) == 1 {
 			return exactMatches[0], nil
 		}

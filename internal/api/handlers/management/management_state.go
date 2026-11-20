@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	managementStateSchemaVersion = "4"
+	managementStateSchemaVersion = "5"
 	managementStateFileMode      = 0o600
 )
 
@@ -128,7 +128,8 @@ func (s *managementStateStore) applySchema(ctx context.Context) error {
 	}
 	stmts := []string{
 		"CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID",
-		"CREATE TABLE IF NOT EXISTS state_items (key TEXT PRIMARY KEY, value BLOB NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID",
+		"CREATE TABLE IF NOT EXISTS state_items (key TEXT PRIMARY KEY, value BL" +
+			"OB NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID",
 		`CREATE TABLE IF NOT EXISTS quota_entries_v2 (
 			entry_key TEXT PRIMARY KEY,
 			file_name TEXT NOT NULL,
@@ -160,7 +161,7 @@ func (s *managementStateStore) applySchema(ctx context.Context) error {
 			CHECK(tombstone IN (0, 1)),
 			CHECK(successful_empty IN (0, 1))
 		) WITHOUT ROWID`,
-		"INSERT INTO meta(key, value) VALUES('schema_version', '4') ON CONFLICT(key) DO NOTHING",
+		"INSERT INTO meta(key, value) VALUES('schema_version', '5') ON CONFLICT(key) DO NOTHING",
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -189,7 +190,13 @@ func (s *managementStateStore) applySchema(ctx context.Context) error {
 		if err := s.migrateQuotaFreshnessV4(ctx); err != nil {
 			return err
 		}
-		version = managementStateSchemaVersion
+		version = "4"
+	}
+	if version == "4" {
+		if err := s.migrateMutationResultsV5(ctx); err != nil {
+			return err
+		}
+		version = "5"
 	}
 	if version != managementStateSchemaVersion {
 		return fmt.Errorf("management state: unexpected schema_version=%s", version)
@@ -212,13 +219,11 @@ func (s *managementStateStore) migrateQuotaEntriesV2(ctx context.Context) error 
 	if tableName == "quota_entries" {
 		_, err = s.db.ExecContext(
 			ctx,
-			`INSERT INTO quota_entries_v2(
-				entry_key, file_name, type, auth_index, status, last_refresh, next_refresh, error, failure_count, data, disabled, updated_at
-			 )
-			 SELECT type || '::' || file_name, file_name, type, auth_index, status, last_refresh, next_refresh, error, failure_count, data, disabled, updated_at
-			 FROM quota_entries
-			 WHERE type <> '' AND file_name <> ''
-			 ON CONFLICT(entry_key) DO NOTHING`,
+			"INSERT INTO quota_entries_v2(\n\t\t\t\tentry_key, file_name, type, auth_index, status, "+
+				"last_refresh, next_refresh, error, failure_count, data, disabled, updated_at\n\t\t\t )\n\t\t"+
+				"\t SELECT type || '::' || file_name, file_name, type, auth_index, status, last_refresh, "+
+				"next_refresh, error, failure_count, data, disabled, updated_at\n\t\t\t FROM quota_entries\n"+
+				"\t\t\t WHERE type <> '' AND file_name <> ''\n\t\t\t ON CONFLICT(entry_key) DO NOTHING",
 		)
 		if err != nil {
 			return fmt.Errorf("management state: migrate quota entries: %w", err)

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -708,7 +709,8 @@ func TestRateLimitStatusIncludesBanCountAndUnbanHistory(t *testing.T) {
 		t.Fatalf("unban history = %d, want 1", len(status.UnbanHistory))
 	}
 	history := status.UnbanHistory[0]
-	if history.IP != "203.0.113.1" || history.BanCount != 1 || history.UnbannedAt.IsZero() || history.BannedUntil.IsZero() {
+	if history.IP != "203.0.113.1" || history.BanCount != 1 || history.UnbannedAt.IsZero() ||
+		history.BannedUntil.IsZero() {
 		t.Fatalf("unban history entry = %#v", history)
 	}
 
@@ -922,7 +924,9 @@ func TestImportUsageStatisticsDistinguishesInputAndStorageErrors(t *testing.T) {
 			c.Request = httptest.NewRequest(
 				http.MethodPost,
 				"/usage/import",
-				strings.NewReader(`{"date":"2026-04-27","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m"}]}`),
+				strings.NewReader(
+					`{"date":"2026-04-27","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m"}]}`,
+				),
 			)
 			handler.ImportUsageStatistics(c)
 			if recorder.Code != http.StatusInternalServerError {
@@ -1065,9 +1069,11 @@ func TestInferConfigValidationField(t *testing.T) {
 		{name: "api keys", message: "api-keys[2] is empty", want: "api-keys"},
 		{name: "port", message: "port 0 is out of range", want: "port"},
 		{
-			name:    "yaml line",
-			message: "failed to parse config file: yaml: unmarshal errors:\n  line 3: cannot unmarshal !!str `nope` into int",
-			want:    "line 3",
+			name: "yaml line",
+			message: "failed to parse config file: yaml: unmarshal errors:\n  line 3: " +
+				"cannot unmarshal !!str `nope` into " +
+				"int",
+			want: "line 3",
 		},
 	}
 
@@ -1222,7 +1228,10 @@ func TestPutUsageRetention_PersistsToConfig(t *testing.T) {
 		t.Fatalf("expected UsageRetention.MaxDBSizeMB=512, got %d", committed.UsageRetention.MaxDBSizeMB)
 	}
 	if committed.UsageRetention.WarningThresholdPct != 85 {
-		t.Fatalf("expected UsageRetention.WarningThresholdPct=85, got %d", committed.UsageRetention.WarningThresholdPct)
+		t.Fatalf(
+			"expected UsageRetention.WarningThresholdPct=85, got %d",
+			committed.UsageRetention.WarningThresholdPct,
+		)
 	}
 	if cfg.UsageRetention != (config.UsageRetention{}) {
 		t.Fatalf("original config changed: %+v", cfg.UsageRetention)
@@ -1414,7 +1423,11 @@ func TestUploadAuthFileInvalidReplacementPreservesExistingCredential(t *testing.
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/auth-files?name=existing.json", strings.NewReader(`{"type":`))
+	ctx.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/auth-files?name=existing.json",
+		strings.NewReader(`{"type":`),
+	)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	h.UploadAuthFile(ctx)
 	if recorder.Code != http.StatusInternalServerError {
@@ -1608,7 +1621,11 @@ func TestUploadAuthFile_InvalidName(t *testing.T) {
 			tt.name, func(t *testing.T) {
 				rec := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(rec)
-				c.Request = httptest.NewRequest(http.MethodPost, "/auth-files?name="+tt.qn, strings.NewReader(`{}`))
+				c.Request = httptest.NewRequest(
+					http.MethodPost,
+					"/auth-files?name="+tt.qn,
+					strings.NewReader(`{}`),
+				)
 				h.UploadAuthFile(c)
 				if rec.Code == http.StatusOK {
 					t.Fatalf("expected error for name %q, got 200", tt.qn)
@@ -2069,6 +2086,7 @@ func TestRateLimitTrackingCapacityKeepsBansAndRecentFailures(t *testing.T) {
 	h.failedAttempts[clientIP(0)].blockedUntil = now.Add(managementBanDuration)
 	h.failedAttempts[clientIP(1)].blockedUntil = now.Add(-time.Second)
 	h.failedAttempts[clientIP(1)].banCount = 1
+	//goland:noinspection SpellCheckingInspection
 	newClientIP := "2001:db8::ffff"
 	h.recordFailedManagementAttempt(
 		newClientIP,
@@ -2113,6 +2131,7 @@ func TestRateLimitTrackingCapacityFailsClosedWhenAllClientsAreBanned(t *testing.
 		}
 	}
 
+	//goland:noinspection SpellCheckingInspection
 	remaining, banned := h.currentRateLimitBan("2001:db8::ffff", now)
 	if !banned {
 		t.Fatal("untracked client was allowed while tracking capacity contained only active bans")
@@ -2126,27 +2145,95 @@ func TestRateLimitTrackingCapacityFailsClosedWhenAllClientsAreBanned(t *testing.
 
 func TestDownloadAuthFileRedactsSecrets(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	authDir := t.TempDir()
-	if err := os.WriteFile(
-		filepath.Join(authDir, "secret.json"),
-		[]byte(`{"access_token":"access-secret-value","refresh_token":"refresh-secret-value"}`),
-		0o600,
-	); err != nil {
-		t.Fatalf("write auth file: %v", err)
-	}
-	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil, withEnvSecret(""))
+	privateKey := "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-PRIVATE-KEY-MATERIAL\n-----END PRIVATE KEY-----"
+	for _, tc := range []struct {
+		name    string
+		payload map[string]any
+		want    map[string]any
+	}{
+		{
+			name: "oauth tokens",
+			payload: map[string]any{
+				"access_token":  "access-secret-value",
+				"refresh_token": "refresh-secret-value",
+			},
+			want: map[string]any{
+				"access_token":  util.HideAPIKey("access-secret-value"),
+				"refresh_token": util.HideAPIKey("refresh-secret-value"),
+			},
+		},
+		{
+			name: "vertex private key",
+			payload: map[string]any{
+				"type": "vertex",
+				"service_account": map[string]any{
+					"private_key":    privateKey,
+					"private_key_id": "visible-key-id",
+					"public_key":     "visible-public-key",
+					"client_email":   "service@example.com",
+				},
+			},
+			want: map[string]any{
+				"type": "vertex",
+				"service_account": map[string]any{
+					"private_key":    util.HideAPIKey(privateKey),
+					"private_key_id": "visible-key-id",
+					"public_key":     "visible-public-key",
+					"client_email":   "service@example.com",
+				},
+			},
+		},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				authDir := t.TempDir()
+				payload, err := json.Marshal(tc.payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				filename := filepath.Join(authDir, "secret.json")
+				if err := os.WriteFile(filename, payload, 0o600); err != nil {
+					t.Fatalf("write auth file: %v", err)
+				}
+				h := NewHandler(&config.Config{AuthDir: authDir}, "", nil, withEnvSecret(""))
+				t.Cleanup(
+					func() {
+						if err := h.Close(); err != nil {
+							t.Errorf("close handler: %v", err)
+						}
+					},
+				)
 
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/auth-files/download?name=secret.json", nil)
-	h.DownloadAuthFile(c)
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodGet, "/auth-files/download?name=secret.json", nil)
+				h.DownloadAuthFile(c)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	body := rec.Body.String()
-	if strings.Contains(body, "access-secret-value") || strings.Contains(body, "refresh-secret-value") {
-		t.Fatalf("download kept raw auth secret: %s", body)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+				}
+				if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="secret.json"` {
+					t.Fatalf("Content-Disposition = %q", got)
+				}
+				if got := rec.Header().Get("Content-Type"); got != "application/json" {
+					t.Fatalf("Content-Type = %q", got)
+				}
+				var got map[string]any
+				if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+					t.Fatalf("decode downloaded JSON: %v", err)
+				}
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Errorf("downloaded payload = %#v, want %#v", got, tc.want)
+				}
+				stored, err := os.ReadFile(filename)
+				if err != nil {
+					t.Fatalf("read stored auth file: %v", err)
+				}
+				if !bytes.Equal(stored, payload) {
+					t.Fatal("download changed the stored credential")
+				}
+			},
+		)
 	}
 }
 
@@ -2412,7 +2499,12 @@ func TestConfigYAMLRedactionUsesCurrentFileInsteadOfHandlerConfig(t *testing.T) 
 	h.GetConfigYAML(c)
 
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("GetConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		t.Fatalf(
+			"GetConfigYAML status = %d, want %d body=%s",
+			recorder.Code,
+			http.StatusOK,
+			recorder.Body.String(),
+		)
 	}
 	body := recorder.Body.String()
 	if strings.Contains(body, fileSecret) || !strings.Contains(body, configYAMLPlaceholderPrefix) {
@@ -2443,7 +2535,10 @@ func TestPutConfigYAMLPublishesAPIKeyAliasSnapshot(t *testing.T) {
 	h.GetConfigYAML(getContext)
 	if getRecorder.Code != http.StatusOK {
 		t.Fatalf(
-			"GetConfigYAML status = %d, want %d body=%s", getRecorder.Code, http.StatusOK, getRecorder.Body.String(),
+			"GetConfigYAML status = %d, want %d body=%s",
+			getRecorder.Code,
+			http.StatusOK,
+			getRecorder.Body.String(),
 		)
 	}
 	submitted := strings.Replace(getRecorder.Body.String(), "before", "after", 1)
@@ -2455,7 +2550,10 @@ func TestPutConfigYAMLPublishesAPIKeyAliasSnapshot(t *testing.T) {
 	h.PutConfigYAML(putContext)
 	if putRecorder.Code != http.StatusOK {
 		t.Fatalf(
-			"PutConfigYAML status = %d, want %d body=%s", putRecorder.Code, http.StatusOK, putRecorder.Body.String(),
+			"PutConfigYAML status = %d, want %d body=%s",
+			putRecorder.Code,
+			http.StatusOK,
+			putRecorder.Body.String(),
 		)
 	}
 	if got := h.apiKeyAliasesSnapshot()[rawKey]; got != "after" {
@@ -2558,7 +2656,10 @@ func TestPutConfigYAMLWithoutCurrentFileOnlyRejectsValidPlaceholders(t *testing.
 			h.PutConfigYAML(c)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf(
-					"PutConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+					"PutConfigYAML status = %d, want %d body=%s",
+					recorder.Code,
+					http.StatusOK,
+					recorder.Body.String(),
 				)
 			}
 		},
@@ -2732,7 +2833,11 @@ func TestAPIKeyAliasesMaskedKeysRoundTrip(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodDelete, "/api-key-aliases", strings.NewReader(`{"key":"`+maskedB+`"}`))
+	c.Request = httptest.NewRequest(
+		http.MethodDelete,
+		"/api-key-aliases",
+		strings.NewReader(`{"key":"`+maskedB+`"}`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.DeleteAPIKeyAlias(c)
 	if rec.Code != http.StatusOK {
@@ -2797,7 +2902,8 @@ func TestAPIKeyAliasesRejectAmbiguousMaskedKey(t *testing.T) {
 				if !strings.Contains(rec.Body.String(), "ambiguous API key placeholder") {
 					t.Fatalf("body = %s, want ambiguous placeholder error", rec.Body.String())
 				}
-				if len(cfg.APIKeyAliases) != 2 || cfg.APIKeyAliases[rawA] != "a" || cfg.APIKeyAliases[rawB] != "b" {
+				if len(cfg.APIKeyAliases) != 2 || cfg.APIKeyAliases[rawA] != "a" ||
+					cfg.APIKeyAliases[rawB] != "b" {
 					t.Fatalf("aliases changed after rejected request: %#v", cfg.APIKeyAliases)
 				}
 				snapshot := h.apiKeyAliasesSnapshot()
@@ -2866,7 +2972,9 @@ func TestPutAPIKeyAliasesAcceptsLiteralKeyContainingEllipsis(t *testing.T) {
 func TestProviderMaskedAPIKeyRoundTrip(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	rawKey := "sk-gemini-roundtrip-value"
-	cfg := &config.Config{GeminiKey: []config.GeminiKey{{APIKey: rawKey, BaseURL: "https://example.com/gemini"}}}
+	cfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{APIKey: rawKey, BaseURL: "https://example.com/gemini"}},
+	}
 	h := newConfigBasicTestHandler(t, cfg)
 	masked := util.HideAPIKey(rawKey)
 
@@ -2900,8 +3008,11 @@ func TestProviderMaskedAPIKeyRoundTrip(t *testing.T) {
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(
-		http.MethodPatch, "/gemini-api-key",
-		strings.NewReader(`{"index":0,"value":{"api-key":"`+masked+`","base-url":"https://example.org/gemini"}}`),
+		http.MethodPatch,
+		"/gemini-api-key",
+		strings.NewReader(
+			`{"index":0,"value":{"api-key":"`+masked+`","base-url":"https://example.org/gemini"}}`,
+		),
 	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PatchGeminiKey(c)
@@ -2909,7 +3020,8 @@ func TestProviderMaskedAPIKeyRoundTrip(t *testing.T) {
 		t.Fatalf("PatchGeminiKey status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	snapshot = h.configSnapshot()
-	if len(snapshot.GeminiKey) != 1 || snapshot.GeminiKey[0].APIKey != rawKey || snapshot.GeminiKey[0].BaseURL != "https://example.org/gemini" {
+	if len(snapshot.GeminiKey) != 1 || snapshot.GeminiKey[0].APIKey != rawKey ||
+		snapshot.GeminiKey[0].BaseURL != "https://example.org/gemini" {
 		t.Fatalf("PatchGeminiKey GeminiKey = %#v", snapshot.GeminiKey)
 	}
 
@@ -2947,7 +3059,8 @@ func TestProviderMaskedSecretsFollowStableEntryIdentity(t *testing.T) {
 	}
 	h := newConfigBasicTestHandler(t, cfg)
 	body := fmt.Sprintf(
-		`[{"api-key":%q,"base-url":"https://b.example","headers":{"Authorization":%q}},{"api-key":%q,"base-url":"https://a.example","headers":{"Authorization":%q}}]`,
+		`[{"api-key":%q,"base-url":"https://b.example","headers":{"Authorization":%q}},{"api-key":%q,"base-`+
+			`url":"https://a.example","headers":{"Authorization":%q}}]`,
 		masked,
 		maskedAuthB,
 		masked,
@@ -2998,18 +3111,23 @@ func TestProviderRestrictedHeaderChangesAreRejected(t *testing.T) {
 		{
 			name: "change existing restricted header",
 			body: fmt.Sprintf(
-				`[{"api-key":%q,"base-url":"https://example.com/gemini","headers":{"Authorization":"Bearer changed-secret"}}]`,
+				`[{"api-key":%q,"base-url":"https://example.com/gemini","headers":`+
+					`{"Authorization":"Bearer `+
+					`changed-secret"}}]`,
 				maskedKey,
 			),
 		},
 		{
 			name: "add restricted header to new provider",
-			body: `[{"api-key":"sk-new-provider-key","base-url":"https://new.example/gemini","headers":{"Authorization":"Bearer existing-secret"}}]`,
+			body: `[{"api-key":"sk-new-provider-key","base-url":"https://new.example/gemi` +
+				`ni","headers":{"Authorization":"Bearer existing-secret"}}]`,
 		},
 		{
 			name: "reuse one existing provider twice",
 			body: fmt.Sprintf(
-				`[{"api-key":%q,"base-url":"https://example.com/gemini","headers":{"Authorization":%q}},{"api-key":"sk-duplicate-provider-key","base-url":"https://example.com/gemini","headers":{"Authorization":%q}}]`,
+				`[{"api-key":%q,"base-url":"https://example.com/gemini","headers":{"Authorization":%q}},{"`+
+					`api-key":"sk-duplicate-provider-key","base-url":"https://example.com/gemini","headers":{`+
+					`"Authorization":%q}}]`,
 				maskedKey,
 				maskedAuthorization,
 				maskedAuthorization,
@@ -3030,7 +3148,8 @@ func TestProviderRestrictedHeaderChangesAreRejected(t *testing.T) {
 						recorder.Body.String(),
 					)
 				}
-				if len(cfg.GeminiKey) != 1 || cfg.GeminiKey[0].APIKey != rawKey || cfg.GeminiKey[0].Headers["Authorization"] != authorization {
+				if len(cfg.GeminiKey) != 1 || cfg.GeminiKey[0].APIKey != rawKey ||
+					cfg.GeminiKey[0].Headers["Authorization"] != authorization {
 					t.Fatalf("rejected request changed GeminiKey = %#v", cfg.GeminiKey)
 				}
 			},
@@ -3059,7 +3178,10 @@ func TestProviderAmbiguousMaskedSecretsAreRejected(t *testing.T) {
 	h.PutGeminiKeys(c)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf(
-			"PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String(),
+			"PutGeminiKeys status = %d, want %d body=%s",
+			recorder.Code,
+			http.StatusBadRequest,
+			recorder.Body.String(),
 		)
 	}
 	if len(cfg.GeminiKey) != 2 || cfg.GeminiKey[0].APIKey != rawA || cfg.GeminiKey[1].APIKey != rawB {
@@ -3099,7 +3221,10 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 			h.GetGeminiKeys(c)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf(
-					"GetGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+					"GetGeminiKeys status = %d, want %d body=%s",
+					recorder.Code,
+					http.StatusOK,
+					recorder.Body.String(),
 				)
 			}
 			var response struct {
@@ -3108,7 +3233,8 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 				t.Fatalf("decode GetGeminiKeys response: %v", err)
 			}
-			if len(response.GeminiKeys) != 2 || response.GeminiKeys[0].APIKey != masked+"#1" || response.GeminiKeys[1].APIKey != masked+"#2" {
+			if len(response.GeminiKeys) != 2 || response.GeminiKeys[0].APIKey != masked+"#1" ||
+				response.GeminiKeys[1].APIKey != masked+"#2" {
 				t.Fatalf("GetGeminiKeys API key masks = %#v", response.GeminiKeys)
 			}
 			body, err := json.Marshal(response.GeminiKeys)
@@ -3123,16 +3249,21 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 			h.PutGeminiKeys(c)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf(
-					"PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+					"PutGeminiKeys status = %d, want %d body=%s",
+					recorder.Code,
+					http.StatusOK,
+					recorder.Body.String(),
 				)
 			}
 			snapshot := h.configSnapshot()
-			if len(snapshot.GeminiKey) != 2 || snapshot.GeminiKey[0].APIKey != rawA || snapshot.GeminiKey[1].APIKey != rawB {
+			if len(snapshot.GeminiKey) != 2 || snapshot.GeminiKey[0].APIKey != rawA ||
+				snapshot.GeminiKey[1].APIKey != rawB {
 				t.Fatalf("PutGeminiKeys API keys = %#v", snapshot.GeminiKey)
 			}
 			if snapshot.GeminiKey[0].Headers["client-secret"] != headerSecret {
 				t.Fatalf(
-					"PutGeminiKeys client-secret = %q, want original", snapshot.GeminiKey[0].Headers["client-secret"],
+					"PutGeminiKeys client-secret = %q, want original",
+					snapshot.GeminiKey[0].Headers["client-secret"],
 				)
 			}
 		},
@@ -3191,7 +3322,8 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 				)
 			}
 			snapshot := h.configSnapshot()
-			if len(snapshot.OpenAICompatibility) != 1 || len(snapshot.OpenAICompatibility[0].APIKeyEntries) != 2 ||
+			if len(snapshot.OpenAICompatibility) != 1 ||
+				len(snapshot.OpenAICompatibility[0].APIKeyEntries) != 2 ||
 				snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != rawA ||
 				snapshot.OpenAICompatibility[0].APIKeyEntries[1].APIKey != rawB {
 				t.Fatalf("PutOpenAICompat API keys = %#v", snapshot.OpenAICompatibility)
@@ -3376,7 +3508,9 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 			h.PutOpenAICompat(c)
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf(
-					"ambiguous PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest,
+					"ambiguous PutOpenAICompat status = %d, want %d body=%s",
+					recorder.Code,
+					http.StatusBadRequest,
 					recorder.Body.String(),
 				)
 			}
@@ -3386,7 +3520,10 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 				afterRejectedUpdate.OpenAICompatibility[1].BaseURL != "https://second.example/v1" ||
 				afterRejectedUpdate.OpenAICompatibility[1].APIKeyEntries[0].APIKey != secondA ||
 				afterRejectedUpdate.OpenAICompatibility[1].APIKeyEntries[1].APIKey != secondB {
-				t.Fatalf("rejected provider update changed config = %#v", afterRejectedUpdate.OpenAICompatibility)
+				t.Fatalf(
+					"rejected provider update changed config = %#v",
+					afterRejectedUpdate.OpenAICompatibility,
+				)
 			}
 		},
 	)
@@ -3551,7 +3688,10 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 			h.GetClaudeKeys(c)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf(
-					"GetClaudeKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+					"GetClaudeKeys status = %d, want %d body=%s",
+					recorder.Code,
+					http.StatusOK,
+					recorder.Body.String(),
 				)
 			}
 			var response struct {
@@ -3582,7 +3722,8 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 				)
 			}
 			snapshot := h.configSnapshot()
-			if len(snapshot.ClaudeKey) != 2 || snapshot.ClaudeKey[0].APIKey != firstKey || snapshot.ClaudeKey[1].APIKey != secondKey {
+			if len(snapshot.ClaudeKey) != 2 || snapshot.ClaudeKey[0].APIKey != firstKey ||
+				snapshot.ClaudeKey[1].APIKey != secondKey {
 				t.Fatalf("rejected credential copy changed config = %#v", snapshot.ClaudeKey)
 			}
 		},
@@ -3608,7 +3749,10 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 			h.GetClaudeKeys(c)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf(
-					"GetClaudeKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+					"GetClaudeKeys status = %d, want %d body=%s",
+					recorder.Code,
+					http.StatusOK,
+					recorder.Body.String(),
 				)
 			}
 			var response struct {
@@ -3650,6 +3794,7 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 
 	t.Run(
 		"natural numeric suffix", func(t *testing.T) {
+			//goland:noinspection SpellCheckingInspection
 			rawKey := "abcd-secret-#123"
 			maskedKey := util.HideAPIKey(rawKey)
 			if !strings.HasSuffix(maskedKey, "#123") {
@@ -3670,7 +3815,10 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 			h.GetGeminiKeys(c)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf(
-					"GetGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+					"GetGeminiKeys status = %d, want %d body=%s",
+					recorder.Code,
+					http.StatusOK,
+					recorder.Body.String(),
 				)
 			}
 			var response struct {
@@ -3690,7 +3838,10 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 			h.PutGeminiKeys(c)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf(
-					"PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+					"PutGeminiKeys status = %d, want %d body=%s",
+					recorder.Code,
+					http.StatusOK,
+					recorder.Body.String(),
 				)
 			}
 			if got := h.configSnapshot().GeminiKey[0].APIKey; got != rawKey {
@@ -3728,7 +3879,11 @@ func TestOpenAICompatibilityNestedAPIKeyPlaceholdersRoundTrip(t *testing.T) {
 		t.Fatalf("GetOpenAICompat redaction mismatch: %s", rec.Body.String())
 	}
 
-	body := `[{"name":"openrouter","base-url":"https://openrouter.ai/api/v1","api-key-entries":[{"api-key":"` + masked + `","proxy-url":"http://127.0.0.1:8080"}]}]`
+	body := `[{"name":"openrouter","base-url":"https://openrouter.ai/api/v1",` +
+		`"api-key-entries":[{"api-key":` +
+		`"` +
+		masked +
+		`","proxy-url":"http://127.0.0.1:8080"}]}]`
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", strings.NewReader(body))
@@ -3738,11 +3893,16 @@ func TestOpenAICompatibilityNestedAPIKeyPlaceholdersRoundTrip(t *testing.T) {
 		t.Fatalf("PutOpenAICompat status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	snapshot := h.configSnapshot()
-	if len(snapshot.OpenAICompatibility) != 1 || len(snapshot.OpenAICompatibility[0].APIKeyEntries) != 1 || snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != rawKey {
+	if len(snapshot.OpenAICompatibility) != 1 || len(snapshot.OpenAICompatibility[0].APIKeyEntries) != 1 ||
+		snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != rawKey {
 		t.Fatalf("PutOpenAICompat OpenAICompatibility = %#v", snapshot.OpenAICompatibility)
 	}
 
-	patchBody := `{"index":0,"value":{"name":"openrouter","base-url":"https://openrouter.ai/api/v1","api-key-entries":[{"api-key":"` + masked + `","proxy-url":"http://127.0.0.1:8181"}]}}`
+	patchBody := `{"index":0,"value":{"name":"openrouter","base-url":"https://` +
+		`openrouter.ai/api/v1","api-key-entries":[{"api-key":` +
+		`"` +
+		masked +
+		`","proxy-url":"http://127.0.0.1:8181"}]}}`
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPatch, "/openai-compatibility", strings.NewReader(patchBody))
@@ -3752,7 +3912,8 @@ func TestOpenAICompatibilityNestedAPIKeyPlaceholdersRoundTrip(t *testing.T) {
 		t.Fatalf("PatchOpenAICompat status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	snapshot = h.configSnapshot()
-	if snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != rawKey || snapshot.OpenAICompatibility[0].APIKeyEntries[0].ProxyURL != "http://127.0.0.1:8181" {
+	if snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != rawKey ||
+		snapshot.OpenAICompatibility[0].APIKeyEntries[0].ProxyURL != "http://127.0.0.1:8181" {
 		t.Fatalf("PatchOpenAICompat OpenAICompatibility = %#v", snapshot.OpenAICompatibility)
 	}
 }
@@ -3774,7 +3935,10 @@ func TestAmbiguousMaskedAPIKeyPlaceholderIsRejected(t *testing.T) {
 	h.PatchAPIKeys(c)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf(
-			"PatchAPIKeys ambiguous status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String(),
+			"PatchAPIKeys ambiguous status = %d, want %d body=%s",
+			rec.Code,
+			http.StatusBadRequest,
+			rec.Body.String(),
 		)
 	}
 	if cfg.APIKeys[0] != rawA || cfg.APIKeys[1] != rawB {
@@ -3795,7 +3959,12 @@ func TestAPIKeyCollisionPlaceholdersAreOrdinalAndUnambiguous(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/api-keys", nil)
 	h.GetAPIKeys(c)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("GetAPIKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		t.Fatalf(
+			"GetAPIKeys status = %d, want %d body=%s",
+			recorder.Code,
+			http.StatusOK,
+			recorder.Body.String(),
+		)
 	}
 	var response struct {
 		APIKeys []string `json:"api-keys"`
@@ -3815,7 +3984,12 @@ func TestAPIKeyCollisionPlaceholdersAreOrdinalAndUnambiguous(t *testing.T) {
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PutAPIKeys(c)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("PutAPIKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		t.Fatalf(
+			"PutAPIKeys status = %d, want %d body=%s",
+			recorder.Code,
+			http.StatusOK,
+			recorder.Body.String(),
+		)
 	}
 	if snapshot := h.configSnapshot(); len(snapshot.APIKeys) != 1 || snapshot.APIKeys[0] != rawB {
 		t.Fatalf("PutAPIKeys APIKeys = %#v, want second raw key", snapshot.APIKeys)
@@ -3869,7 +4043,10 @@ func TestAmbiguousAPIKeyListMutationsAreRejected(t *testing.T) {
 				test.call(h, c)
 				if recorder.Code != http.StatusBadRequest {
 					t.Fatalf(
-						"status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String(),
+						"status = %d, want %d body=%s",
+						recorder.Code,
+						http.StatusBadRequest,
+						recorder.Body.String(),
 					)
 				}
 				if len(cfg.APIKeys) != 2 || cfg.APIKeys[0] != rawA || cfg.APIKeys[1] != rawB {
@@ -3882,16 +4059,26 @@ func TestAmbiguousAPIKeyListMutationsAreRejected(t *testing.T) {
 
 func TestAPIKeyContainingEllipsisIsAcceptedAsLiteral(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
+	//goland:noinspection SpellCheckingInspection
 	const literal = "abcd...wxyz"
 	cfg := &config.Config{}
 	h := newConfigBasicTestHandler(t, cfg)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPut, "/api-keys", strings.NewReader(`[`+fmt.Sprintf("%q", literal)+`]`))
+	c.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/api-keys",
+		strings.NewReader(`[`+fmt.Sprintf("%q", literal)+`]`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PutAPIKeys(c)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("PutAPIKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		t.Fatalf(
+			"PutAPIKeys status = %d, want %d body=%s",
+			recorder.Code,
+			http.StatusOK,
+			recorder.Body.String(),
+		)
 	}
 	if snapshot := h.configSnapshot(); len(snapshot.APIKeys) != 1 || snapshot.APIKeys[0] != literal {
 		t.Fatalf("PutAPIKeys APIKeys = %#v, want literal ellipsis key", snapshot.APIKeys)
@@ -3991,13 +4178,13 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	rawA := "abcd-first-wxyz"
 	rawB := "abcd-second-wxyz"
-	masked := util.HideAPIKey(rawA)
+	const masked = "ab...yz"
 	credentialRawA := "sk-credential-first-wxyz"
 	credentialRawB := "sk-credential-other-wxyz"
 	credentialMasked := util.HideAPIKey(credentialRawA)
 	// These guards keep future fixture edits from removing the intended masked collisions.
 	// noinspection GoBoolExpressions
-	if rawA == rawB || masked != util.HideAPIKey(rawB) ||
+	if rawA == rawB || util.HideAPIKey(rawA) != util.HideAPIKey(rawB) ||
 		credentialRawA == credentialRawB || credentialMasked != util.HideAPIKey(credentialRawB) {
 		t.Fatalf("invalid collision fixtures: %q/%q, %q/%q", rawA, rawB, credentialRawA, credentialRawB)
 	}
@@ -4077,7 +4264,10 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		h.GetUsageSummary(c)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf(
-				"GetUsageSummary status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+				"GetUsageSummary status = %d, want %d body=%s",
+				recorder.Code,
+				http.StatusOK,
+				recorder.Body.String(),
 			)
 		}
 		var response summaryResponse
@@ -4122,8 +4312,8 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		if stats.Tokens != wantTokens {
 			t.Fatalf("%s API key tokens = %+v, want %+v", label, stats.Tokens, wantTokens)
 		}
-		if stats.Cost != 0.01 {
-			t.Fatalf("%s API key cost = %v, want 0.01", label, stats.Cost)
+		if stats.Cost != 0.006 {
+			t.Fatalf("%s API key cost = %v, want 0.006", label, stats.Cost)
 		}
 		if stats.TotalLatencyMs == nil || *stats.TotalLatencyMs != 600 ||
 			stats.AverageLatencyMs == nil || *stats.AverageLatencyMs != 200 ||
@@ -4133,7 +4323,12 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 
 		credentialKey := "test:" + credentialMasked + " [api_key]"
 		if len(got.ByCredential) != 1 {
-			t.Fatalf("%s by_credential has %d entries, want 1: %#v", label, len(got.ByCredential), got.ByCredential)
+			t.Fatalf(
+				"%s by_credential has %d entries, want 1: %#v",
+				label,
+				len(got.ByCredential),
+				got.ByCredential,
+			)
 		}
 		credentialStats := got.ByCredential[credentialKey]
 		if credentialStats == nil {
@@ -4142,12 +4337,15 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		if credentialStats.Success != 2 || credentialStats.Failure != 1 ||
 			credentialStats.Provider != "test" || credentialStats.Source != credentialMasked {
 			t.Fatalf(
-				"%s credential stats = %+v, want success/failure/provider/source 2/1/test/%s", label, credentialStats,
+				"%s credential stats = %+v, want success/failure/provider/source 2/1/test/%s",
+				label,
+				credentialStats,
 				credentialMasked,
 			)
 		}
 		credentialSeries := got.TimeSeriesByCredential[credentialKey]
-		if len(credentialSeries) != 2 || credentialSeries[0].Requests != 2 || credentialSeries[1].Requests != 1 {
+		if len(credentialSeries) != 2 || credentialSeries[0].Requests != 2 ||
+			credentialSeries[1].Requests != 1 {
 			t.Fatalf("%s credential time series = %#v, want request counts 2/1", label, credentialSeries)
 		}
 
@@ -4161,14 +4359,14 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		}
 		if firstPoint.Time != bucket.Format(time.RFC3339) ||
 			firstPoint.Requests != 2 || firstPoint.Success != 1 || firstPoint.Failure != 1 ||
-			firstPoint.Tokens != firstTokens || firstPoint.Cost != 0 || !firstPoint.HasCost {
+			firstPoint.Tokens != firstTokens || firstPoint.Cost != 0.004 || !firstPoint.HasCost {
 			t.Fatalf("%s first masked time point = %+v", label, firstPoint)
 		}
 		secondPoint := series[1]
 		secondTokens := summaryTokens{Input: 2, Total: 2}
 		if secondPoint.Time != bucket.Add(time.Hour).Format(time.RFC3339) ||
 			secondPoint.Requests != 1 || secondPoint.Success != 1 || secondPoint.Failure != 0 ||
-			secondPoint.Tokens != secondTokens || secondPoint.Cost != 0 || !secondPoint.HasCost {
+			secondPoint.Tokens != secondTokens || secondPoint.Cost != 0.002 || !secondPoint.HasCost {
 			t.Fatalf("%s second masked time point = %+v", label, secondPoint)
 		}
 	}
@@ -4187,6 +4385,16 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 	filtered, filteredBody := requestSummary(basePath + "&api_key=" + masked)
 	assertNoRawSecrets("API-key filtered usage summary", filteredBody)
 	assertAggregated("masked API-key filter", filtered)
+
+	legacyFiltered, legacyFilteredBody := requestSummary(basePath + "&api_key=" + util.HideAPIKey(rawA))
+	assertNoRawSecrets("legacy API-key filtered usage summary", legacyFilteredBody)
+	assertAggregated("legacy masked API-key filter", legacyFiltered)
+
+	rawFiltered, rawFilteredBody := requestSummary(basePath + "&api_key=" + rawA)
+	assertNoRawSecrets("raw API-key filtered usage summary", rawFilteredBody)
+	if rawFiltered.Totals.Requests != 2 {
+		t.Fatalf("raw API-key filter requests = %d, want 2", rawFiltered.Totals.Requests)
+	}
 
 	credentialFiltered, credentialFilteredBody := requestSummary(
 		basePath + "&credential=test:" + credentialMasked,
@@ -4244,6 +4452,7 @@ func TestGetUsageSummarySeparatesCredentialSourceKinds(t *testing.T) {
 	defer persister.Stop()
 
 	bucket := time.Now().UTC().Add(-time.Hour).Truncate(time.Hour)
+	//goland:noinspection SpellCheckingInspection
 	display := "abcd...wxyz"
 	persister.Record(
 		usage.FlatDetail{
@@ -4278,7 +4487,10 @@ func TestGetUsageSummarySeparatesCredentialSourceKinds(t *testing.T) {
 		h.GetUsageSummary(c)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf(
-				"GetUsageSummary status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+				"GetUsageSummary status = %d, want %d body=%s",
+				recorder.Code,
+				http.StatusOK,
+				recorder.Body.String(),
 			)
 		}
 		var response summaryResponse
@@ -4312,14 +4524,20 @@ func TestGetUsageSummarySeparatesCredentialSourceKinds(t *testing.T) {
 		if stats == nil || stats.Success != 1 || stats.Failure != 0 || stats.Source != display ||
 			stats.SourceKind != wantKind || stats.FilterKey == "" {
 			t.Fatalf(
-				"credential %q = %#v, want one successful %s request with a typed filter key", key, stats, wantKind,
+				"credential %q = %#v, want one successful %s request with a typed filter key",
+				key,
+				stats,
+				wantKind,
 			)
 		}
 		filtered := requestSummary(basePath + "&credential=" + url.QueryEscape(stats.FilterKey))
-		if filtered.Totals.Requests != 1 || len(filtered.ByCredential) != 1 || filtered.ByCredential[key] == nil {
+		if filtered.Totals.Requests != 1 || len(filtered.ByCredential) != 1 ||
+			filtered.ByCredential[key] == nil {
 			t.Fatalf(
-				"credential filter %q = totals %d entries %#v, want stable key with one request", stats.FilterKey,
-				filtered.Totals.Requests, filtered.ByCredential,
+				"credential filter %q = totals %d entries %#v, want stable key with one request",
+				stats.FilterKey,
+				filtered.Totals.Requests,
+				filtered.ByCredential,
 			)
 		}
 	}
@@ -4329,6 +4547,7 @@ func TestGetUsageSummaryAPIKeyFilterBoundaries(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	collidingRawA := "ab,c-first-zzzz"
 	collidingRawB := "ab,c-second-zzzz"
+	//goland:noinspection SpellCheckingInspection
 	keys := []string{
 		"abcd...wxyz",
 		"abcd-secret-wxyz",
@@ -4411,6 +4630,7 @@ func TestGetUsageSummaryAPIKeyFilterBoundaries(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 
+	//goland:noinspection SpellCheckingInspection
 	tests := []struct {
 		name   string
 		filter string
@@ -4419,6 +4639,8 @@ func TestGetUsageSummaryAPIKeyFilterBoundaries(t *testing.T) {
 		{name: "exact raw and masked display", filter: "abcd...wxyz", want: 2},
 		{name: "literal none and null sentinel", filter: "(none)", want: 2},
 		{name: "masked display containing comma", filter: util.HideAPIKey("ab,c-first-zzzz"), want: 2},
+		{name: "two-character collision display", filter: "ab...zz", want: 2},
+		{name: "two-character literal and masked display", filter: "ab...yz", want: 2},
 	}
 	for _, test := range tests {
 		t.Run(
@@ -4430,6 +4652,7 @@ func TestGetUsageSummaryAPIKeyFilterBoundaries(t *testing.T) {
 		)
 	}
 
+	//goland:noinspection SpellCheckingInspection
 	repeated := []string{util.HideAPIKey("ab,c-first-zzzz"), "abcd...wxyz"}
 	if got := requestTotals(repeated...); got != 4 {
 		t.Fatalf("GetUsageSummary(repeated API keys) totals = %d, want 4", got)
@@ -4473,7 +4696,7 @@ func TestGetUsageSummaryAPIKeyFilterBoundaries(t *testing.T) {
 			aliases[event.APIKeyAlias] = event.APIKey
 		}
 	}
-	wantMaskedCollision := util.HideAPIKey(collidingRawA)
+	const wantMaskedCollision = "ab...zz"
 	if aliases["comma-first"] != wantMaskedCollision || aliases["comma-second"] != wantMaskedCollision {
 		t.Fatalf("GetUsageEvents collision aliases = %#v, want both mapped to %q", aliases, wantMaskedCollision)
 	}
@@ -4559,7 +4782,10 @@ func TestUsageSnapshotHandlersReturnDatabaseErrors(t *testing.T) {
 
 				if rec.Code != http.StatusInternalServerError {
 					t.Fatalf(
-						"status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String(),
+						"status = %d, want %d body=%s",
+						rec.Code,
+						http.StatusInternalServerError,
+						rec.Body.String(),
 					)
 				}
 				if !strings.Contains(rec.Body.String(), test.wantError) {
@@ -4578,14 +4804,21 @@ func TestGetLogsFullRefreshKeepsNewestLines(t *testing.T) {
 
 	rotatedContent := strings.Join(
 		[]string{
-			"[2026-05-08 10:08:42] [--------] [info ] [gin_logger.go:92] 304 | 0s | 61.119.121.203 | GET \"/management.html\"",
-			"[2026-05-08 10:07:57] [--------] [warn ] [gin_logger.go:90] 404 | 0s | 107.173.241.217 | GET \"/containers/json\"",
+			"[2026-05-08 10:08:42] [--------] [info ] [gin_logger.go:92] 304 | 0s " +
+				"| 61.119.121.203 | GET \"/" +
+				"management.html\"",
+			"[2026-05-08 10:07:57] [--------] [warn ] [gin_logger.go:90] 404 | 0s " +
+				"| 107.173.241.217 | GET \"/containers/" +
+				"json\"",
 		}, "\n",
 	) + "\n"
 	mainContent := strings.Join(
 		[]string{
-			"[2026-05-09 00:45:59] [--------] [info ] [gin_logger.go:92] 304 | 0s | 61.119.121.203 | GET \"/management.html\"",
-			"[2026-05-09 00:46:20] [1e532bb7] [info ] [gin_logger.go:92] 200 | 1m7s | 61.119.121.203 | POST \"/v1/messages?beta=true\"",
+			"[2026-05-09 00:45:59] [--------] [info ] [gin_logger.go:92] 304 | 0s " +
+				"| 61.119.121.203 | GET \"/" +
+				"management.html\"",
+			"[2026-05-09 00:46:20] [1e532bb7] [info ] [gin_logger.go:92] 200 | 1m7s" +
+				" | 61.119.121.203 | POST \"/v1/messages?beta=true\"",
 		}, "\n",
 	) + "\n"
 
@@ -4616,7 +4849,8 @@ func TestGetLogsFullRefreshKeepsNewestLines(t *testing.T) {
 		t.Fatalf("expected 4 lines, got %d", len(resp.Lines))
 	}
 	last := resp.Lines[len(resp.Lines)-1]
-	if !strings.Contains(last, "[2026-05-09 00:46:20]") || !strings.Contains(last, "/v1/messages?beta=true") {
+	wantHeader := "[" + time.Date(2026, 5, 9, 0, 46, 20, 0, time.Local).UTC().Format(time.RFC3339Nano) + "]"
+	if !strings.Contains(last, wantHeader) || !strings.Contains(last, "/v1/messages?beta=true") {
 		t.Fatalf("expected newest main.log line to stay last, got %q", last)
 	}
 }

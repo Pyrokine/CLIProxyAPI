@@ -103,7 +103,9 @@ func TestAccountInspectionStatePersistsAcrossHandlers(t *testing.T) {
 	svc.updatedAt = endedAt
 	svc.addLogLocked("info", "persisted inspection log")
 	svc.mu.Unlock()
-	svc.persist()
+	if err := svc.persist(); err != nil {
+		t.Fatalf("persist inspection state: %v", err)
+	}
 	if err := h.Close(); err != nil {
 		t.Fatalf("close handler: %v", err)
 	}
@@ -111,7 +113,8 @@ func TestAccountInspectionStatePersistsAcrossHandlers(t *testing.T) {
 	h2 := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	defer func() { _ = h2.Close() }()
 	gotSchedule := h2.inspectionService().scheduleSnapshot()
-	if gotSchedule.IntervalSeconds != schedule.IntervalSeconds || gotSchedule.MaxConcurrency != schedule.MaxConcurrency {
+	if gotSchedule.IntervalSeconds != schedule.IntervalSeconds ||
+		gotSchedule.MaxConcurrency != schedule.MaxConcurrency {
 		t.Fatalf("schedule = %+v, want %+v", gotSchedule, schedule)
 	}
 	results, total, _, _ := h2.inspectionService().resultsSnapshot("", false, true, 1, 10)
@@ -322,7 +325,8 @@ func TestQuotaTombstonePersistsAndRejectsOlderGeneration(t *testing.T) {
 		t.Fatalf("load quota entries: %v", err)
 	}
 	persisted := entries[key]
-	if !persisted.Tombstone || persisted.Generation != 6 || persisted.StateRevision != 1 || len(persisted.Data) != 0 {
+	if !persisted.Tombstone || persisted.Generation != 6 || persisted.StateRevision != 1 ||
+		len(persisted.Data) != 0 {
 		t.Fatalf("persisted quota tombstone = %#v", persisted)
 	}
 
@@ -464,7 +468,8 @@ func TestRateLimitStateRejectsOlderRevision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load rate limit state: %v", err)
 	}
-	if stored == nil || stored.Revision != newer.Revision || len(stored.Attempts) != 1 || stored.Attempts[0].IP != newer.Attempts[0].IP {
+	if stored == nil || stored.Revision != newer.Revision || len(stored.Attempts) != 1 ||
+		stored.Attempts[0].IP != newer.Attempts[0].IP {
 		t.Fatalf("stored rate limit state = %#v, want revision %d", stored, newer.Revision)
 	}
 }
@@ -505,12 +510,9 @@ func TestRateLimitPersistenceRecoversCorruptStateOnNextChange(t *testing.T) {
 		t, time.Second, func() bool {
 			state, errLoad := h.stateStore.loadRateLimitState(context.Background())
 			return errLoad == nil && state != nil && len(state.Attempts) == 1 &&
-				state.Attempts[0].IP == clientIP
+				state.Attempts[0].IP == clientIP && h.rateLimitPersistenceAvailable.Load()
 		},
 	)
-	if !h.rateLimitPersistenceAvailable.Load() {
-		t.Fatal("rate limit persistence did not recover after replacing corrupt state")
-	}
 }
 
 func TestRateLimitFailureWindowPersistsAcrossHandlers(t *testing.T) {
@@ -667,7 +669,9 @@ func TestRateLimitPersistenceRetriesLatestSnapshot(t *testing.T) {
 		t.Fatalf("begin locking transaction: %v", err)
 	}
 	if _, err = lockTx.Exec(
-		"INSERT INTO meta(key, value) VALUES('rate_limit_test_lock', '1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+		"INSERT INTO meta(key, value) VALUES('rate_limit_test_lock', '1') ON " +
+			"CONFLICT(key) DO UPDATE SET " +
+			"value=excluded.value",
 	); err != nil {
 		_ = lockTx.Rollback()
 		t.Fatalf("acquire SQLite write lock: %v", err)
@@ -696,12 +700,10 @@ func TestRateLimitPersistenceRetriesLatestSnapshot(t *testing.T) {
 	waitForRateLimitCondition(
 		t, time.Second, func() bool {
 			state, errLoad := h.stateStore.loadRateLimitState(context.Background())
-			return errLoad == nil && state != nil && len(state.Attempts) == 1 && len(state.Attempts[0].Failures) == 2
+			return errLoad == nil && state != nil && len(state.Attempts) == 1 &&
+				len(state.Attempts[0].Failures) == 2 && h.rateLimitPersistenceAvailable.Load()
 		},
 	)
-	if !h.rateLimitPersistenceAvailable.Load() {
-		t.Fatal("rate limit persistence did not recover after retry")
-	}
 }
 
 func waitForRateLimitCondition(t *testing.T, timeout time.Duration, condition func() bool) {

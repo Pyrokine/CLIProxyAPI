@@ -375,9 +375,11 @@ func TestConfigCommitWarningsCollectConcurrentCleanupErrors(t *testing.T) {
 
 	var workers sync.WaitGroup
 	for range 8 {
-		workers.Go(func() {
-			ReportConfigCommitCleanupError(ginCtx.Request.Context(), errors.New("cleanup failed"))
-		})
+		workers.Go(
+			func() {
+				ReportConfigCommitCleanupError(ginCtx.Request.Context(), errors.New("cleanup failed"))
+			},
+		)
 	}
 	workers.Wait()
 	if message := warnings.cleanupErrorMessage(); message == "" {

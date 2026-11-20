@@ -181,28 +181,29 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 
 	geminiCursor := 0
 	for i := range cfg.GeminiKey {
-		if strings.TrimSpace(cfg.GeminiKey[i].APIKey) == "" {
+		if strings.TrimSpace(cfg.GeminiKey[i].APIKey) == "" && strings.TrimSpace(cfg.GeminiKey[i].BaseURL) == "" {
 			continue
 		}
 		views.gemini[i] = nextAuthIndex(queues.gemini, &geminiCursor)
 	}
 	interactionsCursor := 0
 	for i := range cfg.InteractionsKey {
-		if strings.TrimSpace(cfg.InteractionsKey[i].APIKey) == "" {
+		if strings.TrimSpace(cfg.InteractionsKey[i].APIKey) == "" &&
+			strings.TrimSpace(cfg.InteractionsKey[i].BaseURL) == "" {
 			continue
 		}
 		views.interactions[i] = nextAuthIndex(queues.interactions, &interactionsCursor)
 	}
 	claudeCursor := 0
 	for i := range cfg.ClaudeKey {
-		if strings.TrimSpace(cfg.ClaudeKey[i].APIKey) == "" {
+		if strings.TrimSpace(cfg.ClaudeKey[i].APIKey) == "" && strings.TrimSpace(cfg.ClaudeKey[i].BaseURL) == "" {
 			continue
 		}
 		views.claude[i] = nextAuthIndex(queues.claude, &claudeCursor)
 	}
 	codexCursor := 0
 	for i := range cfg.CodexKey {
-		if strings.TrimSpace(cfg.CodexKey[i].APIKey) == "" {
+		if strings.TrimSpace(cfg.CodexKey[i].APIKey) == "" && strings.TrimSpace(cfg.CodexKey[i].BaseURL) == "" {
 			continue
 		}
 		views.codex[i] = nextAuthIndex(queues.codex, &codexCursor)
@@ -216,7 +217,7 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 	}
 	xaiCursor := 0
 	for i := range cfg.XAIKey {
-		if strings.TrimSpace(cfg.XAIKey[i].APIKey) == "" {
+		if strings.TrimSpace(cfg.XAIKey[i].APIKey) == "" && strings.TrimSpace(cfg.XAIKey[i].BaseURL) == "" {
 			continue
 		}
 		views.xai[i] = nextAuthIndex(queues.xai, &xaiCursor)

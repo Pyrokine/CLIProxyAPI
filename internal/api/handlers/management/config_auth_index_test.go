@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -77,7 +78,11 @@ func TestBuildConfigAuthIndexViewsDoesNotShiftAfterInteractionsKeys(t *testing.T
 		auth.EnsureIndex()
 		expected[auth.Provider] = auth.Index
 	}
-	views := (&Handler{authManager: manager}).buildConfigAuthIndexViews(cfg)
+	h := &Handler{authManager: manager}
+	views := h.buildConfigAuthIndexViews(cfg)
+	if got := views.interactions[0]; got != expected["gemini-interactions"] {
+		t.Fatalf("Interactions auth index = %q, want %q", got, expected["gemini-interactions"])
+	}
 	if got := views.gemini[0]; got != expected["gemini"] {
 		t.Fatalf("gemini auth index = %q, want %q", got, expected["gemini"])
 	}
@@ -90,11 +95,35 @@ func TestBuildConfigAuthIndexViewsDoesNotShiftAfterInteractionsKeys(t *testing.T
 	if got := views.xai[0]; got != expected["xai"] {
 		t.Fatalf("xai auth index = %q, want %q", got, expected["xai"])
 	}
-	if got := views.openAIEntries[0][0]; got != expected["interactions"] {
-		t.Fatalf("Interactions-named compatibility auth index = %q, want %q", got, expected["interactions"])
-	}
-	if got := views.openAIEntries[1][0]; got != expected["custom"] {
-		t.Fatalf("custom compatibility auth index = %q, want %q", got, expected["custom"])
+	for groupIndex, compat := range cfg.OpenAICompatibility {
+		var expectedAuth *coreauth.Auth
+		for _, auth := range manager.List() {
+			if auth.Attributes["config_index"] == strconv.Itoa(groupIndex) &&
+				auth.Attributes["compat_name"] == compat.Name &&
+				auth.Attributes["api_key"] == compat.APIKeyEntries[0].APIKey &&
+				auth.Attributes["base_url"] == compat.BaseURL {
+				expectedAuth = auth
+				break
+			}
+		}
+		if expectedAuth == nil {
+			t.Fatalf("compatibility group %d (%s) has no matching live auth", groupIndex, compat.Name)
+		}
+		expectedAuth.EnsureIndex()
+		index := views.openAIEntries[groupIndex][0]
+		if index == "" || index != expectedAuth.Index {
+			t.Fatalf(
+				"%s compatibility auth index = %q, want %q for %s", compat.Name, index, expectedAuth.Index,
+				expectedAuth.ID,
+			)
+		}
+		resolved := h.authByIndex(index)
+		if resolved == nil || resolved.ID != expectedAuth.ID || resolved.Provider != "openai-compatible-"+compat.Name {
+			t.Fatalf(
+				"%s compatibility index resolved to %#v, want auth %s with namespaced runtime provider",
+				compat.Name, resolved, expectedAuth.ID,
+			)
+		}
 	}
 	if views.claude[0] == expected["gemini-interactions"] {
 		t.Fatal("claude config received the Interactions auth index")

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -235,19 +236,25 @@ func parseBody[T any](c *gin.Context) (T, bool) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
 	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return zero, false
 	}
 	var result T
 	if err = json.Unmarshal(data, &result); err != nil {
 		var wrapper struct {
-			Items T `json:"items"`
+			Items json.RawMessage `json:"items"`
 		}
-		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
+		if err2 := json.Unmarshal(data, &wrapper); err2 != nil || len(wrapper.Items) == 0 {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(400, gin.H{"error": "invalid body"})
 			return zero, false
 		}
-		result = wrapper.Items
+		if err2 := json.Unmarshal(wrapper.Items, &result); err2 != nil {
+			rejectMutation(mutationRequestContext(c))
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return zero, false
+		}
 	}
 	return result, true
 }
@@ -265,6 +272,7 @@ func (h *Handler) putStringList(
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
 	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
@@ -274,6 +282,7 @@ func (h *Handler) putStringList(
 			Items []string `json:"items"`
 		}
 		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(400, gin.H{"error": "invalid body"})
 			return
 		}
@@ -302,6 +311,7 @@ func (h *Handler) putStringList(
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -320,10 +330,12 @@ func (h *Handler) patchStringList(
 		Value *string `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
 	if (body.Index == nil || body.Value == nil) && (body.Old == nil || body.New == nil) {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "missing fields"})
 		return
 	}
@@ -381,6 +393,7 @@ func (h *Handler) patchStringList(
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -394,6 +407,7 @@ func (h *Handler) deleteFromStringList(
 	idxStr := c.Query("index")
 	value := strings.TrimSpace(c.Query("value"))
 	if idxStr == "" && value == "" {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "missing index or value"})
 		return
 	}
@@ -402,7 +416,13 @@ func (h *Handler) deleteFromStringList(
 			list := append([]string(nil), get(next)...)
 			if idxStr != "" {
 				var index int
-				if _, errScan := fmt.Sscanf(idxStr, "%d", &index); errScan == nil && index >= 0 && index < len(list) {
+				if parsedIndex, errParse := strconv.Atoi(idxStr); errParse ==
+					nil &&
+					parsedIndex >=
+						0 &&
+					parsedIndex <
+						len(list) {
+					index = parsedIndex
 					list = append(list[:index], list[index+1:]...)
 					set(next, list)
 					if after != nil {
@@ -431,6 +451,7 @@ func (h *Handler) deleteFromStringList(
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -482,11 +503,28 @@ func validateAlias(alias string) error {
 
 func (h *Handler) GetAPIKeys(c *gin.Context) {
 	cfg := h.configSnapshot()
-	if cfg == nil {
-		c.JSON(http.StatusOK, gin.H{"api-keys": []string{}})
-		return
+	//goland:noinspection GoPreferNilSlice
+	keys := []string{}
+	if cfg != nil {
+		keys = maskAPIKeyList(cfg.APIKeys)
 	}
-	c.JSON(http.StatusOK, gin.H{"api-keys": maskAPIKeyList(cfg.APIKeys)})
+	response := gin.H{"api-keys": keys}
+	if queries, requested := c.Request.URL.Query()["api_key_search"]; requested {
+		query := ""
+		if len(queries) > 0 {
+			query = strings.ToLower(strings.TrimSpace(queries[0]))
+		}
+		matches := make([]string, 0, len(keys))
+		if cfg != nil {
+			for index, key := range cfg.APIKeys {
+				if strings.Contains(strings.ToLower(key), query) {
+					matches = append(matches, keys[index])
+				}
+			}
+		}
+		response["api-key-matches"] = matches
+	}
+	c.JSON(http.StatusOK, response)
 }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	h.putStringList(
@@ -560,6 +598,7 @@ func (h *Handler) apiKeyAliasesSnapshot() map[string]string {
 func (h *Handler) PutAPIKeyAliases(c *gin.Context) {
 	var body map[string]string
 	if err := c.ShouldBindJSON(&body); err != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
@@ -573,10 +612,19 @@ func (h *Handler) PutAPIKeyAliases(c *gin.Context) {
 			if errResolve != nil {
 				return errResolve
 			}
+			for key, alias := range resolved {
+				if errValidate := validateAPIKey(key); errValidate != nil {
+					return errValidate
+				}
+				if errValidate := validateAlias(alias); errValidate != nil {
+					return errValidate
+				}
+			}
 			next.APIKeyAliases = resolved
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -587,6 +635,7 @@ func (h *Handler) PatchAPIKeyAlias(c *gin.Context) {
 		Alias string `json:"alias"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Key == "" {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
@@ -616,6 +665,7 @@ func (h *Handler) PatchAPIKeyAlias(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -627,12 +677,14 @@ func (h *Handler) DeleteAPIKeyAlias(c *gin.Context) {
 			Key string `json:"key"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(400, gin.H{"error": "invalid body"})
 			return
 		}
 		key = body.Key
 	}
 	if key == "" {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "missing key parameter"})
 		return
 	}
@@ -649,6 +701,7 @@ func (h *Handler) DeleteAPIKeyAlias(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -940,6 +993,7 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -950,15 +1004,17 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 		Models   []string `json:"models"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Provider == nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
 	provider := strings.ToLower(strings.TrimSpace(*body.Provider))
 	if provider == "" {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "invalid provider"})
 		return
 	}
-	normalized := config.NormalizeExcludedModels(body.Models)
+	normalized := config.NormalizeOAuthExcludedModels(map[string][]string{provider: body.Models})[provider]
 	if _, ok := h.mutateConfig(
 		c, func(next *config.Config) error {
 			if len(normalized) == 0 {
@@ -982,6 +1038,7 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -989,6 +1046,7 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 	provider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
 	if provider == "" {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "missing provider"})
 		return
 	}
@@ -1007,6 +1065,7 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1016,12 +1075,17 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 func (h *Handler) GetOAuthRequestScopedErrors(c *gin.Context) {
 	cfg := h.configSnapshot()
 	if cfg == nil {
-		c.JSON(http.StatusOK, gin.H{"oauth-request-scoped-errors": map[string][]config.RequestScopedErrorRule{}})
+		c.JSON(
+			http.StatusOK,
+			gin.H{"oauth-request-scoped-errors": map[string][]config.RequestScopedErrorRule{}},
+		)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"oauth-request-scoped-errors": sanitizedOAuthRequestScopedErrors(cfg.OAuthRequestScopedErrors),
-	})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"oauth-request-scoped-errors": sanitizedOAuthRequestScopedErrors(cfg.OAuthRequestScopedErrors),
+		},
+	)
 }
 
 func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
@@ -1035,6 +1099,7 @@ func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1046,6 +1111,7 @@ func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
 		Rules    []config.RequestScopedErrorRule `json:"rules"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
@@ -1057,6 +1123,7 @@ func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
 	}
 	channel := strings.ToLower(strings.TrimSpace(channelRaw))
 	if channel == "" {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel"})
 		return
 	}
@@ -1086,6 +1153,7 @@ func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1096,6 +1164,7 @@ func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
 		channel = strings.ToLower(strings.TrimSpace(c.Query("provider")))
 	}
 	if channel == "" {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing channel"})
 		return
 	}
@@ -1114,6 +1183,7 @@ func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1155,6 +1225,7 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 		Aliases  []config.OAuthModelAlias `json:"aliases"`
 	}
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
@@ -1166,6 +1237,7 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 	}
 	channel := strings.ToLower(strings.TrimSpace(channelRaw))
 	if channel == "" {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "invalid channel"})
 		return
 	}
@@ -1195,6 +1267,7 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		channel = strings.ToLower(strings.TrimSpace(c.Query("provider")))
 	}
 	if channel == "" {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
@@ -1244,7 +1317,31 @@ func (h *Handler) PutMetaKeys(c *gin.Context)   { putStructList(h, c, metaKeyRes
 func (h *Handler) PostMetaKey(c *gin.Context)   { postStructEntry(h, c, metaKeyResource) }
 func (h *Handler) DeleteMetaKey(c *gin.Context) { deleteStructEntry(h, c, metaKeyResource) }
 func (h *Handler) PatchMetaKey(c *gin.Context) {
-	patchStructEntry(h, c, metaKeyResource, patchCodexStyleKey)
+	patchStructEntry(
+		h, c, metaKeyResource, func(entry *config.MetaKey, raw json.RawMessage) error {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				return err
+			}
+			if value, exists := fields["base-url"]; exists {
+				var baseURL *string
+				if err := json.Unmarshal(value, &baseURL); err != nil {
+					return err
+				}
+				if baseURL != nil && strings.TrimSpace(*baseURL) == "" {
+					defaults := config.MetaKey{}
+					normalizeMetaKey(&defaults)
+					fields["base-url"] = json.RawMessage(strconv.Quote(defaults.BaseURL))
+					var err error
+					raw, err = json.Marshal(fields)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			return patchCodexStyleKey(entry, raw)
+		},
+	)
 }
 
 func patchCodexKey(entry *config.CodexKey, raw json.RawMessage) error {
@@ -1337,7 +1434,11 @@ func claudeKeyRouteEqual(left, right *config.ClaudeKey) bool {
 		left.ProxyURL == right.ProxyURL &&
 		diff.ComputeClaudeModelsHash(left.Models) == diff.ComputeClaudeModelsHash(right.Models) &&
 		maps.Equal(left.Headers, right.Headers) &&
-		diff.ComputeExcludedModelsHash(left.ExcludedModels) == diff.ComputeExcludedModelsHash(right.ExcludedModels) &&
+		diff.ComputeExcludedModelsHash(
+			left.ExcludedModels,
+		) == diff.ComputeExcludedModelsHash(
+			right.ExcludedModels,
+		) &&
 		left.RebuildMidSystemMessage == right.RebuildMidSystemMessage &&
 		left.FingerprintProfile == right.FingerprintProfile &&
 		reflect.DeepEqual(left.DisableCooling, right.DisableCooling) &&
@@ -1361,7 +1462,11 @@ func codexKeyRouteEqual(left, right *config.CodexKey) bool {
 		left.ProxyURL == right.ProxyURL &&
 		diff.ComputeCodexModelsHash(left.Models) == diff.ComputeCodexModelsHash(right.Models) &&
 		maps.Equal(left.Headers, right.Headers) &&
-		diff.ComputeExcludedModelsHash(left.ExcludedModels) == diff.ComputeExcludedModelsHash(right.ExcludedModels) &&
+		diff.ComputeExcludedModelsHash(
+			left.ExcludedModels,
+		) == diff.ComputeExcludedModelsHash(
+			right.ExcludedModels,
+		) &&
 		reflect.DeepEqual(left.DisableCooling, right.DisableCooling) &&
 		reflect.DeepEqual(left.DisableCodexCloaking, right.DisableCodexCloaking) &&
 		reflect.DeepEqual(left.RequestRetry, right.RequestRetry) &&
@@ -1415,7 +1520,10 @@ func validateClaudeKey(entry *config.ClaudeKey, existing *config.ClaudeKey) erro
 	return validateConfigHeaders(entry.Headers, existingHeaders)
 }
 
-func validateOpenAICompatibilityEntry(entry *config.OpenAICompatibility, existing *config.OpenAICompatibility) error {
+func validateOpenAICompatibilityEntry(
+	entry *config.OpenAICompatibility,
+	existing *config.OpenAICompatibility,
+) error {
 	if entry == nil {
 		return nil
 	}
@@ -1540,7 +1648,10 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 	for i := range entries {
 		copyEntry := entries[i]
 		if len(copyEntry.APIKeyEntries) > 0 {
-			copyEntry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), copyEntry.APIKeyEntries...)
+			copyEntry.APIKeyEntries = append(
+				[]config.OpenAICompatibilityAPIKey(nil),
+				copyEntry.APIKeyEntries...,
+			)
 		}
 		copyEntry.RequestScopedErrors = cloneRequestScopedErrorRules(copyEntry.RequestScopedErrors)
 		normalizeOpenAICompatibilityEntry(&copyEntry)
@@ -1550,7 +1661,11 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 }
 
 // normalizeModels trims Name/Alias in each model entry and keeps entries satisfying the keep predicate.
-func normalizeModels[T any](models []T, nameAlias func(*T) (*string, *string), keep func(name, alias string) bool) []T {
+func normalizeModels[T any](
+	models []T,
+	nameAlias func(*T) (*string, *string),
+	keep func(name, alias string) bool,
+) []T {
 	if len(models) == 0 {
 		return models
 	}

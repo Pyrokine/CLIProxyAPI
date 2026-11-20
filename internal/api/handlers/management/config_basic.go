@@ -72,6 +72,7 @@ func (e *configValidationInternalError) Error() string {
 	return "internal config validation failure"
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *configValidationInternalError) Unwrap() error {
 	return e.err
 }
@@ -100,7 +101,12 @@ var (
 		{pattern: regexp.MustCompile(`\btls cert\b`), field: "tls.cert"},
 		{pattern: regexp.MustCompile(`\btls key\b`), field: "tls.key"},
 	}
-	yamlLinePattern = regexp.MustCompile(`line\s+(\d+)`)
+	yamlLinePattern                = regexp.MustCompile(`line\s+(\d+)`)
+	credentialInFlightFieldPattern = regexp.MustCompile(
+		`\bcredential-in-flight\.(snapshot-interval|stale-after|max-part-bytes|` +
+			`max-part-count|max-revision-bytes|max-aggregate-groups|max-details|max` +
+			`-string-bytes|staging-retention)\b`,
+	)
 )
 
 type configResponse struct {
@@ -169,6 +175,11 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	if isGitHubAPIRequestURL(releaseURL) {
+		if token := util.GitHubToken(); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -598,14 +609,17 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	body, err := readConfigYAMLBody(c)
 	if err != nil {
 		if errors.Is(err, errConfigYAMLBodyTooLarge) {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "body_too_large", "message": err.Error()})
 			return
 		}
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": "cannot read request body"})
 		return
 	}
 	containsPlaceholder, errPlaceholder := configYAMLContainsPlaceholder(body)
 	if errPlaceholder != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": errPlaceholder.Error()})
 		return
 	}
@@ -614,12 +628,27 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	h.mu.Lock()
 	commit, callback, ok := h.commitConfigYAMLLocked(c, body, containsPlaceholder)
 	h.mu.Unlock()
-	h.commitMu.Unlock()
+	if commit.yamlCatalog != nil {
+		defer h.commitMu.Unlock()
+	} else {
+		h.commitMu.Unlock()
+	}
 	if !ok {
 		return
 	}
 	if !h.notifyConfigCommitted(c, callback, commit) {
 		return
+	}
+	if warnings.cleanupErrorMessage() != "" {
+		failMutation(mutationRequestContext(c))
+	} else if commit.ModelCatalogPrepared {
+		CompleteMutation(mutationRequestContext(c))
+	} else if document, errDecode := decodeConfigYAML(body); errDecode == nil && len(document.Content) > 0 {
+		aliases, _, aliasError := yamlEffectiveMappingValue(document.Content[0], "oauth-model-alias", nil)
+		catalog, _, catalogError := yamlEffectiveMappingValue(document.Content[0], "model-catalog", nil)
+		if aliasError == nil && catalogError == nil && aliases == nil && catalog == nil {
+			CompleteMutation(mutationRequestContext(c))
+		}
 	}
 	response := gin.H{"ok": true, "changed": []string{"config"}}
 	if cleanupError := warnings.cleanupErrorMessage(); cleanupError != "" {
@@ -652,6 +681,7 @@ func (h *Handler) commitConfigYAMLLocked(
 		}
 	}
 	if ifMatch != "" && (!currentExists || !configYAMLMatchesIfMatch(ifMatch, current, placeholderKey)) {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(
 			http.StatusPreconditionFailed,
 			gin.H{
@@ -666,11 +696,13 @@ func (h *Handler) commitConfigYAMLLocked(
 		var err error
 		body, err = restoreConfigYAMLPlaceholdersWithKey(body, current, placeholderKey)
 		if err != nil {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 			return ConfigCommit{}, nil, false
 		}
 	case currentExists:
 	case os.IsNotExist(errRead) && containsPlaceholder:
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(
 			http.StatusUnprocessableEntity,
 			gin.H{"error": "invalid_config", "message": "redacted values require the current config file"},
@@ -691,6 +723,19 @@ func (h *Handler) commitConfigYAMLLocked(
 			)
 			return ConfigCommit{}, nil, false
 		}
+		rejectMutation(mutationRequestContext(c))
+		c.JSON(
+			http.StatusUnprocessableEntity, gin.H{
+				"error": "invalid_config", "message": errValidate.Error(),
+				"field": inferConfigValidationField(errValidate.Error()),
+			},
+		)
+		return ConfigCommit{}, nil, false
+	}
+
+	body, errValidate = config.MigrateRoutingSessionAffinityYAML(body)
+	if errValidate != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": errValidate.Error()})
 		return ConfigCommit{}, nil, false
 	}
@@ -702,6 +747,7 @@ func (h *Handler) commitConfigYAMLLocked(
 			return ConfigCommit{}, nil, false
 		}
 		if !bytes.Equal(latest, current) {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(
 				http.StatusPreconditionFailed,
 				gin.H{
@@ -727,6 +773,7 @@ func (h *Handler) commitConfigYAMLLocked(
 	)
 	if errPersisted != nil {
 		if errors.Is(errPersisted, errConfigYAMLManagementSecretAlias) {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": errPersisted.Error()})
 			return ConfigCommit{}, nil, false
 		}
@@ -734,12 +781,46 @@ func (h *Handler) commitConfigYAMLLocked(
 		return ConfigCommit{}, nil, false
 	}
 	persistedData = config.NormalizeCommentIndentation(persistedData)
+	catalog, errCatalog := h.prepareConfigYAMLCatalog(body, newCfg, current, currentExists)
+	if errCatalog != nil {
+		respondModelCatalogMutationError(c, errCatalog)
+		return ConfigCommit{}, nil, false
+	}
+	catalogPrepared := false
+	defer func() {
+		if catalog != nil && !catalogPrepared {
+			if errRollback := catalog.transaction.Rollback(); errRollback != nil {
+				log.WithError(errRollback).Error("failed to restore model catalog after YAML persistence failure")
+			}
+		}
+	}()
+	rollbackMigration, errMigration := h.prepareUsageDataDirMigration(newCfg)
+	if errMigration != nil {
+		c.JSON(
+			http.StatusInternalServerError, gin.H{"error": "migration_state_failed", "message": errMigration.Error()},
+		)
+		return ConfigCommit{}, nil, false
+	}
 	if err := writeConfigFileAtomically(h.configFilePath, persistedData); err != nil {
+		if errRollback := rollbackMigration(); errRollback != nil {
+			log.WithError(errRollback).
+				Error("failed to restore usage directory migration after configuration write failure")
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return ConfigCommit{}, nil, false
 	}
+	if catalog != nil {
+		catalog.rollbackUsage = rollbackMigration
+	}
+	RecordMutationEffect(mutationRequestContext(c), "configuration.persisted", "configuration")
 	digest := sha256.Sum256(persistedData)
 	commit, callback := h.publishConfigLocked(newCfg, fmt.Sprintf("%x", digest[:]))
+	if catalog != nil {
+		commit.ModelCatalogPrepared = true
+		commit.yamlCatalog = catalog
+		catalogPrepared = true
+	}
+	RecordMutationEffect(mutationRequestContext(c), "configuration.published", "configuration")
 	return commit, callback, true
 }
 
@@ -888,6 +969,9 @@ func yamlMergedMappingValue(
 
 // ValidateConfigYAML validates a YAML config body without saving.
 func inferConfigValidationField(message string) string {
+	if field := credentialInFlightFieldPattern.FindString(message); field != "" {
+		return field
+	}
 	for _, candidate := range configFieldPatterns {
 		if candidate.pattern.MatchString(message) {
 			return candidate.field
@@ -908,9 +992,11 @@ func (h *Handler) ValidateConfigYAML(c *gin.Context) {
 	body, err := readConfigYAMLBody(c)
 	if err != nil {
 		if errors.Is(err, errConfigYAMLBodyTooLarge) {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "body_too_large", "message": err.Error()})
 			return
 		}
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": "cannot read request body"})
 		return
 	}
@@ -923,6 +1009,7 @@ func (h *Handler) ValidateConfigYAML(c *gin.Context) {
 			)
 			return
 		}
+		rejectMutation(mutationRequestContext(c))
 		message := errValidate.Error()
 		c.JSON(
 			http.StatusOK, gin.H{
@@ -1063,16 +1150,23 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 		Value *int `json:"value"`
 	}
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
 	value := max(*body.Value, 0)
+	if value > config.MaxStorageSizeMB {
+		rejectMutation(mutationRequestContext(c))
+		c.JSON(http.StatusBadRequest, gin.H{"error": "logs-max-total-size-mb exceeds the supported range"})
+		return
+	}
 	if _, ok := h.mutateConfig(
 		c, func(cfg *config.Config) error {
 			cfg.LogsMaxTotalSizeMB = value
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1091,6 +1185,7 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 		Value *int `json:"value"`
 	}
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
@@ -1104,6 +1199,7 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1119,7 +1215,7 @@ func (h *Handler) PutRequestLog(c *gin.Context) {
 	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.RequestLog = v })
 }
 
-// GetWebsocketAuth returns the websocket auth flag.
+// GetWebsocketAuth returns the WebSocket auth flag.
 func (h *Handler) GetWebsocketAuth(c *gin.Context) {
 	cfg := h.configSnapshot()
 	// configSnapshot may be nil for a handler created without runtime configuration.
@@ -1141,6 +1237,20 @@ func (h *Handler) GetRequestRetry(c *gin.Context) {
 }
 func (h *Handler) PutRequestRetry(c *gin.Context) {
 	h.updateIntField(c, func(cfg *config.Config, v int) { cfg.RequestRetry = v })
+}
+
+// GetMaxRetryCredentials 返回每次请求最多尝试的凭证数，非正数表示尝试全部可用凭证
+func (h *Handler) GetMaxRetryCredentials(c *gin.Context) {
+	cfg := h.configSnapshot()
+	value := 0
+	if cfg != nil {
+		value = cfg.MaxRetryCredentials
+	}
+	c.JSON(http.StatusOK, gin.H{"max-retry-credentials": value})
+}
+
+func (h *Handler) PutMaxRetryCredentials(c *gin.Context) {
+	h.updateIntField(c, func(cfg *config.Config, value int) { cfg.MaxRetryCredentials = value })
 }
 
 // GetMaxRetryInterval returns the max retry interval.
@@ -1202,11 +1312,13 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 		Value *string `json:"value"`
 	}
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
 	normalized, ok := normalizeRoutingStrategy(*body.Value)
 	if !ok {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid strategy"})
 		return
 	}
@@ -1216,6 +1328,7 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1234,6 +1347,7 @@ func (h *Handler) PutAutoRefreshInterval(c *gin.Context) {
 		Value *int `json:"value"`
 	}
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
@@ -1244,6 +1358,7 @@ func (h *Handler) PutAutoRefreshInterval(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1277,6 +1392,7 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }

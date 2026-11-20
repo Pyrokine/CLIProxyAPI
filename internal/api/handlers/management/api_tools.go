@@ -168,6 +168,10 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 	auth := h.authByIndex(authIndex)
+	if _, errProxy := proxyutil.Parse(h.apiCallProxyURL(cfg, auth, proxyURL)); errProxy != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid configured proxy"})
+		return
+	}
 
 	reqHeaders := body.Header
 	if reqHeaders == nil {
@@ -463,6 +467,9 @@ func (h *Handler) resolveTokenForAuthWithProxy(
 	if auth == nil {
 		return "", nil
 	}
+	if _, errProxy := proxyutil.Parse(h.apiCallProxyURL(cfg, auth, requestProxyURL)); errProxy != nil {
+		return "", errors.New("invalid configured proxy")
+	}
 
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	switch provider {
@@ -534,13 +541,18 @@ func metaAPICallToken(auth *coreauth.Auth) (string, error) {
 		return "", errors.New("meta credential is unavailable")
 	}
 	stored, _ := auth.Storage.(*metaauth.MetaTokenStorage)
-	dcaTokens := []string{firstMetadataString(auth.Metadata, "dca_token"), strings.TrimSpace(auth.Attributes["dca_token"])}
+	dcaTokens := []string{
+		firstMetadataString(auth.Metadata, "dca_token"), strings.TrimSpace(auth.Attributes["dca_token"]),
+	}
 	candidates := []string{
 		strings.TrimSpace(auth.Attributes["api_key"]),
 		firstMetadataString(auth.Metadata, "api_key"),
 	}
 	if !coreauth.IsConfigAPIKeyAuth(auth) {
-		candidates = append(candidates, strings.TrimSpace(auth.Attributes["access_token"]), firstMetadataString(auth.Metadata, "access_token"))
+		candidates = append(
+			candidates, strings.TrimSpace(auth.Attributes["access_token"]),
+			firstMetadataString(auth.Metadata, "access_token"),
+		)
 	}
 	if stored != nil {
 		dcaTokens = append(dcaTokens, strings.TrimSpace(stored.DCAToken))
@@ -614,7 +626,9 @@ func refreshOwnerMatches(current, before *coreauth.Auth) bool {
 	if coreauth.AccessTokenSHA256(current) != coreauth.AccessTokenSHA256(before) {
 		return false
 	}
-	for _, key := range []string{"email", "sub", "account_id", "account_uuid", "organization_uuid", "id_token", "token_endpoint"} {
+	for _, key := range []string{
+		"email", "sub", "account_id", "account_uuid", "organization_uuid", "id_token", "token_endpoint",
+	} {
 		if stringValue(current.Metadata, key) != stringValue(before.Metadata, key) {
 			return false
 		}
@@ -686,7 +700,9 @@ func (h *Handler) persistRefreshedAuth(ctx context.Context, before, refreshed *c
 			return nil
 		}
 		if !refreshOwnerMatches(current, before) ||
-			(!reflect.DeepEqual(before.Storage, refreshed.Storage) && !reflect.DeepEqual(current.Storage, before.Storage)) {
+			(!reflect.DeepEqual(before.Storage, refreshed.Storage) && !reflect.DeepEqual(
+				current.Storage, before.Storage,
+			)) {
 			return fmt.Errorf("persist refreshed auth %s: credential owner changed", refreshed.ID)
 		}
 		next := mergeRefreshedAuth(current, before, refreshed)
@@ -695,6 +711,7 @@ func (h *Handler) persistRefreshedAuth(ctx context.Context, before, refreshed *c
 			return fmt.Errorf("persist refreshed auth %s: %w", refreshed.ID, errUpdate)
 		}
 		if updated != nil {
+			RecordMutationEffect(ctx, "credential.published", "credential")
 			return nil
 		}
 		if errContext := persistenceCtx.Err(); errContext != nil {
@@ -1081,7 +1098,9 @@ func xaiTokenNeedsRefresh(auth *coreauth.Auth) bool {
 		if exp, errParse := time.Parse(time.RFC3339, strings.TrimSpace(storage.Expire)); errParse == nil {
 			return !exp.After(refreshAt)
 		}
-		if refreshedAt, errParse := time.Parse(time.RFC3339, strings.TrimSpace(storage.LastRefresh)); errParse == nil && storage.ExpiresIn > 0 {
+		if refreshedAt, errParse := time.Parse(
+			time.RFC3339, strings.TrimSpace(storage.LastRefresh),
+		); errParse == nil && storage.ExpiresIn > 0 {
 			return !refreshedAt.Add(time.Duration(storage.ExpiresIn) * time.Second).After(refreshAt)
 		}
 	}
@@ -1261,21 +1280,8 @@ func tokenValueFromMetadata(metadata map[string]any) string {
 }
 
 func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
-	authIndex = strings.TrimSpace(authIndex)
-	if authIndex == "" || h == nil || h.authManager == nil {
-		return nil
-	}
-	auths := h.authManager.List()
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		auth.EnsureIndex()
-		if auth.Index == authIndex {
-			return auth
-		}
-	}
-	return nil
+	auth, _ := h.lookupAuthFile("", authIndex)
+	return auth
 }
 
 func (h *Handler) apiCallTransport(
@@ -1286,8 +1292,11 @@ func (h *Handler) apiCallTransport(
 	setting := apiCallProxySetting(cfg, auth, requestProxyURL)
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(setting.Raw)
 	if errBuild != nil {
-		log.WithError(errBuild).Debug("build proxy transport failed")
-		return proxyutil.NewDirectTransport()
+		rejected := proxyutil.NewDirectTransport()
+		rejected.Proxy = func(*http.Request) (*url.URL, error) {
+			return nil, errors.New("invalid configured proxy")
+		}
+		return rejected
 	}
 	if transport == nil {
 		return proxyutil.NewDirectTransport()
@@ -1308,15 +1317,7 @@ func apiCallProxySetting(
 	auth *coreauth.Auth,
 	requestProxyURL string,
 ) proxyutil.Setting {
-	if requestProxyURL = strings.TrimSpace(requestProxyURL); requestProxyURL != "" {
-		setting, errParse := proxyutil.Parse(requestProxyURL)
-		if errParse == nil {
-			return setting
-		}
-		return proxyutil.Setting{Raw: "direct", Mode: proxyutil.ModeDirect}
-	}
-
-	candidates := make([]string, 0, 2)
+	candidates := []string{requestProxyURL}
 	if auth != nil {
 		candidates = append(candidates, auth.ProxyURL)
 	}
@@ -1325,7 +1326,10 @@ func apiCallProxySetting(
 	}
 	for _, candidate := range candidates {
 		setting, errParse := proxyutil.Parse(candidate)
-		if errParse == nil && setting.Mode != proxyutil.ModeInherit {
+		if errParse != nil {
+			return proxyutil.Setting{Raw: strings.TrimSpace(candidate)}
+		}
+		if setting.Mode != proxyutil.ModeInherit {
 			return setting
 		}
 	}

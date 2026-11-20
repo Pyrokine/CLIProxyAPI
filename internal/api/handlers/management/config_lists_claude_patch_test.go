@@ -18,10 +18,12 @@ import (
 )
 
 func TestPatchCodexKeyCloakingOverride(t *testing.T) {
-	h := newConfigListTestHandler(t, &config.Config{
-		Codex:    config.CodexConfig{DisableCodexCloaking: true},
-		CodexKey: []config.CodexKey{{APIKey: "synthetic-config-key", BaseURL: "https://example.test"}},
-	})
+	h := newConfigListTestHandler(
+		t, &config.Config{
+			Codex:    config.CodexConfig{DisableCodexCloaking: true},
+			CodexKey: []config.CodexKey{{APIKey: "synthetic-config-key", BaseURL: "https://example.test"}},
+		},
+	)
 	for _, step := range []struct {
 		name, value, expected string
 		status                int
@@ -31,38 +33,47 @@ func TestPatchCodexKeyCloakingOverride(t *testing.T) {
 		{"reject_string", `"true"`, "true", http.StatusBadRequest},
 		{"inherit", "null", "", http.StatusOK},
 	} {
-		t.Run(step.name, func(t *testing.T) {
-			response := runConfigListRequest(h.PatchCodexKey, http.MethodPatch, "/codex-api-key",
-				`{"index":0,"value":{"disable-codex-cloaking":`+step.value+`}}`)
-			if response.Code != step.status {
-				t.Fatalf("PATCH status = %d: %s", response.Code, response.Body.String())
-			}
-			data, err := os.ReadFile(h.configFilePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			reloaded, err := config.ParseConfigBytes(data)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, cfg := range []*config.Config{h.configSnapshot(), reloaded} {
-				key := cfg.CodexKey[0]
-				if key.APIKey != "synthetic-config-key" || !cfg.Codex.DisableCodexCloaking {
-					t.Fatalf("Codex key or global setting changed: %+v", cfg)
+		t.Run(
+			step.name, func(t *testing.T) {
+				response := runConfigListRequest(
+					h.PatchCodexKey, http.MethodPatch, "/codex-api-key",
+					`{"index":0,"value":{"disable-codex-cloaking":`+step.value+`}}`,
+				)
+				if response.Code != step.status {
+					t.Fatalf("PATCH status = %d: %s", response.Code, response.Body.String())
 				}
-				if step.expected == "" && key.DisableCodexCloaking != nil ||
-					step.expected == "true" && (key.DisableCodexCloaking == nil || !*key.DisableCodexCloaking) ||
-					step.expected == "false" && (key.DisableCodexCloaking == nil || *key.DisableCodexCloaking) {
-					t.Fatalf("Codex override = %v, want %q", key.DisableCodexCloaking, step.expected)
+				data, err := os.ReadFile(h.configFilePath)
+				if err != nil {
+					t.Fatal(err)
 				}
-				auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{
-					Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
-				})
-				if err != nil || len(auths) != 1 || auths[0].Attributes[coreauth.AttributeCodexDisableCloaking] != step.expected {
-					t.Fatalf("auth cloaking attribute = %+v, error = %v", auths, err)
+				reloaded, err := config.ParseConfigBytes(data)
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-		})
+				for _, cfg := range []*config.Config{h.configSnapshot(), reloaded} {
+					key := cfg.CodexKey[0]
+					if key.APIKey != "synthetic-config-key" || !cfg.Codex.DisableCodexCloaking {
+						t.Fatalf("Codex key or global setting changed: %+v", cfg)
+					}
+					if step.expected == "" && key.DisableCodexCloaking != nil ||
+						step.expected == "true" &&
+							(key.DisableCodexCloaking == nil || !*key.DisableCodexCloaking) ||
+						step.expected == "false" &&
+							(key.DisableCodexCloaking == nil || *key.DisableCodexCloaking) {
+						t.Fatalf("Codex override = %v, want %q", key.DisableCodexCloaking, step.expected)
+					}
+					auths, err := synthesizer.NewConfigSynthesizer().Synthesize(
+						&synthesizer.SynthesisContext{
+							Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
+						},
+					)
+					if err != nil || len(auths) != 1 ||
+						auths[0].Attributes[coreauth.AttributeCodexDisableCloaking] != step.expected {
+						t.Fatalf("auth cloaking attribute = %+v, error = %v", auths, err)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -75,14 +86,29 @@ func TestOtherKeysRejectCodexCloakingOverride(t *testing.T) {
 		{"xai", (*Handler).PostXAIKey, "xai-api-key"},
 		{"meta", (*Handler).PostMetaKey, "meta-api-key"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newConfigListTestHandler(t, &config.Config{})
-			response := runConfigListRequest(func(c *gin.Context) { tc.create(h, c) }, http.MethodPost, "/"+tc.key,
-				`{"api-key":"synthetic-config-key","base-url":"https://example.test","disable-codex-cloaking":true}`)
-			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "disable-codex-cloaking") {
-				t.Fatalf("unsupported %s override: status=%d body=%s", tc.key, response.Code, response.Body.String())
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				h := newConfigListTestHandler(t, &config.Config{})
+				response := runConfigListRequest(
+					func(c *gin.Context) { tc.create(h, c) },
+					http.MethodPost,
+					"/"+tc.key,
+					`{"api-key":"synthetic-config-key","base-url":"https://example.test",`+
+						`"disable-codex-cloaking":`+
+						`true}`,
+				)
+				if response.Code != http.StatusBadRequest || !strings.Contains(
+					response.Body.String(), "disable-codex-cloaking",
+				) {
+					t.Fatalf(
+						"unsupported %s override: status=%d body=%s",
+						tc.key,
+						response.Code,
+						response.Body.String(),
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -96,59 +122,75 @@ func TestClaudeKeyWritesNormalizeCloakAndReload(t *testing.T) {
 		{http.MethodPatch, (*Handler).PatchClaudeKey},
 	} {
 		for _, cacheUserID := range []string{"false", "true", "null"} {
-			t.Run(test.method+"/"+cacheUserID, func(t *testing.T) {
-				cfg := &config.Config{}
-				if test.method == http.MethodPatch {
-					cfg.ClaudeKey = []config.ClaudeKey{{APIKey: "synthetic-key", ExperimentalCCHSigning: true}}
-				}
-				h := newConfigListTestHandler(t, cfg)
-				entry := `{"api-key":"synthetic-key","cloak":{"mode":"  never  ","strict-mode":false,"cache-user-id":` + cacheUserID + `,"sensitive-words":[" alpha ","","  "," beta "]}}`
-				body := entry
-				switch test.method {
-				case http.MethodPut:
-					body = "[" + entry + "]"
-				case http.MethodPatch:
-					body = `{"index":0,"value":` + entry + `}`
-				}
-				response := runConfigListRequest(func(c *gin.Context) { test.write(h, c) }, test.method, "/claude-api-key", body)
-				wantStatus := http.StatusOK
-				if test.method == http.MethodPost {
-					wantStatus = http.StatusCreated
-				}
-				if response.Code != wantStatus {
-					t.Fatalf("%s status = %d, want %d: %s", test.method, response.Code, wantStatus, response.Body.String())
-				}
-				reloaded, err := config.LoadConfigOptional(h.configFilePath, false)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, current := range []*config.Config{h.configSnapshot(), reloaded} {
-					if len(current.ClaudeKey) != 1 {
-						t.Fatalf("Claude key count = %d", len(current.ClaudeKey))
-					}
-					key := current.ClaudeKey[0]
-					if key.APIKey != "synthetic-key" || (test.method == http.MethodPatch && !key.ExperimentalCCHSigning) {
-						t.Fatalf("Claude key identity or hidden fields changed: %+v", key)
-					}
-					cloak := key.Cloak
-					if cloak == nil || cloak.Mode != "never" || cloak.StrictMode || !reflect.DeepEqual(cloak.SensitiveWords, []string{"alpha", "beta"}) {
-						t.Fatalf("cloak not normalized: %+v", cloak)
-					}
-					if cacheUserID == "null" {
-						if cloak.CacheUserID != nil {
-							t.Fatalf("null cache-user-id became %v", cloak.CacheUserID)
+			t.Run(
+				test.method+"/"+cacheUserID, func(t *testing.T) {
+					cfg := &config.Config{}
+					if test.method == http.MethodPatch {
+						cfg.ClaudeKey = []config.ClaudeKey{
+							{APIKey: "synthetic-key", ExperimentalCCHSigning: true},
 						}
-					} else if cloak.CacheUserID == nil || *cloak.CacheUserID != (cacheUserID == "true") {
-						t.Fatalf("cache-user-id = %v, want %s", cloak.CacheUserID, cacheUserID)
 					}
-				}
-			})
+					h := newConfigListTestHandler(t, cfg)
+					entry := `{"api-key":"synthetic-key","cloak":{"mode":"  never  ","strict-mode":` +
+						`false,"cache-user-id":` +
+						cacheUserID +
+						`,"sensitive-words":[" alpha ","","  "," beta "]}}`
+					body := entry
+					switch test.method {
+					case http.MethodPut:
+						body = "[" + entry + "]"
+					case http.MethodPatch:
+						body = `{"index":0,"value":` + entry + `}`
+					}
+					response := runConfigListRequest(
+						func(c *gin.Context) { test.write(h, c) }, test.method, "/claude-api-key", body,
+					)
+					wantStatus := http.StatusOK
+					if test.method == http.MethodPost {
+						wantStatus = http.StatusCreated
+					}
+					if response.Code != wantStatus {
+						t.Fatalf(
+							"%s status = %d, want %d: %s", test.method, response.Code, wantStatus,
+							response.Body.String(),
+						)
+					}
+					reloaded, err := config.LoadConfigOptional(h.configFilePath, false)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, current := range []*config.Config{h.configSnapshot(), reloaded} {
+						if len(current.ClaudeKey) != 1 {
+							t.Fatalf("Claude key count = %d", len(current.ClaudeKey))
+						}
+						key := current.ClaudeKey[0]
+						if key.APIKey != "synthetic-key" ||
+							(test.method == http.MethodPatch && !key.ExperimentalCCHSigning) {
+							t.Fatalf("Claude key identity or hidden fields changed: %+v", key)
+						}
+						cloak := key.Cloak
+						if cloak == nil || cloak.Mode != "never" || cloak.StrictMode || !reflect.DeepEqual(
+							cloak.SensitiveWords, []string{"alpha", "beta"},
+						) {
+							t.Fatalf("cloak not normalized: %+v", cloak)
+						}
+						if cacheUserID == "null" {
+							if cloak.CacheUserID != nil {
+								t.Fatalf("null cache-user-id became %v", cloak.CacheUserID)
+							}
+						} else if cloak.CacheUserID == nil || *cloak.CacheUserID != (cacheUserID == "true") {
+							t.Fatalf("cache-user-id = %v, want %s", cloak.CacheUserID, cacheUserID)
+						}
+					}
+				},
+			)
 		}
 	}
 }
 
 func TestPatchClaudeKeyPreservesSecretAndHiddenFields(t *testing.T) {
 	cacheUserID := true
+	//goland:noinspection HttpUrlsUsage
 	cfg := &config.Config{
 		ClaudeKey: []config.ClaudeKey{
 			{
@@ -177,7 +219,9 @@ func TestPatchClaudeKeyPreservesSecretAndHiddenFields(t *testing.T) {
 		h.PatchClaudeKey,
 		http.MethodPatch,
 		"/claude-api-key",
-		`{"index":0,"value":{"priority":0,"prefix":"","base-url":"","proxy-url":"","models":[],"headers":{},"excluded-models":[],"cloak":{"mode":"never","strict-mode":false,"sensitive-words":[]}}}`,
+		`{"index":0,"value":{"priority":0,"prefix":"","base-url":"","proxy-url"`+
+			`:"","models":[],"headers":{},"excluded-models":[],"cloak":{"mode":"nev`+
+			`er","strict-mode":false,"sensitive-words":[]}}}`,
 	)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("PatchClaudeKey status = %d, want 200: %s", recorder.Code, recorder.Body.String())
@@ -196,7 +240,8 @@ func TestPatchClaudeKeyPreservesSecretAndHiddenFields(t *testing.T) {
 	if !updated.RebuildMidSystemMessage || !updated.ExperimentalCCHSigning {
 		t.Fatalf("hidden fields changed: %+v", updated)
 	}
-	if updated.Cloak == nil || updated.Cloak.Mode != "never" || updated.Cloak.StrictMode || len(updated.Cloak.SensitiveWords) != 0 {
+	if updated.Cloak == nil || updated.Cloak.Mode != "never" || updated.Cloak.StrictMode ||
+		len(updated.Cloak.SensitiveWords) != 0 {
 		t.Fatalf("Cloak = %+v, want updated visible fields", updated.Cloak)
 	}
 	if updated.Cloak.CacheUserID == nil || !*updated.Cloak.CacheUserID {
@@ -205,9 +250,14 @@ func TestPatchClaudeKeyPreservesSecretAndHiddenFields(t *testing.T) {
 }
 
 func TestPutClaudeKeysPreservesModeForUnchangedIdentity(t *testing.T) {
-	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{
-		{APIKey: "secret-key", BaseURL: "https://api.example.com", Prefix: "old", Cloak: &config.CloakConfig{Mode: "always"}},
-	}}
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{
+			{
+				APIKey: "secret-key", BaseURL: "https://api.example.com", Prefix: "old",
+				Cloak: &config.CloakConfig{Mode: "always"},
+			},
+		},
+	}
 	h := newConfigListTestHandler(t, cfg)
 
 	for _, body := range []string{
@@ -252,20 +302,23 @@ func TestPutClaudeKeysDoesNotInheritModeFromDifferentOrAmbiguousIdentity(t *test
 			body: `[{"api-key":"key"}]`,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			h := newConfigListTestHandler(t, &config.Config{ClaudeKey: test.original})
-			recorder := runConfigListRequest(h.PutClaudeKeys, http.MethodPut, "/claude-api-key", test.body)
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("PutClaudeKeys status = %d, want 200: %s", recorder.Code, recorder.Body.String())
-			}
-			if got := h.configSnapshot().ClaudeKey[0].Cloak; got != nil && got.Mode != "" {
-				t.Fatalf("inherited unrelated cloak mode: %+v", got)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				h := newConfigListTestHandler(t, &config.Config{ClaudeKey: test.original})
+				recorder := runConfigListRequest(h.PutClaudeKeys, http.MethodPut, "/claude-api-key", test.body)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("PutClaudeKeys status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+				}
+				if got := h.configSnapshot().ClaudeKey[0].Cloak; got != nil && got.Mode != "" {
+					t.Fatalf("inherited unrelated cloak mode: %+v", got)
+				}
+			},
+		)
 	}
 }
 
 func TestPatchClaudeKeyClearsInheritedCloakForChangedIdentity(t *testing.T) {
+	//goland:noinspection HttpUrlsUsage
 	for _, tt := range []struct {
 		name  string
 		patch string
@@ -279,31 +332,51 @@ func TestPatchClaudeKeyClearsInheritedCloakForChangedIdentity(t *testing.T) {
 		{name: "partial cloak for new identity", patch: `"api-key":"replacement-secret","cloak":{"strict-mode":false}`},
 		{name: "explicit mode", patch: `"api-key":"replacement-secret","cloak":{"mode":"never"}`, mode: "never"},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			h := newConfigListTestHandler(t, &config.Config{ClaudeKey: []config.ClaudeKey{{
-				APIKey: "original-secret", BaseURL: "https://old.example.com", Prefix: "old",
-				ProxyURL: "http://proxy.example.com", Cloak: &config.CloakConfig{Mode: "always", StrictMode: true},
-			}}})
-			response := runConfigListRequest(h.PatchClaudeKey, http.MethodPatch, "/claude-api-key",
-				`{"index":0,"value":{`+tt.patch+`}}`)
-			if response.Code != http.StatusOK {
-				t.Fatalf("PATCH status = %d: %s", response.Code, response.Body.String())
-			}
-			key := h.configSnapshot().ClaudeKey[0]
-			if key.Cloak == nil || key.Cloak.Mode != tt.mode {
-				t.Fatalf("cloak after PATCH = %+v, want mode %q", key.Cloak, tt.mode)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				//goland:noinspection HttpUrlsUsage
+				h := newConfigListTestHandler(
+					t, &config.Config{
+						ClaudeKey: []config.ClaudeKey{
+							{
+								APIKey: "original-secret", BaseURL: "https://old.example.com", Prefix: "old",
+								ProxyURL: "http://proxy.example.com",
+								Cloak:    &config.CloakConfig{Mode: "always", StrictMode: true},
+							},
+						},
+					},
+				)
+				response := runConfigListRequest(
+					h.PatchClaudeKey, http.MethodPatch, "/claude-api-key",
+					`{"index":0,"value":{`+tt.patch+`}}`,
+				)
+				if response.Code != http.StatusOK {
+					t.Fatalf("PATCH status = %d: %s", response.Code, response.Body.String())
+				}
+				key := h.configSnapshot().ClaudeKey[0]
+				if key.Cloak == nil || key.Cloak.Mode != tt.mode {
+					t.Fatalf("cloak after PATCH = %+v, want mode %q", key.Cloak, tt.mode)
+				}
+			},
+		)
 	}
 }
 
 func TestPatchClaudeKeyMaskedIdentityPreservesCloak(t *testing.T) {
 	const key = "original-secret"
-	h := newConfigListTestHandler(t, &config.Config{ClaudeKey: []config.ClaudeKey{{
-		APIKey: key, Cloak: &config.CloakConfig{Mode: "always"},
-	}}})
-	response := runConfigListRequest(h.PatchClaudeKey, http.MethodPatch, "/claude-api-key",
-		`{"index":0,"value":{"api-key":"`+util.HideAPIKey(key)+`","priority":2}}`)
+	h := newConfigListTestHandler(
+		t, &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey: key, Cloak: &config.CloakConfig{Mode: "always"},
+				},
+			},
+		},
+	)
+	response := runConfigListRequest(
+		h.PatchClaudeKey, http.MethodPatch, "/claude-api-key",
+		`{"index":0,"value":{"api-key":"`+util.HideAPIKey(key)+`","priority":2}}`,
+	)
 	if response.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d: %s", response.Code, response.Body.String())
 	}
@@ -315,9 +388,13 @@ func TestPatchClaudeKeyMaskedIdentityPreservesCloak(t *testing.T) {
 
 func TestPatchClaudeKeyCacheUserIDSupportsFalseAndNull(t *testing.T) {
 	cacheUserID := true
-	h := newConfigListTestHandler(t, &config.Config{ClaudeKey: []config.ClaudeKey{
-		{APIKey: "key", Cloak: &config.CloakConfig{Mode: "always", CacheUserID: &cacheUserID}},
-	}})
+	h := newConfigListTestHandler(
+		t, &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "key", Cloak: &config.CloakConfig{Mode: "always", CacheUserID: &cacheUserID}},
+			},
+		},
+	)
 	for _, test := range []struct {
 		value string
 		want  *bool
@@ -325,8 +402,10 @@ func TestPatchClaudeKeyCacheUserIDSupportsFalseAndNull(t *testing.T) {
 		{value: "false", want: new(false)},
 		{value: "null", want: nil},
 	} {
-		recorder := runConfigListRequest(h.PatchClaudeKey, http.MethodPatch, "/claude-api-key",
-			`{"index":0,"value":{"cloak":{"cache-user-id":`+test.value+`}}}`)
+		recorder := runConfigListRequest(
+			h.PatchClaudeKey, http.MethodPatch, "/claude-api-key",
+			`{"index":0,"value":{"cloak":{"cache-user-id":`+test.value+`}}}`,
+		)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("PatchClaudeKey status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 		}
@@ -339,13 +418,23 @@ func TestPatchClaudeKeyCacheUserIDSupportsFalseAndNull(t *testing.T) {
 }
 
 func TestPatchClaudeKeyCacheUserIDRejectsInvalidValue(t *testing.T) {
-	h := newConfigListTestHandler(t, &config.Config{ClaudeKey: []config.ClaudeKey{
-		{APIKey: "key", Cloak: &config.CloakConfig{Mode: "always"}},
-	}})
-	recorder := runConfigListRequest(h.PatchClaudeKey, http.MethodPatch, "/claude-api-key",
-		`{"index":0,"value":{"cloak":{"cache-user-id":"invalid"}}}`)
+	h := newConfigListTestHandler(
+		t, &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "key", Cloak: &config.CloakConfig{Mode: "always"}},
+			},
+		},
+	)
+	recorder := runConfigListRequest(
+		h.PatchClaudeKey, http.MethodPatch, "/claude-api-key",
+		`{"index":0,"value":{"cloak":{"cache-user-id":"invalid"}}}`,
+	)
 	if recorder.Code != http.StatusBadRequest || h.configSnapshot().ClaudeKey[0].Cloak.CacheUserID != nil {
-		t.Fatalf("invalid cloak cache-user-id accepted: status = %d, body = %s", recorder.Code, recorder.Body.String())
+		t.Fatalf(
+			"invalid cloak cache-user-id accepted: status = %d, body = %s",
+			recorder.Code,
+			recorder.Body.String(),
+		)
 	}
 }
 

@@ -401,7 +401,8 @@ func TestManagementMutationAuditRecordsAuthenticatedActorAndSafeFields(t *testin
 				if len(record.RequestID) != 32 {
 					t.Fatalf("request id = %q, want 32 hex characters", record.RequestID)
 				}
-				if record.ActorKind != actorKind || record.ClientKey != expectedClient || record.ClientSource != string(expectedSource) {
+				if record.ActorKind != actorKind || record.ClientKey != expectedClient ||
+					record.ClientSource != string(expectedSource) {
 					t.Fatalf("actor/client = %+v", record)
 				}
 				if record.Method != http.MethodPost || record.Route != "/v0/management/config/:id" ||
@@ -617,7 +618,8 @@ func TestManagementMutationTargetAllowsOnlySafeClassifiedValues(t *testing.T) {
 	} {
 		if got := buildManagementMutationTarget(testCase.kind, testCase.value); got != testCase.want {
 			t.Errorf(
-				"buildManagementMutationTarget(%q, %q) = %q, want %q", testCase.kind, testCase.value, got, testCase.want,
+				"buildManagementMutationTarget(%q, %q) = %q, want %q", testCase.kind, testCase.value, got,
+				testCase.want,
 			)
 		}
 	}

@@ -165,14 +165,16 @@ func TestResolveTokenForAuth_Antigravity_RefreshesExpiredToken(t *testing.T) {
 func TestResolveTokenForAuthUsesRequestProxyForOAuthRefresh(t *testing.T) {
 	var proxyCalls atomic.Int32
 	proxy := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-			proxyCalls.Add(1)
-			if request.URL.String() != "http://oauth.example/token" {
-				t.Fatalf("proxy target = %s", request.URL)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"access_token":"proxied-token","refresh_token":"rt2","expires_in":3600}`))
-		}),
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				proxyCalls.Add(1)
+				if request.URL.String() != "http://oauth.example/token" {
+					t.Fatalf("proxy target = %s", request.URL)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"access_token":"proxied-token","refresh_token":"rt2","expires_in":3600}`))
+			},
+		),
 	)
 	t.Cleanup(proxy.Close)
 
@@ -219,19 +221,23 @@ func TestResolveTokenForAuthUsesRequestProxyForOAuthRefresh(t *testing.T) {
 func TestResolveTokenForAuthDirectDoesNotInheritOAuthProxy(t *testing.T) {
 	var inheritedProxyCalls atomic.Int32
 	inheritedProxy := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			inheritedProxyCalls.Add(1)
-			http.Error(w, "unexpected inherited proxy", http.StatusBadGateway)
-		}),
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				inheritedProxyCalls.Add(1)
+				http.Error(w, "unexpected inherited proxy", http.StatusBadGateway)
+			},
+		),
 	)
 	t.Cleanup(inheritedProxy.Close)
 	tokenServerCalls := 0
 	tokenServer := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			tokenServerCalls++
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"access_token":"direct-token","refresh_token":"rt2","expires_in":3600}`))
-		}),
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				tokenServerCalls++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"access_token":"direct-token","refresh_token":"rt2","expires_in":3600}`))
+			},
+		),
 	)
 	t.Cleanup(tokenServer.Close)
 
@@ -837,7 +843,9 @@ func TestTokenValueForAuthSupportsKnownDevinFieldsOnly(t *testing.T) {
 		},
 		{
 			name: "attribute session token",
-			auth: &coreauth.Auth{Provider: "devin", Attributes: map[string]string{"session_token": "attribute-session"}},
+			auth: &coreauth.Auth{
+				Provider: "devin", Attributes: map[string]string{"session_token": "attribute-session"},
+			},
 			want: "attribute-session",
 		},
 		{
@@ -847,11 +855,13 @@ func TestTokenValueForAuthSupportsKnownDevinFieldsOnly(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tokenValueForAuth(tt.auth); got != tt.want {
-				t.Fatalf("tokenValueForAuth() = %q, want %q", got, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				if got := tokenValueForAuth(tt.auth); got != tt.want {
+					t.Fatalf("tokenValueForAuth() = %q, want %q", got, tt.want)
+				}
+			},
+		)
 	}
 }
 
@@ -868,6 +878,7 @@ func TestResolveAPICallTokenPrefersDraftToken(t *testing.T) {
 }
 
 func TestAPICallRejectsDraftTokenWithoutPlaceholder(t *testing.T) {
+	installAPICallTestResolver(t)
 	h := newConfigListTestHandler(t, &config.Config{})
 	recorder := runConfigListRequest(
 		h.APICall,
@@ -884,6 +895,7 @@ func TestAPICallRejectsDraftTokenWithoutPlaceholder(t *testing.T) {
 }
 
 func TestAPICallRejectsPlaceholderWithoutToken(t *testing.T) {
+	installAPICallTestResolver(t)
 	h := newConfigListTestHandler(t, &config.Config{})
 	recorder := runConfigListRequest(
 		h.APICall,
@@ -900,25 +912,32 @@ func TestAPICallRejectsPlaceholderWithoutToken(t *testing.T) {
 }
 
 func TestAPICallRejectsMissingAuthIndexWithPlaceholder(t *testing.T) {
+	installAPICallTestResolver(t)
 	h := newConfigListTestHandler(t, &config.Config{})
 	recorder := runConfigListRequest(
 		h.APICall,
 		http.MethodPost,
 		"/api-call",
-		`{"auth_index":"unknown-index","method":"GET","url":"https://api.openai.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"}}`,
+		`{"auth_index":"unknown-index","method":"GET","url":"https://api.openai`+
+			`.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"}}`,
 	)
-	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "auth credential not found for auth_index") {
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(
+		recorder.Body.String(), "auth credential not found for auth_index",
+	) {
 		t.Fatalf("missing auth index: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
 func TestAPICallRejectsDraftTokenOverHTTP(t *testing.T) {
+	installAPICallTestResolver(t)
 	h := newConfigListTestHandler(t, &config.Config{})
+	//goland:noinspection HttpUrlsUsage
 	recorder := runConfigListRequest(
 		h.APICall,
 		http.MethodPost,
 		"/api-call",
-		`{"method":"GET","url":"http://api.openai.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"},"draftToken":"draft-token"}`,
+		`{"method":"GET","url":"http://api.openai.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"},`+
+			`"draftToken":"draft-token"}`,
 	)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("APICall status = %d, want 400: %s", recorder.Code, recorder.Body.String())
@@ -929,6 +948,7 @@ func TestAPICallRejectsDraftTokenOverHTTP(t *testing.T) {
 }
 
 func TestValidateTokenTransportURLRejectsDowngrade(t *testing.T) {
+	//goland:noinspection HttpUrlsUsage
 	target, err := url.Parse("http://api.openai.com/v1/models")
 	if err != nil {
 		t.Fatalf("url.Parse: %v", err)
@@ -944,7 +964,8 @@ func TestAPICallRejectsDraftTokenForUnknownTarget(t *testing.T) {
 		h.APICall,
 		http.MethodPost,
 		"/api-call",
-		`{"method":"GET","url":"https://example.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"},"draftToken":"draft-token"}`,
+		`{"method":"GET","url":"https://example.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"},"`+
+			`draftToken":"draft-token"}`,
 	)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("APICall status = %d, want 403: %s", recorder.Code, recorder.Body.String())
@@ -952,6 +973,8 @@ func TestAPICallRejectsDraftTokenForUnknownTarget(t *testing.T) {
 }
 
 func TestAPICallBodyTokenUsesSameTransportRestrictions(t *testing.T) {
+	installAPICallTestResolver(t)
+	//goland:noinspection HttpUrlsUsage
 	tests := []struct {
 		name       string
 		targetURL  string
@@ -988,42 +1011,48 @@ func TestAPICallBodyTokenUsesSameTransportRestrictions(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			payload, errMarshal := json.Marshal(
-				map[string]any{
-					"method":     http.MethodPost,
-					"url":        tt.targetURL,
-					"data":       `{"token":"$TOKEN$"}`,
-					"draftToken": tt.draftToken,
-				},
-			)
-			if errMarshal != nil {
-				t.Fatal(errMarshal)
-			}
-			h := newConfigListTestHandler(t, &config.Config{})
-			recorder := runConfigListRequest(h.APICall, http.MethodPost, "/api-call", string(payload))
-			if recorder.Code != tt.wantStatus || !strings.Contains(recorder.Body.String(), tt.wantError) {
-				t.Fatalf("APICall status = %d, body = %s", recorder.Code, recorder.Body.String())
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				payload, errMarshal := json.Marshal(
+					map[string]any{
+						"method":     http.MethodPost,
+						"url":        tt.targetURL,
+						"data":       `{"token":"$TOKEN$"}`,
+						"draftToken": tt.draftToken,
+					},
+				)
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+				h := newConfigListTestHandler(t, &config.Config{})
+				recorder := runConfigListRequest(h.APICall, http.MethodPost, "/api-call", string(payload))
+				if recorder.Code != tt.wantStatus || !strings.Contains(recorder.Body.String(), tt.wantError) {
+					t.Fatalf("APICall status = %d, body = %s", recorder.Code, recorder.Body.String())
+				}
+			},
+		)
 	}
 }
 
 func TestAPICallReplacesBodyTokenForKnownDevinEndpoint(t *testing.T) {
 	const token = "line1\"\\line2\nend"
 	requestCount := 0
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		requestCount++
-		var payload map[string]string
-		if errDecode := json.NewDecoder(request.Body).Decode(&payload); errDecode != nil {
-			t.Fatalf("decode body: %v", errDecode)
-		}
-		if payload["token"] != token {
-			t.Fatalf("body token = %q, want %q", payload["token"], token)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
+	server := httptest.NewTLSServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				requestCount++
+				var payload map[string]string
+				if errDecode := json.NewDecoder(request.Body).Decode(&payload); errDecode != nil {
+					t.Fatalf("decode body: %v", errDecode)
+				}
+				if payload["token"] != token {
+					t.Fatalf("body token = %q, want %q", payload["token"], token)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			},
+		),
+	)
 	t.Cleanup(server.Close)
 	installAPICallTLSTestTransport(t, server)
 
@@ -1031,12 +1060,14 @@ func TestAPICallReplacesBodyTokenForKnownDevinEndpoint(t *testing.T) {
 	if errData != nil {
 		t.Fatal(errData)
 	}
-	body, errBody := json.Marshal(map[string]any{
-		"method":     http.MethodPost,
-		"url":        "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus",
-		"data":       string(data),
-		"draftToken": token,
-	})
+	body, errBody := json.Marshal(
+		map[string]any{
+			"method":     http.MethodPost,
+			"url":        "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus",
+			"data":       string(data),
+			"draftToken": token,
+		},
+	)
 	if errBody != nil {
 		t.Fatal(errBody)
 	}
@@ -1050,22 +1081,24 @@ func TestAPICallReplacesBodyTokenForKnownDevinEndpoint(t *testing.T) {
 func TestAPICallBlocksCrossHostRedirectForBodyToken(t *testing.T) {
 	requestCount := 0
 	server := httptest.NewTLSServer(
-		http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-			requestCount++
-			body, errRead := io.ReadAll(request.Body)
-			if errRead != nil {
-				t.Fatalf("ReadAll() error = %v", errRead)
-			}
-			if string(body) != `{"token":"draft-token"}` {
-				t.Fatalf("request body = %q", body)
-			}
-			http.Redirect(
-				w,
-				request,
-				"https://server.codeium.com/redirected",
-				http.StatusTemporaryRedirect,
-			)
-		}),
+		http.HandlerFunc(
+			func(w http.ResponseWriter, request *http.Request) {
+				requestCount++
+				body, errRead := io.ReadAll(request.Body)
+				if errRead != nil {
+					t.Fatalf("ReadAll() error = %v", errRead)
+				}
+				if string(body) != `{"token":"draft-token"}` {
+					t.Fatalf("request body = %q", body)
+				}
+				http.Redirect(
+					w,
+					request,
+					"https://server.codeium.com/redirected",
+					http.StatusTemporaryRedirect,
+				)
+			},
+		),
 	)
 	t.Cleanup(server.Close)
 	installAPICallTLSTestTransport(t, server)
@@ -1159,7 +1192,8 @@ func TestAPICallRejectsUnsafeDeepSeekRedirects(t *testing.T) {
 					h.APICall,
 					http.MethodPost,
 					"/api-call",
-					`{"method":"GET","url":"https://api.deepseek.com/models","header":{"Authorization":"Bearer $TOKEN$"},"draftToken":"draft-token"}`,
+					`{"method":"GET","url":"https://api.deepseek.com/models","header":{"Authorization":"`+
+						`Bearer $TOKEN$"},"draftToken":"draft-token"}`,
 				)
 				if recorder.Code != http.StatusBadGateway {
 					t.Fatalf("APICall status = %d, want 502: %s", recorder.Code, recorder.Body.String())
@@ -1199,7 +1233,8 @@ func TestAPICallAllowsDeepSeekDefaultPortRedirect(t *testing.T) {
 		h.APICall,
 		http.MethodPost,
 		"/api-call",
-		`{"method":"GET","url":"https://api.deepseek.com/models","header":{"Authorization":"Bearer $TOKEN$"},"draftToken":"draft-token"}`,
+		`{"method":"GET","url":"https://api.deepseek.com/models","header":{"Authorization":"Bearer $TOKEN$"},`+
+			`"draftToken":"draft-token"}`,
 	)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("APICall status = %d, want 200: %s", recorder.Code, recorder.Body.String())
@@ -1209,8 +1244,16 @@ func TestAPICallAllowsDeepSeekDefaultPortRedirect(t *testing.T) {
 	}
 }
 
+func installAPICallTestResolver(t *testing.T) {
+	t.Helper()
+	previousResolver := net.DefaultResolver
+	net.DefaultResolver = catalogReceiptTestResolver(t)
+	t.Cleanup(func() { net.DefaultResolver = previousResolver })
+}
+
 func installAPICallTLSTestTransport(t *testing.T, server *httptest.Server) {
 	t.Helper()
+	installAPICallTestResolver(t)
 	transport, ok := server.Client().Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("test server transport = %T", server.Client().Transport)
@@ -1339,18 +1382,20 @@ func TestAPICallTransportExplicitDirectDoesNotInherit(t *testing.T) {
 	h := &Handler{cfg: cfg}
 	auth := &coreauth.Auth{ProxyURL: "http://8.8.4.4:8080"}
 	for _, mode := range []string{"direct", "none"} {
-		t.Run(mode, func(t *testing.T) {
-			transport, ok := h.apiCallTransport(cfg, auth, mode).(*http.Transport)
-			if !ok {
-				t.Fatalf("transport type = %T, want *http.Transport", h.apiCallTransport(cfg, auth, mode))
-			}
-			if transport.Proxy != nil {
-				t.Fatalf("%s request proxy inherited a lower-priority proxy", mode)
-			}
-			if got := h.apiCallProxyURL(cfg, auth, mode); got != mode {
-				t.Fatalf("OAuth proxy = %q, want %q", got, mode)
-			}
-		})
+		t.Run(
+			mode, func(t *testing.T) {
+				transport, ok := h.apiCallTransport(cfg, auth, mode).(*http.Transport)
+				if !ok {
+					t.Fatalf("transport type = %T, want *http.Transport", h.apiCallTransport(cfg, auth, mode))
+				}
+				if transport.Proxy != nil {
+					t.Fatalf("%s request proxy inherited a lower-priority proxy", mode)
+				}
+				if got := h.apiCallProxyURL(cfg, auth, mode); got != mode {
+					t.Fatalf("OAuth proxy = %q, want %q", got, mode)
+				}
+			},
+		)
 	}
 }
 
@@ -1412,6 +1457,7 @@ func proxyURLForTransport(t *testing.T, rt http.RoundTripper) string {
 	if transport.Proxy == nil {
 		t.Fatal("expected proxy function")
 	}
+	//goland:noinspection HttpUrlsUsage
 	req := httptest.NewRequest(http.MethodGet, "http://example.com", nil)
 	proxyURL, err := transport.Proxy(req)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -45,6 +46,7 @@ func putStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
 	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
@@ -54,6 +56,7 @@ func putStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 			Items []T `json:"items"`
 		}
 		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(400, gin.H{"error": "invalid body"})
 			return
 		}
@@ -100,6 +103,7 @@ func putStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -108,11 +112,13 @@ func postStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T])
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
 	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read body"})
 		return
 	}
 	var submitted T
 	if err = json.Unmarshal(data, &submitted); err != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
@@ -151,6 +157,7 @@ func postStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T])
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusCreated, gin.H{"status": "created"})
 	}
 }
@@ -224,12 +231,14 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
 		data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 		if err != nil {
+			rejectMutation(mutationRequestContext(c))
 			c.JSON(400, gin.H{"error": "failed to read body"})
 			return
 		}
 		if len(strings.TrimSpace(string(data))) > 0 {
 			var body map[string]json.RawMessage
 			if err = json.Unmarshal(data, &body); err != nil {
+				rejectMutation(mutationRequestContext(c))
 				c.JSON(400, gin.H{"error": "invalid body"})
 				return
 			}
@@ -249,6 +258,7 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 	}
 
 	if !hasMatch && !hasIndex {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": fmt.Sprintf("missing %s or index", r.matchQueryParam)})
 		return
 	}
@@ -304,6 +314,7 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -328,8 +339,8 @@ func deleteStructEntryIndex(c *gin.Context) (int, bool) {
 	if idxStr == "" {
 		return 0, false
 	}
-	var idx int
-	if _, err := fmt.Sscanf(idxStr, "%d", &idx); err != nil {
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil {
 		return 0, false
 	}
 	return idx, true
@@ -369,6 +380,7 @@ func patchStructEntry[T any](
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
 	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
@@ -378,6 +390,7 @@ func patchStructEntry[T any](
 		Value json.RawMessage `json:"value"`
 	}
 	if err = json.Unmarshal(data, &envelope); err != nil || len(envelope.Value) == 0 {
+		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
@@ -400,6 +413,7 @@ func patchStructEntry[T any](
 			if stableRaw, ok := raw[r.stableMatchBodyField]; ok {
 				var s string
 				if err = json.Unmarshal(stableRaw, &s); err != nil {
+					rejectMutation(mutationRequestContext(c))
 					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid stable item identity"})
 					return
 				}
@@ -486,6 +500,7 @@ func patchStructEntry[T any](
 			return nil
 		},
 	); ok {
+		completeConfigMutation(mutationRequestContext(c))
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }

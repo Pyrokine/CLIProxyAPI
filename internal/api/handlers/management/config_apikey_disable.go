@@ -31,13 +31,30 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, target *coreauth.Auth, di
 	if cfg == nil || target == nil || !coreauth.IsConfigAPIKeyAuth(target) {
 		return newConfigMutationError(http.StatusConflict, "config credential status is not editable")
 	}
-	auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{
-		Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
-	})
+	auths, err := synthesizer.NewConfigSynthesizer().Synthesize(
+		&synthesizer.SynthesisContext{
+			Config: cfg, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("synthesize config credentials: %w", err)
 	}
+	compatEntries := make(map[int]int)
 	for _, auth := range auths {
+		if strings.HasPrefix(auth.ID, "openai-compatibility:") {
+			groupIndex, indexError := strconv.Atoi(auth.Attributes[coreauth.AttributeConfigIndex])
+			if indexError == nil && groupIndex >= 0 && groupIndex < len(cfg.OpenAICompatibility) {
+				entryIndex := compatEntries[groupIndex]
+				compatEntries[groupIndex]++
+				if auth.ID == target.ID && coreauth.IsConfigAPIKeyAuth(auth) {
+					if entryIndex < len(cfg.OpenAICompatibility[groupIndex].APIKeyEntries) {
+						cfg.OpenAICompatibility[groupIndex].APIKeyEntries[entryIndex].Disabled = disabled
+						return nil
+					}
+					break
+				}
+			}
+		}
 		if auth.ID != target.ID || !coreauth.IsConfigAPIKeyAuth(auth) {
 			continue
 		}

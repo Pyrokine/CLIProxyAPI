@@ -51,7 +51,7 @@ func TestMaskUsageEventAPIKeysPreservesAliasIdentityOnMaskCollision(t *testing.T
 		map[string]string{rawA: "first", rawB: "second"},
 		usageCredentialMasker{},
 	)
-	if masked[0].APIKey != util.HideAPIKey(rawA) || masked[1].APIKey != util.HideAPIKey(rawB) {
+	if masked[0].APIKey != "ab...yz" || masked[1].APIKey != "ab...yz" {
 		t.Fatalf("maskUsageEventAPIKeys API keys = %#v", masked)
 	}
 	if masked[0].APIKeyAlias != "first" || masked[1].APIKeyAlias != "second" {
@@ -63,6 +63,7 @@ func TestMaskUsageEventAPIKeysPreservesAliasIdentityOnMaskCollision(t *testing.T
 
 func TestUsageCredentialMaskerRedactsUntaggedHistory(t *testing.T) {
 	masker := usageCredentialMasker{}
+	//goland:noinspection SpellCheckingInspection
 	for _, raw := range []string{"custom-provider-secret-value", "abcd...wxyz", "user@example.com"} {
 		if got, want := masker.mask(raw), util.HideAPIKey(raw); got != want {
 			t.Fatalf("historical source %q = %q, want %q", raw, got, want)
@@ -209,7 +210,9 @@ debug: false
 			t.Fatalf("redactConfigYAML hid schema field %q: %s", visible, redacted)
 		}
 	}
-	for _, secret := range []string{"synthetic-key-only", "private-note", "hidden-provider-note", "custom-field", "hidden-plugin-value"} {
+	for _, secret := range []string{
+		"synthetic-key-only", "private-note", "hidden-provider-note", "custom-field", "hidden-plugin-value",
+	} {
 		if strings.Contains(string(redacted), secret) {
 			t.Fatalf("redactConfigYAML kept secret %q: %s", secret, redacted)
 		}
@@ -235,7 +238,9 @@ debug: false
 	if err != nil {
 		t.Fatalf("restoreConfigYAMLPlaceholders: %v", err)
 	}
-	if !strings.Contains(string(restored), "debug: true") || !strings.Contains(string(restored), "api-key: synthetic-key-only") {
+	if !strings.Contains(string(restored), "debug: true") || !strings.Contains(
+		string(restored), "api-key: synthetic-key-only",
+	) {
 		t.Fatalf("restored config lost edited setting or API key: %s", restored)
 	}
 }
@@ -559,7 +564,8 @@ func TestConfigYAMLOpaquePlaceholdersDoNotCollideWithMasks(t *testing.T) {
 	if err = yaml.Unmarshal(restored, &decoded); err != nil {
 		t.Fatalf("decode restored YAML: %v", err)
 	}
-	if decoded.ProxyURL != masked || len(decoded.APIKeys) != 2 || decoded.APIKeys[0] != rawA || decoded.APIKeys[1] != rawB {
+	if decoded.ProxyURL != masked || len(decoded.APIKeys) != 2 || decoded.APIKeys[0] != rawA ||
+		decoded.APIKeys[1] != rawB {
 		t.Fatalf("restored config = %#v", decoded)
 	}
 }
@@ -592,14 +598,16 @@ func TestConfigYAMLPlaceholderAvoidsSourceScalarCollision(t *testing.T) {
 	if decoded.ProxyURL != collidingScalar {
 		t.Fatalf("proxy-url = %q, want source scalar preserved", decoded.ProxyURL)
 	}
-	if len(decoded.APIKeys) != 1 || decoded.APIKeys[0] == collidingScalar || !isConfigYAMLPlaceholder(decoded.APIKeys[0]) {
+	if len(decoded.APIKeys) != 1 || decoded.APIKeys[0] == collidingScalar ||
+		!isConfigYAMLPlaceholder(decoded.APIKeys[0]) {
 		t.Fatalf("api-keys = %#v, want non-colliding placeholder", decoded.APIKeys)
 	}
 }
 
 func TestConfigYAMLPreservesBlockScalarValueOnRestore(t *testing.T) {
 	expected := "first line\n  indented line\nlast line\n"
-	source := []byte("plugins:\n  configs:\n    sample:\n      access-token: |\n        first line\n          indented line\n        last line\n")
+	source := []byte(("plugins:\n  configs:\n    sample:\n      access-token: |\n        firs" +
+		"t line\n          indented line\n        last line\n"))
 
 	redacted, err := redactConfigYAML(source)
 	if err != nil {
@@ -676,7 +684,9 @@ func TestConfigYAMLSeparatesValueAndMapKeySensitiveContainers(t *testing.T) {
 }
 
 func TestConfigYAMLRestoresPlaceholdersAfterMappingAndSequenceReorder(t *testing.T) {
-	source := []byte("port: 8317\ndebug: false\ngemini-api-key:\n  - api-key: sk-first-secret-value\n    base-url: https://first.example\n  - api-key: sk-second-secret-value\n    base-url: https://second.example\n")
+	source := []byte(("port: 8317\ndebug: false\ngemini-api-key:\n  - api-key: sk-first-secret-value\n    " +
+		"base-url: https://first.example\n  - api-key: sk-second-secret-value\n    base-url: https://second." +
+		"example\n"))
 	redacted, err := redactConfigYAML(source)
 	if err != nil {
 		t.Fatalf("redactConfigYAML: %v", err)
@@ -772,7 +782,9 @@ func TestConfigYAMLRejectsStaleAndMisplacedPlaceholders(t *testing.T) {
 
 	t.Run(
 		"structured sequence misplacement", func(t *testing.T) {
-			structuredSource := []byte("gemini-api-key:\n  - api-key: sk-first-secret-value\n    base-url: https://first.example\n  - api-key: sk-second-secret-value\n    base-url: https://second.example\n")
+			structuredSource := []byte(("gemini-api-key:\n  - api-key: sk-first-secret-value\n    base-url: htt" +
+				"ps://first.example\n  - api-key: sk-second-secret-value\n    base-url:" +
+				" https://second.example\n"))
 			structuredRedacted, errRedact := redactConfigYAML(structuredSource)
 			if errRedact != nil {
 				t.Fatalf("redactConfigYAML: %v", errRedact)

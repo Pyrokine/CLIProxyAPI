@@ -252,66 +252,81 @@ func TestPatchGeminiStyleKeyUsesBaseURLSelectorAndRejectsAmbiguity(t *testing.T)
 		},
 	}
 	for _, resource := range resources {
-		resource := resource
-		t.Run(resource.name+" unique base URL", func(t *testing.T) {
-			cfg := &config.Config{}
-			resource.set(cfg, []config.GeminiKey{
-				{APIKey: "shared-key", BaseURL: "https://first.example", Prefix: "first"},
-				{APIKey: "shared-key", BaseURL: "https://second.example", Prefix: "second"},
-			})
-			h := newConfigListTestHandler(t, cfg)
-			recorder := runConfigListRequest(
-				func(c *gin.Context) { resource.patch(h, c) },
-				http.MethodPatch,
-				resource.path+"?base-url=https://second.example",
-				`{"match":"shared-key","value":{"prefix":"updated"}}`,
-			)
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
-			}
-			entries := resource.get(h.configSnapshot())
-			if entries[0].Prefix != "first" || entries[1].Prefix != "updated" {
-				t.Fatalf("prefixes = %q, %q, want first, updated", entries[0].Prefix, entries[1].Prefix)
-			}
-		})
-		t.Run(resource.name+" missing base URL", func(t *testing.T) {
-			cfg := &config.Config{}
-			resource.set(cfg, []config.GeminiKey{
-				{APIKey: "shared-key", BaseURL: "https://first.example", Prefix: "first"},
-				{APIKey: "shared-key", BaseURL: "https://second.example", Prefix: "second"},
-			})
-			h := newConfigListTestHandler(t, cfg)
-			recorder := runConfigListRequest(
-				func(c *gin.Context) { resource.patch(h, c) },
-				http.MethodPatch,
-				resource.path,
-				`{"match":"shared-key","value":{"prefix":"updated"}}`,
-			)
-			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "multiple items match") {
-				t.Fatalf("status = %d, want ambiguous 400: %s", recorder.Code, recorder.Body.String())
-			}
-			entries := resource.get(h.configSnapshot())
-			if entries[0].Prefix != "first" || entries[1].Prefix != "second" {
-				t.Fatalf("ambiguous patch changed entries: %#v", entries)
-			}
-		})
-		t.Run(resource.name+" duplicate route selector", func(t *testing.T) {
-			cfg := &config.Config{}
-			resource.set(cfg, []config.GeminiKey{
-				{APIKey: "shared-key", BaseURL: "https://shared.example", Prefix: "first"},
-				{APIKey: "shared-key", BaseURL: "https://shared.example", Prefix: "second"},
-			})
-			h := newConfigListTestHandler(t, cfg)
-			recorder := runConfigListRequest(
-				func(c *gin.Context) { resource.patch(h, c) },
-				http.MethodPatch,
-				resource.path+"?base-url=https://shared.example",
-				`{"match":"shared-key","value":{"prefix":"updated"}}`,
-			)
-			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "multiple items match") {
-				t.Fatalf("status = %d, want ambiguous 400: %s", recorder.Code, recorder.Body.String())
-			}
-		})
+		t.Run(
+			resource.name+" unique base URL", func(t *testing.T) {
+				cfg := &config.Config{}
+				resource.set(
+					cfg, []config.GeminiKey{
+						{APIKey: "shared-key", BaseURL: "https://first.example", Prefix: "first"},
+						{APIKey: "shared-key", BaseURL: "https://second.example", Prefix: "second"},
+					},
+				)
+				h := newConfigListTestHandler(t, cfg)
+				recorder := runConfigListRequest(
+					func(c *gin.Context) { resource.patch(h, c) },
+					http.MethodPatch,
+					resource.path+"?base-url=https://second.example",
+					`{"match":"shared-key","value":{"prefix":"updated"}}`,
+				)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+				}
+				entries := resource.get(h.configSnapshot())
+				if entries[0].Prefix != "first" || entries[1].Prefix != "updated" {
+					t.Fatalf("prefixes = %q, %q, want first, updated", entries[0].Prefix, entries[1].Prefix)
+				}
+			},
+		)
+		t.Run(
+			resource.name+" missing base URL", func(t *testing.T) {
+				cfg := &config.Config{}
+				resource.set(
+					cfg, []config.GeminiKey{
+						{APIKey: "shared-key", BaseURL: "https://first.example", Prefix: "first"},
+						{APIKey: "shared-key", BaseURL: "https://second.example", Prefix: "second"},
+					},
+				)
+				h := newConfigListTestHandler(t, cfg)
+				recorder := runConfigListRequest(
+					func(c *gin.Context) { resource.patch(h, c) },
+					http.MethodPatch,
+					resource.path,
+					`{"match":"shared-key","value":{"prefix":"updated"}}`,
+				)
+				if recorder.Code != http.StatusBadRequest || !strings.Contains(
+					recorder.Body.String(), "multiple items match",
+				) {
+					t.Fatalf("status = %d, want ambiguous 400: %s", recorder.Code, recorder.Body.String())
+				}
+				entries := resource.get(h.configSnapshot())
+				if entries[0].Prefix != "first" || entries[1].Prefix != "second" {
+					t.Fatalf("ambiguous patch changed entries: %#v", entries)
+				}
+			},
+		)
+		t.Run(
+			resource.name+" duplicate route selector", func(t *testing.T) {
+				cfg := &config.Config{}
+				resource.set(
+					cfg, []config.GeminiKey{
+						{APIKey: "shared-key", BaseURL: "https://shared.example", Prefix: "first"},
+						{APIKey: "shared-key", BaseURL: "https://shared.example", Prefix: "second"},
+					},
+				)
+				h := newConfigListTestHandler(t, cfg)
+				recorder := runConfigListRequest(
+					func(c *gin.Context) { resource.patch(h, c) },
+					http.MethodPatch,
+					resource.path+"?base-url=https://shared.example",
+					`{"match":"shared-key","value":{"prefix":"updated"}}`,
+				)
+				if recorder.Code != http.StatusBadRequest || !strings.Contains(
+					recorder.Body.String(), "multiple items match",
+				) {
+					t.Fatalf("status = %d, want ambiguous 400: %s", recorder.Code, recorder.Body.String())
+				}
+			},
+		)
 	}
 }
 
@@ -339,65 +354,80 @@ func TestDeleteGeminiStyleKeyUsesBaseURLSelectorAndRejectsAmbiguity(t *testing.T
 		},
 	}
 	for _, resource := range resources {
-		resource := resource
-		t.Run(resource.name+" unique base URL", func(t *testing.T) {
-			cfg := &config.Config{}
-			resource.set(cfg, []config.GeminiKey{
-				{APIKey: "shared-key", BaseURL: "https://first.example", Prefix: "first"},
-				{APIKey: "shared-key", BaseURL: "https://second.example", Prefix: "second"},
-			})
-			h := newConfigListTestHandler(t, cfg)
-			recorder := runConfigListRequest(
-				func(c *gin.Context) { resource.delete(h, c) },
-				http.MethodDelete,
-				resource.path+"?api-key=shared-key&base-url=https://second.example",
-				"",
-			)
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
-			}
-			entries := resource.get(h.configSnapshot())
-			if len(entries) != 1 || entries[0].Prefix != "first" {
-				t.Fatalf("remaining entries = %#v, want first route", entries)
-			}
-		})
-		t.Run(resource.name+" missing base URL", func(t *testing.T) {
-			cfg := &config.Config{}
-			resource.set(cfg, []config.GeminiKey{
-				{APIKey: "shared-key", BaseURL: "https://first.example", Prefix: "first"},
-				{APIKey: "shared-key", BaseURL: "https://second.example", Prefix: "second"},
-			})
-			h := newConfigListTestHandler(t, cfg)
-			recorder := runConfigListRequest(
-				func(c *gin.Context) { resource.delete(h, c) },
-				http.MethodDelete,
-				resource.path+"?api-key=shared-key",
-				"",
-			)
-			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "multiple items match") {
-				t.Fatalf("status = %d, want ambiguous 400: %s", recorder.Code, recorder.Body.String())
-			}
-			if got := len(resource.get(h.configSnapshot())); got != 2 {
-				t.Fatalf("ambiguous delete left %d entries, want 2", got)
-			}
-		})
-		t.Run(resource.name+" duplicate route selector", func(t *testing.T) {
-			cfg := &config.Config{}
-			resource.set(cfg, []config.GeminiKey{
-				{APIKey: "shared-key", BaseURL: "https://shared.example", Prefix: "first"},
-				{APIKey: "shared-key", BaseURL: "https://shared.example", Prefix: "second"},
-			})
-			h := newConfigListTestHandler(t, cfg)
-			recorder := runConfigListRequest(
-				func(c *gin.Context) { resource.delete(h, c) },
-				http.MethodDelete,
-				resource.path+"?api-key=shared-key&base-url=https://shared.example",
-				"",
-			)
-			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "multiple items match") {
-				t.Fatalf("status = %d, want ambiguous 400: %s", recorder.Code, recorder.Body.String())
-			}
-		})
+		t.Run(
+			resource.name+" unique base URL", func(t *testing.T) {
+				cfg := &config.Config{}
+				resource.set(
+					cfg, []config.GeminiKey{
+						{APIKey: "shared-key", BaseURL: "https://first.example", Prefix: "first"},
+						{APIKey: "shared-key", BaseURL: "https://second.example", Prefix: "second"},
+					},
+				)
+				h := newConfigListTestHandler(t, cfg)
+				recorder := runConfigListRequest(
+					func(c *gin.Context) { resource.delete(h, c) },
+					http.MethodDelete,
+					resource.path+"?api-key=shared-key&base-url=https://second.example",
+					"",
+				)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+				}
+				entries := resource.get(h.configSnapshot())
+				if len(entries) != 1 || entries[0].Prefix != "first" {
+					t.Fatalf("remaining entries = %#v, want first route", entries)
+				}
+			},
+		)
+		t.Run(
+			resource.name+" missing base URL", func(t *testing.T) {
+				cfg := &config.Config{}
+				resource.set(
+					cfg, []config.GeminiKey{
+						{APIKey: "shared-key", BaseURL: "https://first.example", Prefix: "first"},
+						{APIKey: "shared-key", BaseURL: "https://second.example", Prefix: "second"},
+					},
+				)
+				h := newConfigListTestHandler(t, cfg)
+				recorder := runConfigListRequest(
+					func(c *gin.Context) { resource.delete(h, c) },
+					http.MethodDelete,
+					resource.path+"?api-key=shared-key",
+					"",
+				)
+				if recorder.Code != http.StatusBadRequest || !strings.Contains(
+					recorder.Body.String(), "multiple items match",
+				) {
+					t.Fatalf("status = %d, want ambiguous 400: %s", recorder.Code, recorder.Body.String())
+				}
+				if got := len(resource.get(h.configSnapshot())); got != 2 {
+					t.Fatalf("ambiguous delete left %d entries, want 2", got)
+				}
+			},
+		)
+		t.Run(
+			resource.name+" duplicate route selector", func(t *testing.T) {
+				cfg := &config.Config{}
+				resource.set(
+					cfg, []config.GeminiKey{
+						{APIKey: "shared-key", BaseURL: "https://shared.example", Prefix: "first"},
+						{APIKey: "shared-key", BaseURL: "https://shared.example", Prefix: "second"},
+					},
+				)
+				h := newConfigListTestHandler(t, cfg)
+				recorder := runConfigListRequest(
+					func(c *gin.Context) { resource.delete(h, c) },
+					http.MethodDelete,
+					resource.path+"?api-key=shared-key&base-url=https://shared.example",
+					"",
+				)
+				if recorder.Code != http.StatusBadRequest || !strings.Contains(
+					recorder.Body.String(), "multiple items match",
+				) {
+					t.Fatalf("status = %d, want ambiguous 400: %s", recorder.Code, recorder.Body.String())
+				}
+			},
+		)
 	}
 }
 
