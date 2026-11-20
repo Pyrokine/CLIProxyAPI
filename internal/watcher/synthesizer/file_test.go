@@ -18,17 +18,26 @@ import (
 
 func TestFileSynthesizerQuotaMaterialIdentity(t *testing.T) {
 	dir := t.TempDir()
-	ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: dir, Now: time.Now(), IDGenerator: NewStableIDGenerator()}
+	ctx := &SynthesisContext{
+		Config: &config.Config{}, AuthDir: dir, Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+	}
 	var previous string
 	for _, serial := range []string{"7", "9007199254740992", "9007199254740993"} {
-		raw := []byte(`{"type":"codex","access_token":"synthetic","priority":7,"request-retry":1,"credential_serial":` + serial + `}`)
+		raw := []byte(
+			(`{"type":"codex","access_token":"synthetic","priority":7,` +
+				`"request-retry":1,"credential_serial":`) +
+				serial +
+				`}`,
+		)
 		auths, err := SynthesizeAuthFile(ctx, filepath.Join(dir, "codex-material.json"), raw)
 		if err != nil || len(auths) != 1 {
 			t.Fatalf("synthesize exact source: count=%d err=%v", len(auths), err)
 		}
 		auth := auths[0]
 		revision, equivalent, err := coreauth.QuotaCredentialRevisions(auth)
-		if err != nil || revision == previous || slices.Contains(equivalent, auth.Attributes[coreauth.PersistedSHA256Attribute]) != (serial == "7") {
+		if err != nil || revision == previous || slices.Contains(
+			equivalent, auth.Attributes[coreauth.PersistedSHA256Attribute],
+		) != (serial == "7") {
 			t.Fatalf("source material or numeric legacy isolation changed: %v", err)
 		}
 		var expected any = json.Number(serial)
@@ -141,6 +150,7 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 		t.Errorf("expected prefix test-prefix, got %s", auths[0].Prefix)
 	}
 	if auths[0].ProxyURL != "http://proxy.local" {
+		//goland:noinspection HttpUrlsUsage
 		t.Errorf("expected proxy_url http://proxy.local, got %s", auths[0].ProxyURL)
 	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
@@ -173,7 +183,11 @@ func TestFileSynthesizerSeparatesKimiServiceCredentials(t *testing.T) {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-	auths, err := NewFileSynthesizer().Synthesize(&SynthesisContext{Config: &config.Config{}, AuthDir: dir, Now: time.Now()})
+	auths, err := NewFileSynthesizer().Synthesize(
+		&SynthesisContext{
+			Config: &config.Config{}, AuthDir: dir, Now: time.Now(),
+		},
+	)
 	if err != nil || len(auths) != 2 {
 		t.Fatalf("Kimi credentials: auths=%#v error=%v", auths, err)
 	}
@@ -259,7 +273,9 @@ func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 
 func TestSynthesizeGeminiVirtualAuthInheritsCredentialAliasesAndRules(t *testing.T) {
 	ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: t.TempDir(), Now: time.Now()}
-	data := []byte(`{"type":"gemini","project_id":"first,second","model-aliases":[{"name":"gemini-2.5-pro","alias":"project-pro","fork":true}],"request-scoped-errors":[{"status":429,"match":["quota"],"action":"stop"}]}`)
+	data := []byte((`{"type":"gemini","project_id":"first,second","model-aliases":[{"name":"gemini-2.5-pro","` +
+		`alias":"project-pro","fork":true}],"request-scoped-errors":[{"status":429,"match":["quota"],"action"` +
+		`:"stop"}]}`))
 	auths, err := SynthesizeAuthFile(ctx, filepath.Join(ctx.AuthDir, "gemini.json"), data)
 	if err != nil || len(auths) != 3 {
 		t.Fatalf("auths = %#v error = %v", auths, err)
@@ -277,8 +293,10 @@ func TestSynthesizeGeminiVirtualAuthInheritsCredentialAliasesAndRules(t *testing
 
 func TestSynthesizeAuthFileRejectsInvalidCredentialAliases(t *testing.T) {
 	ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: t.TempDir(), Now: time.Now()}
-	_, err := SynthesizeAuthFile(ctx, filepath.Join(ctx.AuthDir, "invalid.json"),
-		[]byte(`{"type":"claude","model_aliases":[{"name":"claude-sonnet-5-5"}]}`))
+	_, err := SynthesizeAuthFile(
+		ctx, filepath.Join(ctx.AuthDir, "invalid.json"),
+		[]byte(`{"type":"claude","model_aliases":[{"name":"claude-sonnet-5-5"}]}`),
+	)
 	if err == nil || !strings.Contains(err.Error(), "model_aliases") {
 		t.Fatalf("invalid credential aliases: %v", err)
 	}
@@ -378,6 +396,7 @@ func TestFileSynthesizer_Synthesize_RelativeID(t *testing.T) {
 }
 
 func TestFileSynthesizer_Synthesize_PrefixValidation(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	tests := []struct {
 		name       string
 		prefix     string
@@ -500,11 +519,13 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 
 func codexPlanJWT(t *testing.T, planType string) string {
 	t.Helper()
-	claims, errMarshal := json.Marshal(map[string]any{
-		"https://api.openai.com/auth": map[string]any{
-			"chatgpt_plan_type": planType,
+	claims, errMarshal := json.Marshal(
+		map[string]any{
+			"https://api.openai.com/auth": map[string]any{
+				"chatgpt_plan_type": planType,
+			},
 		},
-	})
+	)
 	if errMarshal != nil {
 		t.Fatalf("marshal JWT claims: %v", errMarshal)
 	}
@@ -550,32 +571,34 @@ func TestFileSynthesizerCodexPlanTypeMetadataThenJWT(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			raw, errMarshal := json.Marshal(test.metadata)
-			if errMarshal != nil {
-				t.Fatalf("marshal auth metadata: %v", errMarshal)
-			}
-			authDir := t.TempDir()
-			auths, errSynthesize := SynthesizeAuthFile(
-				&SynthesisContext{
-					Config:  &config.Config{},
-					AuthDir: authDir,
-					Now:     time.Now(),
-				},
-				filepath.Join(authDir, "codex.json"),
-				raw,
-			)
-			if errSynthesize != nil {
-				t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
-			}
-			if len(auths) != 1 {
-				t.Fatalf("SynthesizeAuthFile() auth count = %d, want 1", len(auths))
-			}
-			got, present := auths[0].Attributes["plan_type"]
-			if !present || got != test.want {
-				t.Fatalf("plan_type = %q present=%t, want %q", got, present, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				raw, errMarshal := json.Marshal(test.metadata)
+				if errMarshal != nil {
+					t.Fatalf("marshal auth metadata: %v", errMarshal)
+				}
+				authDir := t.TempDir()
+				auths, errSynthesize := SynthesizeAuthFile(
+					&SynthesisContext{
+						Config:  &config.Config{},
+						AuthDir: authDir,
+						Now:     time.Now(),
+					},
+					filepath.Join(authDir, "codex.json"),
+					raw,
+				)
+				if errSynthesize != nil {
+					t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+				}
+				if len(auths) != 1 {
+					t.Fatalf("SynthesizeAuthFile() auth count = %d, want 1", len(auths))
+				}
+				got, present := auths[0].Attributes["plan_type"]
+				if !present || got != test.want {
+					t.Fatalf("plan_type = %q present=%t, want %q", got, present, test.want)
+				}
+			},
+		)
 	}
 }
 
@@ -705,6 +728,7 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 			t.Errorf("expected prefix test-prefix, got %s", v.Prefix)
 		}
 		if v.ProxyURL != "http://proxy.local" {
+			//goland:noinspection HttpUrlsUsage
 			t.Errorf("expected proxy_url http://proxy.local, got %s", v.ProxyURL)
 		}
 		if vv, ok := v.Metadata["disable_cooling"].(bool); !ok || !vv {
@@ -721,7 +745,9 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 		}
 		if v.Attributes["gemini_virtual_project"] != projectIDs[i] {
 			t.Errorf(
-				"expected gemini_virtual_project=%s, got %s", projectIDs[i], v.Attributes["gemini_virtual_project"],
+				"expected gemini_virtual_project=%s, got %s",
+				projectIDs[i],
+				v.Attributes["gemini_virtual_project"],
 			)
 		}
 		if !strings.Contains(v.Label, "["+projectIDs[i]+"]") {
@@ -853,7 +879,7 @@ func TestSplitGeminiProjectIDs(t *testing.T) {
 func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create a gemini auth file with multiple projects
+	// Create a Gemini auth file with multiple projects
 	authData := map[string]any{
 		"type":       "gemini",
 		"email":      "multi@example.com",
@@ -904,7 +930,10 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 		}
 		if v.Attributes["gemini_virtual_parent"] != primary.ID {
 			t.Errorf(
-				"expected virtual %d parent to be %s, got %s", i, primary.ID, v.Attributes["gemini_virtual_parent"],
+				"expected virtual %d parent to be %s, got %s",
+				i,
+				primary.ID,
+				v.Attributes["gemini_virtual_parent"],
 			)
 		}
 		if gotPriority := v.Attributes["priority"]; gotPriority != "10" {
@@ -992,13 +1021,15 @@ func TestSynthesizeAuthFileRejectsInvalidSourceWeightBeforePluginParser(t *testi
 		Config:  &config.Config{},
 		AuthDir: t.TempDir(),
 		Now:     time.Now(),
-		PluginAuthParser: multiAuthParserFunc(func(
-			context.Context,
-			pluginapi.AuthParseRequest,
-		) ([]*coreauth.Auth, bool, error) {
-			called = true
-			return []*coreauth.Auth{{ID: "plugin-a", Provider: "plugin"}}, true, nil
-		}),
+		PluginAuthParser: multiAuthParserFunc(
+			func(
+				context.Context,
+				pluginapi.AuthParseRequest,
+			) ([]*coreauth.Auth, bool, error) {
+				called = true
+				return []*coreauth.Auth{{ID: "plugin-a", Provider: "plugin"}}, true, nil
+			},
+		),
 	}
 	fullPath := filepath.Join(ctx.AuthDir, "plugin.json")
 
@@ -1021,15 +1052,17 @@ func TestSynthesizeAuthFileFiltersInvalidPluginChildWeight(t *testing.T) {
 		Config:  &config.Config{},
 		AuthDir: tempDir,
 		Now:     time.Now(),
-		PluginAuthParser: multiAuthParserFunc(func(
-			context.Context,
-			pluginapi.AuthParseRequest,
-		) ([]*coreauth.Auth, bool, error) {
-			return []*coreauth.Auth{
-				{ID: "invalid", Provider: "plugin", Metadata: map[string]any{"weight": 1.5}},
-				{ID: "valid", Provider: "plugin"},
-			}, true, nil
-		}),
+		PluginAuthParser: multiAuthParserFunc(
+			func(
+				context.Context,
+				pluginapi.AuthParseRequest,
+			) ([]*coreauth.Auth, bool, error) {
+				return []*coreauth.Auth{
+					{ID: "invalid", Provider: "plugin", Metadata: map[string]any{"weight": 1.5}},
+					{ID: "valid", Provider: "plugin"},
+				}, true, nil
+			},
+		),
 	}
 
 	auths, errSynthesize := SynthesizeAuthFile(
@@ -1053,43 +1086,138 @@ func (storage *filePriorityTestStorage) SetMetadata(metadata map[string]any) {
 	storage.metadata = metadata
 }
 
+func TestSynthesizeAuthFileOriginalPluginMultiAuthInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, fileName, raw string
+		disabled, empty               bool
+	}{
+		{
+			"expanded", "gemini-cli", "geminicli.json",
+			`{"type":"gemini-cli","excluded_models":["model-a"],"headers":{"X-Test":"value"}}`, false, false,
+		},
+		{"source disabled", "gemini-cli", "geminicli.json", `{"type":"gemini-cli","disabled":true}`, true, false},
+		{"handled empty", "codex", "codex.json", `{"type":"codex","access_token":"token"}`, false, true},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				authDir := t.TempDir()
+				path := filepath.Join(authDir, tc.fileName)
+				ctx := &SynthesisContext{
+					Config: &config.Config{}, AuthDir: authDir,
+					Now: time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+					PluginAuthParser: multiAuthParserFunc(
+						func(
+							_ context.Context, req pluginapi.AuthParseRequest,
+						) ([]*coreauth.Auth, bool, error) {
+							if req.Provider != tc.provider || req.Path != path || req.FileName != tc.fileName ||
+								string(req.RawJSON) != tc.raw {
+								t.Fatalf("file context changed: %#v", req)
+							}
+							if tc.empty {
+								return nil, true, nil
+							}
+							return []*coreauth.Auth{
+								{
+									ID: "geminicli.json", Provider: "gemini-cli", Metadata: map[string]any{
+										"type": "gemini-cli", "headers": map[string]any{"X-Test": "value"},
+									},
+								},
+								nil,
+								{
+									ID: "geminicli-project-a.json", Provider: "gemini-cli", Metadata: map[string]any{
+										"type": "gemini-cli", "project_id": "project-a",
+										"headers": map[string]any{"X-Test": "value"},
+									},
+								},
+							}, true, nil
+						},
+					),
+				}
+				auths, err := SynthesizeAuthFile(ctx, path, []byte(tc.raw))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.empty {
+					if len(auths) != 0 {
+						t.Fatalf("handled empty fell back to built-in parsing: %#v", auths)
+					}
+					return
+				}
+				if len(auths) != 2 {
+					t.Fatalf("expanded auth count = %d", len(auths))
+				}
+				for _, auth := range auths {
+					if !coreauth.IsPluginVirtualAuth(auth) ||
+						auth.Attributes[coreauth.AttributeVirtualSource] !=
+							path ||
+						auth.Attributes[coreauth.AttributePath] != path ||
+						auth.Attributes[coreauth.AttributeSource] != path ||
+						auth.Attributes["header:X-Test"] != "value" ||
+						auth.Attributes["auth_kind"] != "oauth" {
+						t.Fatalf("auth %s source/header context = %#v", auth.ID, auth.Attributes)
+					}
+					if tc.disabled &&
+						(!auth.Disabled ||
+							auth.Status !=
+								coreauth.StatusDisabled ||
+							auth.Metadata["disabled"] !=
+								true) {
+						t.Fatalf("auth %s disabled state = %#v", auth.ID, auth)
+					}
+				}
+				if auths[0].EnsureIndex() == "" || auths[0].EnsureIndex() == auths[1].EnsureIndex() ||
+					auths[1].ID != "geminicli-project-a.json" || auths[1].Metadata["project_id"] != "project-a" {
+					t.Fatalf("expanded identity/project changed: %#v", auths)
+				}
+			},
+		)
+	}
+}
+
 func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 	tempDir := t.TempDir()
 	fullPath := filepath.Join(tempDir, "plugin.json")
-	raw := []byte(`{"type":"plugin","priority":11,"excluded_models":["model-a"],"proxy-url":"http://proxy.test","headers":{"X-Test":"value"},"model_aliases":[{"name":"real","alias":"short","fork":true}],"request_scoped_errors":[{"status":429,"match":["quota"],"action":"stop"}]}`)
+	raw := []byte((`{"type":"plugin","priority":11,"excluded_models":["model-a"],"proxy-ur` +
+		`l":"http://proxy.test","headers":{"X-Test":"value"},"model_aliases":[{` +
+		`"name":"real","alias":"short","fork":true}],"request_scoped_errors":[{` +
+		`"status":429,"match":["quota"],"action":"stop"}]}`))
 	storage := &filePriorityTestStorage{}
 	ctx := &SynthesisContext{
 		Config:  &config.Config{},
 		AuthDir: tempDir,
 		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
-		PluginAuthParser: multiAuthParserFunc(func(
-			_ context.Context,
-			req pluginapi.AuthParseRequest,
-		) ([]*coreauth.Auth, bool, error) {
-			if req.Provider != "plugin" || req.Path != fullPath || req.FileName != "plugin.json" {
-				t.Fatalf("ParseAuths request = %#v", req)
-			}
-			return []*coreauth.Auth{
-				{
-					ID:         "plugin-a",
-					Provider:   "plugin",
-					FileName:   req.FileName,
-					Storage:    storage,
-					Attributes: map[string]string{"priority": "3"},
-					Metadata: map[string]any{
-						"type": "plugin", "request-retry": 2,
-						"headers": map[string]any{"X-Test": "value"},
+		PluginAuthParser: multiAuthParserFunc(
+			func(
+				_ context.Context,
+				req pluginapi.AuthParseRequest,
+			) ([]*coreauth.Auth, bool, error) {
+				if req.Provider != "plugin" || req.Path != fullPath || req.FileName != "plugin.json" {
+					t.Fatalf("ParseAuths request = %#v", req)
+				}
+				return []*coreauth.Auth{
+					{
+						ID:         "plugin-a",
+						Provider:   "plugin",
+						FileName:   req.FileName,
+						Storage:    storage,
+						Attributes: map[string]string{"priority": "3"},
+						Metadata: map[string]any{
+							"type": "plugin", "request-retry": 2,
+							"headers": map[string]any{"X-Test": "value"},
+						},
 					},
-				},
-				nil,
-				{
-					ID:       "plugin-b",
-					Provider: "plugin",
-					FileName: req.FileName,
-					Metadata: map[string]any{"type": "plugin", "account": "b", "headers": map[string]any{"X-Test": "value"}},
-				},
-			}, true, nil
-		}),
+					nil,
+					{
+						ID:       "plugin-b",
+						Provider: "plugin",
+						FileName: req.FileName,
+						Metadata: map[string]any{
+							"type": "plugin", "account": "b", "headers": map[string]any{"X-Test": "value"},
+						},
+					},
+				}, true, nil
+			},
+		),
 	}
 
 	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, raw)
@@ -1155,15 +1283,17 @@ func TestSynthesizeAuthFileAppliesSourceDisabledToPluginMultiAuths(t *testing.T)
 		Config:  &config.Config{},
 		AuthDir: tempDir,
 		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
-		PluginAuthParser: multiAuthParserFunc(func(
-			context.Context,
-			pluginapi.AuthParseRequest,
-		) ([]*coreauth.Auth, bool, error) {
-			return []*coreauth.Auth{
-				{ID: "plugin-a", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
-				{ID: "plugin-b", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
-			}, true, nil
-		}),
+		PluginAuthParser: multiAuthParserFunc(
+			func(
+				context.Context,
+				pluginapi.AuthParseRequest,
+			) ([]*coreauth.Auth, bool, error) {
+				return []*coreauth.Auth{
+					{ID: "plugin-a", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+					{ID: "plugin-b", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+				}, true, nil
+			},
+		),
 	}
 	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, []byte(`{"type":"plugin","disabled":true}`))
 	if errSynthesize != nil {
@@ -1191,12 +1321,14 @@ func TestSynthesizeAuthFilePluginHandledEmptyAndDuplicateIDs(t *testing.T) {
 		Config:  &config.Config{},
 		AuthDir: tempDir,
 		Now:     time.Now(),
-		PluginAuthParser: multiAuthParserFunc(func(
-			context.Context,
-			pluginapi.AuthParseRequest,
-		) ([]*coreauth.Auth, bool, error) {
-			return []*coreauth.Auth{}, true, nil
-		}),
+		PluginAuthParser: multiAuthParserFunc(
+			func(
+				context.Context,
+				pluginapi.AuthParseRequest,
+			) ([]*coreauth.Auth, bool, error) {
+				return []*coreauth.Auth{}, true, nil
+			},
+		),
 	}
 	auths, errSynthesize := SynthesizeAuthFile(emptyContext, fullPath, raw)
 	if errSynthesize != nil || len(auths) != 0 {
@@ -1207,15 +1339,17 @@ func TestSynthesizeAuthFilePluginHandledEmptyAndDuplicateIDs(t *testing.T) {
 		Config:  &config.Config{},
 		AuthDir: tempDir,
 		Now:     time.Now(),
-		PluginAuthParser: multiAuthParserFunc(func(
-			context.Context,
-			pluginapi.AuthParseRequest,
-		) ([]*coreauth.Auth, bool, error) {
-			return []*coreauth.Auth{
-				{ID: "duplicate", Provider: "plugin"},
-				{ID: "duplicate", Provider: "plugin"},
-			}, true, nil
-		}),
+		PluginAuthParser: multiAuthParserFunc(
+			func(
+				context.Context,
+				pluginapi.AuthParseRequest,
+			) ([]*coreauth.Auth, bool, error) {
+				return []*coreauth.Auth{
+					{ID: "duplicate", Provider: "plugin"},
+					{ID: "duplicate", Provider: "plugin"},
+				}, true, nil
+			},
+		),
 	}
 	if _, errSynthesize = SynthesizeAuthFile(duplicateContext, fullPath, raw); errSynthesize == nil ||
 		!strings.Contains(errSynthesize.Error(), "duplicate auth id") {

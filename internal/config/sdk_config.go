@@ -109,6 +109,11 @@ func (cfg *SDKConfig) FilterAPIKeyProviders(apiKey string, providers []string) [
 		provider = strings.ToLower(strings.TrimSpace(provider))
 		if provider != "" {
 			allowed[provider] = struct{}{}
+			if provider != "*" && provider != "openai-compatibility" && !strings.HasPrefix(
+				provider, "openai-compatible-",
+			) {
+				allowed["openai-compatible-"+provider] = struct{}{}
+			}
 		}
 	}
 	if _, all := allowed["*"]; all {
@@ -280,13 +285,14 @@ func matchAPIKeyModelPattern(pattern string, model string) bool {
 	return strings.HasSuffix(model, last)
 }
 
+//goland:noinspection LongLine
 type SDKConfig struct {
-	Client ClientConfig `yaml:"client" json:"client,omitempty"`
+	Client ClientConfig `yaml:"client" json:"client"`
 
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
-	ModelCatalog ModelCatalogConfig `yaml:"model-catalog,omitempty" json:"model-catalog,omitempty"`
+	ModelCatalog ModelCatalogConfig `yaml:"model-catalog,omitempty" json:"model-catalog"`
 
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
@@ -325,7 +331,8 @@ type SDKConfig struct {
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
 
 	// DisableImageGeneration controls whether image generation endpoints and tools are available.
-	// "off" enables them; "all" returns 404 for image endpoints and strips chat tools; "chat" strips chat tools only; "passthrough" keeps client-supplied tools untouched.
+	// "off" enables them; "all" returns 404 for image endpoints and strips chat tools; "chat" strips chat tools
+	// only; "passthrough" keeps client-supplied tools untouched.
 	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
 	// GPTImage2BaseModel sets the base model used by the legacy hosted image_generation tool path
@@ -346,7 +353,7 @@ type SDKConfig struct {
 }
 
 type ClientConfig struct {
-	Codex CodexClientConfig `yaml:"codex" json:"codex,omitempty"`
+	Codex CodexClientConfig `yaml:"codex" json:"codex"`
 }
 
 type CodexClientConfig struct {

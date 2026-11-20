@@ -106,7 +106,8 @@ func TestOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 }
 
 func TestOpenAICompatibilityRedactsEndpointLabels(t *testing.T) {
-	const endpoint = "https://fixture-user:fixture-pass@compat.example:8443/private?token=fixture-token#fixture-fragment"
+	const endpoint = "https://fixture-user:fixture-pass@compat.example:8443/" +
+		"private?token=fixture-token#fixture-fragment"
 	entry := config.OpenAICompatibility{BaseURL: endpoint}
 	changed := entry
 	changed.Disabled = true
@@ -120,21 +121,25 @@ func TestOpenAICompatibilityRedactsEndpointLabels(t *testing.T) {
 		{"updated", []config.OpenAICompatibility{entry}, []config.OpenAICompatibility{changed}, 1},
 		{"duplicates", []config.OpenAICompatibility{entry, entry}, []config.OpenAICompatibility{changed, changed}, 2},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			details := BuildConfigChangeDetails(
-				&config.Config{OpenAICompatibility: tc.old},
-				&config.Config{OpenAICompatibility: tc.new},
-			)
-			joined := strings.Join(details, "\n")
-			if count := strings.Count(joined, "https://compat.example:8443"); count != tc.labelCount {
-				t.Fatalf("redacted labels = %d, want %d: %s", count, tc.labelCount, joined)
-			}
-			for _, secret := range []string{"fixture-user", "fixture-pass", "/private", "fixture-token", "fixture-fragment"} {
-				if strings.Contains(joined, secret) {
-					t.Fatalf("config change details leaked %q: %s", secret, joined)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				details := BuildConfigChangeDetails(
+					&config.Config{OpenAICompatibility: tc.old},
+					&config.Config{OpenAICompatibility: tc.new},
+				)
+				joined := strings.Join(details, "\n")
+				if count := strings.Count(joined, "https://compat.example:8443"); count != tc.labelCount {
+					t.Fatalf("redacted labels = %d, want %d: %s", count, tc.labelCount, joined)
 				}
-			}
-		})
+				for _, secret := range []string{
+					"fixture-user", "fixture-pass", "/private", "fixture-token", "fixture-fragment",
+				} {
+					if strings.Contains(joined, secret) {
+						t.Fatalf("config change details leaked %q: %s", secret, joined)
+					}
+				}
+			},
+		)
 	}
 	key, label := openAICompatKey(entry, 0)
 	if key != "base:"+endpoint || label != "https://compat.example:8443" || entry.BaseURL != endpoint {

@@ -8,12 +8,14 @@ import (
 )
 
 func TestConfigSynthesizerProjectsRequestScopedErrorRules(t *testing.T) {
-	rule := []config.RequestScopedErrorRule{{
-		Status:      400,
-		Match:       []string{"limit"},
-		MatchRegexr: []string{"^limit$"},
-		Action:      "stop",
-	}}
+	rule := []config.RequestScopedErrorRule{
+		{
+			Status:      400,
+			Match:       []string{"limit"},
+			MatchRegexr: []string{"^limit$"},
+			Action:      "stop",
+		},
+	}
 	cfg := &config.Config{
 		GeminiKey:       []config.GeminiKey{{APIKey: "gemini", RequestScopedErrors: rule}},
 		InteractionsKey: []config.GeminiKey{{APIKey: "interactions", RequestScopedErrors: rule}},
@@ -21,15 +23,20 @@ func TestConfigSynthesizerProjectsRequestScopedErrorRules(t *testing.T) {
 		CodexKey:        []config.CodexKey{{APIKey: "codex", RequestScopedErrors: rule}},
 		XAIKey:          []config.CodexKey{{APIKey: "xai", RequestScopedErrors: rule}},
 		OpenAICompatibility: []config.OpenAICompatibility{
-			{Name: "compat-with-key", BaseURL: "https://with-key.example/v1", APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "compat"}}, RequestScopedErrors: rule},
+			{
+				Name: "compat-with-key", BaseURL: "https://with-key.example/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "compat"}}, RequestScopedErrors: rule,
+			},
 			{Name: "compat-without-key", BaseURL: "https://without-key.example/v1", RequestScopedErrors: rule},
 		},
 		VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "vertex", BaseURL: "https://vertex.example/v1"}},
 	}
 
-	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
-		Config: cfg, Now: time.Unix(100, 0), IDGenerator: NewStableIDGenerator(),
-	})
+	auths, err := NewConfigSynthesizer().Synthesize(
+		&SynthesisContext{
+			Config: cfg, Now: time.Unix(100, 0), IDGenerator: NewStableIDGenerator(),
+		},
+	)
 	if err != nil {
 		t.Fatalf("Synthesize() error = %v", err)
 	}
@@ -78,13 +85,17 @@ func TestRequestScopedErrorRulesDoNotChangeStableAuthIdentity(t *testing.T) {
 			ClaudeKey:       []config.ClaudeKey{{APIKey: "claude", RequestScopedErrors: rules}},
 			CodexKey:        []config.CodexKey{{APIKey: "codex", RequestScopedErrors: rules}},
 			XAIKey:          []config.CodexKey{{APIKey: "xai", RequestScopedErrors: rules}},
-			OpenAICompatibility: []config.OpenAICompatibility{{
-				Name: "compat", BaseURL: "https://compat.example/v1", RequestScopedErrors: rules,
-			}},
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name: "compat", BaseURL: "https://compat.example/v1", RequestScopedErrors: rules,
+				},
+			},
 		}
-		auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
-			Config: cfg, Now: time.Unix(100, 0), IDGenerator: NewStableIDGenerator(),
-		})
+		auths, err := NewConfigSynthesizer().Synthesize(
+			&SynthesisContext{
+				Config: cfg, Now: time.Unix(100, 0), IDGenerator: NewStableIDGenerator(),
+			},
+		)
 		if err != nil {
 			t.Fatalf("Synthesize() error = %v", err)
 		}

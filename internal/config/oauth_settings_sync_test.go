@@ -18,41 +18,68 @@ func TestOAuthSettingsFlatDecoding(t *testing.T) {
 		decode func([]byte, any) error
 		want   []OAuthModelSetting
 	}{
-		{name: "single YAML", raw: "oauth-settings:\n  codex:\n    - name: gpt-6-sol\n      max-context-length: 524288\n", decode: yaml.Unmarshal, want: []OAuthModelSetting{{Name: "gpt-6-sol", MaxContextLength: 524288}}},
-		{name: "single JSON", raw: `{"oauth-settings":{"codex":[{"name":"gpt-6-sol","max-context-length":524288}]}}`, decode: json.Unmarshal, want: []OAuthModelSetting{{Name: "gpt-6-sol", MaxContextLength: 524288}}},
-		{name: "multiple YAML", raw: "oauth-settings:\n  codex:\n    - name: gpt-6-sol\n      max-context-length: 524288\n    - name: deepseek-v4-flash\n      max-context-length: 1048576\n", decode: yaml.Unmarshal, want: []OAuthModelSetting{{Name: "gpt-6-sol", MaxContextLength: 524288}, {Name: "deepseek-v4-flash", MaxContextLength: 1048576}}},
-		{name: "multiple JSON", raw: `{"oauth-settings":{"codex":[{"name":"gpt-6-sol","max-context-length":524288},{"name":"deepseek-v4-flash","max-context-length":1048576}]}}`, decode: json.Unmarshal, want: []OAuthModelSetting{{Name: "gpt-6-sol", MaxContextLength: 524288}, {Name: "deepseek-v4-flash", MaxContextLength: 1048576}}},
+		{
+			name:   "single YAML",
+			raw:    "oauth-settings:\n  codex:\n    - name: gpt-6-sol\n      max-context-length: 524288\n",
+			decode: yaml.Unmarshal, want: []OAuthModelSetting{{Name: "gpt-6-sol", MaxContextLength: 524288}},
+		},
+		{
+			name: "single JSON", raw: `{"oauth-settings":{"codex":[{"name":"gpt-6-sol","max-context-length":524288}]}}`,
+			decode: json.Unmarshal, want: []OAuthModelSetting{{Name: "gpt-6-sol", MaxContextLength: 524288}},
+		},
+		{
+			name: "multiple YAML",
+			raw: "oauth-settings:\n  codex:\n    - name: gpt-6-sol\n      max-context-length: 524288\n    - " +
+				"name: deepseek-v4-flash\n      max-context-length: 1048576\n",
+			decode: yaml.Unmarshal, want: []OAuthModelSetting{
+				{Name: "gpt-6-sol", MaxContextLength: 524288}, {Name: "deepseek-v4-flash", MaxContextLength: 1048576},
+			},
+		},
+		{
+			name: "multiple JSON",
+			raw: `{"oauth-settings":{"codex":[{"name":"gpt-6-sol","max-context-length":5` +
+				`24288},{"name":"deepseek-v4-flash","max-context-length":1048576}]}}`,
+			decode: json.Unmarshal, want: []OAuthModelSetting{
+				{Name: "gpt-6-sol", MaxContextLength: 524288}, {Name: "deepseek-v4-flash", MaxContextLength: 1048576},
+			},
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var cfg Config
-			if err := tc.decode([]byte(tc.raw), &cfg); err != nil {
-				t.Fatal(err)
-			}
-			cfg.SanitizeOAuthSettings()
-			if len(cfg.OAuthSettings) != 1 || !slices.Equal(cfg.OAuthSettings["codex"], tc.want) {
-				t.Fatalf("OAuth settings = %+v, want %+v", cfg.OAuthSettings, tc.want)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				var cfg Config
+				if err := tc.decode([]byte(tc.raw), &cfg); err != nil {
+					t.Fatal(err)
+				}
+				cfg.SanitizeOAuthSettings()
+				if len(cfg.OAuthSettings) != 1 || !slices.Equal(cfg.OAuthSettings["codex"], tc.want) {
+					t.Fatalf("OAuth settings = %+v, want %+v", cfg.OAuthSettings, tc.want)
+				}
+			},
+		)
 	}
 }
 
 func TestOAuthSettingsSanitizePreservesInterleavedRulePriority(t *testing.T) {
-	cfg := &Config{OAuthSettings: map[string][]OAuthModelSetting{
-		" CODEX ": {
-			{Name: " upstream ", MaxContextLength: 524288},
-			{Name: "public", MaxContextLength: 600000},
-			{Name: "   ", MaxContextLength: 12345},
-			{Name: "upstream", MaxContextLength: 1048576},
+	cfg := &Config{
+		OAuthSettings: map[string][]OAuthModelSetting{
+			" CODEX ": {
+				{Name: " upstream ", MaxContextLength: 524288},
+				{Name: "public", MaxContextLength: 600000},
+				{Name: "   ", MaxContextLength: 12345},
+				{Name: "upstream", MaxContextLength: 1048576},
+			},
+			"  ":     {{Name: "ignored", MaxContextLength: 100}},
+			"claude": nil,
 		},
-		"  ":     {{Name: "ignored", MaxContextLength: 100}},
-		"claude": nil,
-	}}
+	}
 	before := ResolveOAuthModelSetting(cfg.OAuthSettings[" CODEX "], "public", "upstream", "")
 	if before == nil || before.MaxContextLength != 1048576 {
 		t.Fatalf("pre-sanitize rule = %+v", before)
 	}
 	cfg.SanitizeOAuthSettings()
-	want := []OAuthModelSetting{{Name: "public", MaxContextLength: 600000}, {Name: "upstream", MaxContextLength: 1048576}}
+	want := []OAuthModelSetting{
+		{Name: "public", MaxContextLength: 600000}, {Name: "upstream", MaxContextLength: 1048576},
+	}
 	if len(cfg.OAuthSettings) != 1 || !slices.Equal(cfg.OAuthSettings["codex"], want) {
 		t.Fatalf("sanitized settings = %+v, want %+v", cfg.OAuthSettings, want)
 	}

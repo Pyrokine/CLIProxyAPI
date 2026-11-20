@@ -47,6 +47,36 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			),
 		)
 	}
+	if oldCfg.RedisUsageQueueRetentionSeconds != newCfg.RedisUsageQueueRetentionSeconds {
+		changes = append(
+			changes, fmt.Sprintf(
+				"redis-usage-queue-retention-seconds: %d -> %d", oldCfg.RedisUsageQueueRetentionSeconds,
+				newCfg.RedisUsageQueueRetentionSeconds,
+			),
+		)
+	}
+	if oldCfg.TransientErrorCooldownSeconds != newCfg.TransientErrorCooldownSeconds {
+		changes = append(
+			changes, fmt.Sprintf(
+				"transient-error-cooldown-seconds: %d -> %d", oldCfg.TransientErrorCooldownSeconds,
+				newCfg.TransientErrorCooldownSeconds,
+			),
+		)
+	}
+	if oldCfg.DisableClaudeCloakMode != newCfg.DisableClaudeCloakMode {
+		changes = append(
+			changes, fmt.Sprintf(
+				"disable-claude-cloak-mode: %t -> %t", oldCfg.DisableClaudeCloakMode, newCfg.DisableClaudeCloakMode,
+			),
+		)
+	}
+	if oldCfg.DisableImageGeneration != newCfg.DisableImageGeneration {
+		changes = append(
+			changes, fmt.Sprintf(
+				"disable-image-generation: %s -> %s", oldCfg.DisableImageGeneration, newCfg.DisableImageGeneration,
+			),
+		)
+	}
 	if oldCfg.DisableCooling != newCfg.DisableCooling {
 		changes = append(
 			changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling),
@@ -345,56 +375,99 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
 	}
-	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
-		changes = append(
-			changes, fmt.Sprintf("gemini-api-key count: %d -> %d", len(oldCfg.GeminiKey), len(newCfg.GeminiKey)),
-		)
-	} else {
-		for i := range oldCfg.GeminiKey {
-			o := oldCfg.GeminiKey[i]
-			n := newCfg.GeminiKey[i]
+	for _, provider := range []struct {
+		key, label string
+		old, new   []config.GeminiKey
+	}{
+		{"gemini-api-key", "gemini", oldCfg.GeminiKey, newCfg.GeminiKey},
+		{"interactions-api-key", "interactions", oldCfg.InteractionsKey, newCfg.InteractionsKey},
+	} {
+		if len(provider.old) != len(provider.new) {
+			changes = append(
+				changes, fmt.Sprintf("%s count: %d -> %d", provider.key, len(provider.old), len(provider.new)),
+			)
+		}
+		for i := 0; i < min(len(provider.old), len(provider.new)); i++ {
+			o := provider.old[i]
+			n := provider.new[i]
+			if o.Priority != n.Priority {
+				changes = append(
+					changes, fmt.Sprintf("%s[%d].priority: %d -> %d", provider.label, i, o.Priority, n.Priority),
+				)
+			}
+			if !reflect.DeepEqual(o.Weight, n.Weight) {
+				changes = append(
+					changes, fmt.Sprintf(
+						"%s[%d].weight: %s -> %s", provider.label, i, formatOptionalConfigValue(o.Weight),
+						formatOptionalConfigValue(n.Weight),
+					),
+				)
+			}
 			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"%s[%d].disable-cooling: %s -> %s", provider.label, i,
+						formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"%s[%d].request-retry: %s -> %s", provider.label, i, formatOptionalConfigValue(o.RequestRetry),
+						formatOptionalConfigValue(n.RequestRetry),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"%s[%d].request-scoped-errors: updated (%d -> %d entries)", provider.label, i,
+						len(o.RequestScopedErrors), len(n.RequestScopedErrors),
+					),
+				)
 			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf(
-						"gemini[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL),
+						"%s[%d].base-url: %s -> %s", provider.label, i, formatURL(o.BaseURL), formatURL(n.BaseURL),
 					),
 				)
 			}
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(
 					changes, fmt.Sprintf(
-						"gemini[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL),
+						"%s[%d].proxy-url: %s -> %s", provider.label, i, formatProxyURL(o.ProxyURL),
+						formatProxyURL(n.ProxyURL),
 					),
 				)
 			}
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(
 					changes, fmt.Sprintf(
-						"gemini[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix),
+						"%s[%d].prefix: %s -> %s", provider.label, i, strings.TrimSpace(o.Prefix),
+						strings.TrimSpace(n.Prefix),
 					),
 				)
 			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].api-key: updated", i))
+				changes = append(changes, fmt.Sprintf("%s[%d].api-key: updated", provider.label, i))
 			}
 			if !equalStringMap(o.Headers, n.Headers) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].headers: updated", i))
+				changes = append(changes, fmt.Sprintf("%s[%d].headers: updated", provider.label, i))
 			}
 			oldModels := summarizeGeminiModels(o.Models)
 			newModels := summarizeGeminiModels(n.Models)
 			if oldModels.hash != newModels.hash {
 				changes = append(
 					changes,
-					fmt.Sprintf("gemini[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count),
+					fmt.Sprintf(
+						"%s[%d].models: updated (%d -> %d entries)",
+						provider.label,
+						i,
+						oldModels.count,
+						newModels.count,
+					),
 				)
 			}
 			oldExcluded := summarizeExcludedModels(o.ExcludedModels)
@@ -402,24 +475,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if oldExcluded.hash != newExcluded.hash {
 				changes = append(
 					changes, fmt.Sprintf(
-						"gemini[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count,
+						"%s[%d].excluded-models: updated (%d -> %d entries)", provider.label, i, oldExcluded.count,
 						newExcluded.count,
 					),
 				)
 			}
-		}
-	}
-
-	for i := 0; i < min(len(oldCfg.InteractionsKey), len(newCfg.InteractionsKey)); i++ {
-		o, n := oldCfg.InteractionsKey[i], newCfg.InteractionsKey[i]
-		if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
-			changes = append(changes, fmt.Sprintf("interactions[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
-		}
-		if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
-			changes = append(changes, fmt.Sprintf("interactions[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
-		}
-		if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
-			changes = append(changes, fmt.Sprintf("interactions[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
 		}
 	}
 
@@ -432,14 +492,40 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.ClaudeKey {
 			o := oldCfg.ClaudeKey[i]
 			n := newCfg.ClaudeKey[i]
+			if o.Priority != n.Priority {
+				changes = append(changes, fmt.Sprintf("claude[%d].priority: %d -> %d", i, o.Priority, n.Priority))
+			}
+			if !reflect.DeepEqual(o.Weight, n.Weight) {
+				changes = append(
+					changes, fmt.Sprintf(
+						"claude[%d].weight: %s -> %s", i, formatOptionalConfigValue(o.Weight),
+						formatOptionalConfigValue(n.Weight),
+					),
+				)
+			}
 			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
-				changes = append(changes, fmt.Sprintf("claude[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"claude[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling),
+						formatOptionalConfigValue(n.DisableCooling),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
-				changes = append(changes, fmt.Sprintf("claude[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"claude[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry),
+						formatOptionalConfigValue(n.RequestRetry),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
-				changes = append(changes, fmt.Sprintf("claude[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"claude[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors),
+						len(n.RequestScopedErrors),
+					),
+				)
 			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
@@ -500,6 +586,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 					),
 				)
 			}
+			if o.Cloak == nil && n.Cloak != nil {
+				changes = append(changes, fmt.Sprintf("claude[%d].cloak: created", i))
+			}
+			if o.Cloak != nil && n.Cloak == nil {
+				changes = append(changes, fmt.Sprintf("claude[%d].cloak: deleted", i))
+			}
 			if o.Cloak != nil && n.Cloak != nil {
 				if strings.TrimSpace(o.Cloak.Mode) != strings.TrimSpace(n.Cloak.Mode) {
 					changes = append(
@@ -521,6 +613,13 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 							len(n.Cloak.SensitiveWords),
 						),
 					)
+				} else if !reflect.DeepEqual(o.Cloak.SensitiveWords, n.Cloak.SensitiveWords) {
+					changes = append(
+						changes, fmt.Sprintf(
+							"claude[%d].cloak.sensitive-words: updated (%d -> %d entries)", i,
+							len(o.Cloak.SensitiveWords), len(n.Cloak.SensitiveWords),
+						),
+					)
 				}
 			}
 		}
@@ -535,17 +634,49 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.CodexKey {
 			o := oldCfg.CodexKey[i]
 			n := newCfg.CodexKey[i]
+			if o.Priority != n.Priority {
+				changes = append(changes, fmt.Sprintf("codex[%d].priority: %d -> %d", i, o.Priority, n.Priority))
+			}
+			if !reflect.DeepEqual(o.Weight, n.Weight) {
+				changes = append(
+					changes, fmt.Sprintf(
+						"codex[%d].weight: %s -> %s", i, formatOptionalConfigValue(o.Weight),
+						formatOptionalConfigValue(n.Weight),
+					),
+				)
+			}
 			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
-				changes = append(changes, fmt.Sprintf("codex[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"codex[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling),
+						formatOptionalConfigValue(n.DisableCooling),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.DisableCodexCloaking, n.DisableCodexCloaking) {
-				changes = append(changes, fmt.Sprintf("codex[%d].disable-codex-cloaking: %s -> %s", i, formatOptionalConfigValue(o.DisableCodexCloaking), formatOptionalConfigValue(n.DisableCodexCloaking)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"codex[%d].disable-codex-cloaking: %s -> %s", i,
+						formatOptionalConfigValue(o.DisableCodexCloaking),
+						formatOptionalConfigValue(n.DisableCodexCloaking),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
-				changes = append(changes, fmt.Sprintf("codex[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"codex[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry),
+						formatOptionalConfigValue(n.RequestRetry),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
-				changes = append(changes, fmt.Sprintf("codex[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"codex[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors),
+						len(n.RequestScopedErrors),
+					),
+				)
 			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
@@ -618,13 +749,28 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			o := oldCfg.XAIKey[i]
 			n := newCfg.XAIKey[i]
 			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
-				changes = append(changes, fmt.Sprintf("xai[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"xai[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling),
+						formatOptionalConfigValue(n.DisableCooling),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
-				changes = append(changes, fmt.Sprintf("xai[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"xai[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry),
+						formatOptionalConfigValue(n.RequestRetry),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
-				changes = append(changes, fmt.Sprintf("xai[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"xai[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors),
+						len(n.RequestScopedErrors),
+					),
+				)
 			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
@@ -641,7 +787,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(
 					changes,
-					fmt.Sprintf("xai[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)),
+					fmt.Sprintf(
+						"xai[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix),
+					),
 				)
 			}
 			if o.Priority != n.Priority {
@@ -687,10 +835,10 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if entries, _ := oAuthModelAliasChanges(oldCfg.OAuthModelAlias, newCfg.OAuthModelAlias); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
-	if !reflect.DeepEqual(oldCfg.OAuthSettings, newCfg.OAuthSettings) {
-		changes = append(changes, fmt.Sprintf("oauth-settings: updated (%d -> %d channels)", len(oldCfg.OAuthSettings), len(newCfg.OAuthSettings)))
+	if entries, _ := OAuthSettingsChanges(oldCfg.OAuthSettings, newCfg.OAuthSettings); len(entries) > 0 {
+		changes = append(changes, entries...)
 	}
-	if entries, _ := DiffOAuthRequestScopedErrorsChanges(
+	if entries, _ := oAuthRequestScopedErrorsChanges(
 		oldCfg.OAuthRequestScopedErrors, newCfg.OAuthRequestScopedErrors,
 	); len(entries) > 0 {
 		changes = append(changes, entries...)
@@ -809,11 +957,32 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.VertexCompatAPIKey {
 			o := oldCfg.VertexCompatAPIKey[i]
 			n := newCfg.VertexCompatAPIKey[i]
+			if o.Priority != n.Priority {
+				changes = append(changes, fmt.Sprintf("vertex[%d].priority: %d -> %d", i, o.Priority, n.Priority))
+			}
+			if !reflect.DeepEqual(o.Weight, n.Weight) {
+				changes = append(
+					changes, fmt.Sprintf(
+						"vertex[%d].weight: %s -> %s", i, formatOptionalConfigValue(o.Weight),
+						formatOptionalConfigValue(n.Weight),
+					),
+				)
+			}
 			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
-				changes = append(changes, fmt.Sprintf("vertex[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"vertex[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling),
+						formatOptionalConfigValue(n.DisableCooling),
+					),
+				)
 			}
 			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
-				changes = append(changes, fmt.Sprintf("vertex[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+				changes = append(
+					changes, fmt.Sprintf(
+						"vertex[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry),
+						formatOptionalConfigValue(n.RequestRetry),
+					),
+				)
 			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
@@ -845,6 +1014,16 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				changes = append(
 					changes,
 					fmt.Sprintf("vertex[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count),
+				)
+			}
+			oldExcluded := summarizeExcludedModels(o.ExcludedModels)
+			newExcluded := summarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(
+					changes, fmt.Sprintf(
+						"vertex[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count,
+						newExcluded.count,
+					),
 				)
 			}
 			if !equalStringMap(o.Headers, n.Headers) {
@@ -896,7 +1075,7 @@ func equalStringMap(a, b map[string]string) bool {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		if value, ok := b[k]; !ok || value != v {
 			return false
 		}
 	}

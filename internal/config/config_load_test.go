@@ -26,8 +26,8 @@ func TestApplyHomeRuntimeConfig(t *testing.T) {
 	if cfg.APIKeys != nil {
 		t.Fatalf("APIKeys = %v, want nil", cfg.APIKeys)
 	}
-	if !cfg.UsageStatisticsEnabled {
-		t.Fatal("expected usage statistics to be enabled")
+	if cfg.UsageStatisticsEnabled {
+		t.Fatal("Home overlay changed the local statistics switch")
 	}
 	if !cfg.DisableCooling {
 		t.Fatal("expected quota cooldown to be disabled")
@@ -78,14 +78,16 @@ func TestParseConfigBytesImageArtifactCacheDefaultsMatchLoadConfig(t *testing.T)
 }
 
 func TestParseConfigBytesPreservesAntigravityPoolAndCodexOrphanSettings(t *testing.T) {
-	cfg, err := ParseConfigBytes([]byte(`antigravity:
+	cfg, err := ParseConfigBytes(
+		[]byte(`antigravity:
   connection-pool:
     enabled: false
     idle-conn-timeout: ""
     max-idle-conns-per-host: 0
 codex:
   orphan-delegation-compatibility: true
-`))
+`),
+	)
 	if err != nil {
 		t.Fatalf("ParseConfigBytes: %v", err)
 	}
@@ -431,13 +433,12 @@ func TestLoadConfig_WebsocketAuth_ExplicitTrue(t *testing.T) {
 }
 
 func TestRemoteManagementDisableAutoUpdatePanel(t *testing.T) {
-	disabled := true
-	rm := RemoteManagement{DisableAutoUpdatePanel: &disabled}
+	rm := RemoteManagement{DisableAutoUpdatePanel: true}
 	if rm.IsAutoUpdatePanel() {
 		t.Fatal("expected disable-auto-update-panel to disable panel updates")
 	}
 
-	disabled = false
+	rm.DisableAutoUpdatePanel = false
 	if !rm.IsAutoUpdatePanel() {
 		t.Fatal("expected false disable-auto-update-panel to keep panel updates enabled")
 	}

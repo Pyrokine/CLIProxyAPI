@@ -29,6 +29,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	cfg := w.config
 	w.clientsMutex.RUnlock()
 
+	if w.stopped.Load() {
+		return false
+	}
 	if cfg != nil && w.reloadCallback != nil {
 		log.Debugf("triggering server update callback before auth refresh")
 		if !w.reloadCallback(cfg) {
@@ -74,10 +77,17 @@ func (w *Watcher) reloadClientsWithConfig(
 		w.clientsMutex.Unlock()
 	}
 
-	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, metaAPIKeyCount, openAICompatCount := BuildAPIKeyClients(
+	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount,
+		metaAPIKeyCount, openAICompatCount := BuildAPIKeyClients(
 		cfg,
 	)
-	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + openAICompatCount
+	totalAPIKeyClients := geminiAPIKeyCount +
+		vertexCompatAPIKeyCount +
+		claudeAPIKeyCount +
+		codexAPIKeyCount +
+		xaiAPIKeyCount +
+		metaAPIKeyCount +
+		openAICompatCount
 	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
 
 	var authFileCount int
@@ -159,13 +169,22 @@ func (w *Watcher) reloadClientsWithConfig(
 		w.authRescanMu.Unlock()
 	}
 
-	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + openAICompatCount
+	totalNewClients := authFileCount +
+		geminiAPIKeyCount +
+		vertexCompatAPIKeyCount +
+		claudeAPIKeyCount +
+		codexAPIKeyCount +
+		xaiAPIKeyCount +
+		metaAPIKeyCount +
+		openAICompatCount
 
 	w.refreshAuthState(forceAuthRefresh)
 	w.notifyUsageRefresh()
 
 	log.Infof(
-		"full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d Meta API keys + %d OpenAI-compat)",
+		"full client load complete - %d clients (%d auth files + %d Gemini API "+
+			"keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d xA"+
+			"I keys + %d Meta API keys + %d OpenAI-compat)",
 		totalNewClients,
 		authFileCount,
 		geminiAPIKeyCount,
@@ -244,7 +263,10 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	w.clientsMutex.Lock()
 	if w.config != cfg || w.authDir != authDir {
 		w.clientsMutex.Unlock()
-		log.Debugf("auth configuration changed before publication, skipping stale update: %s", filepath.Base(path))
+		log.Debugf(
+			"auth configuration changed before publication, skipping stale update: %s",
+			filepath.Base(path),
+		)
 		return
 	}
 	if w.fileAuthsByPath == nil {
@@ -433,7 +455,11 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 	if errWalk != nil {
 		log.Errorf("error walking auth directory: %v", errWalk)
 	}
-	log.Debugf("auth directory scan complete - found %d .json files, %d readable", authFileCount, successfulAuthCount)
+	log.Debugf(
+		"auth directory scan complete - found %d .json files, %d readable",
+		authFileCount,
+		successfulAuthCount,
+	)
 	return authFileCount
 }
 
@@ -475,7 +501,8 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int, int) 
 			openAICompatCount += len(compatConfig.APIKeyEntries)
 		}
 	}
-	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, metaAPIKeyCount, openAICompatCount
+	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount,
+		metaAPIKeyCount, openAICompatCount
 }
 
 func (w *Watcher) persistConfigAsync() {
@@ -581,13 +608,17 @@ func (w *Watcher) stopServerUpdateTimer() {
 }
 
 func (w *Watcher) triggerServerUpdate(cfg *config.Config) {
-	if w == nil || w.reloadCallback == nil || cfg == nil {
+	if w == nil || w.reloadCallback == nil || cfg == nil || w.stopped.Load() {
 		return
 	}
 
 	now := time.Now()
 
 	w.serverUpdateMu.Lock()
+	if w.stopped.Load() {
+		w.serverUpdateMu.Unlock()
+		return
+	}
 	if w.serverUpdateLast.IsZero() || now.Sub(w.serverUpdateLast) >= serverUpdateDebounce {
 		w.serverUpdateLast = now
 		if w.serverUpdateTimer != nil {
@@ -619,7 +650,7 @@ func (w *Watcher) triggerServerUpdate(cfg *config.Config) {
 			w.clientsMutex.RUnlock()
 
 			w.serverUpdateMu.Lock()
-			if w.serverUpdateTimer != timer || !w.serverUpdatePend {
+			if w.serverUpdateTimer != timer || !w.serverUpdatePend || w.stopped.Load() {
 				w.serverUpdateMu.Unlock()
 				return
 			}

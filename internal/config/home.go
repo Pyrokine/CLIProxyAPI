@@ -27,7 +27,6 @@ func ApplyHomeRuntimeConfig(cfg *Config) {
 		return
 	}
 	cfg.APIKeys = nil
-	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.SaveCooldownStatus = false
 	cfg.WebsocketAuth = false

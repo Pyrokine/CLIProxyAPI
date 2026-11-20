@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -29,7 +30,8 @@ func ValidateConfig(cfg *Config) []string {
 	if len(cfg.APIKeys) == 0 {
 		warnings = append(
 			warnings,
-			"no api-keys configured: all API requests will be unauthenticated (add api-keys or set host to 127.0.0.1 to limit exposure)",
+			"no api-keys configured: all API requests will be unauthenticated (add "+
+				"api-keys or set host to 127.0.0.1 to limit exposure)",
 		)
 	}
 	{
@@ -164,7 +166,8 @@ func ValidateConfig(cfg *Config) []string {
 				fmt.Sprintf("quota-refresh.max-interval %d is below minimum 300 seconds", cfg.QuotaRefresh.MaxInterval),
 			)
 		}
-		if cfg.QuotaRefresh.Interval > 0 && cfg.QuotaRefresh.MaxInterval > 0 && cfg.QuotaRefresh.MaxInterval < cfg.QuotaRefresh.Interval {
+		if cfg.QuotaRefresh.Interval > 0 && cfg.QuotaRefresh.MaxInterval > 0 &&
+			cfg.QuotaRefresh.MaxInterval < cfg.QuotaRefresh.Interval {
 			warnings = append(warnings, "quota-refresh.max-interval is smaller than quota-refresh.interval")
 		}
 	}
@@ -277,6 +280,7 @@ func ValidateConfig(cfg *Config) []string {
 	}
 
 	warnings = append(warnings, validateAPIKeyRules(cfg)...)
+	warnings = append(warnings, validateOAuthRequestScopedErrors(cfg)...)
 
 	// API Key Aliases: reference integrity + duplicate values
 	if len(cfg.APIKeyAliases) > 0 {
@@ -367,12 +371,14 @@ func validateAPIKeyRules(cfg *Config) []string {
 			if err != nil || window <= 0 {
 				warnings = append(
 					warnings, fmt.Sprintf(
-						"api-key-rules[%q].limits[%d].window %q is not a positive duration", apiKey, index, limit.Window,
+						"api-key-rules[%q].limits[%d].window %q is not a positive duration", apiKey, index,
+						limit.Window,
 					),
 				)
 			} else if _, duplicate := windows[window]; duplicate {
 				warnings = append(
-					warnings, fmt.Sprintf("api-key-rules[%q].limits contains duplicate window %q", apiKey, limit.Window),
+					warnings,
+					fmt.Sprintf("api-key-rules[%q].limits contains duplicate window %q", apiKey, limit.Window),
 				)
 			} else {
 				windows[window] = struct{}{}
@@ -438,4 +444,38 @@ func validPluginConfigID(id string) bool {
 
 func isASCIILetterDigit(ch byte) bool {
 	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+}
+
+func validateOAuthRequestScopedErrors(cfg *Config) []string {
+	var warnings []string
+	for channel, rules := range cfg.OAuthRequestScopedErrors {
+		for index, rule := range rules {
+			action := strings.ToLower(strings.TrimSpace(rule.Action))
+			switch action {
+			case "", "stop", "stop-and-cooldown", "continue", "continue-and-cooldown":
+			default:
+				warnings = append(
+					warnings,
+					fmt.Sprintf("oauth-request-scoped-errors.%s[%d].action %q is invalid", channel, index, rule.Action),
+				)
+			}
+			for patternIndex, pattern := range rule.MatchRegexr {
+				if strings.TrimSpace(pattern) == "" {
+					continue
+				}
+				if _, err := regexp.Compile(strings.TrimSpace(pattern)); err != nil {
+					warnings = append(
+						warnings, fmt.Sprintf(
+							"oauth-request-scoped-errors.%s[%d].match-regexr[%d]: %v",
+							channel,
+							index,
+							patternIndex,
+							err,
+						),
+					)
+				}
+			}
+		}
+	}
+	return warnings
 }

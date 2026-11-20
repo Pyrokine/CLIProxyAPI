@@ -44,12 +44,24 @@ func TestResolvePluginsDir(t *testing.T) {
 	}
 }
 
+func TestParseConfigBytesPluginAuthRevision(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte("plugins:\n  auth-revision: 42\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Plugins.AuthRevision != 42 {
+		t.Fatalf("Plugins.AuthRevision = %d, want 42", cfg.Plugins.AuthRevision)
+	}
+}
+
 func TestParseConfigBytesResolvesPluginsDirAndAuthRevision(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("USERPROFILE", homeDir)
 
-	cfg, errParse := ParseConfigBytes([]byte("plugins:\n  enabled: true\n  dir: ~/.cli-proxy-api/plugins\n  auth-revision: 42\n"))
+	cfg, errParse := ParseConfigBytes(
+		[]byte("plugins:\n  enabled: true\n  dir: ~/.cli-proxy-api/plugins\n  auth-revision: 42\n"),
+	)
 	if errParse != nil {
 		t.Fatalf("ParseConfigBytes() error = %v", errParse)
 	}

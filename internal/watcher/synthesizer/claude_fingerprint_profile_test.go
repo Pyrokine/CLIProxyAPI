@@ -16,9 +16,11 @@ func TestClaudeFingerprintConfigIdentity(t *testing.T) {
 	}
 	synthesize := func(keys []config.ClaudeKey) map[string]string {
 		t.Helper()
-		auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
-			Config: &config.Config{ClaudeKey: keys}, Now: time.Unix(100, 0), IDGenerator: NewStableIDGenerator(),
-		})
+		auths, err := NewConfigSynthesizer().Synthesize(
+			&SynthesisContext{
+				Config: &config.Config{ClaudeKey: keys}, Now: time.Unix(100, 0), IDGenerator: NewStableIDGenerator(),
+			},
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -71,7 +73,8 @@ func TestClaudeFingerprintFileReload(t *testing.T) {
 			t.Fatalf("synthesis failed: %v", err)
 		}
 		auth := auths[0]
-		if auth.Attributes[coreauth.AttributeClaudeFingerprintProfile] != tc.want || auth.Metadata[coreauth.AttributeClaudeFingerprintProfile] != tc.want {
+		if auth.Attributes[coreauth.AttributeClaudeFingerprintProfile] != tc.want ||
+			auth.Metadata[coreauth.AttributeClaudeFingerprintProfile] != tc.want {
 			t.Fatalf("metadata and attributes disagree: %v, %v", auth.Metadata, auth.Attributes)
 		}
 		if _, exists := auth.Metadata["fingerprint-profile"]; exists {

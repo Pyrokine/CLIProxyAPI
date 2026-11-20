@@ -124,14 +124,15 @@ usage-statistics-enabled: false
 # SQLite 用量留存，删除过期事件并在同一事务中重建聚合统计
 # usage-retention:
 #   days: 30                    # 保留天数，0 使用默认值 -1，-1 禁用清理
-#   max-db-size-mb: 1024        # Stop new writes after the observed events.db + WAL + SHM size reaches this value. Set to 0 to disable.
+#   # Stop new writes after the observed events.db + WAL + SHM size reaches this value. Set to 0 to disable.
+#   max-db-size-mb: 1024
 #   warning-threshold-pct: 80   # Show warnings when the DB reaches this percentage of max-db-size-mb.
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
-# When true, enable Gemini CLI internal endpoints (/v1internal:*).
+# When true, enable Gemini CLI internal endpoints (`/v1internal:*`).
 # Default is false for safety.
 enable-gemini-cli-endpoint: false
 # When true, forward filtered upstream response headers to downstream clients.
@@ -159,16 +160,20 @@ transient-error-cooldown-seconds: 0
 quota-exceeded:
     switch-project: true # Whether to automatically switch to another project when a quota is exceeded
     switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
-    antigravity-credits: false # Whether to retry Claude Antigravity requests with Google One AI credits when quota is exceeded
+    # Whether to retry Claude Antigravity requests with Google One AI credits when quota is exceeded
+    antigravity-credits: false
 # Routing strategy for selecting credentials when multiple match.
 routing:
     strategy: "round-robin" # round-robin (default), weighted-round-robin, quota-aware, fill-first
     # Keep requests from the same explicit or inferred session on one credential.
+    # 旧 claude-code-session-affinity 在读取时迁移，新键显式值优先，成功保存后移除旧键
     session-affinity: false
     # Expire inactive session bindings after this duration.
     session-affinity-ttl: "1h"
-    # Subagents inherit the parent credential by default across Claude, Codex, Antigravity, Gemini, and generic harnesses.
-    # Set false to distribute subagents through the configured fallback strategy. Ignored when session-affinity is false.
+    # Subagents inherit the parent credential by default across Claude, Codex, Antigravity, Gemini,
+    # and generic harnesses.
+    # Set false to distribute subagents through the configured fallback strategy.
+    # Ignored when session-affinity is false.
     session-affinity-subagents: true
 # CORS allowed origins. Empty = allow all (*) for CLI tool compatibility.
 # Set to restrict browser access: ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -189,9 +194,11 @@ auto-refresh-interval: 3
 model-refresh-interval: 3
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
-# Base model used by the legacy hosted image_generation tool path for GPT Image 2 and 2.5 requests that are not proxied directly through the Images API. Defaults to gpt-5.4-mini.
+# Base model used by the legacy hosted image_generation tool path for GPT Image 2 and 2.5 requests
+# that are not proxied directly through the Images API. Defaults to the model ID "gpt-5.4-mini".
 # gpt-image-2-base-model: "gpt-5.4-mini"
-# How long video IDs stay pinned to the credential that created them. Accepts duration strings like "30m" or "3h". Defaults to 3h.
+# How long video IDs stay pinned to the credential that created them.
+# Accepts duration strings like "30m" or "3h". Defaults to 3h.
 # video-result-auth-cache-ttl: "3h"
 quota-refresh:
     interval: 600
@@ -364,7 +371,7 @@ redis-usage-queue-retention-seconds: 60
 #     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
 #     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
 #     base-url: "https://api.x.ai/v1"
-#     websockets: true # optional: enable upstream websocket transport for downstream websocket requests
+#     websockets: true # optional: enable upstream WebSocket transport for downstream WebSocket requests
 #     disable-cooling: false # optional: disable auth/model cooldown scheduling for this credential
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -413,7 +420,8 @@ redis-usage-queue-retention-seconds: 60
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
 #         max-context-length: 1048576         # optional: override Codex client context window metadata
-#         is-compat: false                    # optional: preserve compatibility-only thinking fields for compatible upstreams
+#         # optional: preserve compatibility-only thinking fields for compatible upstreams
+#         is-compat: false
 #         thinking:                           # optional: exact thinking capability for this configured model
 #           levels: ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
 #     excluded-models:
@@ -443,6 +451,8 @@ redis-usage-queue-retention-seconds: 60
 
 # Claude 请求身份默认值用于 CLI profile 和真实 OAuth
 # 不覆盖默认模式下的调用方身份
+# stabilize-device-profile 为 false 或未配置时，保留请求的 OS/arch，缺省值取当前运行环境
+# true 时，CLI/OAuth profile 的 OS/arch 使用下方基线；CLI 身份继续由 fingerprint-profile 选择
 # claude-header-defaults:
 #   user-agent: "claude-cli/2.1.258 (external, cli)"
 #   package-version: "0.112.1"
@@ -510,7 +520,7 @@ redis-usage-queue-retention-seconds: 60
 #       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
 
-# Global OAuth model name aliases (per channel)
+# OAuth model name aliases configured globally per channel
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi, xai, meta.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key,
@@ -553,7 +563,10 @@ redis-usage-queue-retention-seconds: 60
 #     - name: "qmodel_latest"
 #       alias: "qlatest"
 # Per-auth OAuth/token JSON uses the canonical "model_aliases" key; legacy "model-aliases" remains readable.
-# Example: {"type":"codex","email":"user@example.com","model_aliases":[{"name":"gpt-5.3-codex-spark","alias":"gpt-5.5"}]}
+# Example:
+# {"type":"codex","email":"user@example.com","model_aliases":[
+#   {"name":"gpt-5.3-codex-spark","alias":"gpt-5.5"}
+# ]}
 
 # OAuth-only model metadata. Applied after model aliases; API-key models keep their own settings.
 # oauth-settings:
@@ -588,8 +601,8 @@ redis-usage-queue-retention-seconds: 60
 #   kimi:
 #     - "kimi-k2-thinking"
 
-# OAuth provider request-scoped error rules
-# Rules are evaluated in order; the first valid match wins.
+# OAuth provider request-scoped errors
+# Evaluate rules in order; the first valid match wins.
 # Actions:
 #   stop: stop fallback without changing availability
 #   stop-and-cooldown: stop fallback and force cooldown
@@ -612,7 +625,7 @@ redis-usage-queue-retention-seconds: 60
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
 #           # restricts the rule to a specific protocol,
-#           # options: openai, gemini, claude, codex, antigravity
+#           # options: `openai`, `gemini`, `claude`, `codex`, `antigravity`
 #           protocol: "gemini"
 #           from-protocol: "responses" # 仅匹配该源协议
 #           headers: # 所有请求头都必须匹配，支持 * 通配符
@@ -631,15 +644,16 @@ redis-usage-queue-retention-seconds: 60
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
 #           # restricts the rule to a specific protocol,
-#           # options: openai, gemini, claude, codex, antigravity
+#           # options: `openai`, `gemini`, `claude`, `codex`, `antigravity`
 #           protocol: "gemini"
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
-#         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
+#         "generationConfig.responseJsonSchema": >-
+#           {"type":"object","properties":{"answer":{"type":"string"}}}
 #   override: # Override rules always set parameters, overwriting any existing values.
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
 #           # restricts the rule to a specific protocol,
-#           # options: openai, gemini, claude, codex, antigravity
+#           # options: `openai`, `gemini`, `claude`, `codex`, `antigravity`
 #           protocol: "codex"
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "reasoning.effort": "high"
@@ -647,15 +661,16 @@ redis-usage-queue-retention-seconds: 60
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
 #           # restricts the rule to a specific protocol,
-#           # options: openai, gemini, claude, codex, antigravity
+#           # options: `openai`, `gemini`, `claude`, `codex`, `antigravity`
 #           protocol: "codex"
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
-#         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
+#         "response_format": >-
+#           {"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"}}}
 #   filter: # Filter rules remove specified parameters from the payload.
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
 #           # restricts the rule to a specific protocol,
-#           # options: openai, gemini, claude, codex, antigravity
+#           # options: `openai`, `gemini`, `claude`, `codex`, `antigravity`
 #           protocol: "gemini"
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"

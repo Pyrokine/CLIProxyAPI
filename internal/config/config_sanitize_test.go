@@ -97,19 +97,21 @@ func TestSanitizeGeminiStyleKeysUsesFullRouteIdentity(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			cfg := &Config{}
-			test.set(cfg, append([]GeminiKey(nil), entries...))
-			test.sanitize(cfg)
-			got := test.get(cfg)
-			if len(got) != 4 {
-				t.Fatalf("credential count = %d, want 4: %+v", len(got), got)
-			}
-			if got[0].ProxyURL != "https://proxy-a.example" || got[0].Prefix != "team-a" ||
-				FormatSortedHeaders(got[0].Headers) != "X-A\x001\x00X-B\x002\x00" {
-				t.Fatalf("first normalized route = %+v", got[0])
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				cfg := &Config{}
+				test.set(cfg, append([]GeminiKey(nil), entries...))
+				test.sanitize(cfg)
+				got := test.get(cfg)
+				if len(got) != 4 {
+					t.Fatalf("credential count = %d, want 4: %+v", len(got), got)
+				}
+				if got[0].ProxyURL != "https://proxy-a.example" || got[0].Prefix != "team-a" ||
+					FormatSortedHeaders(got[0].Headers) != "X-A\x001\x00X-B\x002\x00" {
+					t.Fatalf("first normalized route = %+v", got[0])
+				}
+			},
+		)
 	}
 }
 

@@ -18,32 +18,34 @@ func TestClonePreservesIndependentSessionAffinitySubagents(t *testing.T) {
 		{name: "enabled", value: new(true)},
 		{name: "disabled", value: new(false)},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := &Config{}
-			cfg.Routing.SessionAffinitySubagents = test.value
-			cloned, err := Clone(cfg)
-			if err != nil {
-				t.Fatalf("Clone: %v", err)
-			}
-			got := cloned.Routing.SessionAffinitySubagents
-			if test.value == nil {
-				if got != nil {
-					t.Fatalf("cloned value = %v, want nil", *got)
+		t.Run(
+			test.name, func(t *testing.T) {
+				t.Parallel()
+				cfg := &Config{}
+				cfg.Routing.SessionAffinitySubagents = test.value
+				cloned, err := Clone(cfg)
+				if err != nil {
+					t.Fatalf("Clone: %v", err)
 				}
-				return
-			}
-			if got == nil || *got != *test.value {
-				t.Fatalf("cloned value = %v, want %v", got, *test.value)
-			}
-			if got == test.value {
-				t.Fatal("Clone reused the source bool pointer")
-			}
-			*got = !*got
-			if *test.value != (test.name == "enabled") {
-				t.Fatal("mutating clone changed source bool")
-			}
-		})
+				got := cloned.Routing.SessionAffinitySubagents
+				if test.value == nil {
+					if got != nil {
+						t.Fatalf("cloned value = %v, want nil", *got)
+					}
+					return
+				}
+				if got == nil || *got != *test.value {
+					t.Fatalf("cloned value = %v, want %v", got, *test.value)
+				}
+				if got == test.value {
+					t.Fatal("Clone reused the source bool pointer")
+				}
+				*got = !*got
+				if *test.value != (test.name == "enabled") {
+					t.Fatal("mutating clone changed source bool")
+				}
+			},
+		)
 	}
 }
 
@@ -63,47 +65,49 @@ func TestClonePreservesIndependentAntigravityConnectionPoolPointers(t *testing.T
 		{name: "explicit false and zero", enabled: &falseValue, maxIdle: &zero},
 		{name: "enabled and negative", enabled: &trueValue, maxIdle: &negative},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := &Config{
-				Antigravity: AntigravityConfig{
-					ConnectionPool: AntigravityConnectionPoolConfig{
-						Enabled:             test.enabled,
-						IdleConnTimeout:     "",
-						MaxIdleConnsPerHost: test.maxIdle,
+		t.Run(
+			test.name, func(t *testing.T) {
+				t.Parallel()
+				cfg := &Config{
+					Antigravity: AntigravityConfig{
+						ConnectionPool: AntigravityConnectionPoolConfig{
+							Enabled:             test.enabled,
+							IdleConnTimeout:     "",
+							MaxIdleConnsPerHost: test.maxIdle,
+						},
 					},
-				},
-			}
-			cloned, err := Clone(cfg)
-			if err != nil {
-				t.Fatalf("Clone: %v", err)
-			}
-			got := cloned.Antigravity.ConnectionPool
-			if test.enabled == nil {
-				if got.Enabled != nil {
-					t.Fatalf("Enabled = %v, want nil", *got.Enabled)
 				}
-			} else {
-				if got.Enabled == nil || *got.Enabled != *test.enabled {
-					t.Fatalf("Enabled = %v, want %v", got.Enabled, *test.enabled)
+				cloned, err := Clone(cfg)
+				if err != nil {
+					t.Fatalf("Clone: %v", err)
 				}
-				if got.Enabled == test.enabled {
-					t.Fatal("Clone reused the source enabled pointer")
+				got := cloned.Antigravity.ConnectionPool
+				if test.enabled == nil {
+					if got.Enabled != nil {
+						t.Fatalf("Enabled = %v, want nil", *got.Enabled)
+					}
+				} else {
+					if got.Enabled == nil || *got.Enabled != *test.enabled {
+						t.Fatalf("Enabled = %v, want %v", got.Enabled, *test.enabled)
+					}
+					if got.Enabled == test.enabled {
+						t.Fatal("Clone reused the source enabled pointer")
+					}
 				}
-			}
-			if test.maxIdle == nil {
-				if got.MaxIdleConnsPerHost != nil {
-					t.Fatalf("MaxIdleConnsPerHost = %v, want nil", *got.MaxIdleConnsPerHost)
+				if test.maxIdle == nil {
+					if got.MaxIdleConnsPerHost != nil {
+						t.Fatalf("MaxIdleConnsPerHost = %v, want nil", *got.MaxIdleConnsPerHost)
+					}
+				} else {
+					if got.MaxIdleConnsPerHost == nil || *got.MaxIdleConnsPerHost != *test.maxIdle {
+						t.Fatalf("MaxIdleConnsPerHost = %v, want %v", got.MaxIdleConnsPerHost, *test.maxIdle)
+					}
+					if got.MaxIdleConnsPerHost == test.maxIdle {
+						t.Fatal("Clone reused the source max-idle pointer")
+					}
 				}
-			} else {
-				if got.MaxIdleConnsPerHost == nil || *got.MaxIdleConnsPerHost != *test.maxIdle {
-					t.Fatalf("MaxIdleConnsPerHost = %v, want %v", got.MaxIdleConnsPerHost, *test.maxIdle)
-				}
-				if got.MaxIdleConnsPerHost == test.maxIdle {
-					t.Fatal("Clone reused the source max-idle pointer")
-				}
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -121,37 +125,12 @@ func TestParseConfigPreservesExplicitSessionAffinitySubagentsFalse(t *testing.T)
 
 func TestCloneCreatesIndependentConfig(t *testing.T) {
 	cfg, err := ParseConfigBytes(
-		[]byte(`
-api-keys:
-  - client-key
-api-key-aliases:
-  client-key: primary
-gemini-api-key:
-  - api-key: provider-key
-    headers:
-      X-Test: value
-oauth-excluded-models:
-  codex:
-    - gpt-*
-plugins:
-  configs:
-    sample:
-      enabled: true
-      custom:
-        nested: value
-model-catalog:
-  models:
-    - name: model-a
-      aliases:
-        - alias-a
-antigravity:
-  sensitive-words:
-    - API
-    - proxy
-devin:
-  sensitive-words:
-    - sensitive phrase
-`),
+		[]byte(("\napi-keys:\n  - client-key\napi-key-aliases:\n  client-key: primary\ngemini-api-key:\n  - " +
+			"api-key: provider-key\n    headers:\n      X-Test: value\noauth-excluded-models:\n  codex:\n    " +
+			"- gpt-*\nplugins:\n  configs:\n    sample:\n      enabled: true\n      custom:\n        nested: " +
+			"value\nmodel-catalog:\n  models:\n    - name: model-a\n      aliases:\n        - alias-a\n" +
+			"antigravity:\n  sensitive-words:\n    - API\n    - proxy\ndevin:\n  sensitive-words:\n    - " +
+			"sensitive phrase\n")),
 	)
 	if err != nil {
 		t.Fatalf("ParseConfigBytes: %v", err)

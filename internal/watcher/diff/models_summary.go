@@ -44,7 +44,11 @@ func summarizeModelPairs[T any](models []T, accessor func(T) (name, alias, metad
 func summarizeGeminiModels(models []config.GeminiModel) modelsSummary {
 	return summarizeModelPairs(
 		models, func(m config.GeminiModel) (string, string, string) {
-			return m.Name, m.Alias, configuredModelCompatHashSuffix(m) + thinkingHashSuffix(m.Thinking)
+			return m.Name, m.Alias,
+				fmt.Sprintf(
+					"|display-name=%s|max-context-length=%d", strings.TrimSpace(m.DisplayName), m.MaxContextLength,
+				) +
+					configuredModelCompatHashSuffix(m) + thinkingHashSuffix(m.Thinking)
 		},
 	)
 }
@@ -53,7 +57,11 @@ func summarizeGeminiModels(models []config.GeminiModel) modelsSummary {
 func summarizeClaudeModels(models []config.ClaudeModel) modelsSummary {
 	return summarizeModelPairs(
 		models, func(m config.ClaudeModel) (string, string, string) {
-			return m.Name, m.Alias, configuredModelCompatHashSuffix(m) + thinkingHashSuffix(m.Thinking)
+			return m.Name, m.Alias,
+				fmt.Sprintf(
+					"|display-name=%s|max-context-length=%d", strings.TrimSpace(m.DisplayName), m.MaxContextLength,
+				) +
+					configuredModelCompatHashSuffix(m) + thinkingHashSuffix(m.Thinking)
 		},
 	)
 }
@@ -76,6 +84,7 @@ func summarizeCodexModels(models []config.CodexModel) modelsSummary {
 						"|display-name=" + strings.TrimSpace(model.DisplayName) +
 						"|max-context-length=" + fmt.Sprintf("%d", model.MaxContextLength) +
 						"|force-mapping=" + fmt.Sprintf("%t", model.ForceMapping) +
+						"|support-configuration-update=" + fmt.Sprintf("%t", model.SupportConfigurationUpdate) +
 						configuredModelCompatHashSuffix(model) +
 						thinkingHashSuffix(model.Thinking),
 				)
@@ -97,10 +106,11 @@ func summarizeVertexModels(models []config.VertexCompatModel) modelsSummary {
 		if name == "" && alias == "" {
 			continue
 		}
-		if alias != "" {
-			name = alias
-		}
-		names = append(names, name+thinkingHashSuffix(model.Thinking))
+		names = append(
+			names, name+"|"+alias+
+				"|display-name="+strings.TrimSpace(model.DisplayName)+
+				fmt.Sprintf("|force-mapping=%t", model.ForceMapping)+thinkingHashSuffix(model.Thinking),
+		)
 	}
 	if len(names) == 0 {
 		return modelsSummary{}

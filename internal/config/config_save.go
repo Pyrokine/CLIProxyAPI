@@ -79,6 +79,13 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 // SaveConfigPreserveCommentsWithDigest writes the config and returns the SHA-256
 // of the exact bytes atomically published to configFile.
 func SaveConfigPreserveCommentsWithDigest(configFile string, cfg *Config) (string, error) {
+	return saveConfigPreserveComments(configFile, cfg, false)
+}
+
+func saveConfigPreserveComments(configFile string, cfg *Config, includeDefaults bool) (string, error) {
+	if err := validateStorageSizeConfig(cfg); err != nil {
+		return "", err
+	}
 	modelsExternal := modelsJSONExists(configFile)
 	persistCfg := cfg
 	if modelsExternal && cfg != nil {
@@ -119,6 +126,10 @@ func SaveConfigPreserveCommentsWithDigest(configFile string, cfg *Config) (strin
 		return "", err
 	}
 
+	data, err = MigrateRoutingSessionAffinityYAML(data)
+	if err != nil {
+		return "", err
+	}
 	var original yaml.Node
 	if err = yaml.Unmarshal(data, &original); err != nil {
 		return "", err
@@ -145,11 +156,12 @@ func SaveConfigPreserveCommentsWithDigest(configFile string, cfg *Config) (strin
 	} else {
 		pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "model-catalog")
 	}
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-aliases")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-rules")
 	setConfigAPIKeyProviderEntries(original.Content[0], persistCfg.APIKeys)
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
-	mergeMappingPreserve(original.Content[0], generated.Content[0])
+	mergeMappingPreserve(original.Content[0], generated.Content[0], includeDefaults)
 	prunePluginConfigMappings(original.Content[0], generated.Content[0])
 	if modelsExternal {
 		removeMapKey(original.Content[0], "oauth-model-alias")
@@ -165,6 +177,10 @@ func SaveConfigPreserveCommentsWithDigest(configFile string, cfg *Config) (strin
 // while preserving comments and positions.
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
 	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return err
+	}
+	data, err = MigrateRoutingSessionAffinityYAML(data)
 	if err != nil {
 		return err
 	}
@@ -185,12 +201,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			v.Tag = "!!str"
 			v.Value = value
 		} else {
-			next := getOrCreateMapValue(node, key)
-			if next.Kind != yaml.MappingNode {
-				next.Kind = yaml.MappingNode
-				next.Tag = "!!map"
-			}
-			node = next
+			node = getOrCreateMapValue(node, key)
 		}
 	}
 	return writeYAMLNode(configFile, &root)
@@ -308,7 +319,7 @@ func EnsureDefaultsInFile(configFile string, cfg *Config) {
 	if configFile == "" || cfg == nil {
 		return
 	}
-	if err := SaveConfigPreserveComments(configFile, cfg); err != nil {
+	if _, err := saveConfigPreserveComments(configFile, cfg, true); err != nil {
 		// Non-fatal: log the error but don't prevent startup
 		_, _ = fmt.Fprintf(os.Stderr, "config: failed to ensure defaults in %s: %v\n", configFile, err)
 	}

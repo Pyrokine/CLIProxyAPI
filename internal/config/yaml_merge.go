@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -31,7 +32,7 @@ func NormalizeCommentIndentation(data []byte) []byte {
 // mergeMappingPreserve merges keys from src into dst mapping node while preserving
 // key order and comments of existing keys in dst. New keys are only added if their
 // value is non-zero and not a known default to avoid polluting the config with defaults.
-func mergeMappingPreserve(dst, src *yaml.Node, path ...[]string) {
+func mergeMappingPreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]string) {
 	var currentPath []string
 	if len(path) > 0 {
 		currentPath = path[0]
@@ -54,13 +55,15 @@ func mergeMappingPreserve(dst, src *yaml.Node, path ...[]string) {
 		if idx >= 0 {
 			// Merge into existing value node (always update, even to zero values)
 			dv := dst.Content[idx+1]
-			mergeNodePreserve(dv, sv, childPath)
+			mergeNodePreserve(dv, sv, includeDefaults, childPath)
 		} else {
 			// New key: only add if value is non-zero and not a known default
 			candidate := deepCopyNode(sv)
-			pruneKnownDefaultsInNewNode(childPath, candidate)
-			if isKnownDefaultValue(childPath, candidate) {
-				continue
+			if !includeDefaults {
+				pruneKnownDefaultsInNewNode(childPath, candidate)
+				if isKnownDefaultValue(childPath, candidate) {
+					continue
+				}
 			}
 			dst.Content = append(dst.Content, deepCopyNode(sk), candidate)
 		}
@@ -70,7 +73,7 @@ func mergeMappingPreserve(dst, src *yaml.Node, path ...[]string) {
 // mergeNodePreserve merges src into dst for scalars, mappings and sequences while
 // reusing destination nodes to keep comments and anchors. For sequences, it updates
 // in-place by index.
-func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
+func mergeNodePreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]string) {
 	var currentPath []string
 	if len(path) > 0 {
 		currentPath = path[0]
@@ -79,12 +82,17 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 	if dst == nil || src == nil {
 		return
 	}
+	if dst.Kind == yaml.AliasNode && dst.Alias != nil {
+		resolved := deepCopyNode(dst.Alias)
+		resolved.Anchor = ""
+		*dst = *resolved
+	}
 	switch src.Kind {
 	case yaml.MappingNode:
 		if dst.Kind != yaml.MappingNode {
 			copyNodeShallow(dst, src)
 		}
-		mergeMappingPreserve(dst, src, currentPath)
+		mergeMappingPreserve(dst, src, includeDefaults, currentPath)
 		if len(currentPath) > 0 && currentPath[len(currentPath)-1] == "headers" ||
 			len(currentPath) == 2 && currentPath[0] == "claude-api-key" && currentPath[1] == "cloak" {
 			pruneMissingMapKeys(dst, src)
@@ -108,10 +116,10 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 				dst.Content[i] = deepCopyNode(src.Content[i])
 				continue
 			}
-			mergeNodePreserve(dst.Content[i], src.Content[i], currentPath)
+			mergeNodePreserve(dst.Content[i], src.Content[i], includeDefaults, currentPath)
 			if dst.Content[i] != nil && src.Content[i] != nil &&
 				dst.Content[i].Kind == yaml.MappingNode && src.Content[i].Kind == yaml.MappingNode {
-				pruneMissingMapKeys(dst.Content[i], src.Content[i])
+				pruneMissingConfigMapKeys(dst.Content[i], src.Content[i], currentPath)
 			}
 		}
 		// Append any extra items from src
@@ -313,17 +321,27 @@ func isZeroValueNode(node *yaml.Node) bool {
 
 // deepCopyNode creates a deep copy of a yaml.Node graph.
 func deepCopyNode(n *yaml.Node) *yaml.Node {
-	if n == nil {
-		return nil
-	}
-	cp := *n
-	if len(n.Content) > 0 {
-		cp.Content = make([]*yaml.Node, len(n.Content))
-		for i := range n.Content {
-			cp.Content[i] = deepCopyNode(n.Content[i])
+	copies := make(map[*yaml.Node]*yaml.Node)
+	var clone func(*yaml.Node) *yaml.Node
+	clone = func(source *yaml.Node) *yaml.Node {
+		if source == nil {
+			return nil
 		}
+		if copied := copies[source]; copied != nil {
+			return copied
+		}
+		copied := *source
+		copies[source] = &copied
+		if source.Content != nil {
+			copied.Content = make([]*yaml.Node, len(source.Content))
+			for index, child := range source.Content {
+				copied.Content[index] = clone(child)
+			}
+		}
+		copied.Alias = clone(source.Alias)
+		return &copied
 	}
-	return &cp
+	return clone(n)
 }
 
 // copyNodeShallow copies type/tag/value and resets content to match src, but
@@ -332,18 +350,13 @@ func copyNodeShallow(dst, src *yaml.Node) {
 	if dst == nil || src == nil {
 		return
 	}
-	dst.Kind = src.Kind
-	dst.Tag = src.Tag
-	dst.Value = src.Value
-	// Replace content with deep copy from src
-	if len(src.Content) > 0 {
-		dst.Content = make([]*yaml.Node, len(src.Content))
-		for i := range src.Content {
-			dst.Content[i] = deepCopyNode(src.Content[i])
-		}
-	} else {
-		dst.Content = nil
-	}
+	copied := deepCopyNode(src)
+	dst.Kind = copied.Kind
+	dst.Tag = copied.Tag
+	dst.Value = copied.Value
+	// 同次复制保留子节点之间的锚点引用
+	dst.Content = copied.Content
+	dst.Alias = copied.Alias
 }
 
 // findMapKeyIndex returns the index of key node in dst mapping (index of key, not value).
@@ -375,6 +388,11 @@ func removeMapKey(mapNode *yaml.Node, key string) {
 // getOrCreateMapValue finds the value node for a given key in a mapping node.
 // If not found, it appends a new key/value pair and returns the new value node.
 func getOrCreateMapValue(mapNode *yaml.Node, key string) *yaml.Node {
+	if mapNode.Kind == yaml.AliasNode && mapNode.Alias != nil {
+		resolved := deepCopyNode(mapNode.Alias)
+		resolved.Anchor = ""
+		*mapNode = *resolved
+	}
 	if mapNode.Kind != yaml.MappingNode {
 		mapNode.Kind = yaml.MappingNode
 		mapNode.Tag = "!!map"
@@ -435,7 +453,8 @@ func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
 }
 
 func prunePluginConfigMappings(dstRoot, srcRoot *yaml.Node) {
-	if dstRoot == nil || srcRoot == nil || dstRoot.Kind != yaml.MappingNode || srcRoot.Kind != yaml.MappingNode {
+	if dstRoot == nil || srcRoot == nil || dstRoot.Kind != yaml.MappingNode ||
+		srcRoot.Kind != yaml.MappingNode {
 		return
 	}
 	dstPluginIndex := findMapKeyIndex(dstRoot, "plugins")
@@ -466,6 +485,8 @@ func pruneMissingMapKeysRecursively(dst, src *yaml.Node) {
 	if dst == nil || src == nil || dst.Kind != src.Kind {
 		return
 	}
+	// Plugin settings recurse through mappings and sequences; other kinds stay unchanged.
+	//goland:noinspection GoSwitchMissingCasesForIotaConsts
 	switch src.Kind {
 	case yaml.MappingNode:
 		pruneMissingMapKeys(dst, src)
@@ -555,7 +576,7 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		return false
 	}
 	if len(path) == 2 && path[0] == "claude-api-key" && path[1] == "cloak" &&
-		node != nil && node.Kind == yaml.MappingNode && findMapKeyIndex(node, "cache-user-id") >= 0 {
+		node != nil && node.Kind == yaml.MappingNode {
 		return false
 	}
 	if len(path) == 3 && path[0] == "claude-api-key" && path[1] == "cloak" &&
@@ -565,7 +586,14 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	// 凭证覆盖项的 false 和零带有明确语义，不能按全局默认值省略
 	if len(path) == 2 && node != nil && node.Kind == yaml.ScalarNode {
 		switch path[0] {
-		case "claude-api-key", "codex-api-key", "xai-api-key", "gemini-api-key", "interactions-api-key", "vertex-api-key", "meta-api-key", "openai-compatibility":
+		case "claude-api-key",
+			"codex-api-key",
+			"xai-api-key",
+			"gemini-api-key",
+			"interactions-api-key",
+			"vertex-api-key",
+			"meta-api-key",
+			"openai-compatibility":
 			if (path[1] == "disable-cooling" && node.Tag == "!!bool") ||
 				(path[0] == "codex-api-key" && path[1] == "disable-codex-cloaking" && node.Tag == "!!bool") ||
 				(path[0] == "vertex-api-key" && path[1] == "interactions" && node.Tag == "!!bool") ||
@@ -576,16 +604,20 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	}
 
 	// Weight is pointer-backed, so an explicit zero is meaningful and must be preserved.
-	if len(path) > 0 && path[len(path)-1] == "weight" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
+	if len(path) > 0 && path[len(path)-1] == "weight" && node != nil && node.Kind == yaml.ScalarNode &&
+		node.Tag == "!!int" {
 		return false
 	}
 
 	// Antigravity connection-pool pointer fields preserve explicit false and zero values.
 	if len(path) == 1 && path[0] == "antigravity" && node != nil && node.Kind == yaml.MappingNode {
-		if poolIndex := findMapKeyIndex(node, "connection-pool"); poolIndex >= 0 && poolIndex+1 < len(node.Content) {
+		if poolIndex := findMapKeyIndex(node, "connection-pool"); poolIndex >= 0 &&
+			poolIndex+1 < len(node.Content) {
 			poolNode := node.Content[poolIndex+1]
 			if poolNode != nil && poolNode.Kind == yaml.MappingNode &&
-				(findMapKeyIndex(poolNode, "enabled") >= 0 || findMapKeyIndex(poolNode, "max-idle-conns-per-host") >= 0) {
+				(findMapKeyIndex(poolNode, "enabled") >= 0 || findMapKeyIndex(
+					poolNode, "max-idle-conns-per-host",
+				) >= 0) {
 				return false
 			}
 		}
@@ -663,8 +695,7 @@ func pruneKnownDefaultsInNewNode(path []string, node *yaml.Node) {
 			}
 
 			pruneKnownDefaultsInNewNode(childPath, valueNode)
-			if (valueNode.Kind == yaml.MappingNode || valueNode.Kind == yaml.SequenceNode) &&
-				len(valueNode.Content) == 0 {
+			if isKnownDefaultValue(childPath, valueNode) {
 				continue
 			}
 
@@ -706,4 +737,63 @@ func mappingScalarValue(node *yaml.Node, key string) string {
 		}
 	}
 	return ""
+}
+
+// Only typed fields are removed when omitted; extensions remain on their original entry.
+func pruneMissingConfigMapKeys(dst, src *yaml.Node, path []string) {
+	if len(path) > 0 && path[0] == "plugins" {
+		pruneMissingMapKeys(dst, src)
+		return
+	}
+	t := reflect.TypeFor[Config]()
+	for _, key := range path {
+		t = configYAMLFieldType(t, key)
+	}
+	for i := 0; i+1 < len(dst.Content); {
+		key, value := dst.Content[i], dst.Content[i+1]
+		if findMapKeyIndex(src, key.Value) < 0 && configYAMLFieldType(
+			t, key.Value,
+		) !=
+			nil &&
+			value.Tag !=
+				"!!null" &&
+			!((value.Kind ==
+				yaml.MappingNode ||
+				value.Kind ==
+					yaml.SequenceNode) &&
+				len(value.Content) ==
+					0) {
+			dst.Content = append(dst.Content[:i], dst.Content[i+2:]...)
+			continue
+		}
+		i += 2
+	}
+}
+
+func configYAMLFieldType(t reflect.Type, key string) reflect.Type {
+	for t != nil && (t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
+		t = t.Elem()
+	}
+	if t == nil {
+		return nil
+	}
+	if t.Kind() == reflect.Map {
+		return t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	for field := range t.Fields() {
+		tag := field.Tag.Get("yaml")
+		name, _, _ := strings.Cut(tag, ",")
+		if name == key {
+			return field.Type
+		}
+		if strings.Contains(tag, ",inline") {
+			if found := configYAMLFieldType(field.Type, key); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
 }

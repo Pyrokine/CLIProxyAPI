@@ -9,8 +9,8 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
-// SummarizeOAuthRequestScopedErrors summarizes request-scoped error rules per OAuth channel.
-func SummarizeOAuthRequestScopedErrors(
+// summarizeOAuthRequestScopedErrors summarizes request-scoped error rules per OAuth channel.
+func summarizeOAuthRequestScopedErrors(
 	entries map[string][]config.RequestScopedErrorRule,
 ) map[string]modelsSummary {
 	if len(entries) == 0 {
@@ -30,14 +30,14 @@ func SummarizeOAuthRequestScopedErrors(
 	return out
 }
 
-// DiffOAuthRequestScopedErrorsChanges compares OAuth request-scoped error maps.
-func DiffOAuthRequestScopedErrorsChanges(
+// oAuthRequestScopedErrorsChanges compares OAuth request-scoped error maps.
+func oAuthRequestScopedErrorsChanges(
 	oldMap,
 	newMap map[string][]config.RequestScopedErrorRule,
 ) ([]string, []string) {
 	return diffSummaryMapChanges(
-		SummarizeOAuthRequestScopedErrors(oldMap),
-		SummarizeOAuthRequestScopedErrors(newMap),
+		summarizeOAuthRequestScopedErrors(oldMap),
+		summarizeOAuthRequestScopedErrors(newMap),
 		"oauth-request-scoped-errors",
 	)
 }

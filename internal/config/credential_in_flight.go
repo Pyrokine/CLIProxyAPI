@@ -64,8 +64,11 @@ func (c CredentialInFlightConfig) Validate() error {
 	if _, _, _, errDurations := c.Durations(); errDurations != nil {
 		return errDurations
 	}
-	if c.MaxPartBytes < 1024 || c.MaxPartCount <= 0 || c.MaxPartCount > DefaultInFlightMaxPartCount {
-		return fmt.Errorf("credential-in-flight part bounds are invalid")
+	if c.MaxPartBytes < 1024 {
+		return fmt.Errorf("credential-in-flight.max-part-bytes must be at least 1024")
+	}
+	if c.MaxPartCount <= 0 || c.MaxPartCount > DefaultInFlightMaxPartCount {
+		return fmt.Errorf("credential-in-flight.max-part-count is outside hard bounds")
 	}
 	if c.MaxRevisionBytes < c.MaxPartBytes || c.MaxRevisionBytes > DefaultInFlightMaxRevisionBytes {
 		return fmt.Errorf("credential-in-flight.max-revision-bytes is outside hard bounds")

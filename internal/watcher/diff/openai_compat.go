@@ -98,6 +98,27 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldModelCount != newModelCount {
 		details = append(details, fmt.Sprintf("models %d -> %d", oldModelCount, newModelCount))
 	}
+	if oldModelCount == newModelCount &&
+		ComputeOpenAICompatModelsHash(oldEntry.Models) != ComputeOpenAICompatModelsHash(newEntry.Models) {
+		details = append(details, "models updated")
+	}
+	if oldKeyCount == newKeyCount && !reflect.DeepEqual(oldEntry.APIKeyEntries, newEntry.APIKeyEntries) {
+		details = append(details, "api-keys updated (redacted)")
+	}
+	if strings.TrimSpace(oldEntry.BaseURL) != strings.TrimSpace(newEntry.BaseURL) {
+		details = append(
+			details, fmt.Sprintf("base-url %s -> %s", formatURL(oldEntry.BaseURL), formatURL(newEntry.BaseURL)),
+		)
+	}
+	if strings.TrimSpace(oldEntry.Prefix) != strings.TrimSpace(newEntry.Prefix) {
+		details = append(
+			details,
+			fmt.Sprintf("prefix %s -> %s", strings.TrimSpace(oldEntry.Prefix), strings.TrimSpace(newEntry.Prefix)),
+		)
+	}
+	if oldEntry.Priority != newEntry.Priority {
+		details = append(details, fmt.Sprintf("priority %d -> %d", oldEntry.Priority, newEntry.Priority))
+	}
 	if oldEntry.Disabled != newEntry.Disabled {
 		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
 	}
@@ -112,13 +133,28 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 		)
 	}
 	if !reflect.DeepEqual(oldEntry.DisableCooling, newEntry.DisableCooling) {
-		details = append(details, fmt.Sprintf("disable-cooling %s -> %s", formatOptionalConfigValue(oldEntry.DisableCooling), formatOptionalConfigValue(newEntry.DisableCooling)))
+		details = append(
+			details, fmt.Sprintf(
+				"disable-cooling %s -> %s", formatOptionalConfigValue(oldEntry.DisableCooling),
+				formatOptionalConfigValue(newEntry.DisableCooling),
+			),
+		)
 	}
 	if !reflect.DeepEqual(oldEntry.RequestRetry, newEntry.RequestRetry) {
-		details = append(details, fmt.Sprintf("request-retry %s -> %s", formatOptionalConfigValue(oldEntry.RequestRetry), formatOptionalConfigValue(newEntry.RequestRetry)))
+		details = append(
+			details, fmt.Sprintf(
+				"request-retry %s -> %s", formatOptionalConfigValue(oldEntry.RequestRetry),
+				formatOptionalConfigValue(newEntry.RequestRetry),
+			),
+		)
 	}
 	if !reflect.DeepEqual(oldEntry.RequestScopedErrors, newEntry.RequestScopedErrors) {
-		details = append(details, fmt.Sprintf("request-scoped-errors updated (%d -> %d entries)", len(oldEntry.RequestScopedErrors), len(newEntry.RequestScopedErrors)))
+		details = append(
+			details, fmt.Sprintf(
+				"request-scoped-errors updated (%d -> %d entries)", len(oldEntry.RequestScopedErrors),
+				len(newEntry.RequestScopedErrors),
+			),
+		)
 	}
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")

@@ -15,49 +15,65 @@ func TestClaudeFingerprintProfileDecode(t *testing.T) {
 		{"", ""}, {"claude-code-cli", "claude-code-cli"}, {"oauth-cli", "claude-code-cli"},
 		{"  OAUTH-CLI  ", "claude-code-cli"}, {" CLAUDE-CODE-CLI ", "claude-code-cli"},
 	} {
-		t.Run(tc.raw, func(t *testing.T) {
-			encoded, _ := json.Marshal(tc.raw)
-			for _, format := range []string{"json", "yaml"} {
-				var key ClaudeKey
-				var err error
-				if format == "json" {
-					err = json.Unmarshal([]byte(`{"api-key":"synthetic","fingerprint-profile":`+string(encoded)+`}`), &key)
-				} else {
-					err = yaml.Unmarshal([]byte("api-key: synthetic\nfingerprint-profile: "+string(encoded)+"\n"), &key)
+		t.Run(
+			tc.raw, func(t *testing.T) {
+				encoded, _ := json.Marshal(tc.raw)
+				for _, format := range []string{"json", "yaml"} {
+					var key ClaudeKey
+					var err error
+					if format == "json" {
+						err = json.Unmarshal(
+							[]byte(`{"api-key":"synthetic","fingerprint-profile":`+string(encoded)+`}`), &key,
+						)
+					} else {
+						err = yaml.Unmarshal(
+							[]byte("api-key: synthetic\nfingerprint-profile: "+string(encoded)+"\n"), &key,
+						)
+					}
+					if err != nil {
+						t.Fatalf("%s: %v", format, err)
+					}
+					result, _ := json.Marshal(key)
+					var fields map[string]any
+					_ = json.Unmarshal(result, &fields)
+					if got, _ := fields["fingerprint-profile"].(string); got != tc.want {
+						t.Fatalf("%s profile = %q, want %q", format, got, tc.want)
+					}
 				}
-				if err != nil {
-					t.Fatalf("%s: %v", format, err)
-				}
-				result, _ := json.Marshal(key)
-				var fields map[string]any
-				_ = json.Unmarshal(result, &fields)
-				if got, _ := fields["fingerprint-profile"].(string); got != tc.want {
-					t.Fatalf("%s profile = %q, want %q", format, got, tc.want)
-				}
-			}
-		})
+			},
+		)
 	}
 }
 
 func TestClaudeFingerprintProfileRejectsInvalidConfig(t *testing.T) {
 	for _, raw := range []string{`"typo"`, `"oauth"`, `true`, `42`, `null`, `[]`, `{}`} {
-		t.Run(raw, func(t *testing.T) {
-			data := []byte("claude-api-key:\n  - api-key: synthetic\n    fingerprint-profile: " + raw + "\n")
-			if _, err := ParseConfigBytes(data); err == nil || !strings.Contains(err.Error(), "fingerprint-profile") {
-				t.Fatalf("ParseConfigBytes accepted %s: %v", raw, err)
-			}
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, data, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := LoadConfigOptional(path, false); err == nil || !strings.Contains(err.Error(), "fingerprint-profile") {
-				t.Fatalf("LoadConfigOptional accepted %s: %v", raw, err)
-			}
-			var key ClaudeKey
-			if err := json.Unmarshal([]byte(`{"api-key":"synthetic","fingerprint-profile":`+raw+`}`), &key); err == nil {
-				t.Fatalf("JSON accepted %s", raw)
-			}
-		})
+		t.Run(
+			raw, func(t *testing.T) {
+				data := []byte(
+					"claude-api-key:\n  - api-key: synthetic\n    fingerprint-profile: " + raw + "\n",
+				)
+				if _, err := ParseConfigBytes(data); err == nil || !strings.Contains(
+					err.Error(), "fingerprint-profile",
+				) {
+					t.Fatalf("ParseConfigBytes accepted %s: %v", raw, err)
+				}
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := LoadConfigOptional(path, false); err == nil || !strings.Contains(
+					err.Error(), "fingerprint-profile",
+				) {
+					t.Fatalf("LoadConfigOptional accepted %s: %v", raw, err)
+				}
+				var key ClaudeKey
+				if err := json.Unmarshal(
+					[]byte(`{"api-key":"synthetic","fingerprint-profile":`+raw+`}`), &key,
+				); err == nil {
+					t.Fatalf("JSON accepted %s", raw)
+				}
+			},
+		)
 	}
 }
 
@@ -74,7 +90,11 @@ func TestClaudeFingerprintProfileRejectsJSONNullCaseVariants(t *testing.T) {
 }
 
 func TestClaudeFingerprintProfileYAMLAliasAndClone(t *testing.T) {
-	data := []byte("defaults: &defaults\n  fingerprint-profile: oauth-cli\nclaude-api-key:\n  - <<: *defaults\n    api-key: synthetic\n")
+	data := []byte(
+		("defaults: &defaults\n  fingerprint-profile: oauth-cli\nclaude-api-key:" +
+			"\n  - <<: *defaults\n    api-key: " +
+			"synthetic\n"),
+	)
 	cfg, err := ParseConfigBytes(data)
 	if err != nil {
 		t.Fatal(err)

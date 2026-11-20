@@ -20,14 +20,24 @@ func TestSanitizeOAuthModelAlias_PreservesForkAndForceMappingFlags(t *testing.T)
 	}
 	if aliases[0].Name != "gpt-5" || aliases[0].Alias != "g5" || !aliases[0].Fork || !aliases[0].ForceMapping {
 		t.Fatalf(
-			"expected first alias to be gpt-5->g5 fork=true force-mapping=true, got name=%q alias=%q fork=%v force-mapping=%v",
-			aliases[0].Name, aliases[0].Alias, aliases[0].Fork, aliases[0].ForceMapping,
+			"expected first alias to be gpt-5->g5 fork=true force-mapping=true, "+
+				"got name=%q alias=%q fork=%v "+
+				"force-mapping=%v",
+			aliases[0].Name,
+			aliases[0].Alias,
+			aliases[0].Fork,
+			aliases[0].ForceMapping,
 		)
 	}
 	if aliases[1].Name != "gpt-6" || aliases[1].Alias != "g6" || aliases[1].Fork || aliases[1].ForceMapping {
 		t.Fatalf(
-			"expected second alias to be gpt-6->g6 fork=false force-mapping=false, got name=%q alias=%q fork=%v force-mapping=%v",
-			aliases[1].Name, aliases[1].Alias, aliases[1].Fork, aliases[1].ForceMapping,
+			"expected second alias to be gpt-6->g6 fork=false force-mapping=false, "+
+				"got name=%q alias=%q fork=%v "+
+				"force-mapping=%v",
+			aliases[1].Name,
+			aliases[1].Alias,
+			aliases[1].Fork,
+			aliases[1].ForceMapping,
 		)
 	}
 }
@@ -37,7 +47,11 @@ func TestSanitizeOAuthModelAlias_AllowsMultipleAliasesForSameName(t *testing.T) 
 		OAuthModelAlias: map[string][]OAuthModelAlias{
 			"antigravity": {
 				{Name: "gemini-claude-opus-4-5-thinking", Alias: "claude-opus-4-5-20251101", Fork: true},
-				{Name: "gemini-claude-opus-4-5-thinking", Alias: "claude-opus-4-5-20251101-thinking", Fork: true},
+				{
+					Name:  "gemini-claude-opus-4-5-thinking",
+					Alias: "claude-opus-4-5-20251101-thinking",
+					Fork:  true,
+				},
 				{Name: "gemini-claude-opus-4-5-thinking", Alias: "claude-opus-4-5", Fork: true},
 			},
 		},

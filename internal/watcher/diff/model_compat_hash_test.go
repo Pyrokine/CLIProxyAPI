@@ -23,7 +23,13 @@ func TestModelSummariesIncludeIsCompat(t *testing.T) {
 
 func TestOpenAICompatHashIncludesMaxCompletionTokens(t *testing.T) {
 	base := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "upstream-model"}})
-	changed := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "upstream-model", UseMaxCompletionTokens: true}})
+	changed := ComputeOpenAICompatModelsHash(
+		[]config.OpenAICompatibilityModel{
+			{
+				Name: "upstream-model", UseMaxCompletionTokens: true,
+			},
+		},
+	)
 	if base == changed {
 		t.Fatal("OpenAI compatibility model hash did not change when UseMaxCompletionTokens changed")
 	}

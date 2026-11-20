@@ -8,53 +8,19 @@ import (
 )
 
 func TestParseConfigRequestScopedErrorRules(t *testing.T) {
-	const source = `
-gemini-api-key:
-  - api-key: gemini-key
-    request-scoped-errors:
-      - status: 400
-        match: [gemini-limit]
-        action: stop
-interactions-api-key:
-  - api-key: interactions-key
-    request-scoped-errors:
-      - status: 400
-        match: [interactions-limit]
-        action: continue
-claude-api-key:
-  - api-key: claude-key
-    request-scoped-errors:
-      - status: 400
-        match-regexr: ["^claude-limit$"]
-        action: stop-and-cooldown
-codex-api-key:
-  - api-key: codex-key
-    base-url: https://api.openai.com/v1
-    request-scoped-errors:
-      - status: 429
-        match: [codex-limit]
-        action: continue-and-cooldown
-xai-api-key:
-  - api-key: xai-key
-    base-url: https://api.x.ai/v1
-    request-scoped-errors:
-      - status: 500
-        match: [xai-limit]
-        action: stop
-openai-compatibility:
-  - name: compat
-    base-url: https://compat.example/v1
-    request-scoped-errors:
-      - status: 422
-        match: [compat-limit]
-        action: continue
-oauth-request-scoped-errors:
-  Vertex:
-    - status: 400
-      match: [" vertex-limit "]
-      match-regexr: [" ^vertex-limit$ "]
-      action: " STOP "
-`
+	const source = "\ngemini-api-key:\n  - api-key: gemini-key\n    request-scoped-errors:\n      - status: " +
+		"400\n        match: [gemini-limit]\n        action: stop\ninteractions-api-key:\n  - api-key: " +
+		"interactions-key\n    request-scoped-errors:\n      - status: 400\n        match: [interactions-" +
+		"limit]\n        action: continue\nclaude-api-key:\n  - api-key: claude-key\n    request-scoped-" +
+		"errors:\n      - status: 400\n        match-regexr: [\"^claude-limit$\"]\n        action: stop-and-" +
+		"cooldown\ncodex-api-key:\n  - api-key: codex-key\n    base-url: https://api.openai.com/v1\n    " +
+		"request-scoped-errors:\n      - status: 429\n        match: [codex-limit]\n        action: continue-" +
+		"and-cooldown\nxai-api-key:\n  - api-key: xai-key\n    base-url: https://api.x.ai/v1\n    request-" +
+		"scoped-errors:\n      - status: 500\n        match: [xai-limit]\n        action: stop\nopenai-" +
+		"compatibility:\n  - name: compat\n    base-url: https://compat.example/v1\n    request-scoped-" +
+		"errors:\n      - status: 422\n        match: [compat-limit]\n        action: continue\noauth-" +
+		"request-scoped-errors:\n  Vertex:\n    - status: 400\n      match: [\" vertex-limit \"]\n      " +
+		"match-regexr: [\" ^vertex-limit$ \"]\n      action: \" STOP \"\n"
 
 	cfg, err := ParseConfigBytes([]byte(source))
 	if err != nil {
@@ -72,7 +38,10 @@ oauth-request-scoped-errors:
 		{name: "claude", rules: cfg.ClaudeKey[0].RequestScopedErrors, status: 400, action: "stop-and-cooldown"},
 		{name: "codex", rules: cfg.CodexKey[0].RequestScopedErrors, status: 429, action: "continue-and-cooldown"},
 		{name: "xai", rules: cfg.XAIKey[0].RequestScopedErrors, status: 500, action: "stop"},
-		{name: "openai compatibility", rules: cfg.OpenAICompatibility[0].RequestScopedErrors, status: 422, action: "continue"},
+		{
+			name: "openai compatibility", rules: cfg.OpenAICompatibility[0].RequestScopedErrors, status: 422,
+			action: "continue",
+		},
 	}
 	for _, check := range checks {
 		if len(check.rules) != 1 || check.rules[0].Status != check.status || check.rules[0].Action != check.action {
@@ -96,7 +65,9 @@ func TestParseConfigOAuthRequestScopedErrorChannels(t *testing.T) {
 	var source strings.Builder
 	source.WriteString("oauth-request-scoped-errors:\n")
 	for _, channel := range channels {
-		source.WriteString("  " + channel + ":\n    - status: 400\n      match: [context_length_exceeded]\n      action: stop\n")
+		source.WriteString(
+			"  " + channel + ":\n    - status: 400\n      match: [context_length_exceeded]\n      action: stop\n",
+		)
 	}
 	cfg, err := ParseConfigBytes([]byte(source.String()))
 	if err != nil {
@@ -115,20 +86,22 @@ func TestParseConfigOAuthRequestScopedErrorChannels(t *testing.T) {
 }
 
 func TestSanitizeOAuthRequestScopedErrorsKeepsRuntimeInvalidValues(t *testing.T) {
-	cfg := &Config{OAuthRequestScopedErrors: map[string][]RequestScopedErrorRule{
-		" Vertex ": {
-			{
-				Status:      400,
-				Match:       []string{" token ", ""},
-				MatchRegexr: []string{" [invalid ", "  "},
-				Action:      " NOT-ACTION ",
+	cfg := &Config{
+		OAuthRequestScopedErrors: map[string][]RequestScopedErrorRule{
+			" Vertex ": {
+				{
+					Status:      400,
+					Match:       []string{" token ", ""},
+					MatchRegexr: []string{" [invalid ", "  "},
+					Action:      " NOT-ACTION ",
+				},
+				{Status: 0, Match: []string{"ignored"}, Action: "stop"},
+				{Status: 400, Match: []string{"  "}, Action: "stop"},
 			},
-			{Status: 0, Match: []string{"ignored"}, Action: "stop"},
-			{Status: 400, Match: []string{"  "}, Action: "stop"},
+			" ":      {{Status: 400, Match: []string{"ignored"}, Action: "stop"}},
+			"claude": nil,
 		},
-		" ":      {{Status: 400, Match: []string{"ignored"}, Action: "stop"}},
-		"claude": nil,
-	}}
+	}
 
 	cfg.SanitizeOAuthRequestScopedErrors()
 
@@ -160,9 +133,11 @@ oauth-request-scoped-errors:
 		t.Fatal(err)
 	}
 
-	cfg := &Config{Host: "127.0.0.1", OAuthRequestScopedErrors: map[string][]RequestScopedErrorRule{
-		"vertex": {{Status: 400, Match: []string{"current-vertex"}, Action: "stop-and-cooldown"}},
-	}}
+	cfg := &Config{
+		Host: "127.0.0.1", OAuthRequestScopedErrors: map[string][]RequestScopedErrorRule{
+			"vertex": {{Status: 400, Match: []string{"current-vertex"}, Action: "stop-and-cooldown"}},
+		},
+	}
 	if err := SaveConfigPreserveComments(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfigPreserveComments() error = %v", err)
 	}

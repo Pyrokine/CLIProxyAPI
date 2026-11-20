@@ -11,11 +11,13 @@ import (
 
 func cleanupTestWatcher(t *testing.T, watcher *Watcher) {
 	t.Helper()
-	t.Cleanup(func() {
-		if errStop := watcher.Stop(); errStop != nil {
-			t.Errorf("stop watcher: %v", errStop)
-		}
-	})
+	t.Cleanup(
+		func() {
+			if errStop := watcher.Stop(); errStop != nil {
+				t.Errorf("stop watcher: %v", errStop)
+			}
+		},
+	)
 }
 
 func TestAcknowledgeConfigFileSwitchesAuthDirectoryWatch(t *testing.T) {

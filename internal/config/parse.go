@@ -52,6 +52,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
 	}
+	if cfg.Port < 0 || cfg.Port > 65535 {
+		return nil, fmt.Errorf("port %d is out of range [0, 65535]", cfg.Port)
+	}
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
 		return nil, errValidate
@@ -68,7 +71,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if errValidate := validateMetaKeys(cfg.MetaKey); errValidate != nil {
 		return nil, errValidate
 	}
-	if err := validateImageArtifactCacheConfig(cfg.ImageArtifactCache); err != nil {
+	if err := validateStorageSizeConfig(&cfg); err != nil {
 		return nil, err
 	}
 	cfg.APIKeys = mergeConfigAPIKeys(data, cfg.APIKeys)
@@ -125,7 +128,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.SanitizeCodexKeys()
 	cfg.SanitizeXAIKeys()
 	cfg.SanitizeMetaKeys()
-	cfg.sanitizeCodexHeaderDefaults()
+	cfg.SanitizeCodexHeaderDefaults()
 	cfg.sanitizeClaudeHeaderDefaults()
 	cfg.SanitizeClaudeKeys()
 	cfg.SanitizeOpenAICompatibility()

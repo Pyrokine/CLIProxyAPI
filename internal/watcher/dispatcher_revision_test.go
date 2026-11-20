@@ -36,11 +36,13 @@ func pauseRevisionTestSnapshot(
 	}
 	var finishOnce sync.Once
 	finish := func() {
-		finishOnce.Do(func() {
-			close(resume)
-			<-finished
-			snapshotCoreAuthsFunc = original
-		})
+		finishOnce.Do(
+			func() {
+				close(resume)
+				<-finished
+				snapshotCoreAuthsFunc = original
+			},
+		)
 	}
 	t.Cleanup(finish)
 	go func() {
@@ -67,48 +69,50 @@ func newRevisionTestWatcher(auth *coreauth.Auth) *Watcher {
 
 func TestRefreshAuthStatePreservesConcurrentAuthRevision(t *testing.T) {
 	for _, action := range []string{"modify", "delete"} {
-		t.Run(action, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "account.json")
-			oldAuth := &coreauth.Auth{
-				ID:         "account",
-				Provider:   "test",
-				ProxyURL:   "http://old.example",
-				Attributes: map[string]string{coreauth.AttributePath: path},
-			}
-			w := newRevisionTestWatcher(oldAuth)
-			finish := pauseRevisionTestSnapshot(t, w, []*coreauth.Auth{oldAuth.Clone()})
-
-			w.observeAuthFile(path)
-			w.clientsMutex.Lock()
-			newByID := make(map[string]*coreauth.Auth)
-			if action == "modify" {
-				updated := oldAuth.Clone()
-				updated.ProxyURL = "http://latest.example"
-				newByID[updated.ID] = updated
-			}
-			updates := w.computePerPathUpdatesLocked(
-				map[string]*coreauth.Auth{oldAuth.ID: nil},
-				newByID,
-			)
-			w.clientsMutex.Unlock()
-			w.dispatchAuthUpdates(updates)
-			finish()
-
-			current := w.currentAuths[oldAuth.ID]
-			pending := w.pendingUpdates[oldAuth.ID]
-			if action == "delete" {
-				if current != nil || pending.Action != AuthUpdateActionDelete {
-					t.Fatalf("stale scan restored deleted auth: current=%#v update=%#v", current, pending)
+		t.Run(
+			action, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "account.json")
+				oldAuth := &coreauth.Auth{
+					ID:         "account",
+					Provider:   "test",
+					ProxyURL:   "http://old.example",
+					Attributes: map[string]string{coreauth.AttributePath: path},
 				}
-				return
-			}
-			if current == nil || current.ProxyURL != "http://latest.example" {
-				t.Fatalf("current proxy = %#v, want latest", current)
-			}
-			if pending.Auth == nil || pending.Auth.ProxyURL != "http://latest.example" {
-				t.Fatalf("pending proxy = %#v, want latest", pending.Auth)
-			}
-		})
+				w := newRevisionTestWatcher(oldAuth)
+				finish := pauseRevisionTestSnapshot(t, w, []*coreauth.Auth{oldAuth.Clone()})
+
+				w.observeAuthFile(path)
+				w.clientsMutex.Lock()
+				newByID := make(map[string]*coreauth.Auth)
+				if action == "modify" {
+					updated := oldAuth.Clone()
+					updated.ProxyURL = "http://latest.example"
+					newByID[updated.ID] = updated
+				}
+				updates := w.computePerPathUpdatesLocked(
+					map[string]*coreauth.Auth{oldAuth.ID: nil},
+					newByID,
+				)
+				w.clientsMutex.Unlock()
+				w.dispatchAuthUpdates(updates)
+				finish()
+
+				current := w.currentAuths[oldAuth.ID]
+				pending := w.pendingUpdates[oldAuth.ID]
+				if action == "delete" {
+					if current != nil || pending.Action != AuthUpdateActionDelete {
+						t.Fatalf("stale scan restored deleted auth: current=%#v update=%#v", current, pending)
+					}
+					return
+				}
+				if current == nil || current.ProxyURL != "http://latest.example" {
+					t.Fatalf("current proxy = %#v, want latest", current)
+				}
+				if pending.Auth == nil || pending.Auth.ProxyURL != "http://latest.example" {
+					t.Fatalf("pending proxy = %#v, want latest", pending.Auth)
+				}
+			},
+		)
 	}
 }
 

@@ -3,9 +3,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -31,10 +33,8 @@ func mergeConfigAPIKeys(rawYAML []byte, current []string) []string {
 	var parsed struct {
 		Auth struct {
 			Providers map[string]struct {
-				APIKeys []string `yaml:"api-keys"`
-				Entries []struct {
-					APIKey string `yaml:"api-key"`
-				} `yaml:"api-key-entries"`
+				APIKeys []string    `yaml:"api-keys"`
+				Entries []yaml.Node `yaml:"api-key-entries"`
 			} `yaml:"providers"`
 		} `yaml:"auth"`
 	}
@@ -47,7 +47,18 @@ func mergeConfigAPIKeys(rawYAML []byte, current []string) []string {
 	}
 	keys = append(keys, provider.APIKeys...)
 	for _, entry := range provider.Entries {
-		keys = append(keys, entry.APIKey)
+		var key string
+		if err := entry.Decode(&key); err == nil {
+			keys = append(keys, key)
+			continue
+		}
+		var configured struct {
+			APIKey string `yaml:"api-key"`
+		}
+		if err := entry.Decode(&configured); err != nil {
+			return normalizeStringSlice(current)
+		}
+		keys = append(keys, configured.APIKey)
 	}
 	return normalizeStringSlice(keys)
 }
@@ -75,7 +86,18 @@ func normalizeStringSlice(values []string) []string {
 	return result
 }
 
+const (
+	MaxImageArtifactRetentionDays = int(math.MaxInt64 / int64(24*time.Hour))
+	MaxImageArtifactCacheSizeMB   = MaxStorageSizeMB
+)
+
 func validateImageArtifactCacheConfig(cfg ImageArtifactCache) error {
+	if cfg.RetentionDays > MaxImageArtifactRetentionDays {
+		return fmt.Errorf("image-artifact-cache.retention-days must not exceed %d", MaxImageArtifactRetentionDays)
+	}
+	if cfg.MaxTotalSizeMB > MaxImageArtifactCacheSizeMB {
+		return fmt.Errorf("image-artifact-cache.max-total-size-mb must not exceed %d", MaxImageArtifactCacheSizeMB)
+	}
 	if cfg.RetentionDays < 0 {
 		return fmt.Errorf(
 			"image-artifact-cache.retention-days %d is invalid (use 0 to disable or a positive integer)",
@@ -145,7 +167,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
 		if optional {
-			cfgOptional := &Config{}
+			log.Warnf("invalid optional configuration; waiting for a valid configuration: %v", errValidate)
+			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 			cfgOptional.NormalizePluginsConfig()
 			return cfgOptional, nil
 		}
@@ -193,9 +216,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
+			log.Warn("invalid optional configuration; waiting for a valid configuration")
 			return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	if cfg.Port < 0 || cfg.Port > 65535 {
+		return nil, fmt.Errorf("port %d is out of range [0, 65535]", cfg.Port)
 	}
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
@@ -225,7 +252,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if errValidate := validateMetaKeys(cfg.MetaKey); errValidate != nil {
 		return nil, errValidate
 	}
-	if err = validateImageArtifactCacheConfig(cfg.ImageArtifactCache); err != nil {
+	if err = validateStorageSizeConfig(&cfg); err != nil {
 		return nil, err
 	}
 	cfg.APIKeys = mergeConfigAPIKeys(data, cfg.APIKeys)
@@ -299,7 +326,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.SanitizeCodexKeys()
 	cfg.SanitizeXAIKeys()
 	cfg.SanitizeMetaKeys()
-	cfg.sanitizeCodexHeaderDefaults()
+	cfg.SanitizeCodexHeaderDefaults()
 	cfg.sanitizeClaudeHeaderDefaults()
 
 	// Sanitize Claude key headers
@@ -348,7 +375,9 @@ func LoadWithFallback(configFilePath string) (*Config, string, bool, error) {
 	cfg, err := LoadConfig(configFilePath)
 	if err == nil {
 		// Primary config loaded successfully — save as last-good
-		_ = SaveLastGood(configFilePath)
+		if errSave := SaveLastGood(configFilePath); errSave != nil {
+			log.WithError(errSave).Warn("failed to save last-good config")
+		}
 		return cfg, configFilePath, false, nil
 	}
 

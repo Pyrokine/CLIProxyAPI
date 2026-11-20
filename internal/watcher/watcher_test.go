@@ -44,6 +44,7 @@ func TestApplyAuthExcludedModelsMeta_OAuthProvider(t *testing.T) {
 		Provider:   "TestProv",
 		Attributes: map[string]string{},
 	}
+	//goland:noinspection SpellCheckingInspection
 	cfg := &config.Config{
 		OAuthExcludedModels: map[string][]string{
 			"testprov": {"A", "b"},
@@ -1526,8 +1527,10 @@ func TestAddOrUpdateClientEdgeCases(t *testing.T) {
 
 func TestLoadFileClientsWalkError(t *testing.T) {
 	tmpDir := t.TempDir()
+	//goland:noinspection SpellCheckingInspection
 	noAccessDir := filepath.Join(tmpDir, "0noaccess")
 	if err := os.MkdirAll(noAccessDir, 0o755); err != nil {
+		//goland:noinspection SpellCheckingInspection
 		t.Fatalf("failed to create noaccess dir: %v", err)
 	}
 	if err := os.Chmod(noAccessDir, 0); err != nil {

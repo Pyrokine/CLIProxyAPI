@@ -146,6 +146,11 @@ func (w *Watcher) refreshAuthState(force bool) {
 	auths, errSnapshot := snapshotCoreAuthsFunc(cfg, authDir, parser)
 	w.clientsMutex.Lock()
 	w.activeAuthScans--
+	if cfg != w.config || authDir != w.authDir {
+		w.clientsMutex.Unlock()
+		log.Debug("discarding auth snapshot after configuration or auth directory change")
+		return
+	}
 	if errSnapshot != nil && w.currentAuths != nil {
 		w.clientsMutex.Unlock()
 		log.Errorf("failed to refresh auth snapshot; retaining current auth state: %v", errSnapshot)

@@ -6,22 +6,55 @@ import (
 	"testing"
 )
 
+func TestLoadConfigOptional_CodexHeaderDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(
+		("codex-header-defaults:\n  user-agent: \"  my-codex-client/1.0  \"\n  " +
+			"beta-features: \"  feature-a,feature-b  " +
+			"\"\n"),
+	)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigOptional(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.CodexHeaderDefaults.UserAgent; got != "my-codex-client/1.0" {
+		t.Fatalf("UserAgent=%q", got)
+	}
+	if got := cfg.CodexHeaderDefaults.BetaFeatures; got != "feature-a,feature-b" {
+		t.Fatalf("BetaFeatures=%q", got)
+	}
+	if cfg.Codex.DisableCodexCloaking {
+		t.Fatal("default configuration disabled Codex cloaking")
+	}
+}
+
 func TestLoadConfigOptionalCodexOptions(t *testing.T) {
 	for _, value := range []string{"true", "false", "null"} {
-		t.Run(value, func(t *testing.T) {
-			data := []byte("codex:\n  disable-codex-cloaking: true\n  identity-confuse: true\n  optimize-multi-agent-v2: " + value + "\n")
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfg, err := LoadConfigOptional(path, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !cfg.Codex.DisableCodexCloaking || !cfg.Codex.IdentityConfuse || cfg.Codex.OptimizeMultiAgentV2 != (value == "true") {
-				t.Fatalf("Codex options = %+v", cfg.Codex)
-			}
-		})
+		t.Run(
+			value, func(t *testing.T) {
+				data := []byte(
+					("codex:\n  disable-codex-cloaking: true\n  identity-confuse: true\n  " +
+						"optimize-multi-agent-v2: ") +
+						value +
+						"\n",
+				)
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := LoadConfigOptional(path, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !cfg.Codex.DisableCodexCloaking || !cfg.Codex.IdentityConfuse ||
+					cfg.Codex.OptimizeMultiAgentV2 != (value == "true") {
+					t.Fatalf("Codex options = %+v", cfg.Codex)
+				}
+			},
+		)
 	}
 }
 
@@ -69,7 +102,8 @@ claude-header-defaults:
 	if got := cfg.ClaudeHeaderDefaults.Timezone; got != "Asia/Singapore" {
 		t.Fatalf("Timezone = %q", got)
 	}
-	if cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile == nil || *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile {
+	if cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile == nil ||
+		*cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile {
 		t.Fatalf("StabilizeDeviceProfile = %v, want false", cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile)
 	}
 }

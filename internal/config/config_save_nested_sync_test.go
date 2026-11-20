@@ -98,13 +98,15 @@ func TestSaveConfigReordersPluginSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	var reordered yaml.Node
-	if err := yaml.Unmarshal([]byte(`vision_models:
+	if err := yaml.Unmarshal(
+		[]byte(`vision_models:
   - name: model-b
     detail: new-detail-b
     extra_b: only-in-b
   - name: model-a
     detail: new-detail-a
-`), &reordered); err != nil {
+`), &reordered,
+	); err != nil {
 		t.Fatal(err)
 	}
 	plugin := cfg.Plugins.Configs["sample"]
@@ -143,7 +145,9 @@ func TestSaveConfigReordersPluginSequence(t *testing.T) {
 
 func TestSaveConfigAddsPluginToExistingSection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	initial := []byte("# keep port comment\nport: 8080\n# keep plugins comment\nplugins:\n  enabled: true\n  dir: custom-dir\n")
+	initial := []byte(
+		"# keep port comment\nport: 8080\n# keep plugins comment\nplugins:\n  enabled: true\n  dir: custom-dir\n",
+	)
 	if err := os.WriteFile(path, initial, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -152,10 +156,12 @@ func TestSaveConfigAddsPluginToExistingSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	disabled := false
-	cfg := &Config{Port: 8080, Plugins: PluginsConfig{
-		Enabled: true, Dir: "custom-dir",
-		Configs: map[string]PluginInstanceConfig{"new-item": {Enabled: &disabled, Raw: *raw.Content[0]}},
-	}}
+	cfg := &Config{
+		Port: 8080, Plugins: PluginsConfig{
+			Enabled: true, Dir: "custom-dir",
+			Configs: map[string]PluginInstanceConfig{"new-item": {Enabled: &disabled, Raw: *raw.Content[0]}},
+		},
+	}
 	if err := SaveConfigPreserveComments(path, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +169,9 @@ func TestSaveConfigAddsPluginToExistingSection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"# keep port comment", "# keep plugins comment", "dir: custom-dir", "new-item:", "enabled: false"} {
+	for _, expected := range []string{
+		"# keep port comment", "# keep plugins comment", "dir: custom-dir", "new-item:", "enabled: false",
+	} {
 		if !strings.Contains(string(written), expected) {
 			t.Fatalf("plugin config lost %q: %s", expected, written)
 		}
@@ -208,7 +216,9 @@ func TestSaveConfigPreservesExplicitMetaCoolingAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(written), "disable-cooling: false") || !strings.Contains(string(written), "request-retry: 0") {
+	if !strings.Contains(string(written), "disable-cooling: false") || !strings.Contains(
+		string(written), "request-retry: 0",
+	) {
 		t.Fatalf("explicit Meta overrides omitted: %s", written)
 	}
 }
@@ -221,37 +231,46 @@ func TestSaveConfigPreservesNewClaudeCacheUserIDFalse(t *testing.T) {
 		{"existing_cloak", "claude-api-key:\n  - api-key: test-key\n    cloak:\n      mode: always\n"},
 		{"new_cloak", "claude-api-key:\n  - api-key: test-key\n"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, []byte(tc.original), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cacheUserID := false
-			cfg := &Config{ClaudeKey: []ClaudeKey{{
-				APIKey: "test-key", Cloak: &CloakConfig{CacheUserID: &cacheUserID},
-			}}}
-			if err := SaveConfigPreserveComments(path, cfg); err != nil {
-				t.Fatal(err)
-			}
-			written, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(string(written), "cache-user-id: false") || strings.Contains(string(written), "mode: always") {
-				t.Fatalf("Claude cloak settings not saved: %s", written)
-			}
-			loaded, err := LoadConfigOptional(path, false)
-			if err != nil || len(loaded.ClaudeKey) != 1 || loaded.ClaudeKey[0].Cloak == nil ||
-				loaded.ClaudeKey[0].Cloak.CacheUserID == nil || *loaded.ClaudeKey[0].Cloak.CacheUserID {
-				t.Fatalf("loaded cloak cache setting = %#v, error = %v", loaded, err)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, []byte(tc.original), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cacheUserID := false
+				cfg := &Config{
+					ClaudeKey: []ClaudeKey{
+						{
+							APIKey: "test-key", Cloak: &CloakConfig{CacheUserID: &cacheUserID},
+						},
+					},
+				}
+				if err := SaveConfigPreserveComments(path, cfg); err != nil {
+					t.Fatal(err)
+				}
+				written, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(written), "cache-user-id: false") || strings.Contains(
+					string(written), "mode: always",
+				) {
+					t.Fatalf("Claude cloak settings not saved: %s", written)
+				}
+				loaded, err := LoadConfigOptional(path, false)
+				if err != nil || len(loaded.ClaudeKey) != 1 || loaded.ClaudeKey[0].Cloak == nil ||
+					loaded.ClaudeKey[0].Cloak.CacheUserID == nil || *loaded.ClaudeKey[0].Cloak.CacheUserID {
+					t.Fatalf("loaded cloak cache setting = %#v, error = %v", loaded, err)
+				}
+			},
+		)
 	}
 }
 
 func TestSaveConfigClearsRemovedClaudeCloakFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	initial := []byte("claude-api-key:\n  - api-key: test-key\n    cloak:\n      mode: always\n      strict-mode: true\n      cache-user-id: true\n")
+	initial := []byte(("claude-api-key:\n  - api-key: test-key\n    cloak:\n      mode: always" +
+		"\n      strict-mode: true\n      cache-user-id: true\n"))
 	if err := os.WriteFile(path, initial, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -291,13 +310,19 @@ func TestSaveConfigPreservesNewZeroPluginSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	var raw yaml.Node
-	if err := yaml.Unmarshal([]byte("enabled: false\ntimeout: 0\nempty_str: \"\"\nempty_list: []\n"), &raw); err != nil {
+	if err := yaml.Unmarshal(
+		[]byte("enabled: false\ntimeout: 0\nempty_str: \"\"\nempty_list: []\n"), &raw,
+	); err != nil {
 		t.Fatal(err)
 	}
 	disabled := false
-	cfg := &Config{Port: 8080, Plugins: PluginsConfig{Configs: map[string]PluginInstanceConfig{
-		"zero-plugin": {Enabled: &disabled, Raw: *raw.Content[0]},
-	}}}
+	cfg := &Config{
+		Port: 8080, Plugins: PluginsConfig{
+			Configs: map[string]PluginInstanceConfig{
+				"zero-plugin": {Enabled: &disabled, Raw: *raw.Content[0]},
+			},
+		},
+	}
 	if err := SaveConfigPreserveComments(path, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +330,9 @@ func TestSaveConfigPreservesNewZeroPluginSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"zero-plugin:", "enabled: false", "timeout: 0", "empty_str: \"\"", "empty_list: []"} {
+	for _, field := range []string{
+		"zero-plugin:", "enabled: false", "timeout: 0", "empty_str: \"\"", "empty_list: []",
+	} {
 		if !strings.Contains(string(written), field) {
 			t.Fatalf("plugin setting %q omitted: %s", field, written)
 		}

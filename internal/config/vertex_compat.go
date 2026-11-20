@@ -59,6 +59,12 @@ type VertexCompatKey struct {
 func (k VertexCompatKey) GetAPIKey() string  { return k.APIKey }
 func (k VertexCompatKey) GetBaseURL() string { return k.BaseURL }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (k VertexCompatKey) GetPrefix() string { return k.Prefix }
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (k VertexCompatKey) GetProxyURL() string { return k.ProxyURL }
+
 // VertexCompatModel represents a model configuration for Vertex compatibility,
 // including the actual model name and its alias for API routing.
 type VertexCompatModel struct {
@@ -71,12 +77,16 @@ type VertexCompatModel struct {
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
+	// ForceMapping rewrites the response model to the configured alias.
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
 	// Thinking overrides the upstream model's thinking capability.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
 func (m VertexCompatModel) GetName() string        { return m.Name }
 func (m VertexCompatModel) GetAlias() string       { return m.Alias }
+func (m VertexCompatModel) GetForceMapping() bool  { return m.ForceMapping }
 func (m VertexCompatModel) GetDisplayName() string { return m.DisplayName }
 func (m VertexCompatModel) GetThinking() *registry.ThinkingSupport {
 	return m.Thinking

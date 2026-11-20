@@ -43,7 +43,8 @@ func TestC04SynthesizeXAIAPIKeyWithoutDuplicatingOAuth(t *testing.T) {
 	if auth.Attributes["api_key"] != "xai-key" || auth.Attributes["base_url"] != "https://api.x.ai/v1" {
 		t.Fatalf("auth credentials = %#v", auth.Attributes)
 	}
-	if auth.Attributes["websockets"] != "true" || auth.Attributes["header:X-Custom"] != "value" || auth.Attributes["models_hash"] == "" {
+	if auth.Attributes["websockets"] != "true" || auth.Attributes["header:X-Custom"] != "value" ||
+		auth.Attributes["models_hash"] == "" {
 		t.Fatalf("auth execution attributes = %#v", auth.Attributes)
 	}
 	if auth.Attributes["weight"] != "3" || auth.ProxyURL != "http://proxy.local" {

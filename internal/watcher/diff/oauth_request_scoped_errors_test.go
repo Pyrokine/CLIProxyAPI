@@ -7,14 +7,16 @@ import (
 )
 
 func TestSummarizeOAuthRequestScopedErrorsNormalizesAndFilters(t *testing.T) {
-	summary := SummarizeOAuthRequestScopedErrors(map[string][]config.RequestScopedErrorRule{
-		" Vertex ": {
-			{Status: 0, Match: []string{"ignored"}, Action: "stop"},
-			{Status: 400, Match: []string{"", "  "}, Action: "stop"},
-			{Status: 400, Match: []string{"context-limit"}, Action: "stop"},
+	summary := summarizeOAuthRequestScopedErrors(
+		map[string][]config.RequestScopedErrorRule{
+			" Vertex ": {
+				{Status: 0, Match: []string{"ignored"}, Action: "stop"},
+				{Status: 400, Match: []string{"", "  "}, Action: "stop"},
+				{Status: 400, Match: []string{"context-limit"}, Action: "stop"},
+			},
+			"": {{Status: 500, Match: []string{"ignored"}, Action: "continue"}},
 		},
-		"": {{Status: 500, Match: []string{"ignored"}, Action: "continue"}},
-	})
+	)
 
 	if len(summary) != 1 {
 		t.Fatalf("summary = %#v", summary)
@@ -23,7 +25,7 @@ func TestSummarizeOAuthRequestScopedErrorsNormalizesAndFilters(t *testing.T) {
 	if !ok || vertex.count != 1 || vertex.hash == "" {
 		t.Fatalf("vertex summary = %#v", vertex)
 	}
-	if empty := SummarizeOAuthRequestScopedErrors(nil); empty != nil {
+	if empty := summarizeOAuthRequestScopedErrors(nil); empty != nil {
 		t.Fatalf("nil summary = %#v", empty)
 	}
 }
@@ -40,7 +42,7 @@ func TestDiffOAuthRequestScopedErrorsTracksOrderAndChannels(t *testing.T) {
 		"codex":  {{Status: 422, Match: []string{"new"}, Action: "continue-and-cooldown"}},
 	}
 
-	changes, affected := DiffOAuthRequestScopedErrorsChanges(oldMap, newMap)
+	changes, affected := oAuthRequestScopedErrorsChanges(oldMap, newMap)
 	expectContains(t, changes, "oauth-request-scoped-errors[vertex]: updated (2 -> 2 entries)")
 	expectContains(t, changes, "oauth-request-scoped-errors[claude]: removed")
 	expectContains(t, changes, "oauth-request-scoped-errors[codex]: added (1 entries)")
@@ -60,12 +62,16 @@ func TestBuildConfigChangeDetailsIncludesRequestScopedErrors(t *testing.T) {
 	}
 	rule := []config.RequestScopedErrorRule{{Status: 400, Match: []string{"limit"}, Action: "stop"}}
 	newCfg := &config.Config{
-		GeminiKey:                []config.GeminiKey{{APIKey: "g", RequestScopedErrors: rule}},
-		InteractionsKey:          []config.GeminiKey{{APIKey: "i", RequestScopedErrors: rule}},
-		ClaudeKey:                []config.ClaudeKey{{APIKey: "c", RequestScopedErrors: rule}},
-		CodexKey:                 []config.CodexKey{{APIKey: "x", RequestScopedErrors: rule}},
-		XAIKey:                   []config.CodexKey{{APIKey: "a", RequestScopedErrors: rule}},
-		OpenAICompatibility:      []config.OpenAICompatibility{{Name: "compat", BaseURL: "https://example.test", RequestScopedErrors: rule}},
+		GeminiKey:       []config.GeminiKey{{APIKey: "g", RequestScopedErrors: rule}},
+		InteractionsKey: []config.GeminiKey{{APIKey: "i", RequestScopedErrors: rule}},
+		ClaudeKey:       []config.ClaudeKey{{APIKey: "c", RequestScopedErrors: rule}},
+		CodexKey:        []config.CodexKey{{APIKey: "x", RequestScopedErrors: rule}},
+		XAIKey:          []config.CodexKey{{APIKey: "a", RequestScopedErrors: rule}},
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name: "compat", BaseURL: "https://example.test", RequestScopedErrors: rule,
+			},
+		},
 		OAuthRequestScopedErrors: map[string][]config.RequestScopedErrorRule{"vertex": rule},
 	}
 

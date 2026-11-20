@@ -8,6 +8,56 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestDisableImageGenerationMode_UnmarshalYAML(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  DisableImageGenerationMode
+	}{
+		{value: "false", want: DisableImageGenerationOff},
+		{value: "true", want: DisableImageGenerationAll},
+		{value: "chat", want: DisableImageGenerationChat},
+		{value: "passthrough", want: DisableImageGenerationPassthrough},
+	} {
+		t.Run(
+			test.value, func(t *testing.T) {
+				var wrapper struct {
+					V DisableImageGenerationMode `yaml:"disable-image-generation"`
+				}
+				if err := yaml.Unmarshal([]byte("disable-image-generation: "+test.value+"\n"), &wrapper); err != nil {
+					t.Fatalf("unmarshal %s: %v", test.value, err)
+				}
+				if wrapper.V != test.want {
+					t.Fatalf("%s => %v, want %v", test.value, wrapper.V, test.want)
+				}
+			},
+		)
+	}
+}
+
+func TestDisableImageGenerationMode_UnmarshalJSON(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  DisableImageGenerationMode
+	}{
+		{value: "false", want: DisableImageGenerationOff},
+		{value: "true", want: DisableImageGenerationAll},
+		{value: `"chat"`, want: DisableImageGenerationChat},
+		{value: `"passthrough"`, want: DisableImageGenerationPassthrough},
+	} {
+		t.Run(
+			test.value, func(t *testing.T) {
+				var value DisableImageGenerationMode
+				if err := json.Unmarshal([]byte(test.value), &value); err != nil {
+					t.Fatalf("unmarshal %s: %v", test.value, err)
+				}
+				if value != test.want {
+					t.Fatalf("%s => %v, want %v", test.value, value, test.want)
+				}
+			},
+		)
+	}
+}
+
 func TestDisableImageGenerationModePassthroughYAML(t *testing.T) {
 	var cfg struct {
 		DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation"`

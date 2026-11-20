@@ -15,11 +15,13 @@ func TestConfigSynthesizerKeepsBaseURLOnlyCredentials(t *testing.T) {
 		CodexKey:        []config.CodexKey{{BaseURL: "https://codex.example"}},
 		XAIKey:          []config.XAIKey{{BaseURL: "https://xai.example"}},
 	}
-	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
-		Config:      cfg,
-		Now:         time.Unix(1, 0).UTC(),
-		IDGenerator: NewStableIDGenerator(),
-	})
+	auths, err := NewConfigSynthesizer().Synthesize(
+		&SynthesisContext{
+			Config:      cfg,
+			Now:         time.Unix(1, 0).UTC(),
+			IDGenerator: NewStableIDGenerator(),
+		},
+	)
 	if err != nil {
 		t.Fatalf("Synthesize() error = %v", err)
 	}

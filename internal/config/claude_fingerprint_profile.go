@@ -46,6 +46,7 @@ func ParseClaudeFingerprintProfile(value any) (string, error) {
 }
 
 // UnmarshalJSON 在完整配置和单项创建入口使用相同的字段类型校验
+// noinspection GoMixedReceiverTypes
 func (k *ClaudeKey) UnmarshalJSON(data []byte) error {
 	type plain ClaudeKey
 	candidate := plain(*k)
@@ -73,6 +74,7 @@ func (k *ClaudeKey) UnmarshalJSON(data []byte) error {
 }
 
 // UnmarshalYAML 对合并键和 alias 解码后的值校验，不接受隐式字符串转换
+// noinspection GoMixedReceiverTypes
 func (k *ClaudeKey) UnmarshalYAML(node *yaml.Node) error {
 	type plain ClaudeKey
 	candidate := plain(*k)

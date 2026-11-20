@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -459,6 +460,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) ([]*co
 		if providerName == "" {
 			providerName = "openai-compatibility"
 		}
+		providerKey := util.OpenAICompatibleProviderKey(providerName)
 		base := strings.TrimSpace(compat.BaseURL)
 		coolingIdentity := compat.DisableCooling
 		if coolingIdentity != nil && *coolingIdentity {
@@ -472,13 +474,15 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) ([]*co
 			key := strings.TrimSpace(entry.APIKey)
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-			idParts := appendCredentialOverrideIdentity([]string{key, base, proxyURL}, coolingIdentity, compat.RequestRetry)
+			idParts := appendCredentialOverrideIdentity(
+				[]string{key, base, proxyURL}, coolingIdentity, compat.RequestRetry,
+			)
 			id, token := idGen.next(idKind, idParts...)
 			attrs := map[string]string{
 				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
 				"base_url":     base,
 				"compat_name":  compat.Name,
-				"provider_key": providerName,
+				"provider_key": providerKey,
 				"config_index": strconv.Itoa(i),
 			}
 			if compat.Priority != 0 {
@@ -496,7 +500,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) ([]*co
 			}
 			a := &coreauth.Auth{
 				ID:         id,
-				Provider:   providerName,
+				Provider:   providerKey,
 				Label:      compat.Name,
 				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
@@ -507,6 +511,10 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) ([]*co
 				),
 				CreatedAt: now,
 				UpdatedAt: now,
+				Disabled:  entry.Disabled,
+			}
+			if entry.Disabled {
+				a.Status = coreauth.StatusDisabled
 			}
 			out = append(out, a)
 			createdEntries++
@@ -520,7 +528,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) ([]*co
 				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
 				"base_url":     base,
 				"compat_name":  compat.Name,
-				"provider_key": providerName,
+				"provider_key": providerKey,
 				"config_index": strconv.Itoa(i),
 			}
 			if compat.Priority != 0 {
@@ -534,7 +542,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) ([]*co
 			}
 			a := &coreauth.Auth{
 				ID:         id,
-				Provider:   providerName,
+				Provider:   providerKey,
 				Label:      compat.Name,
 				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
@@ -567,7 +575,9 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) ([]*co
 		prefix := strings.TrimSpace(compat.Prefix)
 		proxyURL := strings.TrimSpace(compat.ProxyURL)
 		idKind := "vertex:apikey"
-		idParts := appendCredentialOverrideIdentity([]string{key, base, proxyURL}, compat.DisableCooling, compat.RequestRetry)
+		idParts := appendCredentialOverrideIdentity(
+			[]string{key, base, proxyURL}, compat.DisableCooling, compat.RequestRetry,
+		)
 		id, token := idGen.next(idKind, idParts...)
 		attrs := map[string]string{
 			"source":                      fmt.Sprintf("config:vertex-apikey[%s]", token),

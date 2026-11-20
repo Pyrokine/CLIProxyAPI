@@ -23,7 +23,11 @@ func TestLoadConfigOptionalCodexCloaking(t *testing.T) {
 
 func TestSaveConfigPreservesCodexKeyCloakingOverride(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	initial := []byte("codex:\n  disable-codex-cloaking: true\ncodex-api-key:\n  - api-key: test-key\n    base-url: https://example.test\n")
+	initial := []byte(
+		("codex:\n  disable-codex-cloaking: true\ncodex-api-key:\n  - api-key: " +
+			"test-key\n    base-url: https://" +
+			"example.test\n"),
+	)
 	if err := os.WriteFile(configPath, initial, 0o600); err != nil {
 		t.Fatal(err)
 	}

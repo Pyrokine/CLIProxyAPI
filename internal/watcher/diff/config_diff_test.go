@@ -43,6 +43,7 @@ func TestBuildConfigChangeDetailsIncludesPayloadChanges(t *testing.T) {
 }
 
 func TestBuildConfigChangeDetails(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	oldCfg := &config.Config{
 		Port:    8080,
 		AuthDir: "/tmp/auth-old",
@@ -69,6 +70,7 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 		},
 	}
 
+	//goland:noinspection SpellCheckingInspection
 	newCfg := &config.Config{
 		Port:    9090,
 		AuthDir: "/tmp/auth-new",
@@ -184,9 +186,11 @@ func TestBuildConfigChangeDetailsRedactsEndpointURLs(t *testing.T) {
 			PanelGitHubRepository: "https://old-user:old-pass@old-panel.example/private?token=old-token",
 			CPAGitHubRepository:   "https://old-user:old-pass@old-cpa.example/private?token=old-token",
 		},
-		OpenAICompatibility: []config.OpenAICompatibility{{
-			BaseURL: "https://old-user:old-pass@old-compat.example/v1?token=old-token",
-		}},
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				BaseURL: "https://old-user:old-pass@old-compat.example/v1?token=old-token",
+			},
+		},
 	}
 	newCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{{BaseURL: "https://new-user:new-pass@new.example/v1?token=new-token"}},
@@ -194,9 +198,11 @@ func TestBuildConfigChangeDetailsRedactsEndpointURLs(t *testing.T) {
 			PanelGitHubRepository: "https://new-user:new-pass@new-panel.example/private?token=new-token",
 			CPAGitHubRepository:   "https://new-user:new-pass@new-cpa.example/private?token=new-token",
 		},
-		OpenAICompatibility: []config.OpenAICompatibility{{
-			BaseURL: "https://new-user:new-pass@new-compat.example/v1?token=new-token",
-		}},
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				BaseURL: "https://new-user:new-pass@new-compat.example/v1?token=new-token",
+			},
+		},
 	}
 
 	details := BuildConfigChangeDetails(oldCfg, newCfg)
@@ -247,6 +253,7 @@ func TestBuildConfigChangeDetails_GeminiVertexHeadersAndForceMappings(t *testing
 }
 
 func TestBuildConfigChangeDetails_ModelPrefixes(t *testing.T) {
+	//goland:noinspection HttpUrlsUsage
 	oldCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{
 			{APIKey: "g1", Prefix: "old-g", BaseURL: "http://g", ProxyURL: "http://gp"},
@@ -261,6 +268,7 @@ func TestBuildConfigChangeDetails_ModelPrefixes(t *testing.T) {
 			{APIKey: "v1", Prefix: "old-v", BaseURL: "http://v", ProxyURL: "http://vp"},
 		},
 	}
+	//goland:noinspection HttpUrlsUsage
 	newCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{
 			{APIKey: "g1", Prefix: "new-g", BaseURL: "http://g", ProxyURL: "http://gp"},
@@ -312,14 +320,18 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 }
 
 func TestBuildConfigChangeDetailsOAuthSettingsRedacted(t *testing.T) {
-	oldCfg := &config.Config{OAuthSettings: map[string][]config.OAuthModelSetting{
-		"codex": {{Name: "internal-model", Alias: "public-alias", MaxContextLength: 8192}},
-	}}
-	newCfg := &config.Config{OAuthSettings: map[string][]config.OAuthModelSetting{
-		"codex": {{Name: "internal-model", Alias: "private-alias", MaxContextLength: 16384}},
-	}}
+	oldCfg := &config.Config{
+		OAuthSettings: map[string][]config.OAuthModelSetting{
+			"codex": {{Name: "internal-model", Alias: "public-alias", MaxContextLength: 8192}},
+		},
+	}
+	newCfg := &config.Config{
+		OAuthSettings: map[string][]config.OAuthModelSetting{
+			"codex": {{Name: "internal-model", Alias: "private-alias", MaxContextLength: 16384}},
+		},
+	}
 	changes := BuildConfigChangeDetails(oldCfg, newCfg)
-	expectContains(t, changes, "oauth-settings: updated (1 -> 1 channels)")
+	expectContains(t, changes, "oauth-settings[codex]: updated (1 -> 1 entries)")
 	if strings.Contains(strings.Join(changes, " "), "private-alias") {
 		t.Fatal("OAuth settings diff disclosed a model alias")
 	}
@@ -365,6 +377,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		ForceModelPrefix:           false,
 		NonStreamKeepAliveInterval: 0,
 	}
+	//goland:noinspection HttpUrlsUsage
 	newCfg := &config.Config{
 		Port:                   2000,
 		AuthDir:                "/new",
@@ -616,6 +629,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 }
 
 func TestFormatProxyURL(t *testing.T) {
+	//goland:noinspection HttpUrlsUsage
 	tests := []struct {
 		name string
 		in   string

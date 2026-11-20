@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -35,6 +36,8 @@ type authDirProvider interface {
 }
 
 // Watcher manages file watching for configuration and authentication files
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Watcher struct {
 	configPath           string
 	authDir              string
@@ -74,6 +77,7 @@ type Watcher struct {
 	serverUpdateTimer    *time.Timer
 	serverUpdateLast     time.Time
 	serverUpdatePend     bool
+	stopped              atomic.Bool
 }
 
 // authUpdateAction represents the type of change detected in auth sources.
@@ -95,11 +99,13 @@ type AuthUpdate struct {
 }
 
 // Revision returns the watcher-local ordering assigned to this update.
+// noinspection GoMixedReceiverTypes
 func (u AuthUpdate) Revision() uint64 {
 	return u.revision
 }
 
 // SetRevision assigns watcher-local ordering to an update bridge.
+// noinspection GoMixedReceiverTypes
 func (u *AuthUpdate) SetRevision(revision uint64) {
 	if u != nil {
 		u.revision = revision
@@ -153,6 +159,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 // Stop stops the file watcher
 func (w *Watcher) Stop() error {
+	w.stopped.Store(true)
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
 	w.stopServerUpdateTimer()

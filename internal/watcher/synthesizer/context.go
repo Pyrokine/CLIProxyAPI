@@ -13,8 +13,8 @@ type PluginAuthParser interface {
 	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
 }
 
-// PluginMultiAuthParser expands one source into multiple plugin runtime auths.
-type PluginMultiAuthParser interface {
+// pluginMultiAuthParser expands one source into multiple plugin runtime auths.
+type pluginMultiAuthParser interface {
 	ParseAuths(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error)
 }
 

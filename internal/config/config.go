@@ -35,6 +35,8 @@ type RequestScopedErrorRule struct {
 }
 
 // Config represents the application's configuration, loaded from a YAML file.
+//
+//goland:noinspection LongLine
 type Config struct {
 	SDKConfig `yaml:",inline"`
 	// Host is the network host/interface on which the API server will bind.
@@ -50,10 +52,10 @@ type Config struct {
 	Home HomeConfig `yaml:"-" json:"-"`
 
 	// CredentialConcurrency contains Home-authoritative credential lifecycle settings.
-	CredentialConcurrency CredentialConcurrencyConfig `yaml:"credential-concurrency,omitempty" json:"credential-concurrency,omitempty"`
+	CredentialConcurrency CredentialConcurrencyConfig `yaml:"credential-concurrency,omitempty" json:"credential-concurrency"`
 
 	// CredentialInFlight configures credential observation snapshots.
-	CredentialInFlight CredentialInFlightConfig `yaml:"credential-in-flight,omitempty" json:"credential-in-flight,omitempty"`
+	CredentialInFlight CredentialInFlightConfig `yaml:"credential-in-flight,omitempty" json:"credential-in-flight"`
 
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
@@ -239,7 +241,7 @@ type PluginsConfig struct {
 
 // PluginInstanceConfig stores host-owned plugin settings and the original plugin YAML subtree.
 type PluginInstanceConfig struct {
-	// Enabled toggles this plugin instance. Nil is normalized to true during YAML parsing.
+	// Enabled toggles this plugin instance. Nil keeps the plugin disabled.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Priority controls plugin startup and routing order.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -258,13 +260,14 @@ func PluginInstanceConfigFingerprint(item PluginInstanceConfig) (string, error) 
 }
 
 // UnmarshalYAML extracts host-owned fields while preserving the full original YAML node.
+// noinspection GoMixedReceiverTypes
 func (c *PluginInstanceConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c == nil {
 		return nil
 	}
 
 	c.Priority = 0
-	defaultEnabled := true
+	defaultEnabled := false
 	c.Enabled = &defaultEnabled
 
 	if value == nil || value.Kind == 0 {
@@ -294,11 +297,20 @@ func (c *PluginInstanceConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // MarshalYAML returns the preserved plugin YAML subtree for lossless config output.
+// noinspection GoMixedReceiverTypes
 func (c PluginInstanceConfig) MarshalYAML() (any, error) {
-	if c.Raw.Kind == 0 {
-		return defaultPluginInstanceConfigNode(), nil
+	node := deepCopyNode(&c.Raw)
+	if node.Kind == 0 {
+		node = defaultPluginInstanceConfigNode()
 	}
-	return deepCopyNode(&c.Raw), nil
+	if c.Enabled != nil {
+		value := getOrCreateMapValue(node, "enabled")
+		*value = yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "false"}
+		if *c.Enabled {
+			value.Value = "true"
+		}
+	}
+	return node, nil
 }
 
 func defaultPluginInstanceConfigNode() *yaml.Node {
@@ -306,12 +318,13 @@ func defaultPluginInstanceConfigNode() *yaml.Node {
 		Kind: yaml.MappingNode,
 		Content: []*yaml.Node{
 			{Kind: yaml.ScalarNode, Value: "enabled", Tag: "!!str"},
-			{Kind: yaml.ScalarNode, Value: "true", Tag: "!!bool"},
+			{Kind: yaml.ScalarNode, Value: "false", Tag: "!!bool"},
 		},
 	}
 }
 
-// ClaudeHeaderDefaults configures the measured Claude Code software baseline.
+// ClaudeHeaderDefaults 配置 CLI 软件基线及独立的平台设置
+// 关闭或省略 stabilization 时，平台沿用请求值，缺省值取当前运行环境
 type ClaudeHeaderDefaults struct {
 	UserAgent              string `yaml:"user-agent" json:"user-agent"`
 	PackageVersion         string `yaml:"package-version" json:"package-version"`
@@ -334,7 +347,7 @@ type AntigravityConfig struct {
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
-	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool"`
 }
 
 // AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.
@@ -440,7 +453,7 @@ type RemoteManagement struct {
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
 	// DisableAutoUpdatePanel disables automatic management panel asset updates when true.
-	DisableAutoUpdatePanel *bool `yaml:"disable-auto-update-panel,omitempty"`
+	DisableAutoUpdatePanel bool `yaml:"disable-auto-update-panel,omitempty"`
 	// AutoUpdatePanel controls whether the management panel asset is automatically updated from GitHub Releases.
 	// Defaults to true. Set false to keep a manually deployed panel without it being overwritten.
 	AutoUpdatePanel *bool `yaml:"auto-update-panel,omitempty"`
@@ -458,12 +471,53 @@ type RemoteManagement struct {
 	// CheckInterval is the interval (in minutes) between automatic version checks.
 	// Only effective when AutoCheckUpdate is true. Default: 180 (3 hours). Minimum: 30.
 	CheckInterval int `yaml:"check-interval,omitempty"`
+
+	disableAutoUpdatePanelPresent bool
+}
+
+// UnmarshalYAML 保留显式 false 与旧 auto-update-panel 配置的优先级
+// noinspection GoMixedReceiverTypes
+func (rm *RemoteManagement) UnmarshalYAML(value *yaml.Node) error {
+	type plain RemoteManagement
+	decoded := plain(*rm)
+	var presence struct {
+		Disabled *bool `yaml:"disable-auto-update-panel"`
+	}
+	if rm.DisableAutoUpdatePanel || rm.disableAutoUpdatePanelPresent {
+		presence.Disabled = &decoded.DisableAutoUpdatePanel
+	}
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	if err := value.Decode(&presence); err != nil {
+		return err
+	}
+	decoded.disableAutoUpdatePanelPresent = presence.Disabled != nil
+	decoded.DisableAutoUpdatePanel = presence.Disabled != nil && *presence.Disabled
+	*rm = RemoteManagement(decoded)
+	return nil
+}
+
+// MarshalYAML 保留已显式配置的 false，供配置复制和保存后继续使用
+// noinspection GoMixedReceiverTypes
+func (rm RemoteManagement) MarshalYAML() (any, error) {
+	type plain RemoteManagement
+	var node yaml.Node
+	if err := node.Encode(plain(rm)); err != nil {
+		return nil, err
+	}
+	if rm.disableAutoUpdatePanelPresent && !rm.DisableAutoUpdatePanel {
+		value := getOrCreateMapValue(&node, "disable-auto-update-panel")
+		*value = yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "false"}
+	}
+	return &node, nil
 }
 
 // IsAutoUpdatePanel returns whether automatic panel updates are enabled (default: true).
+// noinspection GoMixedReceiverTypes
 func (rm RemoteManagement) IsAutoUpdatePanel() bool {
-	if rm.DisableAutoUpdatePanel != nil {
-		return !*rm.DisableAutoUpdatePanel
+	if rm.DisableAutoUpdatePanel || rm.disableAutoUpdatePanelPresent {
+		return !rm.DisableAutoUpdatePanel
 	}
 	if rm.AutoUpdatePanel == nil {
 		return true
@@ -525,16 +579,15 @@ type QuotaRefresh struct {
 }
 
 // routingConfig configures how credentials are selected for requests.
+//
+//goland:noinspection LongLine
 type routingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "weighted-round-robin", "quota-aware", "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
-	// ClaudeCodeSessionAffinity is kept for compatibility with older configs.
-	ClaudeCodeSessionAffinity bool `yaml:"claude-code-session-affinity,omitempty" json:"claude-code-session-affinity,omitempty"`
-
 	// SessionAffinity enables session-sticky routing.
-	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
+	SessionAffinity bool `yaml:"session-affinity" json:"session-affinity"`
 
 	// SessionAffinityTTL controls how long session bindings are retained.
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
@@ -567,7 +620,10 @@ type OAuthModelSetting struct {
 }
 
 // ResolveOAuthModelSetting prefers an explicit alias over a model name; later rules of equal specificity win.
-func ResolveOAuthModelSetting(settings []OAuthModelSetting, modelID, catalogName, modelName string) *OAuthModelSetting {
+func ResolveOAuthModelSetting(
+	settings []OAuthModelSetting,
+	modelID, catalogName, modelName string,
+) *OAuthModelSetting {
 	id := strings.ToLower(strings.TrimSpace(modelID))
 	catalog := strings.ToLower(strings.TrimSpace(catalogName))
 	name := strings.ToLower(strings.TrimSpace(modelName))
@@ -667,6 +723,8 @@ type CloakConfig struct {
 
 // ClaudeKey represents the configuration for a Claude API key,
 // including the API key itself and an optional base URL for the API endpoint.
+//
+//goland:noinspection LongLine
 type ClaudeKey struct {
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
@@ -720,8 +778,17 @@ type ClaudeKey struct {
 	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
 }
 
-func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
+// noinspection GoMixedReceiverTypes
+func (k ClaudeKey) GetAPIKey() string { return k.APIKey }
+
+// noinspection GoMixedReceiverTypes
 func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
+
+//goland:noinspection GoMixedReceiverTypes,GoUnnecessarilyExportedIdentifiers
+func (k ClaudeKey) GetPrefix() string { return k.Prefix }
+
+//goland:noinspection GoMixedReceiverTypes,GoUnnecessarilyExportedIdentifiers
+func (k ClaudeKey) GetProxyURL() string { return k.ProxyURL }
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
 type ClaudeModel struct {
@@ -730,6 +797,9 @@ type ClaudeModel struct {
 
 	// Alias is the client-facing model name that maps to Name.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// ForceMapping 将响应中的模型名称改写为配置的 Alias
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
@@ -746,6 +816,7 @@ type ClaudeModel struct {
 
 func (m ClaudeModel) GetName() string          { return m.Name }
 func (m ClaudeModel) GetAlias() string         { return m.Alias }
+func (m ClaudeModel) GetForceMapping() bool    { return m.ForceMapping }
 func (m ClaudeModel) GetDisplayName() string   { return m.DisplayName }
 func (m ClaudeModel) GetMaxContextLength() int { return m.MaxContextLength }
 func (m ClaudeModel) GetIsCompat() bool        { return m.IsCompat }
@@ -755,6 +826,8 @@ func (m ClaudeModel) GetThinking() *registry.ThinkingSupport {
 
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
+//
+//goland:noinspection LongLine
 type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
@@ -774,7 +847,7 @@ type CodexKey struct {
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
-	// Websockets enables the Responses API websocket transport for this credential.
+	// Websockets enables the Responses API WebSocket transport for this credential.
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
 	// AlphaSearch allows this Codex API key to serve the Alpha Search endpoint.
@@ -808,7 +881,15 @@ type CodexKey struct {
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
 func (k CodexKey) GetBaseURL() string { return k.BaseURL }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (k CodexKey) GetPrefix() string { return k.Prefix }
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (k CodexKey) GetProxyURL() string { return k.ProxyURL }
+
 // CodexModel describes a mapping between an alias and the actual upstream model name.
+//
+//goland:noinspection LongLine
 type CodexModel struct {
 	// Name is the upstream model identifier used when issuing requests.
 	Name string `yaml:"name" json:"name"`
@@ -856,6 +937,8 @@ type MetaKey = CodexKey
 
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
+//
+//goland:noinspection LongLine
 type GeminiKey struct {
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
@@ -899,6 +982,12 @@ type GeminiKey struct {
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
 func (k GeminiKey) GetBaseURL() string { return k.BaseURL }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (k GeminiKey) GetPrefix() string { return k.Prefix }
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
+func (k GeminiKey) GetProxyURL() string { return k.ProxyURL }
+
 // GeminiModel describes a mapping between an alias and the actual upstream model name.
 type GeminiModel struct {
 	// Name is the upstream model identifier used when issuing requests.
@@ -906,6 +995,9 @@ type GeminiModel struct {
 
 	// Alias is the client-facing model name that maps to Name.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// ForceMapping 将响应中的模型名称改写为配置的 Alias
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
@@ -922,6 +1014,7 @@ type GeminiModel struct {
 
 func (m GeminiModel) GetName() string          { return m.Name }
 func (m GeminiModel) GetAlias() string         { return m.Alias }
+func (m GeminiModel) GetForceMapping() bool    { return m.ForceMapping }
 func (m GeminiModel) GetDisplayName() string   { return m.DisplayName }
 func (m GeminiModel) GetMaxContextLength() int { return m.MaxContextLength }
 func (m GeminiModel) GetIsCompat() bool        { return m.IsCompat }
@@ -931,6 +1024,8 @@ func (m GeminiModel) GetThinking() *registry.ThinkingSupport {
 
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
+//
+//goland:noinspection LongLine
 type OpenAICompatibility struct {
 	// Name is the identifier for this OpenAI compatibility configuration.
 	Name string `yaml:"name" json:"name"`
@@ -975,6 +1070,9 @@ type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Disabled prevents this credential from being selected without changing its weight.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
 	// Weight controls proportional selection under weighted-round-robin.
 	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
 	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
@@ -991,6 +1089,9 @@ type OpenAICompatibilityModel struct {
 
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// ForceMapping 将响应中的模型名称改写为配置的 Alias
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
@@ -1019,9 +1120,12 @@ type OpenAICompatibilityModel struct {
 
 func (m OpenAICompatibilityModel) GetName() string          { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string         { return m.Alias }
+func (m OpenAICompatibilityModel) GetForceMapping() bool    { return m.ForceMapping }
 func (m OpenAICompatibilityModel) GetDisplayName() string   { return m.DisplayName }
 func (m OpenAICompatibilityModel) GetMaxContextLength() int { return m.MaxContextLength }
 func (m OpenAICompatibilityModel) GetIsCompat() bool        { return m.IsCompat }
+
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m OpenAICompatibilityModel) GetUseMaxCompletionTokens() bool {
 	return m.UseMaxCompletionTokens
 }

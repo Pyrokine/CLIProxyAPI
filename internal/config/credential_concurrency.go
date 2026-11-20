@@ -47,6 +47,7 @@ type CredentialConcurrencyConfig struct {
 }
 
 // UnmarshalYAML preserves field presence so only absent lifecycle values receive legacy defaults.
+// noinspection GoMixedReceiverTypes
 func (c *CredentialConcurrencyConfig) UnmarshalYAML(value *yaml.Node) error {
 	type rawCredentialConcurrencyConfig struct {
 		LifecycleConfigRevision    int64         `yaml:"lifecycle-config-revision"`
@@ -107,6 +108,7 @@ func credentialConcurrencyFieldPresent(value *yaml.Node, field string) bool {
 }
 
 // WithDefaults applies the lifecycle defaults required for compatibility with older Home versions.
+// noinspection GoMixedReceiverTypes
 func (c CredentialConcurrencyConfig) WithDefaults() CredentialConcurrencyConfig {
 	if !c.cpaHeartbeatTimeoutPresent && c.CPAHeartbeatTimeout == 0 {
 		c.CPAHeartbeatTimeout = defaultCPAHeartbeatTimeout

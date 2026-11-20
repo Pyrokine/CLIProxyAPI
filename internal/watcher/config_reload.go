@@ -39,6 +39,9 @@ func (w *Watcher) stopConfigReloadTimer() {
 func (w *Watcher) scheduleConfigReload() {
 	w.configReloadMu.Lock()
 	defer w.configReloadMu.Unlock()
+	if w.stopped.Load() {
+		return
+	}
 	if w.configReloadTimer != nil {
 		w.configReloadTimer.Stop()
 	}
@@ -154,6 +157,9 @@ func (w *Watcher) reloadConfig() bool {
 }
 
 func (w *Watcher) reloadConfigSnapshot(snapshot *configSnapshot) bool {
+	if w.stopped.Load() {
+		return false
+	}
 	log.Debug("=========================== CONFIG RELOAD ============================")
 	log.Debugf("starting config reload from: %s", w.configPath)
 
@@ -207,7 +213,12 @@ func (w *Watcher) reloadConfigSnapshot(snapshot *configSnapshot) bool {
 
 	authDirChanged := w.normalizeAuthPath(previousAuthDir) != w.normalizeAuthPath(newConfig.AuthDir)
 	retryConfigChanged := oldConfig != nil &&
-		(oldConfig.RequestRetry != newConfig.RequestRetry || newConfig.MaxRetryInterval != oldConfig.MaxRetryInterval || oldConfig.MaxRetryCredentials != newConfig.MaxRetryCredentials)
+		(oldConfig.RequestRetry !=
+			newConfig.RequestRetry ||
+			newConfig.MaxRetryInterval !=
+				oldConfig.MaxRetryInterval ||
+			oldConfig.MaxRetryCredentials !=
+				newConfig.MaxRetryCredentials)
 	forceAuthRefresh := oldConfig != nil &&
 		(oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(
 			oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias,
@@ -239,6 +250,9 @@ func (w *Watcher) reloadConfigSnapshot(snapshot *configSnapshot) bool {
 		newAuthWatchAdded = true
 	}
 
+	if w.stopped.Load() {
+		return false
+	}
 	callbackAccepted := true
 	switch {
 	case w.configReloadCallback != nil:

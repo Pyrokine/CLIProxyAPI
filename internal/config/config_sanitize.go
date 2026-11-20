@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 
@@ -124,6 +125,8 @@ func SanitizeOAuthModelAliasMap(entries map[string][]OAuthModelAlias) map[string
 }
 
 // SanitizeOAuthSettings normalizes channels and keeps the last rule for each model and alias.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (cfg *Config) SanitizeOAuthSettings() {
 	if cfg == nil || len(cfg.OAuthSettings) == 0 {
 		return
@@ -136,8 +139,8 @@ func (cfg *Config) SanitizeOAuthSettings() {
 		}
 		seen := make(map[string]struct{}, len(settings))
 		reversed := make([]OAuthModelSetting, 0, len(settings))
-		for i := len(settings) - 1; i >= 0; i-- {
-			entry := settings[i]
+		for _, entry := range slices.Backward(settings) {
+
 			entry.Name = strings.TrimSpace(entry.Name)
 			entry.Alias = strings.TrimSpace(entry.Alias)
 			if entry.Name == "" {
@@ -180,12 +183,14 @@ func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
 			if rule.Status <= 0 || (len(match) == 0 && len(matchRegexr) == 0) || action == "" {
 				continue
 			}
-			clean = append(clean, RequestScopedErrorRule{
-				Status:      rule.Status,
-				Match:       match,
-				MatchRegexr: matchRegexr,
-				Action:      action,
-			})
+			clean = append(
+				clean, RequestScopedErrorRule{
+					Status:      rule.Status,
+					Match:       match,
+					MatchRegexr: matchRegexr,
+					Action:      action,
+				},
+			)
 		}
 		if len(clean) > 0 {
 			out[channel] = clean
@@ -241,9 +246,8 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 	cfg.OpenAICompatibility = out
 }
 
-// sanitizeCodexHeaderDefaults removes Codex API key entries missing a BaseURL.
-// It trims whitespace and preserves order for remaining entries.
-func (cfg *Config) sanitizeCodexHeaderDefaults() {
+// SanitizeCodexHeaderDefaults trims whitespace from the default Codex headers.
+func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	if cfg == nil {
 		return
 	}
@@ -500,6 +504,17 @@ func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]stri
 			continue
 		}
 		normalized := NormalizeExcludedModels(models)
+		spelling := make(map[string]string, len(normalized))
+		for _, raw := range models {
+			trimmed := strings.TrimSpace(raw)
+			canonical := strings.ToLower(trimmed)
+			if _, exists := spelling[canonical]; !exists {
+				spelling[canonical] = trimmed
+			}
+		}
+		for i, canonical := range normalized {
+			normalized[i] = spelling[canonical]
+		}
 		if len(normalized) == 0 {
 			continue
 		}

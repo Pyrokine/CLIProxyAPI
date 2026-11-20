@@ -191,7 +191,9 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 					return nil, errProfile
 				}
 				if _, specified := metadata["model_aliases"]; specified {
-					if errAliases := coreauth.SetOAuthModelAliasesAttribute(auth, perAccountModelAliases); errAliases != nil {
+					if errAliases := coreauth.SetOAuthModelAliasesAttribute(
+						auth, perAccountModelAliases,
+					); errAliases != nil {
 						return nil, errAliases
 					}
 				}
@@ -264,7 +266,7 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 		if a.Attributes["base_url"] == "" {
 			a.Attributes["base_url"] = kimiauth.ResolveKimiAPIBaseURL(domain)
 		}
-		if domain == kimiauth.KimiAIDomain {
+		if domain == kimiauth.AIDomain {
 			a.Provider = "kimi-ai"
 		} else {
 			a.Provider = "kimi"
@@ -317,7 +319,7 @@ func parsePluginFileAuths(
 	if parser == nil {
 		return nil, false, nil
 	}
-	if multiParser, ok := parser.(PluginMultiAuthParser); ok {
+	if multiParser, ok := parser.(pluginMultiAuthParser); ok {
 		return multiParser.ParseAuths(context.Background(), req)
 	}
 	auth, handled, errParse := parser.ParseAuth(context.Background(), req)
@@ -356,6 +358,11 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 	}
 	email, _ := metadata["email"].(string)
 	shared := geminicli.NewSharedCredential(primary.ID, email, metadata, projects)
+	disabled := primary.Disabled || primary.Status == coreauth.StatusDisabled
+	status := coreauth.StatusActive
+	if disabled {
+		status = coreauth.StatusDisabled
+	}
 	primary.Disabled = true
 	primary.Status = coreauth.StatusDisabled
 	primary.Runtime = shared
@@ -403,6 +410,7 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			"virtual":           true,
 			"virtual_parent_id": primary.ID,
 			"type":              metadata["type"],
+			"disabled":          disabled,
 		}
 		if v, ok := metadata["disable_cooling"]; ok {
 			metadataCopy["disable_cooling"] = v
@@ -430,7 +438,8 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			ID:         buildGeminiVirtualID(primary.ID, projectID),
 			Provider:   originalProvider,
 			Label:      fmt.Sprintf("%s [%s]", label, projectID),
-			Status:     coreauth.StatusActive,
+			Status:     status,
+			Disabled:   disabled,
 			Attributes: attrs,
 			Metadata:   metadataCopy,
 			ProxyURL:   primary.ProxyURL,

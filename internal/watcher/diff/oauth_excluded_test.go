@@ -22,10 +22,12 @@ func TestSummarizeExcludedModels_NormalizesAndDedupes(t *testing.T) {
 }
 
 func TestOAuthExcludedModelChanges(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	oldMap := map[string][]string{
 		"ProviderA": {"model-1", "model-2"},
 		"providerB": {"x"},
 	}
+	//goland:noinspection SpellCheckingInspection
 	newMap := map[string][]string{
 		"providerA": {"model-1", "model-3"},
 		"providerC": {"y"},
@@ -51,10 +53,14 @@ func TestSummarizeOAuthExcludedModels_NormalizesKeys(t *testing.T) {
 	if len(out) != 1 {
 		t.Fatalf("expected only non-empty key summary, got %d", len(out))
 	}
+	//goland:noinspection SpellCheckingInspection
 	if _, ok := out["prova"]; !ok {
+		//goland:noinspection SpellCheckingInspection
 		t.Fatalf("expected normalized key 'prova', got keys %v", out)
 	}
+	//goland:noinspection SpellCheckingInspection
 	if out["prova"].count != 1 || out["prova"].hash == "" {
+		//goland:noinspection SpellCheckingInspection
 		t.Fatalf("unexpected summary %+v", out["prova"])
 	}
 	if outEmpty := summarizeOAuthExcludedModels(nil); outEmpty != nil {

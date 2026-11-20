@@ -23,6 +23,7 @@ type ModelCatalogModel struct {
 	DisplayName string   `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 	Aliases     []string `yaml:"aliases,omitempty" json:"aliases,omitempty"`
 	Enabled     *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Speed       string   `yaml:"speed,omitempty" json:"speed,omitempty"`
 }
 
 func (m ModelCatalogModel) isEnabled() bool {
@@ -56,6 +57,7 @@ func (cfg *SDKConfig) sanitizeModelCatalog() {
 		entry.Channel = strings.ToLower(strings.TrimSpace(entry.Channel))
 		entry.Group = strings.TrimSpace(entry.Group)
 		entry.DisplayName = strings.TrimSpace(entry.DisplayName)
+		entry.Speed = strings.ToLower(strings.TrimSpace(entry.Speed))
 		entry.Aliases = sanitizeModelCatalogAliases(entry.Aliases, entry.Name)
 		out = append(out, entry)
 	}

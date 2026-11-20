@@ -17,8 +17,9 @@ func TestCredentialWeightYAMLValidation(t *testing.T) {
 		{name: "zero", content: "interactions-api-key:\n  - api-key: key\n    weight: 0\n"},
 		{name: "maximum", content: "claude-api-key:\n  - api-key: key\n    weight: 1000000\n"},
 		{
-			name:    "openai nested",
-			content: "openai-compatibility:\n  - name: test\n    base-url: https://example.com\n    api-key-entries:\n      - api-key: key\n        weight: 5\n",
+			name: "openai nested",
+			content: "openai-compatibility:\n  - name: test\n    base-url: https://example.c" +
+				"om\n    api-key-entries:\n      - api-key: key\n        weight: 5\n",
 		},
 		{name: "fraction", content: "gemini-api-key:\n  - api-key: key\n    weight: 1.5\n", wantErr: true},
 		{name: "quoted integer", content: "gemini-api-key:\n  - api-key: key\n    weight: \"7\"\n", wantErr: true},
@@ -78,7 +79,11 @@ func TestValidateCredentialWeightsCoversEveryConfiguredFamily(t *testing.T) {
 		{name: "codex", cfg: &Config{CodexKey: []CodexKey{{Weight: &invalid}}}},
 		{
 			name: "openai",
-			cfg:  &Config{OpenAICompatibility: []OpenAICompatibility{{APIKeyEntries: []OpenAICompatibilityAPIKey{{Weight: &invalid}}}}},
+			cfg: &Config{
+				OpenAICompatibility: []OpenAICompatibility{
+					{APIKeyEntries: []OpenAICompatibilityAPIKey{{Weight: &invalid}}},
+				},
+			},
 		},
 	}
 	for _, family := range families {

@@ -14,7 +14,11 @@ func TestAuthEqualDetectsGeminiVirtualCredentialOwnerChange(t *testing.T) {
 	oldAuths, errOld := synthesizer.SynthesizeAuthFile(
 		ctx,
 		path,
-		[]byte(`{"type":"gemini","email":"user@example.com","project_id":"one,two","token":{"refresh_token":"old-refresh"}}`),
+		[]byte(
+			(`{"type":"gemini","email":"user@example.com","project_id":"one,two",` +
+				`"token":{"refresh_token":` +
+				`"old-refresh"}}`),
+		),
 	)
 	if errOld != nil {
 		t.Fatal(errOld)
@@ -22,7 +26,11 @@ func TestAuthEqualDetectsGeminiVirtualCredentialOwnerChange(t *testing.T) {
 	newAuths, errNew := synthesizer.SynthesizeAuthFile(
 		ctx,
 		path,
-		[]byte(`{"type":"gemini","email":"user@example.com","project_id":"one,two","token":{"refresh_token":"new-refresh"}}`),
+		[]byte(
+			(`{"type":"gemini","email":"user@example.com","project_id":"one,two",` +
+				`"token":{"refresh_token":` +
+				`"new-refresh"}}`),
+		),
 	)
 	if errNew != nil {
 		t.Fatal(errNew)

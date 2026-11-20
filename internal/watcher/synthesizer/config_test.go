@@ -67,13 +67,13 @@ func TestConfigSynthesizerAddsConfigIndexToEveryProvider(t *testing.T) {
 		t.Fatalf("Synthesize() error = %v", err)
 	}
 	wantProviders := map[string]bool{
-		"gemini":              false,
-		"gemini-interactions": false,
-		"claude":              false,
-		"codex":               false,
-		"xai":                 false,
-		"compat":              false,
-		"vertex":              false,
+		"gemini":                   false,
+		"gemini-interactions":      false,
+		"claude":                   false,
+		"codex":                    false,
+		"xai":                      false,
+		"openai-compatible-compat": false,
+		"vertex":                   false,
 	}
 	for _, auth := range auths {
 		if _, expected := wantProviders[auth.Provider]; !expected {
@@ -138,6 +138,7 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 					t.Errorf("expected base_url https://custom.api.com, got %s", auths[0].Attributes["base_url"])
 				}
 				if auths[0].ProxyURL != "http://proxy.local:8080" {
+					//goland:noinspection HttpUrlsUsage
 					t.Errorf("expected proxy_url http://proxy.local:8080, got %s", auths[0].ProxyURL)
 				}
 			},
@@ -389,6 +390,7 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 		t.Errorf("expected label codex-apikey, got %s", auths[0].Label)
 	}
 	if auths[0].ProxyURL != "http://proxy.local" {
+		//goland:noinspection HttpUrlsUsage
 		t.Errorf("expected proxy_url http://proxy.local, got %s", auths[0].ProxyURL)
 	}
 	if auths[0].Attributes["websockets"] != "true" {
@@ -429,24 +431,46 @@ func TestConfigSynthesizer_RejectsCodexCloakingOnOtherProviders(t *testing.T) {
 		name   string
 		config *config.Config
 	}{
-		{"xai", &config.Config{XAIKey: []config.XAIKey{{APIKey: "xai-key", BaseURL: "https://api.x.ai", DisableCodexCloaking: new(true)}}}},
-		{"meta", &config.Config{MetaKey: []config.MetaKey{{APIKey: "LLM|meta-key", BaseURL: "https://api.meta.ai/v1", DisableCodexCloaking: new(false)}}}},
+		{
+			"xai", &config.Config{
+				XAIKey: []config.XAIKey{
+					{
+						APIKey: "xai-key", BaseURL: "https://api.x.ai", DisableCodexCloaking: new(true),
+					},
+				},
+			},
+		},
+		{
+			"meta", &config.Config{
+				MetaKey: []config.MetaKey{
+					{
+						APIKey: "LLM|meta-key", BaseURL: "https://api.meta.ai/v1", DisableCodexCloaking: new(false),
+					},
+				},
+			},
+		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := &SynthesisContext{Config: tc.config, Now: time.Now(), IDGenerator: NewStableIDGenerator()}
-			if _, err := NewConfigSynthesizer().Synthesize(ctx); err == nil || !strings.Contains(err.Error(), "disable-codex-cloaking") {
-				t.Fatalf("unsupported %s override error = %v", tc.name, err)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				ctx := &SynthesisContext{Config: tc.config, Now: time.Now(), IDGenerator: NewStableIDGenerator()}
+				if _, err := NewConfigSynthesizer().Synthesize(ctx); err == nil || !strings.Contains(
+					err.Error(), "disable-codex-cloaking",
+				) {
+					t.Fatalf("unsupported %s override error = %v", tc.name, err)
+				}
+			},
+		)
 	}
 }
 
 func TestConfigSynthesizer_MetaKeys(t *testing.T) {
 	ctx := &SynthesisContext{
-		Config: &config.Config{MetaKey: []config.MetaKey{
-			{},
-			{APIKey: "LLM|meta-test", BaseURL: "https://api.meta.ai/v1", Priority: 4},
-		}},
+		Config: &config.Config{
+			MetaKey: []config.MetaKey{
+				{},
+				{APIKey: "LLM|meta-test", BaseURL: "https://api.meta.ai/v1", Priority: 4},
+			},
+		},
 		Now:         time.Now(),
 		IDGenerator: NewStableIDGenerator(),
 	}
@@ -975,68 +999,76 @@ func TestConfigSynthesizer_GeminiStyleIdentityIncludesPrefixAndSortedHeaders(t *
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			identity := func(entry config.GeminiKey) string {
-				t.Helper()
-				auths, err := NewConfigSynthesizer().Synthesize(
-					&SynthesisContext{
-						Config:      test.config(entry),
-						Now:         time.Unix(1_700_000_000, 0),
-						IDGenerator: NewStableIDGenerator(),
-					},
-				)
-				if err != nil {
-					t.Fatalf("synthesize auth: %v", err)
-				}
-				for _, auth := range auths {
-					if auth.Provider == test.provider {
-						return auth.ID
+		t.Run(
+			test.name, func(t *testing.T) {
+				identity := func(entry config.GeminiKey) string {
+					t.Helper()
+					auths, err := NewConfigSynthesizer().Synthesize(
+						&SynthesisContext{
+							Config:      test.config(entry),
+							Now:         time.Unix(1_700_000_000, 0),
+							IDGenerator: NewStableIDGenerator(),
+						},
+					)
+					if err != nil {
+						t.Fatalf("synthesize auth: %v", err)
 					}
+					for _, auth := range auths {
+						if auth.Provider == test.provider {
+							return auth.ID
+						}
+					}
+					t.Fatalf("provider %q auth not found", test.provider)
+					return ""
 				}
-				t.Fatalf("provider %q auth not found", test.provider)
-				return ""
-			}
 
-			firstHeaders := make(map[string]string, 2)
-			firstHeaders["X-B"] = "2"
-			firstHeaders["X-A"] = "1"
-			secondHeaders := make(map[string]string, 2)
-			secondHeaders["X-A"] = "1"
-			secondHeaders["X-B"] = "2"
-			base := config.GeminiKey{
-				APIKey:   "shared-key",
-				BaseURL:  "https://gateway.example/v1",
-				ProxyURL: "https://proxy.example",
-				Prefix:   "team-a",
-				Headers:  firstHeaders,
-			}
-			sameRoute := base
-			sameRoute.Headers = secondHeaders
-			if identity(base) != identity(sameRoute) {
-				t.Fatal("header insertion order changed the stable auth ID")
-			}
+				firstHeaders := make(map[string]string, 2)
+				firstHeaders["X-B"] = "2"
+				firstHeaders["X-A"] = "1"
+				secondHeaders := make(map[string]string, 2)
+				secondHeaders["X-A"] = "1"
+				secondHeaders["X-B"] = "2"
+				base := config.GeminiKey{
+					APIKey:   "shared-key",
+					BaseURL:  "https://gateway.example/v1",
+					ProxyURL: "https://proxy.example",
+					Prefix:   "team-a",
+					Headers:  firstHeaders,
+				}
+				sameRoute := base
+				sameRoute.Headers = secondHeaders
+				if identity(base) != identity(sameRoute) {
+					t.Fatal("header insertion order changed the stable auth ID")
+				}
 
-			differentPrefix := base
-			differentPrefix.Prefix = "team-b"
-			if identity(base) == identity(differentPrefix) {
-				t.Fatal("different prefixes received the same stable auth ID")
-			}
-			differentHeader := base
-			differentHeader.Headers = map[string]string{"X-A": "1", "X-B": "3"}
-			if identity(base) == identity(differentHeader) {
-				t.Fatal("different header values received the same stable auth ID")
-			}
-		})
+				differentPrefix := base
+				differentPrefix.Prefix = "team-b"
+				if identity(base) == identity(differentPrefix) {
+					t.Fatal("different prefixes received the same stable auth ID")
+				}
+				differentHeader := base
+				differentHeader.Headers = map[string]string{"X-A": "1", "X-B": "3"}
+				if identity(base) == identity(differentHeader) {
+					t.Fatal("different header values received the same stable auth ID")
+				}
+			},
+		)
 	}
 }
 
 func TestConfigSynthesizer_DefaultCodexRouteIdentity(t *testing.T) {
-	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
-		Config: &config.Config{CodexKey: []config.CodexKey{{
-			APIKey: "shared-codex-key", BaseURL: "https://codex.example.com",
-		}}},
-		Now: time.Unix(1_700_000_000, 0), IDGenerator: NewStableIDGenerator(),
-	})
+	auths, err := NewConfigSynthesizer().Synthesize(
+		&SynthesisContext{
+			Config: &config.Config{
+				CodexKey: []config.CodexKey{
+					{
+						APIKey: "shared-codex-key", BaseURL: "https://codex.example.com",
+					},
+				},
+			},
+			Now: time.Unix(1_700_000_000, 0), IDGenerator: NewStableIDGenerator(),
+		},
+	)
 	if err != nil {
 		t.Fatalf("Synthesize() error = %v", err)
 	}
@@ -1106,9 +1138,11 @@ func TestConfigSynthesizer_RoutingMetadataStableAcrossReorderAndDelete(t *testin
 			provider:     "codex",
 			identityAttr: "models_hash",
 			configureCodex: func(key *config.CodexKey, variant string) {
-				key.Models = []config.CodexModel{{
-					Name: "model", Alias: "alias", SupportConfigurationUpdate: variant == "a",
-				}}
+				key.Models = []config.CodexModel{
+					{
+						Name: "model", Alias: "alias", SupportConfigurationUpdate: variant == "a",
+					},
+				}
 			},
 		},
 		{
@@ -1258,7 +1292,7 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "gemini-interactions", "claude", "codex", "compat", "vertex"}
+	expected := []string{"gemini", "gemini-interactions", "claude", "codex", "openai-compatible-compat", "vertex"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)

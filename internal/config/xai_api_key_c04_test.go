@@ -51,10 +51,12 @@ func TestC04ParseXAIAPIKey(t *testing.T) {
 		t.Fatalf("xai-api-key count = %d, want 1", len(cfg.XAIKey))
 	}
 	entry := cfg.XAIKey[0]
-	if entry.APIKey != "xai-key" || entry.BaseURL != "https://api.x.ai/v1" || entry.ProxyURL != "http://proxy.local" {
+	if entry.APIKey != "xai-key" || entry.BaseURL != "https://api.x.ai/v1" ||
+		entry.ProxyURL != "http://proxy.local" {
 		t.Fatalf("normalized entry = %+v", entry)
 	}
-	if entry.Prefix != "team-xai" || !entry.Websockets || entry.DisableCooling == nil || !*entry.DisableCooling {
+	if entry.Prefix != "team-xai" || !entry.Websockets || entry.DisableCooling == nil ||
+		!*entry.DisableCooling {
 		t.Fatalf("routing fields = %+v", entry)
 	}
 	if entry.Weight == nil || *entry.Weight != 2 {
@@ -87,19 +89,26 @@ func TestC04ParseXAIAPIKeyRejectsMalformedValues(t *testing.T) {
 		yaml string
 		want string
 	}{
-		{name: "missing key", yaml: "xai-api-key:\n  - base-url: https://api.x.ai/v1\n", want: "api-key is empty"},
+		{
+			name: "missing key",
+			yaml: "xai-api-key:\n  - base-url: https://api.x.ai/v1\n",
+			want: "api-key is empty",
+		},
 		{
 			name: "invalid base URL", yaml: "xai-api-key:\n  - api-key: xai-key\n    base-url: ftp://api.x.ai/v1\n",
 			want: "unsupported URL scheme",
 		},
 		{
 			name: "invalid proxy",
-			yaml: "xai-api-key:\n  - api-key: xai-key\n    base-url: https://api.x.ai/v1\n    proxy-url: ftp://proxy.local\n",
+			yaml: "xai-api-key:\n  - api-key: xai-key\n    base-url: https://api.x.ai/" +
+				"v1\n    proxy-url: ftp://" +
+				"proxy.local\n",
 			want: "unsupported proxy scheme",
 		},
 		{
 			name: "restricted header",
-			yaml: "xai-api-key:\n  - api-key: xai-key\n    base-url: https://api.x.ai/v1\n    headers:\n      Authorization: Bearer other\n",
+			yaml: "xai-api-key:\n  - api-key: xai-key\n    base-url: https://api.x.ai/v1" +
+				"\n    headers:\n      Authorization: Bearer other\n",
 			want: "restricted",
 		},
 		{

@@ -73,6 +73,9 @@ func (w *Watcher) processEvents(ctx context.Context) {
 }
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {
+	if w.stopped.Load() {
+		return
+	}
 	// Filter only relevant events: config file or auth-dir JSON files.
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
@@ -115,7 +118,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		time.Sleep(replaceCheckDelay)
 		_, statErr := os.Stat(event.Name)
 		if statErr != nil && w.isKnownAuthFile(event.Name) {
-			for attempt := 0; attempt < 3; attempt++ {
+			for range 3 {
 				time.Sleep(25 * time.Millisecond)
 				if _, statErr = os.Stat(event.Name); statErr == nil {
 					break

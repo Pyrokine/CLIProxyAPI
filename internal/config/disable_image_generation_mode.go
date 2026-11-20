@@ -22,9 +22,9 @@ const (
 
 func parseDisableImageGenerationMode(s string) (DisableImageGenerationMode, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "off", "false", "0":
+	case "", "off", "false", "0", "no":
 		return DisableImageGenerationOff, nil
-	case "all", "true", "1":
+	case "all", "true", "1", "on", "yes":
 		return DisableImageGenerationAll, nil
 	case "chat":
 		return DisableImageGenerationChat, nil
@@ -37,6 +37,7 @@ func parseDisableImageGenerationMode(s string) (DisableImageGenerationMode, erro
 	}
 }
 
+// noinspection GoMixedReceiverTypes
 func (m DisableImageGenerationMode) String() string {
 	switch m {
 	case DisableImageGenerationAll:
@@ -51,11 +52,13 @@ func (m DisableImageGenerationMode) String() string {
 }
 
 // MarshalYAML serialises to the string representation.
+// noinspection GoMixedReceiverTypes
 func (m DisableImageGenerationMode) MarshalYAML() (any, error) {
 	return m.String(), nil
 }
 
 // UnmarshalYAML accepts string ("off"/"all"/"chat"/"passthrough") and bool/int YAML values.
+// noinspection GoMixedReceiverTypes
 func (m *DisableImageGenerationMode) UnmarshalYAML(unmarshal func(any) error) error {
 	var s string
 	if err := unmarshal(&s); err != nil {
@@ -79,12 +82,17 @@ func (m *DisableImageGenerationMode) UnmarshalYAML(unmarshal func(any) error) er
 	return nil
 }
 
-// MarshalJSON serialises to the string representation.
+// MarshalJSON 保留 off/all 的 bool 表示及扩展模式的字符串表示
+// noinspection GoMixedReceiverTypes
 func (m DisableImageGenerationMode) MarshalJSON() ([]byte, error) {
+	if m == DisableImageGenerationOff || m == DisableImageGenerationAll {
+		return json.Marshal(m == DisableImageGenerationAll)
+	}
 	return json.Marshal(m.String())
 }
 
 // UnmarshalJSON accepts string or boolean JSON values.
+// noinspection GoMixedReceiverTypes
 func (m *DisableImageGenerationMode) UnmarshalJSON(data []byte) error {
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {

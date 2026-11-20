@@ -44,11 +44,17 @@ func (c *CodexLiveMediaRelayConfig) UnmarshalYAML(value *yaml.Node) error {
 		}
 	}
 	if allowPrivate != nil && disablePrivate != nil {
-		return errors.New("codex.live-media-relay cannot set both allow-private-remote-ips and disable-private-remote-ips")
+		return errors.New(
+			"codex.live-media-relay cannot set both allow-private-remote-ips and disable-private-remote-ips",
+		)
 	}
 	if allowPrivate != nil {
 		decoded.DisablePrivateRemoteIPs = !*allowPrivate
-		log.Warn("codex.live-media-relay.allow-private-remote-ips is deprecated; use disable-private-remote-ips with the inverse value")
+		log.Warn(
+			"codex.live-media-relay.allow-private-remote-ips is deprecated; use " +
+				"disable-private-remote-ips with the inverse " +
+				"value",
+		)
 	}
 	*c = CodexLiveMediaRelayConfig(decoded)
 	return nil
