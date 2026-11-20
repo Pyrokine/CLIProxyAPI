@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
@@ -32,6 +34,7 @@ type devinToolAccumulator struct {
 	id        string
 	name      string
 	arguments strings.Builder
+	custom    bool
 }
 
 type devinResponseAccumulator struct {
@@ -83,17 +86,17 @@ type devinResponseLog struct {
 func consumeDevinFrames(
 	body io.Reader,
 	model string,
-) ([]byte, []byte, string, error) {
+) ([]byte, []byte, *helps.DevinUsage, error) {
 	state := newDevinResponseAccumulator()
 	for {
 		flag, payload, err := helps.ReadConnectFrame(body)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				protocolErr := devinProtocolError("Devin response ended before the Connect EOS trailer")
-				return nil, state.logBytes("missing_eos"), "", protocolErr
+				return nil, state.logBytes("missing_eos"), state.usage, protocolErr
 			}
 			protocolErr := devinProtocolError(fmt.Sprintf("read Devin Connect frame: %v", err))
-			return nil, state.logBytes("read_error"), "", protocolErr
+			return nil, state.logBytes("read_error"), state.usage, protocolErr
 		}
 		state.frames++
 		if flag&helps.ConnectFlagEndStream != 0 {
@@ -102,7 +105,7 @@ func consumeDevinFrames(
 				if statusCode == 0 {
 					statusCode = http.StatusBadGateway
 				}
-				return nil, state.logBytes("trailer_error"), "", newUpstreamStatusErrMessage(
+				return nil, state.logBytes("trailer_error"), state.usage, newUpstreamStatusErrMessage(
 					statusCode,
 					trailerErr.Error(),
 					nil,
@@ -114,29 +117,25 @@ func consumeDevinFrames(
 		frame, parseErr := helps.ParseDevinFrame(payload)
 		if parseErr != nil {
 			protocolErr := devinProtocolError(fmt.Sprintf("parse Devin response frame: %v", parseErr))
-			return nil, state.logBytes("parse_error"), "", protocolErr
+			return nil, state.logBytes("parse_error"), state.usage, protocolErr
 		}
 		if applyErr := state.applyFrame(frame); applyErr != nil {
 			protocolErr := devinProtocolError(applyErr.Error())
-			return nil, state.logBytes("protocol_error"), "", protocolErr
+			return nil, state.logBytes("protocol_error"), state.usage, protocolErr
 		}
 	}
 
 	if err := state.finishText(); err != nil {
-		return nil, state.logBytes("utf8_error"), "", devinProtocolError(err.Error())
+		return nil, state.logBytes("utf8_error"), state.usage, devinProtocolError(err.Error())
 	}
 	if err := state.validateTools(); err != nil {
-		return nil, state.logBytes("tool_error"), "", devinProtocolError(err.Error())
+		return nil, state.logBytes("tool_error"), state.usage, devinProtocolError(err.Error())
 	}
 	interaction, err := state.interactionJSON(model)
 	if err != nil {
-		return nil, state.logBytes("encode_error"), "", devinProtocolError(err.Error())
+		return nil, state.logBytes("encode_error"), state.usage, devinProtocolError(err.Error())
 	}
-	responseModel := ""
-	if state.usage != nil {
-		responseModel = state.usage.ModelName
-	}
-	return interaction, state.logBytes("completed"), responseModel, nil
+	return interaction, state.logBytes("completed"), state.usage, nil
 }
 
 func newDevinResponseAccumulator() *devinResponseAccumulator {
@@ -295,9 +294,7 @@ func mergeDevinUsage(dst **helps.DevinUsage, src *helps.DevinUsage) {
 		if target.Headers == nil {
 			target.Headers = make(map[string]string, len(src.Headers))
 		}
-		for key, value := range src.Headers {
-			target.Headers[key] = value
-		}
+		maps.Copy(target.Headers, src.Headers)
 	}
 }
 
@@ -320,10 +317,11 @@ func validateDevinUsage(value *helps.DevinUsage) error {
 
 func (state *devinResponseAccumulator) applyToolDelta(delta helps.DevinToolCallDelta) error {
 	if delta.Index < 0 || delta.Index >= maxDevinToolCalls {
-		return fmt.Errorf("devin tool call index %d exceeds supported range [0,%d)", delta.Index, maxDevinToolCalls)
-	}
-	if delta.IsCustomToolCall || delta.InvalidJSONStr != "" || delta.InvalidJSONErr != "" {
-		return fmt.Errorf("devin custom tool call %q is unsupported without a custom-tool bridge", delta.Name)
+		return fmt.Errorf(
+			"devin tool call index %d exceeds supported range [0,%d)",
+			delta.Index,
+			maxDevinToolCalls,
+		)
 	}
 	tool := state.tools[delta.Index]
 	if delta.ID != "" {
@@ -346,13 +344,27 @@ func (state *devinResponseAccumulator) applyToolDelta(delta helps.DevinToolCallD
 	}
 	if delta.Name != "" {
 		if tool.name != "" && tool.name != delta.Name {
-			return fmt.Errorf("devin tool call %d changed name from %q to %q", delta.Index, tool.name, delta.Name)
+			return fmt.Errorf(
+				"devin tool call %d changed name from %q to %q",
+				delta.Index,
+				tool.name,
+				delta.Name,
+			)
 		}
 		tool.name = delta.Name
 	}
-	if delta.Arguments != "" {
-		tool.arguments.WriteString(delta.Arguments)
+	tool.custom = tool.custom || delta.IsCustomToolCall
+	if !tool.custom && (delta.InvalidJSONStr != "" || delta.InvalidJSONErr != "") {
+		return fmt.Errorf("devin tool call %q has invalid JSON arguments", tool.name)
 	}
+	arguments := delta.Arguments
+	if tool.custom && delta.InvalidJSONStr != "" {
+		arguments = delta.InvalidJSONStr
+	}
+	if !utf8.ValidString(arguments) {
+		return fmt.Errorf("devin tool call %q has invalid UTF-8 arguments", tool.name)
+	}
+	tool.arguments.WriteString(arguments)
 	state.tools[delta.Index] = tool
 	state.lastTool = tool
 	return nil
@@ -371,11 +383,20 @@ func (state *devinResponseAccumulator) validateTools() error {
 			return fmt.Errorf("devin tool call %d is missing a name", tool.index)
 		}
 		arguments := strings.TrimSpace(tool.arguments.String())
-		if arguments != "" && !json.Valid([]byte(arguments)) {
+		if !tool.custom && arguments != "" && !json.Valid([]byte(arguments)) {
 			return fmt.Errorf("devin tool call %d has invalid JSON arguments", tool.index)
 		}
 	}
 	return nil
+}
+
+func devinCustomToolArguments(name, arguments string, opts cliproxyexecutor.Options) (string, error) {
+	identity := translatorcommon.NewResponsesToolIdentity(opts.OriginalRequest)
+	declaration, err := identity.ResolveDeclaration(name, "")
+	if err != nil || declaration.Kind != translatorcommon.ResponsesCustomTool {
+		return "", fmt.Errorf("devin custom tool call %q is unsupported without a custom-tool bridge", name)
+	}
+	return translatorcommon.WrapResponsesCustomToolInput(gjson.Result{Type: gjson.String, Str: arguments}), nil
 }
 
 func (state *devinResponseAccumulator) toolCalls() []helps.DevinToolCall {
@@ -385,11 +406,13 @@ func (state *devinResponseAccumulator) toolCalls() []helps.DevinToolCall {
 		if id == "" {
 			id = fmt.Sprintf("call_%d", tool.index)
 		}
-		calls = append(calls, helps.DevinToolCall{
-			ID:        id,
-			Name:      tool.name,
-			Arguments: tool.arguments.String(),
-		})
+		calls = append(
+			calls, helps.DevinToolCall{
+				ID:        id,
+				Name:      tool.name,
+				Arguments: tool.arguments.String(),
+			},
+		)
 	}
 	return calls
 }
@@ -422,13 +445,16 @@ func (state *devinResponseAccumulator) interactionJSON(model string) ([]byte, er
 		step, _ = sjson.SetBytes(step, "content.0.text", state.preToolContent.String())
 		out, _ = sjson.SetRawBytes(out, "steps.-1", step)
 	}
-	for _, call := range state.toolCalls() {
+	for index, call := range state.toolCalls() {
 		id := helps.EncodeDevinToolCallID(call.ID)
 		step := []byte(`{"type":"function_call","id":"","call_id":"","name":"","arguments":{}}`)
 		step, _ = sjson.SetBytes(step, "id", id)
 		step, _ = sjson.SetBytes(step, "call_id", id)
 		step, _ = sjson.SetBytes(step, "name", call.Name)
-		if strings.TrimSpace(call.Arguments) != "" {
+		if state.toolOrder[index].custom {
+			step, _ = sjson.SetBytes(step, "is_custom_tool_call", true)
+			step, _ = translatorcommon.SetStringWithoutHTMLEscape(step, "arguments", call.Arguments)
+		} else if strings.TrimSpace(call.Arguments) != "" {
 			step, _ = sjson.SetRawBytes(step, "arguments", []byte(call.Arguments))
 		}
 		out, _ = sjson.SetRawBytes(out, "steps.-1", step)
@@ -541,11 +567,13 @@ func (state *devinResponseAccumulator) toolCallsForLog(remaining *int) ([]helps.
 		loggedName, clippedName := takeDevinLogValue(tool.name, remaining)
 		loggedArguments, clippedArguments := takeDevinLogValue(tool.arguments.String(), remaining)
 		truncated = truncated || clippedID || clippedName || clippedArguments
-		calls = append(calls, helps.DevinToolCall{
-			ID:        loggedID,
-			Name:      loggedName,
-			Arguments: loggedArguments,
-		})
+		calls = append(
+			calls, helps.DevinToolCall{
+				ID:        loggedID,
+				Name:      loggedName,
+				Arguments: loggedArguments,
+			},
+		)
 	}
 	return calls, truncated
 }
@@ -666,7 +694,10 @@ func (e *DevinExecutor) streamDevinFrames(
 				return
 			}
 			if errors.Is(err, io.EOF) {
-				state.fail(devinProtocolError("Devin stream ended before the Connect EOS trailer"), "missing_eos")
+				state.fail(
+					devinProtocolError("Devin stream ended before the Connect EOS trailer"),
+					"missing_eos",
+				)
 				return
 			}
 			state.fail(
@@ -848,6 +879,10 @@ func (state *devinStreamState) processToolDelta(delta helps.DevinToolCallDelta) 
 		return err
 	}
 	tool := state.response.lastTool
+	arguments := delta.Arguments
+	if tool.custom && delta.InvalidJSONStr != "" {
+		arguments = delta.InvalidJSONStr
+	}
 	if state.toolStepIndices == nil {
 		state.toolStepIndices = make(map[*devinToolAccumulator]int)
 	}
@@ -860,13 +895,28 @@ func (state *devinStreamState) processToolDelta(delta helps.DevinToolCallDelta) 
 		state.nextStepIndex++
 		state.toolStepIndices[tool] = stepIndex
 	}
+	if tool.custom && state.responseFormat != sdktranslator.FormatInteractions {
+		if tool.id == "" || strings.TrimSpace(tool.name) == "" {
+			return nil
+		}
+		if !state.toolStepStarted[tool] {
+			if _, err := devinCustomToolArguments(tool.name, "", state.opts); err != nil {
+				return err
+			}
+			if !state.emitToolStart(stepIndex, tool) {
+				return context.Canceled
+			}
+			state.toolStepStarted[tool] = true
+		}
+		return nil
+	}
 	if state.responseFormat == sdktranslator.FormatInteractions {
 		if !exists || metadataChanged {
 			if !state.emitToolStart(stepIndex, tool) {
 				return context.Canceled
 			}
 		}
-		if delta.Arguments != "" && !state.emitToolArguments(stepIndex, delta.Arguments) {
+		if arguments != "" && !state.emitToolArguments(stepIndex, arguments) {
 			return context.Canceled
 		}
 		return nil
@@ -887,7 +937,7 @@ func (state *devinStreamState) processToolDelta(delta helps.DevinToolCallDelta) 
 		}
 		return nil
 	}
-	if delta.Arguments != "" && !state.emitToolArguments(stepIndex, delta.Arguments) {
+	if arguments != "" && !state.emitToolArguments(stepIndex, arguments) {
 		return context.Canceled
 	}
 	return nil
@@ -904,12 +954,19 @@ func (state *devinStreamState) emitToolStart(stepIndex int, tool *devinToolAccum
 	if tool == nil {
 		return false
 	}
-	event := []byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"","call_id":"","name":"","arguments":{}}}`)
+	event := []byte(
+		(`{"event_type":"step.start","index":0,"step":{"type":"function_call",` +
+			`"id":"","call_id":"","name":"","arguments":` +
+			`{}}}`),
+	)
 	event, _ = sjson.SetBytes(event, "index", stepIndex)
 	id := helps.EncodeDevinToolCallID(tool.id)
 	event, _ = sjson.SetBytes(event, "step.id", id)
 	event, _ = sjson.SetBytes(event, "step.call_id", id)
 	event, _ = sjson.SetBytes(event, "step.name", tool.name)
+	if tool.custom {
+		event, _ = sjson.SetBytes(event, "step.is_custom_tool_call", true)
+	}
 	return state.emit(event)
 }
 
@@ -944,7 +1001,11 @@ func (state *devinStreamState) emitText(stepType, text string) bool {
 
 	var delta []byte
 	if stepType == "thought" {
-		delta = []byte(`{"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","text":"","content":{"type":"text","text":""}}}`)
+		delta = []byte(
+			(`{"event_type":"step.delta","index":0,"delta":{"type":` +
+				`"thought_summary","text":"","content":{"type":"text","text":` +
+				`""}}}`),
+		)
 		delta, _ = sjson.SetBytes(delta, "delta.text", text)
 		delta, _ = sjson.SetBytes(delta, "delta.content.text", text)
 	} else {
@@ -1028,12 +1089,15 @@ func (state *devinStreamState) flushTools() bool {
 	for tool, stepIndex := range state.toolStepIndices {
 		steps = append(steps, toolStep{tool: tool, stepIndex: stepIndex})
 	}
-	sort.Slice(steps, func(left, right int) bool {
-		return steps[left].stepIndex < steps[right].stepIndex
-	})
+	sort.Slice(
+		steps, func(left, right int) bool {
+			return steps[left].stepIndex < steps[right].stepIndex
+		},
+	)
 	for _, step := range steps {
 		arguments := strings.TrimSpace(step.tool.arguments.String())
-		if state.failed && (strings.TrimSpace(step.tool.name) == "" || (arguments != "" && !json.Valid([]byte(arguments)))) {
+		if state.failed && (strings.TrimSpace(step.tool.name) == "" ||
+			(!step.tool.custom && arguments != "" && !json.Valid([]byte(arguments)))) {
 			delete(state.toolStepIndices, step.tool)
 			delete(state.toolStepStarted, step.tool)
 			continue
@@ -1049,7 +1113,21 @@ func (state *devinStreamState) flushTools() bool {
 			if !state.emitToolStart(step.stepIndex, step.tool) {
 				return false
 			}
-			if step.tool.arguments.Len() > 0 && !state.emitToolArguments(step.stepIndex, step.tool.arguments.String()) {
+			if !step.tool.custom && step.tool.arguments.Len() > 0 && !state.emitToolArguments(
+				step.stepIndex, step.tool.arguments.String(),
+			) {
+				return false
+			}
+		}
+		if step.tool.custom && state.responseFormat != sdktranslator.FormatInteractions {
+			wrapped, err := devinCustomToolArguments(step.tool.name, step.tool.arguments.String(), state.opts)
+			if err != nil {
+				delete(state.toolStepIndices, step.tool)
+				delete(state.toolStepStarted, step.tool)
+				state.fail(devinProtocolError(err.Error()), "protocol_error")
+				return false
+			}
+			if !state.emitToolArguments(step.stepIndex, wrapped) {
 				return false
 			}
 		}
@@ -1065,7 +1143,8 @@ func (state *devinStreamState) flushTools() bool {
 }
 
 func (state *devinStreamState) complete() {
-	completed := []byte(`{"event_type":"interaction.completed","interaction":{"id":"","object":"interaction","status":"completed","model":"","usage":{}}}`)
+	completed := []byte((`{"event_type":"interaction.completed","interaction":{"id":"","object":` +
+		`"interaction","status":"completed","model":"","usage":{}}}`))
 	completed, _ = sjson.SetBytes(completed, "interaction.id", state.interactionID)
 	completed, _ = sjson.SetBytes(completed, "interaction.model", state.req.Model)
 	completed = setDevinTerminationJSON(completed, "interaction", state.response.stopReason)
@@ -1078,7 +1157,10 @@ func (state *devinStreamState) complete() {
 	if !state.emit(completed) || !state.emitDone() {
 		return
 	}
-	state.reporter.publish(state.ctx, devinUsageWithCacheWrites(parseInteractionsUsage(completed)))
+	detail := devinUsageWithCacheWrites(parseInteractionsUsage(completed))
+	detail.CacheReadReported = state.response.usage != nil && state.response.usage.CachedTokensPresent
+	detail.CacheWriteReported = new(state.response.usage != nil && state.response.usage.CacheWriteTokensPresent)
+	state.reporter.publish(state.ctx, detail)
 	state.appendResponseLog("completed")
 }
 
@@ -1110,7 +1192,9 @@ func (state *devinStreamState) fail(err error, code string) {
 	if statusErrValue, ok := err.(interface{ StatusCode() int }); ok && statusErrValue.StatusCode() != 0 {
 		statusCode = statusErrValue.StatusCode()
 	}
-	failed := []byte(`{"event_type":"response.failed","interaction_id":"","response":{"id":"","status":"failed","error":{"type":"api_error","code":"","message":""}},"error":{"type":"api_error","code":"","message":""}}`)
+	failed := []byte((`{"event_type":"response.failed","interaction_id":"","response":{"id":"` +
+		`","status":"failed","error":{"type":"api_error","code":"","message":""` +
+		`}},"error":{"type":"api_error","code":"","message":""}}`))
 	failed, _ = sjson.SetBytes(failed, "interaction_id", state.interactionID)
 	failed, _ = sjson.SetBytes(failed, "response.id", state.interactionID)
 	failed, _ = sjson.SetBytes(failed, "response.error.code", code)
@@ -1140,6 +1224,8 @@ func devinUsageDetail(value *helps.DevinUsage) usage.Detail {
 		OutputTokens:        value.CompletionTokens,
 		CachedTokens:        value.CachedTokens,
 		CacheReadTokens:     value.CachedTokens,
+		CacheReadReported:   value.CachedTokensPresent,
+		CacheWriteReported:  new(value.CacheWriteTokensPresent),
 		CacheCreationTokens: value.CacheWriteTokens,
 		TotalTokens:         total,
 	}
@@ -1175,7 +1261,11 @@ func (state *devinStreamState) emit(payload []byte) bool {
 		}
 		state.createdSent = true
 		if eventType != "interaction.created" {
-			created := []byte(`{"event_type":"interaction.created","interaction":{"id":"","object":"interaction","status":"in_progress","model":""}}`)
+			created := []byte(
+				(`{"event_type":"interaction.created","interaction":{"id":"","object":` +
+					`"interaction","status":"in_progress","model":` +
+					`""}}`),
+			)
 			created, _ = sjson.SetBytes(created, "interaction.id", state.interactionID)
 			created, _ = sjson.SetBytes(created, "interaction.model", state.req.Model)
 			if !state.emit(created) {

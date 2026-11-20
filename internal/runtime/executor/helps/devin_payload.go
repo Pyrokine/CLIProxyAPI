@@ -24,37 +24,49 @@ type devinPayloadField struct {
 
 var devinPayloadFields = map[protowire.Number]devinPayloadField{
 	2: {name: "system_prompt", kind: protowire.BytesType},
-	3: {name: "prompts", kind: protowire.BytesType, repeated: true, children: map[protowire.Number]devinPayloadField{
-		1: {name: "id", kind: protowire.BytesType},
-		2: {name: "source", kind: protowire.VarintType},
-		3: {name: "content", kind: protowire.BytesType},
-		6: {name: "tool_calls", kind: protowire.BytesType, repeated: true, children: map[protowire.Number]devinPayloadField{
+	3: {
+		name: "prompts", kind: protowire.BytesType, repeated: true, children: map[protowire.Number]devinPayloadField{
 			1: {name: "id", kind: protowire.BytesType},
-			2: {name: "name", kind: protowire.BytesType},
-			3: {name: "arguments", kind: protowire.BytesType},
-		}},
-		7: {name: "tool_call_id", kind: protowire.BytesType},
-		10: {name: "images", kind: protowire.BytesType, repeated: true, children: map[protowire.Number]devinPayloadField{
-			1: {name: "data", kind: protowire.BytesType},
-			2: {name: "mime_type", kind: protowire.BytesType},
-		}},
-		11: {name: "thinking", kind: protowire.BytesType},
-		12: {name: "signature", kind: protowire.BytesType, binary: true},
-		18: {name: "signature_type", kind: protowire.BytesType},
-	}},
-	8: {name: "completion_config", kind: protowire.BytesType, children: map[protowire.Number]devinPayloadField{
-		1: {name: "enabled", kind: protowire.VarintType},
-		2: {name: "max_tokens", kind: protowire.VarintType},
-		3: {name: "parameter_3", kind: protowire.VarintType},
-		5: {name: "temperature", kind: protowire.Fixed64Type},
-		7: {name: "top_k", kind: protowire.VarintType},
-		8: {name: "top_p", kind: protowire.Fixed64Type},
-	}},
-	10: {name: "tools", kind: protowire.BytesType, repeated: true, children: map[protowire.Number]devinPayloadField{
-		1: {name: "name", kind: protowire.BytesType},
-		2: {name: "description", kind: protowire.BytesType},
-		3: {name: "parameters", kind: protowire.BytesType, jsonValue: true},
-	}},
+			2: {name: "source", kind: protowire.VarintType},
+			3: {name: "content", kind: protowire.BytesType},
+			6: {
+				name: "tool_calls", kind: protowire.BytesType, repeated: true,
+				children: map[protowire.Number]devinPayloadField{
+					1: {name: "id", kind: protowire.BytesType},
+					2: {name: "name", kind: protowire.BytesType},
+					3: {name: "arguments", kind: protowire.BytesType},
+				},
+			},
+			7: {name: "tool_call_id", kind: protowire.BytesType},
+			10: {
+				name: "images", kind: protowire.BytesType, repeated: true,
+				children: map[protowire.Number]devinPayloadField{
+					1: {name: "data", kind: protowire.BytesType},
+					2: {name: "mime_type", kind: protowire.BytesType},
+				},
+			},
+			11: {name: "thinking", kind: protowire.BytesType},
+			12: {name: "signature", kind: protowire.BytesType, binary: true},
+			18: {name: "signature_type", kind: protowire.BytesType},
+		},
+	},
+	8: {
+		name: "completion_config", kind: protowire.BytesType, children: map[protowire.Number]devinPayloadField{
+			1: {name: "enabled", kind: protowire.VarintType},
+			2: {name: "max_tokens", kind: protowire.VarintType},
+			3: {name: "parameter_3", kind: protowire.VarintType},
+			5: {name: "temperature", kind: protowire.Fixed64Type},
+			7: {name: "top_k", kind: protowire.VarintType},
+			8: {name: "top_p", kind: protowire.Fixed64Type},
+		},
+	},
+	10: {
+		name: "tools", kind: protowire.BytesType, repeated: true, children: map[protowire.Number]devinPayloadField{
+			1: {name: "name", kind: protowire.BytesType},
+			2: {name: "description", kind: protowire.BytesType},
+			3: {name: "parameters", kind: protowire.BytesType, jsonValue: true},
+		},
+	},
 	16: {name: "cascade_id", kind: protowire.BytesType},
 	21: {name: "model", kind: protowire.BytesType},
 }
@@ -63,15 +75,27 @@ var devinPayloadFields = map[protowire.Number]devinPayloadField{
 func DevinPayloadDefaultsSource(native, interactions, original []byte) ([]byte, error) {
 	out := []byte(`{}`)
 	for target, sources := range map[string][]string{
-		"model":                         {"model"},
-		"system_prompt":                 {"system_instruction", "systemInstruction"},
-		"prompts":                       {"input"},
-		"tools":                         {"tools"},
-		"cascade_id":                    {"cascade_id", "cascadeId", "session_id", "sessionId", "conversation_id", "conversationId", "previous_interaction_id", "previousInteractionId"},
-		"completion_config.max_tokens":  {"generation_config.max_output_tokens", "generation_config.maxOutputTokens", "generationConfig.max_output_tokens", "generationConfig.maxOutputTokens"},
-		"completion_config.temperature": {"generation_config.temperature", "generationConfig.temperature", "temperature"},
-		"completion_config.top_k":       {"generation_config.top_k", "generationConfig.top_k"},
-		"completion_config.top_p":       {"generation_config.top_p", "generationConfig.top_p"},
+		"model":         {"model"},
+		"system_prompt": {"system_instruction", "systemInstruction"},
+		"prompts":       {"input"},
+		"tools":         {"tools"},
+		"cascade_id": {
+			"cascade_id", "cascadeId", "session_id", "sessionId", "conversation_id",
+			"conversationId", "previous_interaction_id", "previousInteractionId",
+		},
+		"completion_config.max_tokens": {
+			"generation_config.max_output_tokens", "generation_config.maxOutputTokens",
+			"generationConfig.max_output_tokens", "generationConfig.maxOutputTokens",
+		},
+		"completion_config.temperature": {
+			"generation_config.temperature", "generationConfig.temperature",
+			"temperature",
+		},
+		"completion_config.top_k": {"generation_config.top_k", "generationConfig.top_k"},
+		"completion_config.top_p": {
+			"generation_config.top_p", "generation_config.topP",
+			"generationConfig.top_p", "generationConfig.topP",
+		},
 	} {
 		var value gjson.Result
 		for _, source := range sources {
@@ -175,7 +199,10 @@ func decodeDevinPayload(wire []byte, fields map[protowire.Number]devinPayloadFie
 	return out, nil
 }
 
-func encodeDevinPayload(original []byte, body gjson.Result, fields map[protowire.Number]devinPayloadField) ([]byte, error) {
+func encodeDevinPayload(original []byte, body gjson.Result, fields map[protowire.Number]devinPayloadField) (
+	[]byte,
+	error,
+) {
 	var out []byte
 	// 保留凭证、设备元数据、会话序号和协议标记
 	for len(original) > 0 {

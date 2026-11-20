@@ -6,6 +6,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strings"
@@ -14,6 +17,8 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
@@ -27,11 +32,13 @@ func TestConsumeDevinFramesMergesUsagePresence(t *testing.T) {
 	secondUsage = testDevinVarintField(secondUsage, 3, 4)
 	frame := testDevinBytesField(nil, 7, firstUsage)
 	frame = testDevinBytesField(frame, 7, secondUsage)
-	frame = testDevinBytesField(frame, 28, testExecutorDevinDimensionGroup(
-		testExecutorDevinDimensionMetric("input_tokens", 99),
-		testExecutorDevinDimensionMetric("output_tokens", 8),
-		testExecutorDevinDimensionMetric("cached_input_tokens", 3),
-	))
+	frame = testDevinBytesField(
+		frame, 28, testExecutorDevinDimensionGroup(
+			testExecutorDevinDimensionMetric("input_tokens", 99),
+			testExecutorDevinDimensionMetric("output_tokens", 8),
+			testExecutorDevinDimensionMetric("cached_input_tokens", 3),
+		),
+	)
 	stream := testDevinConnectStream(frame)
 
 	response, logBody, _, err := consumeDevinFrames(bytes.NewReader(stream), "devin/swe-2")
@@ -83,10 +90,12 @@ func TestDevinResponseSeparatesCacheWritesFromInputUsage(t *testing.T) {
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
-		executor.streamDevinFrames(ctx, bytes.NewReader(stream),
+		executor.streamDevinFrames(
+			ctx, bytes.NewReader(stream),
 			cliproxyexecutor.Request{Model: "devin/swe-2"},
 			cliproxyexecutor.Options{ResponseFormat: sdktranslator.FormatInteractions}, nil,
-			newUsageReporter(ctx, executor, "devin/swe-2", nil), out)
+			newUsageReporter(ctx, executor, "devin/swe-2", nil), out,
+		)
 	}()
 	var completed gjson.Result
 	for chunk := range out {
@@ -117,9 +126,13 @@ func TestDevinCacheWriteExplicitZeroAndFailureDetail(t *testing.T) {
 	zeroUsage = testDevinVarintField(zeroUsage, 3, 0)
 	zeroUsage = testDevinVarintField(zeroUsage, 4, 0)
 	zeroUsage = testDevinVarintField(zeroUsage, 5, 0)
-	response, logBody, _, err := consumeDevinFrames(bytes.NewReader(testDevinConnectStream(
-		testDevinBytesField(nil, 7, zeroUsage),
-	)), "devin/swe-2")
+	response, logBody, _, err := consumeDevinFrames(
+		bytes.NewReader(
+			testDevinConnectStream(
+				testDevinBytesField(nil, 7, zeroUsage),
+			),
+		), "devin/swe-2",
+	)
 	if err != nil {
 		t.Fatalf("consume explicit zero cache writes: %v", err)
 	}
@@ -151,8 +164,13 @@ func TestDevinCacheWriteExplicitZeroAndFailureDetail(t *testing.T) {
 		!writeOnly.TokenBreakdown.Valid() {
 		t.Fatalf("write-only usage detail = %+v", writeOnly)
 	}
-	reported := normalizeUsageDetailTotal(devinUsageWithCacheWrites(parseInteractionsUsage(
-		[]byte(`{"interaction":{"usage":{"cache_write_tokens":11}}}`))), "devin", "DevinExecutor")
+	reported := normalizeUsageDetailTotal(
+		devinUsageWithCacheWrites(
+			parseInteractionsUsage(
+				[]byte(`{"interaction":{"usage":{"cache_write_tokens":11}}}`),
+			),
+		), "devin", "DevinExecutor",
+	)
 	if reported.TotalTokens != 0 || reported.CacheCreationTokens != 11 ||
 		reported.TokenBreakdown.Quality != usage.TokenAccountingQualityUnclassified {
 		t.Fatalf("normalized write-only usage detail = %+v", reported)
@@ -172,10 +190,16 @@ func TestConsumeDevinFramesHandlesCompressedUTF8AndTools(t *testing.T) {
 	first = testDevinBytesField(first, 6, toolFirst)
 	second := testDevinBytesField(nil, 3, encoded[2:])
 	second = testDevinBytesField(second, 6, toolLast)
-	stream := append(testCompressedDevinFrame(t, helps.ConnectFlagCompressed, first),
-		testCompressedDevinFrame(t, helps.ConnectFlagCompressed, second)...)
-	stream = append(stream, testCompressedDevinFrame(t,
-		helps.ConnectFlagCompressed|helps.ConnectFlagEndStream, []byte(`{}`))...)
+	stream := append(
+		testCompressedDevinFrame(t, helps.ConnectFlagCompressed, first),
+		testCompressedDevinFrame(t, helps.ConnectFlagCompressed, second)...,
+	)
+	stream = append(
+		stream, testCompressedDevinFrame(
+			t,
+			helps.ConnectFlagCompressed|helps.ConnectFlagEndStream, []byte(`{}`),
+		)...,
+	)
 
 	response, _, _, err := consumeDevinFrames(bytes.NewReader(stream), "devin/swe-2")
 	if err != nil {
@@ -234,10 +258,12 @@ func TestDevinSequentialAndInterleavedToolCallsPreserveIdentity(t *testing.T) {
 	out := make(chan cliproxyexecutor.StreamChunk, 32)
 	go func() {
 		defer close(out)
-		executor.streamDevinFrames(ctx, bytes.NewReader(stream),
+		executor.streamDevinFrames(
+			ctx, bytes.NewReader(stream),
 			cliproxyexecutor.Request{Model: "devin/swe-2"},
 			cliproxyexecutor.Options{ResponseFormat: sdktranslator.FormatInteractions}, nil,
-			newUsageReporter(ctx, executor, "devin/swe-2", nil), out)
+			newUsageReporter(ctx, executor, "devin/swe-2", nil), out,
+		)
 	}()
 
 	startIndex := make(map[string]int64)
@@ -280,7 +306,14 @@ func TestDevinSequentialAndInterleavedToolCallsPreserveIdentity(t *testing.T) {
 	for id, value := range want {
 		index, exists := startIndex[id]
 		if !exists || arguments[index] != value || stops[index] != 1 {
-			t.Fatalf("tool %s index=%d args=%q stop=%d, want %q and one stop", id, index, arguments[index], stops[index], value)
+			t.Fatalf(
+				"tool %s index=%d args=%q stop=%d, want %q and one stop",
+				id,
+				index,
+				arguments[index],
+				stops[index],
+				value,
+			)
 		}
 	}
 }
@@ -302,10 +335,12 @@ func TestDevinResponsesStreamSeparatesSequentialToolCalls(t *testing.T) {
 	out := make(chan cliproxyexecutor.StreamChunk, 64)
 	go func() {
 		defer close(out)
-		executor.streamDevinFrames(ctx, bytes.NewReader(stream),
+		executor.streamDevinFrames(
+			ctx, bytes.NewReader(stream),
 			cliproxyexecutor.Request{Model: "devin/swe-2"},
 			cliproxyexecutor.Options{ResponseFormat: sdktranslator.FormatOpenAIResponse}, nil,
-			newUsageReporter(ctx, executor, "devin/swe-2", nil), out)
+			newUsageReporter(ctx, executor, "devin/swe-2", nil), out,
+		)
 	}()
 
 	var toolIDs []string
@@ -329,7 +364,8 @@ func TestDevinResponsesStreamSeparatesSequentialToolCalls(t *testing.T) {
 				continue
 			}
 			toolIDs = append(toolIDs, event.Get("item.call_id").String())
-			if event.Get("item.call_id").String() == "bash_1" && !bytes.Contains(payload, []byte(`2>&1 <work>`)) {
+			if event.Get("item.call_id").String() == "bash_1" &&
+				!bytes.Contains(payload, []byte(`2>&1 <work>`)) {
 				t.Fatalf("Responses tool arguments escaped: %s", payload)
 			}
 		case "response.completed":
@@ -364,51 +400,71 @@ func TestDevinPostToolTextFollowsCompletedToolCall(t *testing.T) {
 		t.Fatalf("non-stream post-tool step ordering = %s", response)
 	}
 
-	for _, format := range []sdktranslator.Format{sdktranslator.FormatInteractions, sdktranslator.FormatOpenAIResponse} {
-		t.Run(string(format), func(t *testing.T) {
-			ctx := context.Background()
-			executor := NewDevinExecutor(&config.Config{})
-			out := make(chan cliproxyexecutor.StreamChunk, 32)
-			go func() {
-				defer close(out)
-				executor.streamDevinFrames(ctx, bytes.NewReader(stream),
-					cliproxyexecutor.Request{Model: "devin/swe-2"},
-					cliproxyexecutor.Options{ResponseFormat: format}, nil,
-					newUsageReporter(ctx, executor, "devin/swe-2", nil), out)
-			}()
-			toolDone := -1
-			postToolStart := -1
-			position := 0
-			for chunk := range out {
-				if chunk.Err != nil {
-					t.Fatalf("post-tool stream error: %v", chunk.Err)
+	for _, format := range []sdktranslator.Format{
+		sdktranslator.FormatInteractions, sdktranslator.FormatOpenAIResponse,
+	} {
+		t.Run(
+			string(format), func(t *testing.T) {
+				ctx := context.Background()
+				executor := NewDevinExecutor(&config.Config{})
+				out := make(chan cliproxyexecutor.StreamChunk, 32)
+				go func() {
+					defer close(out)
+					executor.streamDevinFrames(
+						ctx, bytes.NewReader(stream),
+						cliproxyexecutor.Request{Model: "devin/swe-2"},
+						cliproxyexecutor.Options{ResponseFormat: format}, nil,
+						newUsageReporter(ctx, executor, "devin/swe-2", nil), out,
+					)
+				}()
+				toolDone := -1
+				postToolStart := -1
+				position := 0
+				for chunk := range out {
+					if chunk.Err != nil {
+						t.Fatalf("post-tool stream error: %v", chunk.Err)
+					}
+					_, payload, ok := bytes.Cut(chunk.Payload, []byte("data: "))
+					if !ok || bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+						continue
+					}
+					event := gjson.ParseBytes(bytes.TrimSpace(payload))
+					if format == sdktranslator.FormatInteractions {
+						if event.Get("event_type").String() == "step.stop" && event.Get("index").Int() == 1 {
+							toolDone = position
+						}
+						if event.Get("event_type").String() == "step.start" &&
+							event.Get("step.type").String() == "model_output" &&
+							event.Get("index").Int() > 1 {
+							postToolStart = position
+						}
+					} else {
+						if event.Get("type").String() ==
+							"response.output_item.done" &&
+							event.Get("item.type").String() ==
+								"function_call" {
+							toolDone = position
+						}
+						if event.Get("type").String() ==
+							"response.output_item.added" &&
+							event.Get("item.type").String() ==
+								"message" &&
+							event.Get("output_index").Int() >
+								1 {
+							postToolStart = position
+						}
+					}
+					position++
 				}
-				_, payload, ok := bytes.Cut(chunk.Payload, []byte("data: "))
-				if !ok || bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
-					continue
+				if toolDone < 0 || postToolStart <= toolDone {
+					t.Fatalf(
+						"post-tool stream ordering: tool done=%d post-tool start=%d",
+						toolDone,
+						postToolStart,
+					)
 				}
-				event := gjson.ParseBytes(bytes.TrimSpace(payload))
-				if format == sdktranslator.FormatInteractions {
-					if event.Get("event_type").String() == "step.stop" && event.Get("index").Int() == 1 {
-						toolDone = position
-					}
-					if event.Get("event_type").String() == "step.start" && event.Get("step.type").String() == "model_output" && event.Get("index").Int() > 1 {
-						postToolStart = position
-					}
-				} else {
-					if event.Get("type").String() == "response.output_item.done" && event.Get("item.type").String() == "function_call" {
-						toolDone = position
-					}
-					if event.Get("type").String() == "response.output_item.added" && event.Get("item.type").String() == "message" && event.Get("output_index").Int() > 1 {
-						postToolStart = position
-					}
-				}
-				position++
-			}
-			if toolDone < 0 || postToolStart <= toolDone {
-				t.Fatalf("post-tool stream ordering: tool done=%d post-tool start=%d", toolDone, postToolStart)
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -422,21 +478,51 @@ func TestDevinCustomToolOutputFailsWithoutToolBridge(t *testing.T) {
 	usageField = testDevinVarintField(usageField, 4, 11)
 	usageField = testDevinVarintField(usageField, 5, 2)
 	stream := testDevinConnectStream(testDevinBytesField(nil, 7, usageField), testDevinBytesField(nil, 6, tool))
-	if _, _, _, err := consumeDevinFrames(bytes.NewReader(stream), "devin/swe-2"); err == nil || testExecutorStatusCode(err) != http.StatusBadGateway || !strings.Contains(err.Error(), "custom tool") {
-		t.Fatalf("non-stream unsupported custom tool error = %v, want explicit 502", err)
-	}
-
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
 	registerTestUsagePlugin(t, plugin)
-	ctx := context.Background()
+	ctx := util.WithRoundTripper(
+		context.Background(), devinTestRoundTripper(
+			func(request *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
+					Body:       io.NopCloser(bytes.NewReader(stream)), Request: request,
+				}, nil
+			},
+		),
+	)
 	executor := NewDevinExecutor(&config.Config{})
+	_, err := executor.Execute(
+		ctx, &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"api_key": "synthetic-token", "base_url": "https://synthetic.devin.invalid",
+			},
+		}, cliproxyexecutor.Request{
+			Model: "devin/swe-2", Payload: []byte(`{"input":[{"type":"user_input","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		},
+	)
+	if err == nil || testExecutorStatusCode(err) != http.StatusBadGateway || !strings.Contains(
+		err.Error(), "custom tool",
+	) {
+		t.Fatalf("non-stream unsupported custom tool error = %v, want explicit 502", err)
+	}
+	nonStreamRecord := testWaitForDevinUsageRecord(t, plugin.records)
+	if !nonStreamRecord.Failed || nonStreamRecord.Detail.InputTokens != 9 ||
+		nonStreamRecord.Detail.TotalTokens != 12 ||
+		nonStreamRecord.Detail.CacheCreationTokens != 11 {
+		t.Fatalf("failed non-stream custom tool usage record = %#v", nonStreamRecord)
+	}
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
-		executor.streamDevinFrames(ctx, bytes.NewReader(stream),
+		executor.streamDevinFrames(
+			ctx, bytes.NewReader(stream),
 			cliproxyexecutor.Request{Model: "devin/swe-2"},
-			cliproxyexecutor.Options{ResponseFormat: sdktranslator.FormatInteractions}, nil,
-			newUsageReporter(ctx, executor, "devin/swe-2", nil), out)
+			cliproxyexecutor.Options{ResponseFormat: sdktranslator.FormatOpenAIResponse}, nil,
+			newUsageReporter(ctx, executor, "devin/swe-2", nil), out,
+		)
 	}()
 	var failure error
 	for chunk := range out {
@@ -449,7 +535,9 @@ func TestDevinCustomToolOutputFailsWithoutToolBridge(t *testing.T) {
 			t.Fatalf("unsupported custom tool emitted success terminal: %s", chunk.Payload)
 		}
 	}
-	if failure == nil || testExecutorStatusCode(failure) != http.StatusBadGateway || !strings.Contains(failure.Error(), "custom tool") {
+	if failure == nil || testExecutorStatusCode(failure) != http.StatusBadGateway || !strings.Contains(
+		failure.Error(), "custom tool",
+	) {
 		t.Fatalf("stream unsupported custom tool error = %v, want explicit 502", failure)
 	}
 	record := testWaitForDevinUsageRecord(t, plugin.records)
@@ -462,18 +550,21 @@ func TestDevinCustomToolOutputFailsWithoutToolBridge(t *testing.T) {
 
 func TestDevinResponseAccumulatorBoundsSparseToolCalls(t *testing.T) {
 	state := newDevinResponseAccumulator()
-	if err := state.applyToolDelta(helps.DevinToolCallDelta{
-		Index: 127,
-		ID:    "call-127",
-		Name:  "empty_arguments",
-	}); err != nil {
+	if err := state.applyToolDelta(
+		helps.DevinToolCallDelta{
+			Index: 127,
+			ID:    "call-127",
+			Name:  "empty_arguments",
+		},
+	); err != nil {
 		t.Fatalf("applyToolDelta(127) error = %v", err)
 	}
 	if err := state.validateTools(); err != nil {
 		t.Fatalf("validateTools() error = %v", err)
 	}
 	calls := state.toolCalls()
-	if len(calls) != 1 || calls[0].ID != "call-127" || calls[0].Name != "empty_arguments" || calls[0].Arguments != "" {
+	if len(calls) != 1 || calls[0].ID != "call-127" || calls[0].Name != "empty_arguments" ||
+		calls[0].Arguments != "" {
 		t.Fatalf("sparse tool calls = %#v", calls)
 	}
 	if err := state.applyToolDelta(helps.DevinToolCallDelta{Index: 128, Name: "out_of_range"}); err == nil {
@@ -487,17 +578,60 @@ func TestDevinResponseAccumulatorBoundsSparseToolCalls(t *testing.T) {
 	}
 }
 
+func TestDevinRepeatedToolIndexEnforcesDistinctCallLimit(t *testing.T) {
+	for _, count := range []int{128, 129} {
+		t.Run(
+			fmt.Sprintf("calls=%d", count), func(t *testing.T) {
+				var frames [][]byte
+				for i := range count {
+					tool := testDevinBytesField(nil, 1, []byte(fmt.Sprintf("call-%d", i)))
+					tool = testDevinBytesField(tool, 2, []byte("lookup"))
+					tool = testDevinBytesField(tool, 3, []byte("{}"))
+					tool = testDevinVarintField(tool, 4, 0)
+					frames = append(frames, testDevinBytesField(nil, 6, tool))
+				}
+				response, _, _, err := consumeDevinFrames(
+					bytes.NewReader(testDevinConnectStream(frames...)), "devin/swe-2",
+				)
+				if count == 129 {
+					if err == nil ||
+						!strings.Contains(err.Error(), "tool call count exceeds supported limit 128") {
+						t.Fatalf("over-limit tool history: response=%s error=%v", response, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				steps := gjson.GetBytes(response, "steps").Array()
+				if len(steps) != count {
+					t.Fatalf("distinct calls sharing index zero: steps=%d, want %d", len(steps), count)
+				}
+				for i, step := range steps {
+					if step.Get("id").String() != fmt.Sprintf(
+						"call-%d", i,
+					) || step.Get("name").String() != "lookup" || step.Get("arguments").Raw != "{}" {
+						t.Fatalf("tool identity or arguments changed at %d: %s", i, step.Raw)
+					}
+				}
+			},
+		)
+	}
+}
+
 func TestDevinResponseLogIsBounded(t *testing.T) {
 	state := newDevinResponseAccumulator()
 	state.content.WriteString(strings.Repeat("\x00", maxDevinDecodedLogSource+1))
 	state.thinking.WriteString(strings.Repeat("t", maxDevinDecodedLogSource))
 	state.signature = bytes.Repeat([]byte{'s'}, maxDevinDecodedLogSource)
-	if err := state.applyToolDelta(helps.DevinToolCallDelta{
-		Index:     0,
-		ID:        "call-1",
-		Name:      "run",
-		Arguments: strings.Repeat("a", maxDevinDecodedLogSource),
-	}); err != nil {
+	if err := state.applyToolDelta(
+		helps.DevinToolCallDelta{
+			Index:     0,
+			ID:        "call-1",
+			Name:      "run",
+			Arguments: strings.Repeat("a", maxDevinDecodedLogSource),
+		},
+	); err != nil {
 		t.Fatalf("applyToolDelta() error = %v", err)
 	}
 	for field := 1; field <= maxDevinLoggedFields+10; field++ {
@@ -533,13 +667,15 @@ func TestDevinStreamSkipsDecodedLogBodyWhenRequestLoggingDisabled(t *testing.T) 
 	for index := range fields {
 		fields[index] = index + 1
 	}
-	if err := state.processFrame(helps.DevinFrameResult{
-		ThinkingText:        "reason",
-		ContentText:         "answer",
-		DeltaSignature:      []byte("signature"),
-		DeltaSignatureType:  "anthropic",
-		UnknownFieldNumbers: fields,
-	}); err != nil {
+	if err := state.processFrame(
+		helps.DevinFrameResult{
+			ThinkingText:        "reason",
+			ContentText:         "answer",
+			DeltaSignature:      []byte("signature"),
+			DeltaSignatureType:  "anthropic",
+			UnknownFieldNumbers: fields,
+		},
+	); err != nil {
 		t.Fatalf("processFrame() error = %v", err)
 	}
 	if response.thinking.Len() != 0 || response.content.Len() != 0 || len(response.signature) != 0 ||
@@ -592,15 +728,42 @@ func TestConsumeDevinFramesRejectsProtocolFailures(t *testing.T) {
 		wantStatus int
 		contains   string
 	}{
-		{name: "short header", stream: []byte{0}, wantStatus: http.StatusBadGateway, contains: "read Devin Connect frame"},
-		{name: "truncated body", stream: truncatedBody, wantStatus: http.StatusBadGateway, contains: "read Devin Connect frame"},
-		{name: "invalid flag", stream: helps.WrapConnectEnvelopeWithFlag(0x04, nil), wantStatus: http.StatusBadGateway, contains: "invalid connect frame flag"},
-		{name: "invalid protobuf", stream: testDevinConnectStream([]byte{0x80}), wantStatus: http.StatusBadGateway, contains: "parse Devin response frame"},
-		{name: "malformed field 28", stream: testDevinConnectStream(malformedDimension), wantStatus: http.StatusBadGateway, contains: "dimension usage"},
-		{name: "invalid UTF-8", stream: testDevinConnectStream(invalidUTF8), wantStatus: http.StatusBadGateway, contains: "invalid UTF-8"},
-		{name: "truncated UTF-8", stream: testDevinConnectStream(truncatedUTF8), wantStatus: http.StatusBadGateway, contains: "truncated UTF-8"},
-		{name: "missing EOS", stream: missingEOS, wantStatus: http.StatusBadGateway, contains: "before the Connect EOS"},
-		{name: "invalid tool arguments", stream: testDevinConnectStream(badTool), wantStatus: http.StatusBadGateway, contains: "invalid JSON arguments"},
+		{
+			name: "short header", stream: []byte{0}, wantStatus: http.StatusBadGateway,
+			contains: "read Devin Connect frame",
+		},
+		{
+			name: "truncated body", stream: truncatedBody, wantStatus: http.StatusBadGateway,
+			contains: "read Devin Connect frame",
+		},
+		{
+			name: "invalid flag", stream: helps.WrapConnectEnvelopeWithFlag(0x04, nil),
+			wantStatus: http.StatusBadGateway, contains: "invalid connect frame flag",
+		},
+		{
+			name: "invalid protobuf", stream: testDevinConnectStream([]byte{0x80}), wantStatus: http.StatusBadGateway,
+			contains: "parse Devin response frame",
+		},
+		{
+			name: "malformed field 28", stream: testDevinConnectStream(malformedDimension),
+			wantStatus: http.StatusBadGateway, contains: "dimension usage",
+		},
+		{
+			name: "invalid UTF-8", stream: testDevinConnectStream(invalidUTF8), wantStatus: http.StatusBadGateway,
+			contains: "invalid UTF-8",
+		},
+		{
+			name: "truncated UTF-8", stream: testDevinConnectStream(truncatedUTF8), wantStatus: http.StatusBadGateway,
+			contains: "truncated UTF-8",
+		},
+		{
+			name: "missing EOS", stream: missingEOS, wantStatus: http.StatusBadGateway,
+			contains: "before the Connect EOS",
+		},
+		{
+			name: "invalid tool arguments", stream: testDevinConnectStream(badTool), wantStatus: http.StatusBadGateway,
+			contains: "invalid JSON arguments",
+		},
 		{
 			name: "trailer authentication error",
 			stream: helps.WrapConnectEnvelopeWithFlag(
@@ -612,18 +775,20 @@ func TestConsumeDevinFramesRejectsProtocolFailures(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, _, _, err := consumeDevinFrames(bytes.NewReader(test.stream), "devin/swe-2")
-			if err == nil {
-				t.Fatal("consumeDevinFrames() error = nil")
-			}
-			if got := testExecutorStatusCode(err); got != test.wantStatus {
-				t.Fatalf("status = %d, want %d, error = %v", got, test.wantStatus, err)
-			}
-			if !strings.Contains(err.Error(), test.contains) {
-				t.Fatalf("error = %q, want substring %q", err, test.contains)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				_, _, _, err := consumeDevinFrames(bytes.NewReader(test.stream), "devin/swe-2")
+				if err == nil {
+					t.Fatal("consumeDevinFrames() error = nil")
+				}
+				if got := testExecutorStatusCode(err); got != test.wantStatus {
+					t.Fatalf("status = %d, want %d, error = %v", got, test.wantStatus, err)
+				}
+				if !strings.Contains(err.Error(), test.contains) {
+					t.Fatalf("error = %q, want substring %q", err, test.contains)
+				}
+			},
+		)
 	}
 }
 
@@ -646,9 +811,11 @@ func TestDevinStreamLifecycleAndUsageExactlyOnce(t *testing.T) {
 	usageField = testDevinVarintField(usageField, 5, 3)
 	usageField = testDevinBytesField(usageField, 9, []byte("devin/swe-3"))
 	usageFrame := testDevinBytesField(nil, 7, usageField)
-	stream := testDevinConnectStream(thinking, signature, content,
+	stream := testDevinConnectStream(
+		thinking, signature, content,
 		testDevinBytesField(nil, 6, toolArguments),
-		testDevinBytesField(nil, 6, toolMetadata), usageFrame)
+		testDevinBytesField(nil, 6, toolMetadata), usageFrame,
+	)
 
 	ctx := context.Background()
 	executor := NewDevinExecutor(&config.Config{})
@@ -761,22 +928,34 @@ func TestDevinStreamEmitsToolDeltasBeforeEOS(t *testing.T) {
 		activeTextIndex:  -1,
 		thoughtStepIndex: -1,
 	}
-	if err := state.processFrame(helps.DevinFrameResult{ToolCallDeltas: []helps.DevinToolCallDelta{{
-		Index:     0,
-		Arguments: `{"path":"`,
-	}}}); err != nil {
+	if err := state.processFrame(
+		helps.DevinFrameResult{
+			ToolCallDeltas: []helps.DevinToolCallDelta{
+				{
+					Index:     0,
+					Arguments: `{"path":"`,
+				},
+			},
+		},
+	); err != nil {
 		t.Fatalf("processFrame(arguments) error = %v", err)
 	}
 	if len(out) != 3 {
 		t.Fatalf("tool events before EOS = %d, want interaction creation, start and delta", len(out))
 	}
 
-	if err := state.processFrame(helps.DevinFrameResult{ToolCallDeltas: []helps.DevinToolCallDelta{{
-		Index:     0,
-		ID:        "call-1",
-		Name:      "read_file",
-		Arguments: `README.md"}`,
-	}}}); err != nil {
+	if err := state.processFrame(
+		helps.DevinFrameResult{
+			ToolCallDeltas: []helps.DevinToolCallDelta{
+				{
+					Index:     0,
+					ID:        "call-1",
+					Name:      "read_file",
+					Arguments: `README.md"}`,
+				},
+			},
+		},
+	); err != nil {
 		t.Fatalf("processFrame(metadata) error = %v", err)
 	}
 	if !state.flushTools() {
@@ -828,67 +1007,73 @@ func TestDevinResponsesStreamWaitsForToolIdentity(t *testing.T) {
 		{name: "late identity", id: "call-1", wantID: "call-1"},
 		{name: "missing upstream id", wantID: "call_0"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			first := testDevinBytesField(nil, 3, []byte(`{"path":"`))
-			first = testDevinVarintField(first, 4, 0)
-			second := testDevinBytesField(nil, 2, []byte("read_file"))
-			if test.id != "" {
-				second = testDevinBytesField(second, 1, []byte(test.id))
-			}
-			second = testDevinBytesField(second, 3, []byte(`README.md"}`))
-			second = testDevinVarintField(second, 4, 0)
-			stream := testDevinConnectStream(testDevinBytesField(nil, 6, first), testDevinBytesField(nil, 6, second))
+		t.Run(
+			test.name, func(t *testing.T) {
+				first := testDevinBytesField(nil, 3, []byte(`{"path":"`))
+				first = testDevinVarintField(first, 4, 0)
+				second := testDevinBytesField(nil, 2, []byte("read_file"))
+				if test.id != "" {
+					second = testDevinBytesField(second, 1, []byte(test.id))
+				}
+				second = testDevinBytesField(second, 3, []byte(`README.md"}`))
+				second = testDevinVarintField(second, 4, 0)
+				stream := testDevinConnectStream(
+					testDevinBytesField(nil, 6, first), testDevinBytesField(nil, 6, second),
+				)
 
-			ctx := context.Background()
-			executor := NewDevinExecutor(&config.Config{})
-			out := make(chan cliproxyexecutor.StreamChunk, 32)
-			go func() {
-				defer close(out)
-				executor.streamDevinFrames(ctx, bytes.NewReader(stream),
-					cliproxyexecutor.Request{Model: "devin/swe-2"},
-					cliproxyexecutor.Options{ResponseFormat: sdktranslator.FormatOpenAIResponse}, nil,
-					newUsageReporter(ctx, executor, "devin/swe-2", nil), out)
-			}()
+				ctx := context.Background()
+				executor := NewDevinExecutor(&config.Config{})
+				out := make(chan cliproxyexecutor.StreamChunk, 32)
+				go func() {
+					defer close(out)
+					executor.streamDevinFrames(
+						ctx, bytes.NewReader(stream),
+						cliproxyexecutor.Request{Model: "devin/swe-2"},
+						cliproxyexecutor.Options{ResponseFormat: sdktranslator.FormatOpenAIResponse}, nil,
+						newUsageReporter(ctx, executor, "devin/swe-2", nil), out,
+					)
+				}()
 
-			var added, completed bool
-			var arguments string
-			for chunk := range out {
-				if chunk.Err != nil {
-					t.Fatalf("stream error = %v", chunk.Err)
-				}
-				if bytes.Contains(chunk.Payload, []byte("data: [DONE]")) {
-					continue
-				}
-				marker := []byte("data: ")
-				index := bytes.Index(chunk.Payload, marker)
-				if index < 0 {
-					t.Fatalf("missing SSE data: %s", chunk.Payload)
-				}
-				payload := bytes.TrimSpace(chunk.Payload[index+len(marker):])
-				switch gjson.GetBytes(payload, "type").String() {
-				case "response.output_item.added", "response.output_item.done":
-					if gjson.GetBytes(payload, "item.type").String() != "function_call" {
+				var added, completed bool
+				var arguments string
+				for chunk := range out {
+					if chunk.Err != nil {
+						t.Fatalf("stream error = %v", chunk.Err)
+					}
+					if bytes.Contains(chunk.Payload, []byte("data: [DONE]")) {
 						continue
 					}
-					if got := gjson.GetBytes(payload, "item.call_id").String(); got != test.wantID {
-						t.Fatalf("tool call_id = %q, want %q in %s", got, test.wantID, payload)
+					marker := []byte("data: ")
+					index := bytes.Index(chunk.Payload, marker)
+					if index < 0 {
+						t.Fatalf("missing SSE data: %s", chunk.Payload)
 					}
-					if got := gjson.GetBytes(payload, "item.name").String(); got != "read_file" {
-						t.Fatalf("tool name = %q, want read_file in %s", got, payload)
+					payload := bytes.TrimSpace(chunk.Payload[index+len(marker):])
+					switch gjson.GetBytes(payload, "type").String() {
+					case "response.output_item.added", "response.output_item.done":
+						if gjson.GetBytes(payload, "item.type").String() != "function_call" {
+							continue
+						}
+						if got := gjson.GetBytes(payload, "item.call_id").String(); got != test.wantID {
+							t.Fatalf("tool call_id = %q, want %q in %s", got, test.wantID, payload)
+						}
+						if got := gjson.GetBytes(payload, "item.name").String(); got != "read_file" {
+							t.Fatalf("tool name = %q, want read_file in %s", got, payload)
+						}
+						if gjson.GetBytes(payload, "type").String() == "response.output_item.added" {
+							added = true
+						} else {
+							completed = true
+						}
+					case "response.function_call_arguments.delta":
+						arguments += gjson.GetBytes(payload, "delta").String()
 					}
-					if gjson.GetBytes(payload, "type").String() == "response.output_item.added" {
-						added = true
-					} else {
-						completed = true
-					}
-				case "response.function_call_arguments.delta":
-					arguments += gjson.GetBytes(payload, "delta").String()
 				}
-			}
-			if !added || !completed || arguments != `{"path":"README.md"}` {
-				t.Fatalf("tool events added=%t completed=%t arguments=%q", added, completed, arguments)
-			}
-		})
+				if !added || !completed || arguments != `{"path":"README.md"}` {
+					t.Fatalf("tool events added=%t completed=%t arguments=%q", added, completed, arguments)
+				}
+			},
+		)
 	}
 }
 
@@ -970,7 +1155,8 @@ func TestDevinStreamLateSignatureTargetsOriginalThoughtStep(t *testing.T) {
 	if signatureIndex != thoughtIndex {
 		t.Fatalf("late signature index = %d, want thought index %d", signatureIndex, thoughtIndex)
 	}
-	if signaturePosition < 0 || thoughtStopPosition < signaturePosition || modelStopPosition < signaturePosition {
+	if signaturePosition < 0 || thoughtStopPosition < signaturePosition ||
+		modelStopPosition < signaturePosition {
 		t.Fatalf(
 			"thought or model output stopped before late signature: signature=%d thought stop=%d model stop=%d",
 			signaturePosition,
@@ -994,10 +1180,12 @@ func TestDevinStreamDefersToolStartUntilLateSignature(t *testing.T) {
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
-		executor.streamDevinFrames(ctx, bytes.NewReader(stream),
+		executor.streamDevinFrames(
+			ctx, bytes.NewReader(stream),
 			cliproxyexecutor.Request{Model: "devin/swe-2"},
 			cliproxyexecutor.Options{ResponseFormat: sdktranslator.FormatInteractions}, nil,
-			newUsageReporter(ctx, executor, "devin/swe-2", nil), out)
+			newUsageReporter(ctx, executor, "devin/swe-2", nil), out,
+		)
 	}()
 	thoughtStop, signatureDelta, toolStart := -1, -1, -1
 	position := 0
@@ -1021,7 +1209,12 @@ func TestDevinStreamDefersToolStartUntilLateSignature(t *testing.T) {
 		position++
 	}
 	if signatureDelta < 0 || thoughtStop <= signatureDelta || toolStart <= thoughtStop {
-		t.Fatalf("signature/tool order: signature=%d thought stop=%d tool start=%d", signatureDelta, thoughtStop, toolStart)
+		t.Fatalf(
+			"signature/tool order: signature=%d thought stop=%d tool start=%d",
+			signatureDelta,
+			thoughtStop,
+			toolStart,
+		)
 	}
 }
 
@@ -1040,10 +1233,12 @@ func TestDevinResponsesStreamPreservesSplitLateSignature(t *testing.T) {
 	out := make(chan cliproxyexecutor.StreamChunk, 24)
 	go func() {
 		defer close(out)
-		executor.streamDevinFrames(ctx, bytes.NewReader(stream),
+		executor.streamDevinFrames(
+			ctx, bytes.NewReader(stream),
 			cliproxyexecutor.Request{Model: "devin/swe-2"},
 			cliproxyexecutor.Options{ResponseFormat: sdktranslator.FormatOpenAIResponse}, nil,
-			newUsageReporter(ctx, executor, "devin/swe-2", nil), out)
+			newUsageReporter(ctx, executor, "devin/swe-2", nil), out,
+		)
 	}()
 
 	var completed gjson.Result
@@ -1077,7 +1272,11 @@ func TestDevinResponsesStreamPreservesSplitLateSignature(t *testing.T) {
 	for _, item := range completed.Get("response.output").Array() {
 		if item.Get("type").String() == "reasoning" {
 			if item.Get("encrypted_content").String() != signature {
-				t.Fatalf("completed reasoning signature = %q, want %q", item.Get("encrypted_content").String(), signature)
+				t.Fatalf(
+					"completed reasoning signature = %q, want %q",
+					item.Get("encrypted_content").String(),
+					signature,
+				)
 			}
 			return
 		}
@@ -1211,10 +1410,19 @@ func testExecutorDevinDimensionMetric(key string, value float32) []byte {
 }
 
 func testExecutorStatusCode(err error) int {
-	if status, ok := err.(interface{ StatusCode() int }); ok {
+	var status interface{ StatusCode() int }
+	if errors.As(err, &status) {
 		return status.StatusCode()
 	}
 	return 0
+}
+
+func TestExecutorStatusCodeFollowsWrappedCause(t *testing.T) {
+	cause := statusErr{code: http.StatusTooManyRequests}
+	if testExecutorStatusCode(nil) != 0 || testExecutorStatusCode(cause) != http.StatusTooManyRequests ||
+		testExecutorStatusCode(fmt.Errorf("wrapped: %w", cause)) != http.StatusTooManyRequests {
+		t.Fatal("status helper lost the original status through an error wrapper")
+	}
 }
 
 func testDevinSSEPayload(frame []byte) ([]byte, bool) {

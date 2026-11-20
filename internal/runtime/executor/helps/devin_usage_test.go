@@ -20,10 +20,11 @@ func TestParseDevinUsageFieldPreservesZeroPresenceAndHeaders(t *testing.T) {
 	data = appendDevinStringField(data, 9, "model-name")
 
 	usage, err := parseDevinUsageField(data)
-	if err != nil {
-		t.Fatalf("parseDevinUsageField(): %v", err)
+	if err != nil || usage == nil {
+		t.Fatalf("parseDevinUsageField(): usage=%+v error=%v", usage, err)
 	}
-	if usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.CachedTokens != 0 || usage.CacheWriteTokens != 58 {
+	if usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.CachedTokens != 0 ||
+		usage.CacheWriteTokens != 58 {
 		t.Fatalf("usage tokens = %+v, want 0 prompt, 0 completion, 0 cached, 58 cache write", usage)
 	}
 	if !usage.PromptTokensPresent || !usage.CompletionTokensPresent || !usage.CachedTokensPresent ||
@@ -44,7 +45,7 @@ func TestParseDevinUsageFieldAccumulatesCacheWritesAndRejectsOverflow(t *testing
 	data = appendDevinVarintField(data, 4, 5)
 	data = appendDevinVarintField(data, 4, 7)
 	parsed, err := parseDevinUsageField(data)
-	if err != nil || !parsed.CacheWriteTokensPresent || parsed.CacheWriteTokens != 12 ||
+	if err != nil || parsed == nil || !parsed.CacheWriteTokensPresent || parsed.CacheWriteTokens != 12 ||
 		parsed.PromptTokensPresent || parsed.PromptTokens != 0 {
 		t.Fatalf("repeated cache writes = %+v, error = %v", parsed, err)
 	}
@@ -113,10 +114,15 @@ func TestParseDevinResponseDimensionGroupsPreservesZeroPresence(t *testing.T) {
 		t.Fatalf("ParseDevinResponseDimensionGroups(): %v", err)
 	}
 	if usage.PromptTokens != 0 || usage.CompletionTokens != 5 || usage.CachedTokens != 0 {
-		t.Fatalf("dimension tokens = %d/%d/%d, want 0/5/0", usage.PromptTokens, usage.CompletionTokens, usage.CachedTokens)
+		t.Fatalf(
+			"dimension tokens = %d/%d/%d, want 0/5/0", usage.PromptTokens, usage.CompletionTokens, usage.CachedTokens,
+		)
 	}
 	if !usage.PromptTokensPresent || !usage.CompletionTokensPresent || !usage.CachedTokensPresent {
-		t.Fatalf("dimension presence = %t/%t/%t, want all present", usage.PromptTokensPresent, usage.CompletionTokensPresent, usage.CachedTokensPresent)
+		t.Fatalf(
+			"dimension presence = %t/%t/%t, want all present", usage.PromptTokensPresent, usage.CompletionTokensPresent,
+			usage.CachedTokensPresent,
+		)
 	}
 
 	unrelated := appendDevinStringField(nil, 1, "Latency Metrics")
@@ -141,9 +147,11 @@ func TestParseDevinResponseDimensionGroupsRejectsMalformedMetrics(t *testing.T) 
 	wrongWireMetric = appendDevinStringField(wrongWireMetric, 5, "input_tokens")
 	wrongWire := testDevinDimensionGroup(wrongWireMetric)
 
-	trailingOuter := appendDevinBytesField(nil, 28, testDevinDimensionGroup(
-		testDevinDimensionMetric("input_tokens", 1),
-	))
+	trailingOuter := appendDevinBytesField(
+		nil, 28, testDevinDimensionGroup(
+			testDevinDimensionMetric("input_tokens", 1),
+		),
+	)
 	trailingOuter = append(trailingOuter, 0x08, 0x01)
 
 	for _, group := range [][]byte{fractional, missingValue, wrongWire, trailingOuter, {0x80}} {

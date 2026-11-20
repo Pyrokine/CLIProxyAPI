@@ -35,7 +35,9 @@ func TestDevinExecutorIdentityAndWireHeaders(t *testing.T) {
 	if executor.Identifier() != "devin" {
 		t.Fatalf("Identifier() = %q, want devin", executor.Identifier())
 	}
-	if format := executor.RequestToFormat(cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); format != sdktranslator.FormatInteractions {
+	if format := executor.RequestToFormat(
+		cliproxyexecutor.Request{}, cliproxyexecutor.Options{},
+	); format != sdktranslator.FormatInteractions {
 		t.Fatalf("RequestToFormat() = %q, want interactions", format)
 	}
 
@@ -61,10 +63,14 @@ func TestDevinExecutorIdentityAndWireHeaders(t *testing.T) {
 	}
 
 	var receivedUserAgent []string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		receivedUserAgent = request.Header["User-Agent"]
-		writer.WriteHeader(http.StatusNoContent)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(writer http.ResponseWriter, request *http.Request) {
+				receivedUserAgent = request.Header["User-Agent"]
+				writer.WriteHeader(http.StatusNoContent)
+			},
+		),
+	)
 	defer server.Close()
 	wireRequest, err := http.NewRequest(http.MethodPost, server.URL, nil)
 	if err != nil {
@@ -84,9 +90,11 @@ func TestDevinExecutorIdentityAndWireHeaders(t *testing.T) {
 }
 
 func TestPrepareDevinRequestConsumesSensitiveWordsOnlyInSystemPrompt(t *testing.T) {
-	executor := NewDevinExecutor(&config.Config{
-		Devin: config.DevinConfig{SensitiveWords: []string{"SECRET"}},
-	})
+	executor := NewDevinExecutor(
+		&config.Config{
+			Devin: config.DevinConfig{SensitiveWords: []string{"SECRET"}},
+		},
+	)
 	auth := &cliproxyauth.Auth{
 		ID: "devin-a.json",
 		Attributes: map[string]string{
@@ -148,11 +156,11 @@ func TestPrepareDevinRequestConsumesSensitiveWordsOnlyInSystemPrompt(t *testing.
 	if got := firstDevinVarintField(t, completion, 2); got != 64000 {
 		t.Fatalf("max output tokens = %d, want 64000", got)
 	}
-	if got := string(firstDevinBytesField(t, protoBody, 21)); got != "swe-2-high" {
-		t.Fatalf("chat model uid = %q, want swe-2-high", got)
+	if got := string(firstDevinBytesField(t, protoBody, 21)); got != "swe-2" {
+		t.Fatalf("chat model uid = %q, want swe-2", got)
 	}
-	if _, upstream := prepared.reporter.responseModelSnapshot(); upstream != "swe-2-high" {
-		t.Fatalf("expected upstream model = %q, want swe-2-high", upstream)
+	if _, upstream := prepared.reporter.responseModelSnapshot(); upstream != "swe-2" {
+		t.Fatalf("expected upstream model = %q, want swe-2", upstream)
 	}
 	logBody := devinRequestLogBody(prepared.body, "keep one\nkeep two")
 	if strings.Contains(string(logBody), "remove SECRET line") {
@@ -168,72 +176,101 @@ func TestPrepareDevinRequestConsumesSensitiveWordsOnlyInSystemPrompt(t *testing.
 		t.Fatal("request header log exposed the Devin session token")
 	}
 	authType, authValue := auth.AccountInfo()
-	if formatted := formatAuthInfo(upstreamRequestLog{AuthType: authType, AuthValue: authValue}); strings.Contains(formatted, token) {
+	if formatted := formatAuthInfo(
+		upstreamRequestLog{
+			AuthType: authType, AuthValue: authValue,
+		},
+	); strings.Contains(formatted, token) {
 		t.Fatal("request auth log exposed the Devin session token")
 	}
 }
 
 func TestPrepareDevinRequestFiltersResponsesToolsThroughWireAndLog(t *testing.T) {
-	exec := NewDevinExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{ID: "devin-offline-test", Attributes: map[string]string{
-		"api_key": "test-session-token", "device_seed": "device-offline-test",
-	}}
-	payload := []byte(`{
-		"model":"devin/swe-2","instructions":"system instruction","input":"hello",
-		"tool_choice":{"type":"function","name":"automation_update","namespace":"mcp__codex_app"},
-		"tools":[
-			{"type":"namespace","name":"mcp__codex_app","children":[
-				{"type":"function","name":"automation_update","description":"Recurring automations"},
-				{"type":"function","name":"read_resource","description":"Read a resource"}
-			]},
-			{"type":"namespace","name":"mcp__terminal","children":[{"type":"function","name":"exec_command","description":"returning output or a session ID for ongoing interaction"}]},
-			{"type":"function","name":"write_stdin","description":"Writes characters to an existing unified exec session and returns recent output."}
-		]
-	}`)
-	prepared, err := exec.prepareDevinRequest(
-		context.Background(), auth,
-		cliproxyexecutor.Request{Model: "devin/swe-2", Payload: payload},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, false,
-	)
-	if err != nil {
-		t.Fatalf("prepareDevinRequest: %v", err)
-	}
-	framed, err := io.ReadAll(prepared.httpReq.Body)
-	if err != nil {
-		t.Fatalf("read wire request: %v", err)
-	}
-	_, wire, err := helps.ReadConnectFrame(bytes.NewReader(framed))
-	if err != nil {
-		t.Fatalf("read Connect frame: %v", err)
-	}
-	wireTools := allDevinBytesFields(t, wire, 10)
-	wantNames := []string{"mcp__codex_app__read_resource", "mcp__terminal__exec_command", "write_stdin"}
-	if len(wireTools) != len(wantNames) {
-		t.Fatalf("wire tools = %d, want %d", len(wireTools), len(wantNames))
-	}
-	for i, tool := range wireTools {
-		if name := string(firstDevinBytesField(t, tool, 1)); name != wantNames[i] {
-			t.Fatalf("wire tool %d name = %q, want %q", i, name, wantNames[i])
-		}
-	}
-	if got := string(firstDevinBytesField(t, wireTools[1], 2)); got != "returning output or an session ID for ongoing interaction" {
-		t.Fatalf("wire exec_command description = %q", got)
-	}
-	if got := string(firstDevinBytesField(t, wireTools[2], 2)); got != "Writes characters to a existing unified exec session and returns recent output." {
-		t.Fatalf("wire write_stdin description = %q", got)
-	}
-	if gjson.GetBytes(prepared.body, "generation_config.tool_choice").Exists() {
-		t.Fatalf("filtered tool remained forced in translated request: %s", prepared.body)
-	}
-	logged := devinRequestLogBody(prepared.body, "system instruction")
-	loggedTools := gjson.GetBytes(logged, "tools").Array()
-	if len(loggedTools) != len(wireTools) {
-		t.Fatalf("logged tools = %s, want %d", loggedTools, len(wireTools))
-	}
-	for i, tool := range loggedTools {
-		if tool.Get("name").String() != wantNames[i] || string(firstDevinBytesField(t, wireTools[i], 2)) != tool.Get("description").String() {
-			t.Fatalf("wire/log tool mismatch: wire=%v logged=%s", wireTools[i], tool.Raw)
-		}
+	for _, model := range []string{"devin/swe-2", "swe-2"} {
+		t.Run(
+			model, func(t *testing.T) {
+				exec := NewDevinExecutor(&config.Config{})
+				auth := &cliproxyauth.Auth{
+					ID: "devin-offline-test", Attributes: map[string]string{
+						"api_key": "test-session-token", "device_seed": "device-offline-test",
+					},
+				}
+				payload := []byte("{\n\t\t\"model\":\"devin/swe-2\",\"instructions\":\"system instruction" +
+					"\",\"input\":\"hello\",\n\t\t\"tool_choice\":{\"type\":\"function\",\"" +
+					"name\":\"automation_update\",\"namespace\":\"mcp__codex_app\"},\n\t\t" +
+					"\"tools\":[\n\t\t\t{\"type\":\"namespace\",\"name\":\"mcp__codex_app\"" +
+					",\"children\":[\n\t\t\t\t{\"type\":\"function\",\"name\":\"automation_" +
+					"update\",\"description\":\"Recurring automations\"},\n\t\t\t\t{\"type" +
+					`":"function","name":"read_resource","description":"Read a resource"}` +
+					"\n\t\t\t]},\n\t\t\t{\"type\":\"namespace\",\"name\":\"mcp__terminal\"," +
+					`"children":[{"type":"function","name":"exec_command","description":"re` +
+					"turning output or a session ID for ongoing interaction\"}]},\n\t\t\t{" +
+					`"type":"function","name":"write_stdin","description":"Writes character` +
+					"s to an existing unified exec session and returns recent output.\"}\n" +
+					"\t\t]\n\t}")
+				prepared, err := exec.prepareDevinRequest(
+					context.Background(), auth,
+					cliproxyexecutor.Request{Model: model, Payload: payload},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, false,
+				)
+				if err != nil {
+					t.Fatalf("prepareDevinRequest: %v", err)
+				}
+				framed, err := io.ReadAll(prepared.httpReq.Body)
+				if err != nil {
+					t.Fatalf("read wire request: %v", err)
+				}
+				_, wire, err := helps.ReadConnectFrame(bytes.NewReader(framed))
+				if err != nil {
+					t.Fatalf("read Connect frame: %v", err)
+				}
+				wireTools := allDevinBytesFields(t, wire, 10)
+				wantNames := []string{
+					"mcp__codex_app__read_resource",
+					"mcp__terminal__exec_command",
+					"write_stdin",
+				}
+				if len(wireTools) != len(wantNames) {
+					t.Fatalf("wire tools = %d, want %d", len(wireTools), len(wantNames))
+				}
+				for i, tool := range wireTools {
+					if name := string(firstDevinBytesField(t, tool, 1)); name != wantNames[i] {
+						t.Fatalf("wire tool %d name = %q, want %q", i, name, wantNames[i])
+					}
+				}
+				if got := string(
+					firstDevinBytesField(
+						t, wireTools[1], 2,
+					),
+				); got != "returning output or an session ID for ongoing interaction" {
+					t.Fatalf("wire exec_command description = %q", got)
+				}
+				if got := string(
+					firstDevinBytesField(
+						t, wireTools[2], 2,
+					),
+				); got != "Writes characters to a existing unified exec session and returns recent output." {
+					t.Fatalf("wire write_stdin description = %q", got)
+				}
+				if gjson.GetBytes(prepared.body, "generation_config.tool_choice").Exists() {
+					t.Fatalf("filtered tool remained forced in translated request: %s", prepared.body)
+				}
+				logged := devinRequestLogBody(prepared.body, "system instruction")
+				loggedTools := gjson.GetBytes(logged, "tools").Array()
+				if len(loggedTools) != len(wireTools) {
+					t.Fatalf("logged tools = %s, want %d", loggedTools, len(wireTools))
+				}
+				for i, tool := range loggedTools {
+					if tool.Get("name").String() != wantNames[i] || string(
+						firstDevinBytesField(
+							t, wireTools[i], 2,
+						),
+					) != tool.Get("description").String() {
+						t.Fatalf("wire/log tool mismatch: wire=%v logged=%s", wireTools[i], tool.Raw)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -252,7 +289,13 @@ func TestResolveDevinSessionScopesCanonicalIdentityByAuth(t *testing.T) {
 		context.Background(), authB, "request-session", "request-cascade", metadata,
 	)
 	if sessionA1 != sessionA2 || cascadeA1 != cascadeA2 || sessionA1 != cascadeA1 {
-		t.Fatalf("same canonical identity changed: %q/%q versus %q/%q", sessionA1, cascadeA1, sessionA2, cascadeA2)
+		t.Fatalf(
+			"same canonical identity changed: %q/%q versus %q/%q",
+			sessionA1,
+			cascadeA1,
+			sessionA2,
+			cascadeA2,
+		)
 	}
 	if sessionA1 == sessionB || cascadeA1 == cascadeB {
 		t.Fatalf("different auth identities shared Devin session %q", sessionA1)
@@ -278,35 +321,39 @@ func TestDevinExecuteUsesConnectResponseAndPublishesUsage(t *testing.T) {
 	var requestFlag byte
 	ctx := util.WithRoundTripper(
 		context.Background(),
-		devinTestRoundTripper(func(request *http.Request) (*http.Response, error) {
-			requestPath = request.URL.Path
-			authorization = request.Header.Get("Authorization")
-			body, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
-			}
-			requestFlag, _, err = helps.ReadConnectFrame(bytes.NewReader(body))
-			if err != nil {
-				t.Fatalf("read request frame: %v", err)
-			}
+		devinTestRoundTripper(
+			func(request *http.Request) (*http.Response, error) {
+				requestPath = request.URL.Path
+				authorization = request.Header.Get("Authorization")
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Fatalf("read request body: %v", err)
+				}
+				requestFlag, _, err = helps.ReadConnectFrame(bytes.NewReader(body))
+				if err != nil {
+					t.Fatalf("read request frame: %v", err)
+				}
 
-			frame := testDevinBytesField(nil, 3, []byte("answer"))
-			usageBody := testDevinVarintField(nil, 2, 2)
-			usageBody = testDevinVarintField(usageBody, 3, 3)
-			usageBody = testDevinVarintField(usageBody, 5, 1)
-			usageBody = testDevinBytesField(usageBody, 9, []byte("devin/swe-3"))
-			frame = testDevinBytesField(frame, 7, usageBody)
-			stream := append(helps.WrapConnectEnvelope(frame), helps.WrapConnectEnvelopeWithFlag(
-				helps.ConnectFlagEndStream,
-				[]byte(`{}`),
-			)...)
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
-				Body:       io.NopCloser(bytes.NewReader(stream)),
-				Request:    request,
-			}, nil
-		}),
+				frame := testDevinBytesField(nil, 3, []byte("answer"))
+				usageBody := testDevinVarintField(nil, 2, 2)
+				usageBody = testDevinVarintField(usageBody, 3, 3)
+				usageBody = testDevinVarintField(usageBody, 5, 1)
+				usageBody = testDevinBytesField(usageBody, 9, []byte("devin/swe-3"))
+				frame = testDevinBytesField(frame, 7, usageBody)
+				stream := append(
+					helps.WrapConnectEnvelope(frame), helps.WrapConnectEnvelopeWithFlag(
+						helps.ConnectFlagEndStream,
+						[]byte(`{}`),
+					)...,
+				)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
+					Body:       io.NopCloser(bytes.NewReader(stream)),
+					Request:    request,
+				}, nil
+			},
+		),
 	)
 
 	executor := NewDevinExecutor(&config.Config{})
@@ -355,14 +402,18 @@ func TestDevinExecuteUsesConnectResponseAndPublishesUsage(t *testing.T) {
 
 func TestDevinRefreshPreservesPresenceAndRemovesStaleQuotaValues(t *testing.T) {
 	statusResponse := testDevinStatusResponse(t, true, 0, false, 0)
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != devinauth.DevinGetUserStatusPath {
-			http.NotFound(writer, request)
-			return
-		}
-		writer.Header().Set("Content-Type", "application/proto")
-		_, _ = writer.Write(statusResponse)
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != devinauth.GetUserStatusPath {
+					http.NotFound(writer, request)
+					return
+				}
+				writer.Header().Set("Content-Type", "application/proto")
+				_, _ = writer.Write(statusResponse)
+			},
+		),
+	)
 	defer server.Close()
 
 	auth := &cliproxyauth.Auth{
@@ -397,7 +448,8 @@ func TestDevinRefreshPreservesPresenceAndRemovesStaleQuotaValues(t *testing.T) {
 		t.Fatal("Refresh() returned original auth pointer")
 	}
 	if updated.Index != auth.Index ||
-		updated.Attributes[cliproxyauth.AttributeAuthIndexSeed] != auth.Attributes[cliproxyauth.AttributeAuthIndexSeed] {
+		updated.Attributes[cliproxyauth.AttributeAuthIndexSeed] !=
+			auth.Attributes[cliproxyauth.AttributeAuthIndexSeed] {
 		t.Fatalf("Refresh() changed Devin identity: index=%q attributes=%#v", updated.Index, updated.Attributes)
 	}
 	for _, key := range []string{
@@ -429,7 +481,11 @@ func TestDevinRefreshPreservesPresenceAndRemovesStaleQuotaValues(t *testing.T) {
 		t.Fatalf("identity metadata = %#v", updated.Metadata)
 	}
 	if updated.Generation != 42 || updated.Quota.Generation != 9 {
-		t.Fatalf("refresh changed selected auth generation: auth=%d quota=%d", updated.Generation, updated.Quota.Generation)
+		t.Fatalf(
+			"refresh changed selected auth generation: auth=%d quota=%d",
+			updated.Generation,
+			updated.Quota.Generation,
+		)
 	}
 	if updated.Quota.ObservedAt.IsZero() || updated.Quota.ObservedAt.Location() != time.UTC ||
 		updated.LastRefreshedAt.IsZero() || updated.LastRefreshedAt.Location() != time.UTC {
@@ -591,95 +647,213 @@ func TestPrepareDevinNativeRulesPreserveCallerAliasesAndWire(t *testing.T) {
 		model   string
 		cascade bool
 	}{
-		{name: "override", payload: `{"input":[{"type":"user_input","content":"hello"}]}`, rules: config.PayloadConfig{Override: []config.PayloadRule{{Models: models, Params: map[string]any{"completion_config.max_tokens": 1234}}}}, max: 1234},
-		{name: "default", payload: `{"input":[{"type":"user_input","content":"hello"}]}`, rules: config.PayloadConfig{Default: []config.PayloadRule{{Models: models, Params: map[string]any{"completion_config.max_tokens": 1234}}}}, max: 1234},
-		{name: "default_raw", payload: `{"input":[{"type":"user_input","content":"hello"}]}`, rules: config.PayloadConfig{DefaultRaw: []config.PayloadRule{{Models: models, Params: map[string]any{"completion_config.max_tokens": "1234"}}}}, max: 1234},
-		{name: "snake", payload: `{"generation_config":{"max_output_tokens":17},"input":[{"type":"user_input","content":"hello"}]}`, max: 17},
-		{name: "camel", payload: `{"generationConfig":{"maxOutputTokens":17},"input":[{"type":"user_input","content":"hello"}]}`, max: 17},
-		{name: "snake_parent_camel_field", payload: `{"generation_config":{"maxOutputTokens":17},"input":[{"type":"user_input","content":"hello"}]}`, max: 17},
-		{name: "camel_parent_snake_field", payload: `{"generationConfig":{"max_output_tokens":17},"input":[{"type":"user_input","content":"hello"}]}`, max: 17},
-		{name: "remove", payload: `{"system_instruction":"caller","input":[{"type":"user_input","content":"hello"}]}`, rules: config.PayloadConfig{Filter: []config.PayloadFilterRule{{Models: models, Params: []string{"system_prompt", "completion_config"}}}}, removed: true},
-		{name: "invalid_raw", payload: `{"input":[{"type":"user_input","content":"hello"}]}`, rules: config.PayloadConfig{OverrideRaw: []config.PayloadRule{{Models: models, Params: map[string]any{"system_prompt": "{"}}}}, invalid: true},
-		{name: "model_observation", payload: `{"input":[{"type":"user_input","content":"hello"}]}`, rules: config.PayloadConfig{Override: []config.PayloadRule{{Models: models, Params: map[string]any{"model": "synthetic-native-model", "completion_config.max_tokens": 1234}}}}, max: 1234, model: "synthetic-native-model"},
-		{name: "cascade_alias", payload: `{"cascadeId":"caller-cascade","input":[{"type":"user_input","content":"hello"}]}`, rules: config.PayloadConfig{Default: []config.PayloadRule{{Models: models, Params: map[string]any{"cascade_id": "rule-cascade", "completion_config.max_tokens": 1234}}}}, max: 1234, cascade: true},
+		{
+			name: "override", payload: `{"input":[{"type":"user_input","content":"hello"}]}`,
+			rules: config.PayloadConfig{
+				Override: []config.PayloadRule{
+					{
+						Models: models, Params: map[string]any{"completion_config.max_tokens": 1234},
+					},
+				},
+			}, max: 1234,
+		},
+		{
+			name: "default", payload: `{"input":[{"type":"user_input","content":"hello"}]}`,
+			rules: config.PayloadConfig{
+				Default: []config.PayloadRule{
+					{
+						Models: models, Params: map[string]any{"completion_config.max_tokens": 1234},
+					},
+				},
+			}, max: 1234,
+		},
+		{
+			name: "default_raw", payload: `{"input":[{"type":"user_input","content":"hello"}]}`,
+			rules: config.PayloadConfig{
+				DefaultRaw: []config.PayloadRule{
+					{
+						Models: models, Params: map[string]any{"completion_config.max_tokens": "1234"},
+					},
+				},
+			}, max: 1234,
+		},
+		{
+			name:    "snake",
+			payload: `{"generation_config":{"max_output_tokens":17},"input":[{"type":"user_input","content":"hello"}]}`,
+			max:     17,
+		},
+		{
+			name:    "camel",
+			payload: `{"generationConfig":{"maxOutputTokens":17},"input":[{"type":"user_input","content":"hello"}]}`,
+			max:     17,
+		},
+		{
+			name:    "snake_parent_camel_field",
+			payload: `{"generation_config":{"maxOutputTokens":17},"input":[{"type":"user_input","content":"hello"}]}`,
+			max:     17,
+		},
+		{
+			name:    "camel_parent_snake_field",
+			payload: `{"generationConfig":{"max_output_tokens":17},"input":[{"type":"user_input","content":"hello"}]}`,
+			max:     17,
+		},
+		{
+			name:    "remove",
+			payload: `{"system_instruction":"caller","input":[{"type":"user_input","content":"hello"}]}`,
+			rules: config.PayloadConfig{
+				Filter: []config.PayloadFilterRule{
+					{
+						Models: models, Params: []string{"system_prompt", "completion_config"},
+					},
+				},
+			}, removed: true,
+		},
+		{
+			name: "invalid_raw", payload: `{"input":[{"type":"user_input","content":"hello"}]}`,
+			rules: config.PayloadConfig{
+				OverrideRaw: []config.PayloadRule{
+					{
+						Models: models, Params: map[string]any{"system_prompt": "{"},
+					},
+				},
+			}, invalid: true,
+		},
+		{
+			name: "model_observation", payload: `{"input":[{"type":"user_input","content":"hello"}]}`,
+			rules: config.PayloadConfig{
+				Override: []config.PayloadRule{
+					{
+						Models: models,
+						Params: map[string]any{"model": "synthetic-native-model", "completion_config.max_tokens": 1234},
+					},
+				},
+			}, max: 1234, model: "synthetic-native-model",
+		},
+		{
+			name:    "cascade_alias",
+			payload: `{"cascadeId":"caller-cascade","input":[{"type":"user_input","content":"hello"}]}`,
+			rules: config.PayloadConfig{
+				Default: []config.PayloadRule{
+					{
+						Models: models,
+						Params: map[string]any{"cascade_id": "rule-cascade", "completion_config.max_tokens": 1234},
+					},
+				},
+			}, max: 1234, cascade: true,
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			if test.max == 17 {
-				test.rules = config.PayloadConfig{Default: []config.PayloadRule{{Models: models, Params: map[string]any{"completion_config.max_tokens": 1234}}}}
-			}
-			executor := NewDevinExecutor(&config.Config{Payload: test.rules})
-			auth := &cliproxyauth.Auth{ID: t.Name(), Attributes: map[string]string{"api_key": "synthetic-session", "device_seed": "synthetic-device"}}
-			prepared, err := executor.prepareDevinRequest(context.Background(), auth, cliproxyexecutor.Request{Model: "devin/swe-2", Payload: []byte(test.payload)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions}, false)
-			if test.invalid {
-				if err == nil {
-					t.Fatal("invalid native JSON returned a prepared request")
+		t.Run(
+			test.name, func(t *testing.T) {
+				if test.max == 17 {
+					test.rules = config.PayloadConfig{
+						Default: []config.PayloadRule{
+							{
+								Models: models, Params: map[string]any{"completion_config.max_tokens": 1234},
+							},
+						},
+					}
 				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			framed, err := io.ReadAll(prepared.httpReq.Body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, wire, err := helps.ReadConnectFrame(bytes.NewReader(framed))
-			if err != nil {
-				t.Fatal(err)
-			}
-			completion := allDevinBytesFields(t, wire, 8)
-			if test.removed {
-				if len(completion) != 0 || len(allDevinBytesFields(t, wire, 2)) != 0 {
-					t.Fatal("removed native fields were reinserted")
+				executor := NewDevinExecutor(&config.Config{Payload: test.rules})
+				auth := &cliproxyauth.Auth{
+					ID: t.Name(),
+					Attributes: map[string]string{
+						"api_key":     "synthetic-session",
+						"device_seed": "synthetic-device",
+					},
 				}
-			} else if len(completion) != 1 || firstDevinVarintField(t, completion[0], 2) != test.max {
-				t.Fatalf("native max_tokens=%x, want %d", completion, test.max)
-			}
-			if test.model != "" {
-				_, observed := prepared.reporter.responseModelSnapshot()
-				if string(firstDevinBytesField(t, wire, 21)) != test.model || observed != test.model {
-					t.Fatalf("wire/observed model differs: wire=%q observed=%q", firstDevinBytesField(t, wire, 21), observed)
+				prepared, err := executor.prepareDevinRequest(
+					context.Background(), auth,
+					cliproxyexecutor.Request{Model: "devin/swe-2", Payload: []byte(test.payload)},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions}, false,
+				)
+				if test.invalid {
+					if err == nil {
+						t.Fatal("invalid native JSON returned a prepared request")
+					}
+					return
 				}
-			}
-			if test.cascade && string(firstDevinBytesField(t, wire, 16)) == "rule-cascade" {
-				t.Fatal("native default replaced an explicit caller cascade")
-			}
-		})
+				if err != nil {
+					t.Fatal(err)
+				}
+				framed, err := io.ReadAll(prepared.httpReq.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, wire, err := helps.ReadConnectFrame(bytes.NewReader(framed))
+				if err != nil {
+					t.Fatal(err)
+				}
+				completion := allDevinBytesFields(t, wire, 8)
+				if test.removed {
+					if len(completion) != 0 || len(allDevinBytesFields(t, wire, 2)) != 0 {
+						t.Fatal("removed native fields were reinserted")
+					}
+				} else if len(completion) != 1 || firstDevinVarintField(t, completion[0], 2) != test.max {
+					t.Fatalf("native max_tokens=%x, want %d", completion, test.max)
+				}
+				if test.model != "" {
+					_, observed := prepared.reporter.responseModelSnapshot()
+					if string(firstDevinBytesField(t, wire, 21)) != test.model || observed != test.model {
+						t.Fatalf(
+							"wire/observed model differs: wire=%q observed=%q",
+							firstDevinBytesField(t, wire, 21),
+							observed,
+						)
+					}
+				}
+				if test.cascade && string(firstDevinBytesField(t, wire, 16)) == "rule-cascade" {
+					t.Fatal("native default replaced an explicit caller cascade")
+				}
+			},
+		)
 	}
 }
 
 func TestDevinMillionContextModelUIDAtRequestBuilder(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		for _, level := range []string{"none", "max"} {
-			t.Run(fmt.Sprintf("%s/stream=%v", level, stream), func(t *testing.T) {
-				executor := NewDevinExecutor(&config.Config{})
-				auth := &cliproxyauth.Auth{ID: "synthetic-devin", Provider: "devin", Attributes: map[string]string{
-					"api_key": "synthetic-session-token", "base_url": "http://example.invalid", "device_seed": "synthetic-device"}}
-				payload := []byte(fmt.Sprintf(`{"generation_config":{"thinking_level":%q,"max_output_tokens":200000},"input":[{"type":"user_input","content":[{"type":"text","text":"hello"}]}]}`, level))
-				prepared, err := executor.prepareDevinRequest(context.Background(), auth,
-					cliproxyexecutor.Request{Model: "devin/glm-5-2-1m", Payload: payload},
-					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions}, stream)
-				if err != nil {
-					t.Fatalf("prepareDevinRequest: %v", err)
-				}
-				body, err := io.ReadAll(prepared.httpReq.Body)
-				_ = prepared.httpReq.Body.Close()
-				if err != nil {
-					t.Fatalf("read prepared body: %v", err)
-				}
-				flag, protoBody, err := helps.ReadConnectFrame(bytes.NewReader(body))
-				if err != nil || flag != helps.ConnectFlagData {
-					t.Fatalf("ReadConnectFrame = %d, %v", flag, err)
-				}
-				want := "glm-5-2-" + level + "-1m"
-				if got := string(firstDevinBytesField(t, protoBody, 21)); got != want {
-					t.Fatalf("wire chat_model_uid = %q, want %q", got, want)
-				}
-				completion := firstDevinBytesField(t, protoBody, 8)
-				if limit := firstDevinVarintField(t, completion, 2); limit != 64000 {
-					t.Fatalf("wire max tokens = %d, want catalog limit 64000", limit)
-				}
-			})
+			t.Run(
+				fmt.Sprintf("%s/stream=%v", level, stream), func(t *testing.T) {
+					executor := NewDevinExecutor(&config.Config{})
+					auth := &cliproxyauth.Auth{
+						ID: "synthetic-devin", Provider: "devin", Attributes: map[string]string{
+							"api_key": "synthetic-session-token", "base_url": "http://example.invalid",
+							"device_seed": "synthetic-device",
+						},
+					}
+					payload := []byte(fmt.Sprintf(
+						`{"generation_config":{"thinking_level":%q,"max_output_tokens":200000},`+
+							`"input":[{"type":"user_input","content":[{"type":"text","text":"hello"`+
+							`}]}]}`,
+						level,
+					))
+					prepared, err := executor.prepareDevinRequest(
+						context.Background(), auth,
+						cliproxyexecutor.Request{Model: "devin/glm-5-2-1m", Payload: payload},
+						cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions}, stream,
+					)
+					if err != nil {
+						t.Fatalf("prepareDevinRequest: %v", err)
+					}
+					body, err := io.ReadAll(prepared.httpReq.Body)
+					_ = prepared.httpReq.Body.Close()
+					if err != nil {
+						t.Fatalf("read prepared body: %v", err)
+					}
+					flag, protoBody, err := helps.ReadConnectFrame(bytes.NewReader(body))
+					if err != nil || flag != helps.ConnectFlagData {
+						t.Fatalf("ReadConnectFrame = %d, %v", flag, err)
+					}
+					want := "glm-5-2-" + level + "-1m"
+					if got := string(firstDevinBytesField(t, protoBody, 21)); got != want {
+						t.Fatalf("wire chat_model_uid = %q, want %q", got, want)
+					}
+					completion := firstDevinBytesField(t, protoBody, 8)
+					if limit := firstDevinVarintField(t, completion, 2); limit != 64000 {
+						t.Fatalf("wire max tokens = %d, want catalog limit 64000", limit)
+					}
+				},
+			)
 		}
 	}
 }

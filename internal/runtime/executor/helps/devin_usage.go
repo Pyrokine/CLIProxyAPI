@@ -2,6 +2,7 @@ package helps
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 
@@ -26,6 +27,8 @@ type DevinUsage struct {
 }
 
 // InputTokens returns uncached plus cached input tokens.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (usage *DevinUsage) InputTokens() int64 {
 	if usage == nil {
 		return 0
@@ -34,6 +37,8 @@ func (usage *DevinUsage) InputTokens() int64 {
 }
 
 // TotalTokens returns input plus completion tokens.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (usage *DevinUsage) TotalTokens() int64 {
 	if usage == nil {
 		return 0
@@ -97,9 +102,7 @@ func mergeDevinUsage(dst, src *DevinUsage) {
 		if dst.Headers == nil {
 			dst.Headers = make(map[string]string, len(src.Headers))
 		}
-		for key, value := range src.Headers {
-			dst.Headers[key] = value
-		}
+		maps.Copy(dst.Headers, src.Headers)
 	}
 }
 
@@ -157,6 +160,7 @@ func parseDevinUsageField(data []byte) (*DevinUsage, error) {
 				}
 				usage.CachedTokens = converted
 				usage.CachedTokensPresent = true
+			// noinspection GoDfaConstantCondition
 			case 6:
 				usage.StatusCode = value
 			}
@@ -442,7 +446,9 @@ func parseDevinDimensionValue(data []byte) (float32, error) {
 }
 
 func devinDimensionTokenCount(value float32) (int64, error) {
-	if float32(math.Trunc(float64(value))) != value || value < 0 || math.IsInf(float64(value), 0) || math.IsNaN(float64(value)) {
+	if float32(math.Trunc(float64(value))) != value || value < 0 || math.IsInf(
+		float64(value), 0,
+	) || math.IsNaN(float64(value)) {
 		return 0, fmt.Errorf("invalid token count %v", value)
 	}
 	if float64(value) > float64(math.MaxInt64) {

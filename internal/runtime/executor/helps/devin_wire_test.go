@@ -11,8 +11,60 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
+
+func TestDevinTopPNativeFieldAndDefaultsPresence(t *testing.T) {
+	for _, test := range []struct {
+		name, interactions string
+		value              float64
+	}{
+		{name: "zero", interactions: `{"generation_config":{"top_p":0}}`, value: 0},
+		{name: "value", interactions: `{"generation_config":{"top_p":0.63}}`, value: 0.63},
+		{name: "one", interactions: `{"generation_config":{"top_p":1}}`, value: 1},
+		{name: "camel field zero", interactions: `{"generation_config":{"topP":0}}`, value: 0},
+		{name: "camel config zero", interactions: `{"generationConfig":{"top_p":0}}`, value: 0},
+		{name: "camel config and field zero", interactions: `{"generationConfig":{"topP":0}}`, value: 0},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				wire := BuildDevinGetChatMessageRequest(
+					"synthetic", "seed", "swe-2", "", nil, nil, nil, 64000, t.Name(), t.Name(), nil,
+				)
+				encoded, view, err := FinalizeDevinPayload(
+					wire, func(native []byte) ([]byte, error) {
+						return sjson.SetBytes(native, "completion_config.top_p", test.value)
+					},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _, err = FinalizeDevinPayload(
+					encoded, func(decoded []byte) ([]byte, error) {
+						value := gjson.GetBytes(decoded, "completion_config.top_p")
+						if !value.Exists() || value.Float() != test.value {
+							t.Errorf("decoded native top_p=%s, want %v", value.Raw, test.value)
+						}
+						return decoded, nil
+					},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				source, err := DevinPayloadDefaultsSource(view, []byte(test.interactions), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				value := gjson.GetBytes(source, "completion_config.top_p")
+				if !value.Exists() || value.Float() != test.value {
+					t.Fatalf("explicit top_p presence=%s, want %v", value.Raw, test.value)
+				}
+			},
+		)
+	}
+}
 
 func TestBuildDevinWireFiltersAutomationAndSanitizesDescriptions(t *testing.T) {
 	request := BuildDevinGetChatMessageRequest(
@@ -20,7 +72,11 @@ func TestBuildDevinWireFiltersAutomationAndSanitizesDescriptions(t *testing.T) {
 		[]DevinTool{
 			{Name: "mcp__codex_app__automation_update", Description: "Recurring automations"},
 			{Name: "exec_command", Description: "returning output or a session ID for ongoing interaction"},
-			{Name: "write_stdin", Description: "Writes characters to an existing unified exec session and returns recent output. Takes a task_id parameter identifying the task"},
+			{
+				Name: "write_stdin",
+				Description: "Writes characters to an existing unified exec session and returns recent " +
+					"output. Takes a task_id parameter identifying the task",
+			},
 		},
 		nil, 1000, "session-1", "cascade-1", nil,
 	)
@@ -30,12 +86,20 @@ func TestBuildDevinWireFiltersAutomationAndSanitizesDescriptions(t *testing.T) {
 	}
 	for index, want := range []struct{ name, description string }{
 		{"exec_command", "returning output or an session ID for ongoing interaction"},
-		{"write_stdin", "Writes characters to a existing unified exec session and returns recent output. Takes a taskId parameter identifying the task"},
+		{
+			"write_stdin",
+			"Writes characters to a existing unified exec session and returns recent output. Takes a taskId " +
+				"parameter identifying the task",
+		},
 	} {
 		name := testProtoBytesFields(t, tools[index], 1)
 		description := testProtoBytesFields(t, tools[index], 2)
-		if len(name) != 1 || len(description) != 1 || string(name[0]) != want.name || string(description[0]) != want.description {
-			t.Fatalf("wire tool %d = name %q description %q, want %q/%q", index, name, description, want.name, want.description)
+		if len(name) != 1 || len(description) != 1 || string(name[0]) != want.name ||
+			string(description[0]) != want.description {
+			t.Fatalf(
+				"wire tool %d = name %q description %q, want %q/%q", index, name, description, want.name,
+				want.description,
+			)
 		}
 	}
 }
@@ -67,9 +131,11 @@ func TestReadConnectFrameValidatesFramingAndCompression(t *testing.T) {
 	if err = writer.Close(); err != nil {
 		t.Fatalf("gzip.Close(): %v", err)
 	}
-	flag, decoded, err = ReadConnectFrame(bytes.NewReader(
-		WrapConnectEnvelopeWithFlag(ConnectFlagCompressed, compressed.Bytes()),
-	))
+	flag, decoded, err = ReadConnectFrame(
+		bytes.NewReader(
+			WrapConnectEnvelopeWithFlag(ConnectFlagCompressed, compressed.Bytes()),
+		),
+	)
 	if err != nil {
 		t.Fatalf("ReadConnectFrame(gzip): %v", err)
 	}
@@ -99,11 +165,13 @@ func TestReadConnectFrameRejectsMalformedFrames(t *testing.T) {
 		{name: "invalid gzip", frame: WrapConnectEnvelopeWithFlag(ConnectFlagCompressed, []byte("not gzip"))},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if _, _, err := ReadConnectFrame(bytes.NewReader(test.frame)); err == nil {
-				t.Fatal("ReadConnectFrame() error = nil")
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				if _, _, err := ReadConnectFrame(bytes.NewReader(test.frame)); err == nil {
+					t.Fatal("ReadConnectFrame() error = nil")
+				}
+			},
+		)
 	}
 }
 
@@ -127,25 +195,31 @@ func TestReadConnectFrameRejectsDecompressedPayloadOverLimit(t *testing.T) {
 func TestBuildDevinGetChatMessageRequestLimitsSensitiveWordsToSystemPrompt(t *testing.T) {
 	const sensitive = "SECRET_TOKEN"
 	matcher := BuildSensitiveWordMatcher([]string{sensitive})
-	prompts := []DevinPrompt{{
-		MessageID: "assistant-1",
-		Source:    2,
-		Content:   "ordinary message with " + sensitive,
-		ToolCalls: []DevinToolCall{{
-			ID:        "call-1",
-			Name:      "run_task",
-			Arguments: `{"task_id":"` + sensitive + `"}`,
-		}},
-	}}
-	tools := []DevinTool{{
-		Name:        "run_task",
-		Description: "accepts task_id exactly; " + sensitive,
-		Parameters:  []byte(`{"type":"object","properties":{"task_id":{"type":"string"}}}`),
-	}}
+	prompts := []DevinPrompt{
+		{
+			MessageID: "assistant-1",
+			Source:    2,
+			Content:   "ordinary message with " + sensitive,
+			ToolCalls: []DevinToolCall{
+				{
+					ID:        "call-1",
+					Name:      "run_task",
+					Arguments: `{"task_id":"` + sensitive + `"}`,
+				},
+			},
+		},
+	}
+	tools := []DevinTool{
+		{
+			Name:        "run_task",
+			Description: "accepts task_id exactly; " + sensitive,
+			Parameters:  []byte(`{"type":"object","properties":{"task_id":{"type":"string"}}}`),
+		},
+	}
 
 	sessionID := "sensitive-word-scope"
-	ResetDevinSessionTurnIndex(sessionID)
-	defer ResetDevinSessionTurnIndex(sessionID)
+	resetDevinSessionTurnIndex(sessionID)
+	defer resetDevinSessionTurnIndex(sessionID)
 	request := BuildDevinGetChatMessageRequest(
 		"session-token",
 		"device-seed",
@@ -233,8 +307,8 @@ func TestBuildDevinGetChatMessageRequestPreservesExplicitZeroTemperature(t *test
 
 func TestBuildDevinGetChatMessageRequestTracksSessionTurns(t *testing.T) {
 	sessionID := "session-turn-counter"
-	ResetDevinSessionTurnIndex(sessionID)
-	defer ResetDevinSessionTurnIndex(sessionID)
+	resetDevinSessionTurnIndex(sessionID)
+	defer resetDevinSessionTurnIndex(sessionID)
 	prompts := []DevinPrompt{{MessageID: "user-1", Source: 1, Content: "hello"}}
 
 	first := BuildDevinGetChatMessageRequest(
@@ -343,21 +417,52 @@ func TestParseDevinTrailerErrorIsStrict(t *testing.T) {
 		{name: "success", payload: "{}", wantStatus: 0},
 		{name: "malformed JSON", payload: "{", wantStatus: http.StatusBadGateway, wantError: true},
 		{name: "missing error", payload: `{"metadata":{}}`, wantStatus: http.StatusBadGateway, wantError: true},
-		{name: "missing code", payload: `{"error":{"message":"failed"}}`, wantStatus: http.StatusBadGateway, wantError: true},
-		{name: "quota", payload: `{"error":{"code":"failed_precondition","message":"monthly ACU quota exhausted"}}`, wantStatus: http.StatusTooManyRequests, wantError: true},
-		{name: "unauthenticated", payload: `{"error":{"code":"unauthenticated","message":"expired"}}`, wantStatus: http.StatusUnauthorized, wantError: true},
-		{name: "high demand", payload: `{"error":{"code":"permission_denied","message":"The model is currently in high demand; retry soon"}}`, wantStatus: http.StatusTooManyRequests, wantError: true},
-		{name: "high demand case-insensitive", payload: `{"error":{"code":"permission_denied","message":"HIGH DEMAND: retry soon"}}`, wantStatus: http.StatusTooManyRequests, wantError: true},
-		{name: "genuine permission denial", payload: `{"error":{"code":"permission_denied","message":"model access denied"}}`, wantStatus: http.StatusForbidden, wantError: true},
-		{name: "resource exhausted", payload: `{"error":{"code":"resource_exhausted","message":"rate limit"}}`, wantStatus: http.StatusTooManyRequests, wantError: true},
+		{
+			name: "missing code", payload: `{"error":{"message":"failed"}}`, wantStatus: http.StatusBadGateway,
+			wantError: true,
+		},
+		{
+			name: "quota", payload: `{"error":{"code":"failed_precondition","message":"monthly ACU quota exhausted"}}`,
+			wantStatus: http.StatusTooManyRequests, wantError: true,
+		},
+		{
+			name: "unauthenticated", payload: `{"error":{"code":"unauthenticated","message":"expired"}}`,
+			wantStatus: http.StatusUnauthorized, wantError: true,
+		},
+		{
+			name: "high demand",
+			payload: `{"error":{"code":"permission_denied","message":"The model is ` +
+				`currently in high demand; retry ` +
+				`soon"}}`,
+			wantStatus: http.StatusTooManyRequests, wantError: true,
+		},
+		{
+			name:       "high demand case-insensitive",
+			payload:    `{"error":{"code":"permission_denied","message":"HIGH DEMAND: retry soon"}}`,
+			wantStatus: http.StatusTooManyRequests, wantError: true,
+		},
+		{
+			name:       "genuine permission denial",
+			payload:    `{"error":{"code":"permission_denied","message":"model access denied"}}`,
+			wantStatus: http.StatusForbidden, wantError: true,
+		},
+		{
+			name: "resource exhausted", payload: `{"error":{"code":"resource_exhausted","message":"rate limit"}}`,
+			wantStatus: http.StatusTooManyRequests, wantError: true,
+		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			status, err := ParseDevinTrailerError([]byte(test.payload))
-			if status != test.wantStatus || (err != nil) != test.wantError {
-				t.Fatalf("ParseDevinTrailerError() = %d/%v, want %d/error=%t", status, err, test.wantStatus, test.wantError)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				status, err := ParseDevinTrailerError([]byte(test.payload))
+				if status != test.wantStatus || (err != nil) != test.wantError {
+					t.Fatalf(
+						"ParseDevinTrailerError() = %d/%v, want %d/error=%t", status, err, test.wantStatus,
+						test.wantError,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -393,9 +498,9 @@ func TestUTF8SplitBufferValidatesStreamText(t *testing.T) {
 }
 
 func TestGenerateDevinIdentityValues(t *testing.T) {
-	first := GenerateDevinDeviceFingerprint("stable-seed")
-	second := GenerateDevinDeviceFingerprint("stable-seed")
-	if first != second || len(first) != DevinFingerprintHexLen {
+	first := generateDevinDeviceFingerprint("stable-seed")
+	second := generateDevinDeviceFingerprint("stable-seed")
+	if first != second || len(first) != devinFingerprintHexLen {
 		t.Fatalf("deterministic fingerprint lengths/equality = %d/%t", len(first), first == second)
 	}
 
@@ -461,30 +566,34 @@ func testProtoVarintFields(t *testing.T, data []byte) map[protowire.Number]uint6
 
 func TestBuildDevinClientMetadataCurrentFieldLayout(t *testing.T) {
 	for _, osName := range []string{"linux", "windows"} {
-		t.Run(osName, func(t *testing.T) {
-			metadata := BuildDevinClientMetadataBytes("synthetic-session", "synthetic-seed", osName)
-			for _, field := range []struct {
-				number   protowire.Number
-				expected string
-			}{
-				{1, DevinDefaultClientName},
-				{2, DevinDefaultClientVersion},
-				{3, "synthetic-session"},
-				{5, osName},
-				{7, DevinDefaultClientVersion},
-				{12, DevinDefaultClientName},
-			} {
-				values := testProtoBytesFields(t, metadata, field.number)
-				if len(values) != 1 || string(values[0]) != field.expected {
-					t.Errorf("metadata field %d = %q, want %q", field.number, values, field.expected)
+		t.Run(
+			osName, func(t *testing.T) {
+				metadata := BuildDevinClientMetadataBytes("synthetic-session", "synthetic-seed", osName)
+				for _, field := range []struct {
+					number   protowire.Number
+					expected string
+				}{
+					{1, devinDefaultClientName},
+					{2, devinDefaultClientVersion},
+					{3, "synthetic-session"},
+					{5, osName},
+					{7, devinDefaultClientVersion},
+					{12, devinDefaultClientName},
+				} {
+					values := testProtoBytesFields(t, metadata, field.number)
+					if len(values) != 1 || string(values[0]) != field.expected {
+						t.Errorf("metadata field %d = %q, want %q", field.number, values, field.expected)
+					}
 				}
-			}
-			if values := testProtoBytesFields(t, metadata, 28); len(values) != 0 {
-				t.Errorf("obsolete metadata field 28 remains: %q", values)
-			}
-			if values := testProtoBytesFields(t, metadata, 31); len(values) != 1 || len(values[0]) != DevinFingerprintHexLen {
-				t.Errorf("device fingerprint changed: %q", values)
-			}
-		})
+				if values := testProtoBytesFields(t, metadata, 28); len(values) != 0 {
+					t.Errorf("obsolete metadata field 28 remains: %q", values)
+				}
+				if values := testProtoBytesFields(
+					t, metadata, 31,
+				); len(values) != 1 || len(values[0]) != devinFingerprintHexLen {
+					t.Errorf("device fingerprint changed: %q", values)
+				}
+			},
+		)
 	}
 }

@@ -30,9 +30,11 @@ func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 		return nil
 	}
 
-	sort.Slice(validWords, func(i, j int) bool {
-		return len(validWords[i]) > len(validWords[j])
-	})
+	sort.Slice(
+		validWords, func(i, j int) bool {
+			return len(validWords[i]) > len(validWords[j])
+		},
+	)
 	escaped := make([]string, len(validWords))
 	for i, word := range validWords {
 		escaped[i] = regexp.QuoteMeta(word)
@@ -43,25 +45,31 @@ func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 }
 
 // Matches reports whether text contains a configured sensitive word.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *SensitiveWordMatcher) Matches(text string) bool {
 	return m != nil && m.regex != nil && m.regex.MatchString(text)
 }
 
 // ObfuscateText inserts a zero-width space after the first rune of each match.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *SensitiveWordMatcher) ObfuscateText(text string) string {
 	if m == nil || m.regex == nil {
 		return text
 	}
-	return m.regex.ReplaceAllStringFunc(text, func(word string) string {
-		if strings.Contains(word, devinZeroWidthSpace) {
-			return word
-		}
-		_, size := utf8.DecodeRuneInString(word)
-		if size <= 0 || size >= len(word) {
-			return word
-		}
-		return word[:size] + devinZeroWidthSpace + word[size:]
-	})
+	return m.regex.ReplaceAllStringFunc(
+		text, func(word string) string {
+			if strings.Contains(word, devinZeroWidthSpace) {
+				return word
+			}
+			_, size := utf8.DecodeRuneInString(word)
+			if size <= 0 || size >= len(word) {
+				return word
+			}
+			return word[:size] + devinZeroWidthSpace + word[size:]
+		},
+	)
 }
 
 // SanitizeDevinSystemPrompt removes unsupported Claude CLI identity lines and configured sensitive lines.

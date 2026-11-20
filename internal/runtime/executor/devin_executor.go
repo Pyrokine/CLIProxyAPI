@@ -125,12 +125,13 @@ func (e *DevinExecutor) Execute(
 	if err != nil {
 		return resp, err
 	}
+	ctx = prepared.reporter.withContext(ctx)
 	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := prepared.reporter.trackHTTPClient(newDevinHTTPClient(ctx, e.cfg, auth, 0))
 	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return resp, err
 	}
 	defer func() {
@@ -139,7 +140,7 @@ func (e *DevinExecutor) Execute(
 		}
 	}()
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxDevinErrorBodySize))
 		appendAPIResponseChunk(ctx, e.cfg, body)
@@ -147,17 +148,43 @@ func (e *DevinExecutor) Execute(
 		return resp, err
 	}
 
-	interaction, summary, responseModel, consumeErr := consumeDevinFrames(httpResp.Body, req.Model)
+	responseFormat := devinResponseFormat(opts)
+	interaction, summary, observedUsage, consumeErr := consumeDevinFrames(httpResp.Body, req.Model)
 	if len(summary) > 0 {
 		appendAPIResponseChunk(ctx, e.cfg, summary)
 	}
+	if observedUsage != nil {
+		prepared.reporter.setResponseModel(observedUsage.ModelName)
+	}
+	if consumeErr == nil && responseFormat != sdktranslator.FormatInteractions {
+		for index, step := range gjson.GetBytes(interaction, "steps").Array() {
+			if !step.Get("is_custom_tool_call").Bool() {
+				continue
+			}
+			arguments, errBridge := devinCustomToolArguments(
+				step.Get("name").String(), step.Get("arguments").String(), opts,
+			)
+			if errBridge != nil {
+				consumeErr = devinProtocolError(errBridge.Error())
+				break
+			}
+			interaction, consumeErr = sjson.SetRawBytes(
+				interaction, fmt.Sprintf("steps.%d.arguments", index), []byte(arguments),
+			)
+			if consumeErr != nil {
+				break
+			}
+		}
+	}
 	if consumeErr != nil {
 		recordAPIResponseError(ctx, e.cfg, consumeErr)
+		prepared.reporter.publishFailureWithDetail(ctx, devinUsageDetail(observedUsage), consumeErr)
 		return resp, consumeErr
 	}
-	prepared.reporter.setResponseModel(responseModel)
 
-	responseFormat := devinResponseFormat(opts)
+	observedDetail := devinUsageWithCacheWrites(parseInteractionsUsage(interaction))
+	observedDetail.CacheReadReported = observedUsage != nil && observedUsage.CachedTokensPresent
+	observedDetail.CacheWriteReported = new(observedUsage != nil && observedUsage.CacheWriteTokensPresent)
 	var parameter any
 	translated := sdktranslator.TranslateNonStream(
 		ctx,
@@ -169,15 +196,22 @@ func (e *DevinExecutor) Execute(
 		interaction,
 		&parameter,
 	)
-	if errTranslate := sdktranslator.ResponseTranslationError(&parameter); errTranslate != nil || len(translated) == 0 {
+	if errTranslate := sdktranslator.ResponseTranslationError(&parameter); errTranslate != nil ||
+		len(translated) == 0 {
 		if errTranslate == nil {
-			errTranslate = markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload"})
+			errTranslate = markResponseStarted(
+				statusErr{
+					code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload",
+				},
+			)
 		}
 		recordAPIResponseError(ctx, e.cfg, errTranslate)
-		prepared.reporter.publishFailureWithDetail(ctx, devinUsageWithCacheWrites(parseInteractionsUsage(interaction)), errTranslate)
+		prepared.reporter.publishFailureWithDetail(
+			ctx, observedDetail, errTranslate,
+		)
 		return resp, errTranslate
 	}
-	prepared.reporter.publish(ctx, devinUsageWithCacheWrites(parseInteractionsUsage(interaction)))
+	prepared.reporter.publish(ctx, observedDetail)
 	return cliproxyexecutor.Response{
 		Payload: translated,
 		Headers: httpResp.Header.Clone(),
@@ -196,15 +230,16 @@ func (e *DevinExecutor) ExecuteStream(
 	if err != nil {
 		return nil, err
 	}
+	ctx = prepared.reporter.withContext(ctx)
 	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := prepared.reporter.trackHTTPClient(newDevinHTTPClient(ctx, e.cfg, auth, 0))
 	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return nil, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxDevinErrorBodySize))
 		if closeErr := httpResp.Body.Close(); closeErr != nil {
@@ -278,19 +313,6 @@ func (e *DevinExecutor) prepareDevinRequest(
 		return nil, err
 	}
 	originalTranslated, _ := translateDevinRequest(ctx, from, req.Model, originalSource, stream)
-	body, err = helps.ApplyThinkingWithSourcePayload(
-		body,
-		req.Payload,
-		originalSource,
-		req.Model,
-		from.String(),
-		sdktranslator.FormatInteractions.String(),
-		e.Identifier(),
-		req,
-	)
-	if err != nil {
-		return nil, devinRequestError(err)
-	}
 	body = applyPayloadConfigWithRequest(
 		e.cfg,
 		thinking.ParseSuffix(req.Model).ModelName,
@@ -306,6 +328,23 @@ func (e *DevinExecutor) prepareDevinRequest(
 	)
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return nil, devinRequestError(errors.New("translated Devin request is not valid JSON"))
+	}
+	generation := firstExistingDevinResult(
+		gjson.GetBytes(body, "generation_config"), gjson.GetBytes(body, "generationConfig"),
+	)
+	for _, field := range []string{
+		"presence_penalty", "frequency_penalty", "stop_sequences", "presencePenalty", "frequencyPenalty",
+		"stopSequences",
+	} {
+		if generation.Get(field).Exists() {
+			return nil, devinRequestError(fmt.Errorf("devin does not support generation_config.%s", field))
+		}
+	}
+	topP := firstExistingDevinResult(generation.Get("top_p"), generation.Get("topP"))
+	if topP.Exists() && (topP.Type != gjson.Number || topP.Float() < 0 || topP.Float() > 1) {
+		return nil, devinRequestError(
+			errors.New("devin generation_config.top_p must be a number between 0 and 1"),
+		)
 	}
 
 	parsed := parseDevinInteractionsPayload(body, opts.OriginalRequest)
@@ -348,14 +387,22 @@ func (e *DevinExecutor) prepareDevinRequest(
 				break
 			}
 		}
-		for neighbor := promptIndex; !sameTurnSendable && neighbor < len(parsed.prompts) && parsed.prompts[neighbor].Source != 2; neighbor++ {
+		for neighbor := promptIndex; !sameTurnSendable &&
+			neighbor <
+				len(parsed.prompts) &&
+			parsed.prompts[neighbor].Source !=
+				2; neighbor++ {
 			other := parsed.prompts[neighbor]
 			if other.Source != 1 || strings.TrimSpace(other.Content) != "" || len(other.Images) > 0 {
 				sameTurnSendable = true
 			}
 		}
 		if !sameTurnSendable {
-			return nil, devinRequestError(fmt.Errorf("devin user turn %d has no sendable text or inline image", promptIndex))
+			return nil, devinRequestError(
+				fmt.Errorf(
+					"devin user turn %d has no sendable text or inline image", promptIndex,
+				),
+			)
 		}
 		dropEmptyPrompts[promptIndex-1] = true
 	}
@@ -374,6 +421,7 @@ func (e *DevinExecutor) prepareDevinRequest(
 		req.Metadata,
 		opts.Metadata,
 	)
+	// Devin encodes effort in the UID, including explicit none and binary thinking variants.
 	chatModelUID, modelInfo, err := helps.ResolveDevinChatModel(
 		req.Model,
 		parsed.thinkingLevel,
@@ -431,13 +479,45 @@ func (e *DevinExecutor) prepareDevinRequest(
 		parsed.cascadeID,
 		matcher,
 	)
-	protoBody, nativeLog, err := helps.FinalizeDevinPayload(protoBody, func(native []byte) ([]byte, error) {
-		original, errDefaults := helps.DevinPayloadDefaultsSource(native, originalTranslated, originalSource)
-		if errDefaults != nil {
-			return nil, errDefaults
-		}
-		return applyPayloadConfigWithRequest(e.cfg, thinking.ParseSuffix(req.Model).ModelName, "devin", from.String(), "", native, original, payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier()), nil
-	})
+	protoBody, nativeLog, err := helps.FinalizeDevinPayload(
+		protoBody, func(native []byte) ([]byte, error) {
+			if topP.Exists() {
+				var errTopP error
+				native, errTopP = sjson.SetBytes(native, "completion_config.top_p", topP.Float())
+				if errTopP != nil {
+					return nil, errTopP
+				}
+			}
+			original, errDefaults := helps.DevinPayloadDefaultsSource(
+				native,
+				originalTranslated,
+				originalSource,
+			)
+			if errDefaults != nil {
+				return nil, errDefaults
+			}
+			configured := applyPayloadConfigWithRequest(
+				e.cfg, thinking.ParseSuffix(req.Model).ModelName, "devin", from.String(), "", native, original,
+				payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
+			)
+			finalUID := gjson.GetBytes(configured, "model").String()
+			if thinking.HasContext1MTag(payloadRequestedModel(opts, req.Model)) && finalUID != chatModelUID {
+				finalModel := ""
+				if finalUID != "" {
+					finalModel = "devin/" + strings.TrimPrefix(finalUID, "devin/")
+					if _, info, err := helps.ResolveDevinChatModel(
+						finalUID, parsed.thinkingLevel, parsed.budgetTokens,
+					); err == nil && info != nil {
+						finalModel = info.ID
+					}
+				}
+				if err := bindFinalModelContext(&req, auth, opts, finalModel); err != nil {
+					return nil, err
+				}
+			}
+			return configured, nil
+		},
+	)
 	if err != nil {
 		return nil, devinRequestError(err)
 	}
@@ -463,6 +543,14 @@ func (e *DevinExecutor) prepareDevinRequest(
 	if len(nativeLog) > 0 {
 		logBody = nativeLog
 	}
+	reporter := newUsageReporter(ctx, e, thinking.ParseSuffix(req.Model).ModelName, auth)
+	if stream {
+		reporter.markStream()
+	}
+	ctx = reporter.withContext(ctx)
+	reporter.setTranslatedReasoningEffort(body, sdktranslator.FormatInteractions.String())
+	reporter.setUpstreamModel(gjson.GetBytes(nativeLog, "model").String())
+	httpReq = httpReq.WithContext(ctx)
 	recordUpstreamRequest(
 		ctx,
 		e.cfg,
@@ -473,9 +561,6 @@ func (e *DevinExecutor) prepareDevinRequest(
 		auth,
 	)
 
-	reporter := newUsageReporter(ctx, e, thinking.ParseSuffix(req.Model).ModelName, auth)
-	reporter.setTranslatedReasoningEffort(body, sdktranslator.FormatInteractions.String())
-	reporter.setUpstreamModel(gjson.GetBytes(nativeLog, "model").String())
 	return &devinPreparedRequest{
 		body:     body,
 		httpReq:  httpReq,
@@ -493,7 +578,7 @@ func translateDevinRequest(
 	if from == sdktranslator.FormatInteractions {
 		return bytes.Clone(payload), nil
 	}
-	return sdktranslator.TranslateRequestChecked(
+	body, err := sdktranslator.TranslateRequestChecked(
 		ctx,
 		from,
 		sdktranslator.FormatInteractions,
@@ -501,6 +586,30 @@ func translateDevinRequest(
 		bytes.Clone(payload),
 		stream,
 	)
+	if err != nil {
+		return nil, err
+	}
+	if from == sdktranslator.FormatCodex || from == sdktranslator.FormatOpenAIResponse {
+		if effort := thinking.ExtractReasoningEffort(payload, from.String(), ""); effort != "" {
+			body, err = sjson.SetBytes(body, "generation_config.thinking_level", effort)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	choice := gjson.GetBytes(body, "generation_config.tool_choice")
+	for _, path := range []string{"name", "function.name", "custom.name"} {
+		if translatorcommon.IsDevinCodexAppAutomationUpdate(
+			choice.Get("namespace").String(), choice.Get(path).String(),
+		) {
+			body, err = sjson.DeleteBytes(body, "generation_config.tool_choice")
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+	return body, nil
 }
 
 func devinRequestLogBody(payload []byte, sanitizedSystemPrompt string) []byte {
@@ -522,7 +631,8 @@ func devinRequestLogBody(payload []byte, sanitizedSystemPrompt string) []byte {
 				continue
 			}
 			description := strings.ReplaceAll(
-				tool.Description, "Takes a task_id parameter identifying the task", "Takes a taskId parameter identifying the task",
+				tool.Description, "Takes a task_id parameter identifying the task",
+				"Takes a taskId parameter identifying the task",
 			)
 			description = translatorcommon.SanitizeDevinToolDescription(tool.Name, description)
 			item := []byte(`{"name":""}`)

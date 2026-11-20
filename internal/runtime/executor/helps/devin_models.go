@@ -39,8 +39,8 @@ var specialDevinAliases = map[string]string{
 
 var devinStandardLevelOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 
-// HasDevinEffortSuffix reports whether model ends with a recognized Devin UID suffix.
-func HasDevinEffortSuffix(model string) bool {
+// hasDevinEffortSuffix reports whether model ends with a recognized Devin UID suffix.
+func hasDevinEffortSuffix(model string) bool {
 	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(model)), "-slow") {
 		return true
 	}
@@ -48,8 +48,8 @@ func HasDevinEffortSuffix(model string) bool {
 	return found
 }
 
-// NormalizeThinkingLevel converts a request effort or token budget to a Devin effort.
-func NormalizeThinkingLevel(level string, budgetTokens int) string {
+// normalizeThinkingLevel converts a request effort or token budget to a Devin effort.
+func normalizeThinkingLevel(level string, budgetTokens int) string {
 	normalized := strings.ToLower(strings.TrimSpace(level))
 	switch normalized {
 	case "minimal", "low", "medium", "high", "xhigh", "max", "fast":
@@ -79,7 +79,11 @@ func NormalizeThinkingLevel(level string, budgetTokens int) string {
 
 // ResolveDevinChatModel resolves a namespaced public model and requested effort
 // to an upstream chat_model_uid and its catalog metadata.
-func ResolveDevinChatModel(rawModel string, thinkingLevel string, budgetTokens int) (string, *registry.ModelInfo, error) {
+func ResolveDevinChatModel(rawModel string, thinkingLevel string, budgetTokens int) (
+	string,
+	*registry.ModelInfo,
+	error,
+) {
 	model := strings.TrimSpace(rawModel)
 	if model == "" {
 		model = "devin/swe-2"
@@ -90,17 +94,24 @@ func ResolveDevinChatModel(rawModel string, thinkingLevel string, budgetTokens i
 
 	parsedSuffix := thinking.ParseSuffix(model)
 	model = strings.TrimSpace(parsedSuffix.ModelName)
+	hasRequestSuffix := parsedSuffix.HasSuffix
 	if parsedSuffix.HasSuffix {
 		thinkingLevel = parsedSuffix.RawSuffix
 	} else if colon := strings.LastIndex(model, ":"); colon >= 0 {
 		thinkingLevel = strings.TrimSpace(model[colon+1:])
 		model = strings.TrimSpace(model[:colon])
+		hasRequestSuffix = true
 	}
 
+	manualUID := model
 	baseModel, uidEffort, priority, hasUIDSuffix := splitDevinModelSuffix(model)
 	if hasUIDSuffix {
+		lowerUID := strings.ToLower(model)
+		encodedEffort := strings.HasPrefix(lowerUID, "model_") || strings.HasSuffix(
+			lowerUID, "-thinking",
+		) || strings.HasSuffix(lowerUID, "-thinking-1m") || lowerUID == "swe-1-6-fast"
 		model = baseModel
-		if !parsedSuffix.HasSuffix && thinkingLevel == "" && uidEffort != "" {
+		if !hasRequestSuffix && (thinkingLevel == "" || encodedEffort) && uidEffort != "" {
 			thinkingLevel = uidEffort
 		}
 	}
@@ -113,12 +124,58 @@ func ResolveDevinChatModel(rawModel string, thinkingLevel string, budgetTokens i
 		canonicalBase = "gemini-3-8-flash"
 	}
 
+	effort := normalizeThinkingLevel(thinkingLevel, budgetTokens)
+	legacyID := strings.ReplaceAll(canonicalBase, "-", "_")
+	switch legacyID {
+	case "model_gpt_5_2":
+		levels := []string{"none", "low", "medium", "high", "xhigh"}
+		info := &registry.ModelInfo{
+			ID: "devin/" + legacyID, Type: "devin", ContextLength: 384000,
+			MaxCompletionTokens: 64000, Thinking: &registry.ThinkingSupport{Levels: levels},
+		}
+		level := clampDevinEffort(effort, levels, "low")
+		return "MODEL_GPT_5_2_" + strings.ToUpper(level), info, nil
+	case "model_google_gemini_3_0_flash":
+		levels := []string{"minimal", "low", "medium", "high"}
+		info := &registry.ModelInfo{
+			ID: "devin/" + legacyID, Type: "devin", ContextLength: 1048576,
+			MaxCompletionTokens: 64000, Thinking: &registry.ThinkingSupport{Levels: levels},
+		}
+		level := clampDevinEffort(effort, levels, "high")
+		return "MODEL_GOOGLE_GEMINI_3_0_FLASH_" + strings.ToUpper(level), info, nil
+	case "model_claude_4_5_opus":
+		info := &registry.ModelInfo{
+			ID: "devin/" + legacyID, Type: "devin", ContextLength: 200000,
+			MaxCompletionTokens: 64000, Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+		}
+		if effort != "" && effort != "none" {
+			return "MODEL_CLAUDE_4_5_OPUS_THINKING", info, nil
+		}
+		return "MODEL_CLAUDE_4_5_OPUS", info, nil
+	case "model_private_2", "model_private_3", "model_private_11", "model_private_12",
+		"model_private_13", "model_private_14", "model_private_15", "model_chat_gpt_4_1_2025_04_14":
+		contextLength := 200000
+		switch legacyID {
+		case "model_private_12", "model_private_13", "model_private_14", "model_private_15":
+			contextLength = 272000
+		case "model_chat_gpt_4_1_2025_04_14":
+			contextLength = 1047576
+		}
+		info := &registry.ModelInfo{
+			ID: "devin/" + legacyID, Type: "devin",
+			ContextLength: contextLength, MaxCompletionTokens: 64000,
+		}
+		return strings.ToUpper(legacyID), info, nil
+	}
+
 	modelInfo := registry.LookupDevinModel(canonicalBase)
 	if modelInfo == nil {
+		if strings.HasSuffix(strings.ToLower(manualUID), "-slow") {
+			return manualUID, nil, nil
+		}
 		return "", nil, fmt.Errorf("unknown Devin model %q", rawModel)
 	}
 
-	effort := NormalizeThinkingLevel(thinkingLevel, budgetTokens)
 	if alias, exists := specialDevinAliases[canonicalBase]; exists {
 		return alias, modelInfo, nil
 	}
@@ -129,6 +186,32 @@ func ResolveDevinChatModel(rawModel string, thinkingLevel string, budgetTokens i
 		return "MODEL_PRIVATE_2", modelInfo, nil
 	}
 
+	switch canonicalBase {
+	case "swe-1-6":
+		if effort == "fast" {
+			return canonicalBase + "-fast", modelInfo, nil
+		}
+		return canonicalBase, modelInfo, nil
+	case "glm-5-2", "glm-5-2-1m":
+		uid := strings.TrimSuffix(canonicalBase, "-1m")
+		if effort == "none" || effort == "max" {
+			uid += "-" + effort
+		}
+		if strings.HasSuffix(canonicalBase, "-1m") {
+			uid += "-1m"
+		}
+		return uid, modelInfo, nil
+	case "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-6-1m", "claude-sonnet-4-6-1m":
+		uid := strings.TrimSuffix(canonicalBase, "-1m")
+		if effort != "" && effort != "none" {
+			uid += "-thinking"
+		}
+		if strings.HasSuffix(canonicalBase, "-1m") {
+			uid += "-1m"
+		}
+		return uid, modelInfo, nil
+	}
+
 	allowedLevels := []string(nil)
 	if modelInfo.Thinking != nil {
 		allowedLevels = modelInfo.Thinking.Levels
@@ -137,11 +220,11 @@ func ResolveDevinChatModel(rawModel string, thinkingLevel string, budgetTokens i
 		return canonicalBase, modelInfo, nil
 	}
 
-	defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
-	resolvedEffort := clampDevinEffort(effort, allowedLevels, defaultEffort)
-	uid := canonicalBase + "-" + resolvedEffort
-	if canonicalBase == "glm-5-2-1m" {
-		uid = "glm-5-2-" + resolvedEffort + "-1m"
+	uid := canonicalBase
+	if effort != "" || !strings.HasPrefix(canonicalBase, "swe-") {
+		defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
+		resolvedEffort := clampDevinEffort(effort, allowedLevels, defaultEffort)
+		uid += "-" + resolvedEffort
 	}
 	if priority {
 		uid += "-priority"
@@ -158,9 +241,24 @@ func splitDevinModelSuffix(model string) (string, string, bool, bool) {
 	case "glm-5-2-max-1m":
 		return "glm-5-2-1m", "max", false, true
 	}
+	if strings.HasSuffix(lower, "-thinking-1m") {
+		return trimmed[:len(trimmed)-len("-thinking-1m")] + "-1m", "high", false, true
+	}
+	for _, suffix := range []string{"-thinking", "_thinking"} {
+		if strings.HasSuffix(lower, suffix) {
+			return trimmed[:len(trimmed)-len(suffix)], "high", false, true
+		}
+	}
+	for _, level := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		if suffix := "_" + level; strings.HasSuffix(lower, suffix) {
+			return trimmed[:len(trimmed)-len(suffix)], level, false, true
+		}
+	}
 	for _, candidate := range devinModelSuffixes {
 		if strings.HasSuffix(lower, candidate.suffix) && len(trimmed) > len(candidate.suffix) {
-			return strings.TrimSpace(trimmed[:len(trimmed)-len(candidate.suffix)]), candidate.effort, candidate.priority, true
+			return strings.TrimSpace(
+				trimmed[:len(trimmed)-len(candidate.suffix)],
+			), candidate.effort, candidate.priority, true
 		}
 	}
 	return trimmed, "", false, false

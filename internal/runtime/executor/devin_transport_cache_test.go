@@ -39,10 +39,12 @@ func TestNewDevinHTTPClientReusesClonedContextTransport(t *testing.T) {
 
 func TestNewDevinHTTPClientDisablesGzipForCustomRoundTripper(t *testing.T) {
 	var encoding string
-	roundTripper := proxyTestRoundTripper(func(req *http.Request) (*http.Response, error) {
-		encoding = req.Header.Get("Accept-Encoding")
-		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
-	})
+	roundTripper := proxyTestRoundTripper(
+		func(req *http.Request) (*http.Response, error) {
+			encoding = req.Header.Get("Accept-Encoding")
+			return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+		},
+	)
 	client := newDevinHTTPClient(util.WithRoundTripper(context.Background(), roundTripper), nil, nil, 0)
 	req, err := http.NewRequest(http.MethodGet, "https://example.test", nil)
 	if err != nil {

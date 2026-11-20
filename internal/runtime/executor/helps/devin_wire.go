@@ -28,11 +28,10 @@ const (
 	ConnectFlagCompressed byte = 0x01
 	ConnectFlagEndStream  byte = 0x02
 
-	DevinDefaultBaseURL       = "https://server.codeium.com"
 	DevinChatPath             = "/exa.api_server_pb.ApiServerService/GetChatMessage"
-	DevinDefaultClientName    = "chisel"
-	DevinDefaultClientVersion = "3000.10.21"
-	DevinFingerprintHexLen    = 732
+	devinDefaultClientName    = "chisel"
+	devinDefaultClientVersion = "3000.10.21"
+	devinFingerprintHexLen    = 732
 	DevinDefaultMaxTokens     = 128000
 
 	maxConnectFrameSize      = 16 * 1024 * 1024
@@ -104,10 +103,10 @@ type DevinFrameResult struct {
 
 var devinSessionTurns = cache.NewBoundedLRU[string, *atomic.Uint64](defaultDevinTurnCounters, nil)
 
-// GenerateDevinDeviceFingerprint returns the 732-character device fingerprint used by Devin CLI metadata.
-func GenerateDevinDeviceFingerprint(seed string) string {
+// generateDevinDeviceFingerprint returns the 732-character device fingerprint used by Devin CLI metadata.
+func generateDevinDeviceFingerprint(seed string) string {
 	if seed == "" {
-		var random [DevinFingerprintHexLen / 2]byte
+		var random [devinFingerprintHexLen / 2]byte
 		if _, err := rand.Read(random[:]); err == nil {
 			return hex.EncodeToString(random[:])
 		}
@@ -115,11 +114,11 @@ func GenerateDevinDeviceFingerprint(seed string) string {
 	}
 
 	var result strings.Builder
-	for counter := 0; result.Len() < DevinFingerprintHexLen; counter++ {
+	for counter := 0; result.Len() < devinFingerprintHexLen; counter++ {
 		digest := sha256.Sum256([]byte(fmt.Sprintf("%s-%d", seed, counter)))
 		result.WriteString(hex.EncodeToString(digest[:]))
 	}
-	return result.String()[:DevinFingerprintHexLen]
+	return result.String()[:devinFingerprintHexLen]
 }
 
 // GenerateDevinSentryTrace returns a Sentry trace header compatible with the native CLI.
@@ -132,20 +131,22 @@ func GenerateDevinSentryTrace() string {
 		strings.ReplaceAll(uuid.NewString(), "-", "")[:16] + "-1"
 }
 
-// NextDevinSessionTurnIndex returns the process-local zero-based request ordinal for a session.
-func NextDevinSessionTurnIndex(sessionID string) int {
+// nextDevinSessionTurnIndex returns the process-local zero-based request ordinal for a session.
+func nextDevinSessionTurnIndex(sessionID string) int {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return 0
 	}
-	counter := devinSessionTurns.GetOrAdd(sessionID, func() *atomic.Uint64 {
-		return &atomic.Uint64{}
-	})
+	counter := devinSessionTurns.GetOrAdd(
+		sessionID, func() *atomic.Uint64 {
+			return &atomic.Uint64{}
+		},
+	)
 	return int(counter.Add(1) - 1)
 }
 
-// ResetDevinSessionTurnIndex clears the request ordinal for a session.
-func ResetDevinSessionTurnIndex(sessionID string) {
+// resetDevinSessionTurnIndex clears the request ordinal for a session.
+func resetDevinSessionTurnIndex(sessionID string) {
 	devinSessionTurns.Delete(strings.TrimSpace(sessionID))
 }
 
@@ -197,15 +198,9 @@ func ReadConnectFrame(reader io.Reader) (byte, []byte, error) {
 	if err != nil {
 		return flag, nil, fmt.Errorf("decompress gzip connect frame: %w", err)
 	}
-	defer compressed.Close()
+	defer func() { _ = compressed.Close() }()
 
-	initialCapacity := int(length) * 4
-	if initialCapacity < 4096 {
-		initialCapacity = 4096
-	}
-	if initialCapacity > 4*1024*1024 {
-		initialCapacity = 4 * 1024 * 1024
-	}
+	initialCapacity := min(max(int(length)*4, 4096), 4*1024*1024)
 	decoded := bytes.NewBuffer(make([]byte, 0, initialCapacity))
 	if _, err = decoded.ReadFrom(io.LimitReader(compressed, maxDecompressedFrameSize+1)); err != nil {
 		return flag, nil, fmt.Errorf("read decompressed connect frame: %w", err)
@@ -239,15 +234,15 @@ func BuildDevinClientMetadataBytes(sessionToken, deviceSeed, osName string) []by
 	if osName == "" {
 		osName = runtime.GOOS
 	}
-	fingerprint := GenerateDevinDeviceFingerprint(deviceSeed)
+	fingerprint := generateDevinDeviceFingerprint(deviceSeed)
 	metadata := make([]byte, 0, 1024)
-	metadata = appendDevinStringField(metadata, 1, DevinDefaultClientName)
-	metadata = appendDevinStringField(metadata, 2, DevinDefaultClientVersion)
+	metadata = appendDevinStringField(metadata, 1, devinDefaultClientName)
+	metadata = appendDevinStringField(metadata, 2, devinDefaultClientVersion)
 	metadata = appendDevinStringField(metadata, 3, sessionToken)
 	metadata = appendDevinStringField(metadata, 4, "en")
 	metadata = appendDevinStringField(metadata, 5, osName)
-	metadata = appendDevinStringField(metadata, 7, DevinDefaultClientVersion)
-	metadata = appendDevinStringField(metadata, 12, DevinDefaultClientName)
+	metadata = appendDevinStringField(metadata, 7, devinDefaultClientVersion)
+	metadata = appendDevinStringField(metadata, 12, devinDefaultClientName)
 	metadata = appendDevinStringField(metadata, 31, fingerprint)
 	return metadata
 }
@@ -366,7 +361,8 @@ func BuildDevinGetChatMessageRequest(
 			continue
 		}
 		description := strings.ReplaceAll(
-			tool.Description, "Takes a task_id parameter identifying the task", "Takes a taskId parameter identifying the task",
+			tool.Description, "Takes a task_id parameter identifying the task",
+			"Takes a taskId parameter identifying the task",
 		)
 		description = translatorcommon.SanitizeDevinToolDescription(tool.Name, description)
 		encoded := make([]byte, 0, len(tool.Name)+len(description)+len(tool.Parameters)+16)
@@ -380,7 +376,7 @@ func BuildDevinGetChatMessageRequest(
 		request = appendDevinBytesField(request, 10, encoded)
 	}
 
-	turnIndex := NextDevinSessionTurnIndex(sessionID)
+	turnIndex := nextDevinSessionTurnIndex(sessionID)
 	session := appendDevinStringField(nil, 1, sessionID)
 	if turnIndex > 0 {
 		session = appendDevinVarintField(session, 2, uint64(turnIndex))

@@ -6,7 +6,12 @@ import (
 )
 
 func TestBuildSensitiveWordMatcherFiltersInvalidEntries(t *testing.T) {
-	matcher := BuildSensitiveWordMatcher([]string{"", "x", " proxy ", "Nous Research", "p" + devinZeroWidthSpace + "roxy"})
+	//goland:noinspection SpellCheckingInspection
+	matcher := BuildSensitiveWordMatcher(
+		[]string{
+			"", "x", " proxy ", "Nous Research", "p" + devinZeroWidthSpace + "roxy",
+		},
+	)
 	if matcher == nil {
 		t.Fatal("BuildSensitiveWordMatcher() = nil")
 	}
@@ -29,13 +34,15 @@ func TestSanitizeDevinSystemPromptDeletesMatchingLines(t *testing.T) {
 	if got != "keep this line" {
 		t.Fatalf("SanitizeDevinSystemPrompt() = %q, want %q", got, "keep this line")
 	}
+	//goland:noinspection SpellCheckingInspection
 	if obfuscated := matcher.ObfuscateText("use proxy"); obfuscated != "use p"+devinZeroWidthSpace+"roxy" {
 		t.Fatalf("ObfuscateText() = %q", obfuscated)
 	}
 }
 
 func TestSanitizeDevinSystemPromptRemovesCodexCLIIdentityDirectives(t *testing.T) {
-	prompt := "keep system guidance\nCodex refers to the open-source agentic coding interface\n- Don’t output ANSI escape codes directly — the CLI renderer applies them.\nkeep tool guidance"
+	prompt := "keep system guidance\nCodex refers to the open-source agentic coding interface\n- Don’t " +
+		"output ANSI escape codes directly — the CLI renderer applies them.\nkeep tool guidance"
 	got := SanitizeDevinSystemPrompt(prompt, nil)
 	if got != "keep system guidance\nkeep tool guidance" {
 		t.Fatalf("sanitized system prompt = %q", got)
