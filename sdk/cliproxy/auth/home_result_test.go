@@ -231,8 +231,12 @@ func TestC08HomeCountTokensReportsEveryUnauthorizedAttempt(t *testing.T) {
 				continue
 			}
 			matched++
-			if record.Fail.Body != c08UnauthorizedBody || coreusage.GenerateEnabled(record.Generate) || record.Detail.TotalTokens != 0 {
-				t.Fatalf("unexpected unauthorized usage: body=%q generate=%v tokens=%d", record.Fail.Body, coreusage.GenerateEnabled(record.Generate), record.Detail.TotalTokens)
+			if record.Fail.Body != c08UnauthorizedBody || coreusage.GenerateEnabled(record.Generate) ||
+				record.Detail.TotalTokens != 0 {
+				t.Fatalf(
+					"unexpected unauthorized usage: body=%q generate=%v tokens=%d", record.Fail.Body,
+					coreusage.GenerateEnabled(record.Generate), record.Detail.TotalTokens,
+				)
 			}
 			if seen, ok := wantHashes[record.AccessTokenSHA256]; ok && !seen {
 				wantHashes[record.AccessTokenSHA256] = true

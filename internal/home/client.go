@@ -59,6 +59,7 @@ func (e *dispatchError) Error() string {
 	return e.Err.Error()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *dispatchError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -119,7 +120,8 @@ func IsLegacyMembershipProtocolError(err error) bool {
 		return false
 	}
 	message := strings.TrimSpace(strings.ToLower(err.Error()))
-	return message == "wrong number of arguments for 'subscribe' command" || message == "err wrong number of arguments for 'subscribe' command"
+	return message == "wrong number of arguments for 'subscribe' command" ||
+		message == "err wrong number of arguments for 'subscribe' command"
 }
 
 type clusterNode struct {
@@ -604,6 +606,7 @@ func (c *homeDispatchConn) Close() error {
 	return c.Conn.Close()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *homeDispatchConn) NetConn() net.Conn {
 	if c == nil {
 		return nil
@@ -883,7 +886,10 @@ func (c *Client) switchToNodeLocked(node clusterNode) bool {
 	c.homeCfg.Host = host
 	c.homeCfg.Port = node.Port
 	if !c.recoveryState.CompareAndSwap(uint32(recoveryStateStable), uint32(recoveryStateSwitching)) {
-		c.recoveryState.CompareAndSwap(uint32(recoveryStateTakeoverEligible), uint32(recoveryStateSwitchingTakeover))
+		c.recoveryState.CompareAndSwap(
+			uint32(recoveryStateTakeoverEligible),
+			uint32(recoveryStateSwitchingTakeover),
+		)
 	}
 	c.closeClientsLocked()
 	return true
@@ -995,7 +1001,11 @@ func (c *Client) GetModels(ctx context.Context) ([]byte, error) {
 	return c.GetModelsWithRequest(ctx, nil, nil)
 }
 
-func (c *Client) GetModelsWithRequest(ctx context.Context, headers http.Header, query url.Values) ([]byte, error) {
+func (c *Client) GetModelsWithRequest(
+	ctx context.Context,
+	headers http.Header,
+	query url.Values,
+) ([]byte, error) {
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return nil, errClient
@@ -1057,7 +1067,7 @@ func durationCeil(value time.Duration, unit time.Duration) int64 {
 	if value <= 0 || unit <= 0 {
 		return 0
 	}
-	return int64((value + unit - 1) / unit)
+	return int64((value-1)/unit + 1)
 }
 
 func (c *Client) KVGet(ctx context.Context, key string) ([]byte, bool, error) {
@@ -1139,7 +1149,11 @@ func (c *Client) KVCompareAndSwap(
 	if errCAS != nil {
 		if isHomeCommandUnsupported(errCAS) {
 			if c.casUnsupported.CompareAndSwap(false, true) {
-				log.Warn("home kv: this Home does not implement CAS; reasoning replay is disabled until the next Home lifetime")
+				log.Warn(
+					"home kv: this Home does not implement CAS; reasoning replay is " +
+						"disabled until the next Home " +
+						"lifetime",
+				)
 			}
 			return false, ErrCompareAndSwapUnsupported
 		}
@@ -1165,6 +1179,84 @@ func (c *Client) KVExpire(ctx context.Context, key string, ttl time.Duration) (b
 		return false, errClient
 	}
 	return cmd.Expire(ctx, key, ttl).Result()
+}
+
+func (c *Client) KVTTL(ctx context.Context, key string) (time.Duration, bool, error) {
+	cmd, err := c.commandClient()
+	if err != nil {
+		return 0, false, err
+	}
+	ttl, err := cmd.TTL(ctx, key).Result()
+	if err != nil {
+		return 0, false, err
+	}
+	// go-redis 保留 -2、-1 哨兵值，不将它们换算为秒
+	switch ttl {
+	case -2:
+		return 0, false, nil
+	case -1:
+		return 0, true, nil
+	default:
+		return ttl, true, nil
+	}
+}
+
+func (c *Client) KVIncrBy(ctx context.Context, key string, delta int64) (int64, error) {
+	cmd, err := c.commandClient()
+	if err != nil {
+		return 0, err
+	}
+	return cmd.IncrBy(ctx, key, delta).Result()
+}
+
+func (c *Client) KVMGet(ctx context.Context, keys ...string) ([][]byte, []bool, error) {
+	if len(keys) == 0 {
+		return nil, nil, nil
+	}
+	cmd, err := c.commandClient()
+	if err != nil {
+		return nil, nil, err
+	}
+	items, err := cmd.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, nil, err
+	}
+	values, found := make([][]byte, len(items)), make([]bool, len(items))
+	for index, item := range items {
+		switch value := item.(type) {
+		case nil:
+			continue
+		case string:
+			values[index] = []byte(value)
+		case []byte:
+			values[index] = append([]byte(nil), value...)
+		default:
+			return nil, nil, fmt.Errorf("home kv: unsupported MGET item type %T", item)
+		}
+		found[index] = true
+	}
+	return values, found, nil
+}
+
+func (c *Client) KVMSet(ctx context.Context, pairs map[string][]byte) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+	cmd, err := c.commandClient()
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(pairs))
+	for key := range pairs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	args := make([]any, 1, 1+2*len(keys))
+	args[0] = "MSET"
+	for _, key := range keys {
+		args = append(args, key, append([]byte(nil), pairs[key]...))
+	}
+	return cmd.Do(ctx, args...).Err()
 }
 
 func headersToLowerMap(headers http.Header) map[string]string {
@@ -1195,7 +1287,15 @@ func headersToLowerMap(headers http.Header) map[string]string {
 
 func includeHomeDispatchHeader(key string) bool {
 	switch key {
-	case "authorization", "x-api-key", "x-goog-api-key", "user-agent", "x-codex-client", "x-codex-client-version", "x-goog-api-client", "anthropic-version", "anthropic-beta":
+	case "authorization",
+		"x-api-key",
+		"x-goog-api-key",
+		"user-agent",
+		"x-codex-client",
+		"x-codex-client-version",
+		"x-goog-api-client",
+		"anthropic-version",
+		"anthropic-beta":
 		return true
 	default:
 		return false
@@ -1238,12 +1338,16 @@ func newAuthDispatchRequest(
 		count = 1
 	}
 	constraint := AuthDispatchConstraints{}
+	var retryRound *int
 	if len(constraints) > 0 {
 		constraint = constraints[0]
+		round := max(constraint.RetryRound, 0)
+		retryRound = &round
+		count = 1
 	}
 	return authDispatchRequest{
 		Type:                "auth",
-		Model:               requestedModel,
+		Model:               strings.TrimSpace(requestedModel),
 		Count:               count,
 		ConcurrencyProtocol: 1,
 		SessionID:           strings.TrimSpace(sessionID),
@@ -1251,8 +1355,8 @@ func newAuthDispatchRequest(
 		NodeKind:            strings.TrimSpace(headers.Get("X-Node-Kind")),
 		Headers:             headersToLowerMap(headers),
 		CredentialPolicy:    strings.TrimSpace(constraint.CredentialPolicy),
-		RetryRound:          max(constraint.RetryRound, 0),
-		ExcludedAuthIDs:     append([]string(nil), constraint.ExcludedAuthIDs...),
+		RetryRound:          retryRound,
+		ExcludedAuthIDs:     slices.Clone(constraint.ExcludedAuthIDs),
 		PinnedAuthID:        strings.TrimSpace(constraint.PinnedAuthID),
 	}
 }
@@ -1263,7 +1367,7 @@ func (c *Client) RPopAuth(
 	headers http.Header,
 	count int,
 ) ([]byte, error) {
-	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, AuthDispatchConstraints{})
+	return c.rPopAuth(ctx, newAuthDispatchRequest(requestedModel, sessionID, headers, count))
 }
 
 // RPopAuthWithPolicy requests a Home credential constrained by the supplied fixed policy.
@@ -1274,21 +1378,23 @@ func (c *Client) RPopAuthWithPolicy(
 	count int,
 	credentialPolicy string,
 ) ([]byte, error) {
-	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, AuthDispatchConstraints{CredentialPolicy: credentialPolicy})
+	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count)
+	req.CredentialPolicy = strings.TrimSpace(credentialPolicy)
+	return c.rPopAuth(ctx, req)
 }
 
 // RPopAuthWithConstraints requests a credential for one bounded retry round.
-func (c *Client) RPopAuthWithConstraints(ctx context.Context, requestedModel, sessionID string, headers http.Header, count int, constraints AuthDispatchConstraints) ([]byte, error) {
-	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, constraints)
-}
-
-func (c *Client) rPopAuth(
+func (c *Client) RPopAuthWithConstraints(
 	ctx context.Context,
 	requestedModel, sessionID string,
 	headers http.Header,
 	count int,
 	constraints AuthDispatchConstraints,
 ) ([]byte, error) {
+	return c.rPopAuth(ctx, newAuthDispatchRequest(requestedModel, sessionID, headers, count, constraints))
+}
+
+func (c *Client) rPopAuth(ctx context.Context, req authDispatchRequest) ([]byte, error) {
 	if c == nil || c.dispatchFenced.Load() {
 		return nil, errDispatchFenced
 	}
@@ -1298,11 +1404,9 @@ func (c *Client) rPopAuth(
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, errContext
 	}
-	requestedModel = strings.TrimSpace(requestedModel)
-	if requestedModel == "" {
+	if req.Model == "" {
 		return nil, fmt.Errorf("home: requested model is empty")
 	}
-	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count, constraints)
 	keyBytes, errMarshal := json.Marshal(&req)
 	if errMarshal != nil {
 		return nil, errMarshal
@@ -1353,7 +1457,11 @@ func isAmbiguousIssuedRPopAuthError(err error) bool {
 	return !errors.As(err, &redisErr)
 }
 
-func (c *Client) GetRefreshAuth(ctx context.Context, authIndex string, accessTokenSHA256 string) ([]byte, error) {
+func (c *Client) GetRefreshAuth(
+	ctx context.Context,
+	authIndex string,
+	accessTokenSHA256 string,
+) ([]byte, error) {
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return nil, errClient
@@ -1426,7 +1534,8 @@ func (c *Client) concurrencyReleaseClient() (*redis.Client, error) {
 		return nil, errDispatchFenced
 	}
 	state := recoveryState(c.recoveryState.Load())
-	if state == recoveryStateTakeoverEligible || state == recoveryStateSwitching || state == recoveryStateSwitchingTakeover {
+	if state == recoveryStateTakeoverEligible || state == recoveryStateSwitching ||
+		state == recoveryStateSwitchingTakeover {
 		return nil, ErrNotConnected
 	}
 	if !c.Enabled() {
@@ -1439,7 +1548,8 @@ func (c *Client) concurrencyReleaseClient() (*redis.Client, error) {
 		return nil, errDispatchFenced
 	}
 	state = recoveryState(c.recoveryState.Load())
-	if state == recoveryStateTakeoverEligible || state == recoveryStateSwitching || state == recoveryStateSwitchingTakeover {
+	if state == recoveryStateTakeoverEligible || state == recoveryStateSwitching ||
+		state == recoveryStateSwitchingTakeover {
 		return nil, ErrNotConnected
 	}
 	if c.release != nil {
@@ -1584,7 +1694,9 @@ func (c *Client) LimiterConfig() config.CredentialConcurrencyConfig {
 
 func (c *Client) subscriptionParameters() ([]string, time.Duration) {
 	if c == nil {
-		return []string{redisChannelConfig}, config.CredentialConcurrencyConfig{}.WithDefaults().CPAHeartbeatTimeout
+		return []string{
+			redisChannelConfig,
+		}, config.CredentialConcurrencyConfig{}.WithDefaults().CPAHeartbeatTimeout
 	}
 	c.mu.Lock()
 	cfg := c.lifecycle.WithDefaults()
@@ -1693,7 +1805,11 @@ func (c *Client) handleSubscriptionPayload(
 
 // RunConfigSubscriberLifetime runs one GET, SUBSCRIBE, and receive lifetime.
 // Reconnection is owned by the service so each replacement can install a new client lifetime.
-func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func([]byte) error, onReady func()) error {
+func (c *Client) RunConfigSubscriberLifetime(
+	ctx context.Context,
+	onConfig func([]byte) error,
+	onReady func(),
+) error {
 	if c == nil || !c.Enabled() {
 		return ErrDisabled
 	}
@@ -1739,8 +1855,19 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 		return c.endConfigSubscriberLifetime(ErrNotConnected)
 	}
 
+	stopCancel := context.AfterFunc(
+		ctx, func() {
+			if errClose := pubsub.Close(); errClose != nil {
+				log.WithError(errClose).Debug("Home canceled subscription close failed")
+			}
+		},
+	)
+	defer stopCancel()
+
 	if errACK := receiveSubscriptionACKs(ctx, pubsub, receiveTimeout, args[:1]); errACK != nil {
-		if ctx.Err() == nil {
+		if errContext := ctx.Err(); errContext != nil {
+			errACK = errContext
+		} else {
 			c.markReconnectFailure("subscribe")
 		}
 		return c.endConfigSubscriberLifetimeWithSubscription(errACK, pubsub, "failed ACK")
@@ -1766,7 +1893,9 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 		_, receiveTimeout = c.subscriptionParameters()
 		event, errReceive := pubsub.ReceiveTimeout(ctx, receiveTimeout)
 		if errReceive != nil {
-			if ctx.Err() == nil {
+			if errContext := ctx.Err(); errContext != nil {
+				errReceive = errContext
+			} else {
 				if c.heartbeatOK.Load() {
 					c.markMembershipTakeoverEligible()
 				}
@@ -1824,7 +1953,10 @@ func receiveSubscriptionACKs(
 
 func (c *Client) endConfigSubscriberLifetime(err error) error {
 	c.heartbeatOK.Store(false)
-	if !c.managedLifetime() {
+	if c.managedLifetime() {
+		// 中断命令读取，并发释放连接保留到 Service 确认释放后关闭
+		c.closeBootstrapPools()
+	} else {
 		c.Close()
 	}
 	return err
@@ -1841,10 +1973,7 @@ func (c *Client) endConfigSubscriberLifetimeWithSubscription(
 			log.WithError(errClose).Debugf("Home subscription close after %s", reason)
 		}
 	}
-	if !c.managedLifetime() {
-		c.Close()
-	}
-	return err
+	return c.endConfigSubscriberLifetime(err)
 }
 
 func isTimeoutError(err error) bool {

@@ -15,12 +15,16 @@ import (
 )
 
 // HomeInFlightTransport publishes in-flight observation frames for one Home lifetime.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type HomeInFlightTransport interface {
 	HeartbeatOK() bool
 	LPushInFlightSnapshot(context.Context, []byte) error
 }
 
 // HomeInFlightPublisherConfig bounds in-flight observation frames.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type HomeInFlightPublisherConfig struct {
 	SnapshotInterval   time.Duration
 	MaxPartBytes       int
@@ -77,6 +81,8 @@ func (m *Manager) ApplyHomeInFlightPublisherConfig(cfg HomeInFlightPublisherConf
 }
 
 // HomeInFlightPublisherConfig returns the current immutable publisher config snapshot.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *Manager) HomeInFlightPublisherConfig() HomeInFlightPublisherConfig {
 	if m == nil {
 		return HomeInFlightPublisherConfig{}
@@ -89,11 +95,24 @@ func (m *Manager) HomeInFlightPublisherConfig() HomeInFlightPublisherConfig {
 }
 
 func validHomeInFlightPublisherConfig(cfg HomeInFlightPublisherConfig) bool {
-	if cfg.SnapshotInterval <= 0 || cfg.MaxPartBytes < 1024 || cfg.MaxPartCount <= 0 || cfg.MaxPartCount > internalconfig.DefaultInFlightMaxPartCount ||
-		cfg.MaxRevisionBytes < cfg.MaxPartBytes || cfg.MaxRevisionBytes > internalconfig.DefaultInFlightMaxRevisionBytes ||
-		cfg.MaxAggregateGroups <= 0 || cfg.MaxAggregateGroups > internalconfig.DefaultInFlightMaxAggregateGroups ||
-		cfg.MaxDetails < 0 || cfg.MaxDetails > internalconfig.DefaultInFlightMaxDetails ||
-		cfg.MaxStringBytes <= 0 || cfg.MaxStringBytes > internalconfig.DefaultInFlightMaxStringBytes {
+	if cfg.SnapshotInterval <=
+		0 ||
+		cfg.MaxPartBytes <
+			1024 ||
+		cfg.MaxPartCount <=
+			0 ||
+		cfg.MaxPartCount >
+			internalconfig.DefaultInFlightMaxPartCount ||
+		cfg.MaxRevisionBytes <
+			cfg.MaxPartBytes ||
+		cfg.MaxRevisionBytes >
+			internalconfig.DefaultInFlightMaxRevisionBytes ||
+		cfg.MaxAggregateGroups <= 0 ||
+		cfg.MaxAggregateGroups > internalconfig.DefaultInFlightMaxAggregateGroups ||
+		cfg.MaxDetails < 0 ||
+		cfg.MaxDetails > internalconfig.DefaultInFlightMaxDetails ||
+		cfg.MaxStringBytes <= 0 ||
+		cfg.MaxStringBytes > internalconfig.DefaultInFlightMaxStringBytes {
 		return false
 	}
 	return (cfg.MaxRevisionBytes+cfg.MaxPartBytes-1)/cfg.MaxPartBytes <= cfg.MaxPartCount
@@ -191,7 +210,8 @@ func encodeHomeInFlightFreeze(
 			return aggregates[left].Status < aggregates[right].Status
 		},
 	)
-	if !validHomeInFlightPublisherBounds(cfg) || !aggregateKeysValid || len(aggregates) > cfg.MaxAggregateGroups {
+	if !validHomeInFlightPublisherBounds(cfg) || !aggregateKeysValid ||
+		len(aggregates) > cfg.MaxAggregateGroups {
 		return homeInFlightOverflow(freeze, observedAt, len(aggregates))
 	}
 
@@ -274,10 +294,16 @@ func validHomeInFlightDetail(detail home.InFlightRequestDetail, maxStringBytes i
 	validString := func(value string) bool {
 		return utf8.ValidString(value) && strings.TrimSpace(value) != "" && len(value) <= maxStringBytes
 	}
-	return validString(detail.RequestID) && validString(detail.CredentialID) && validString(detail.Model) && validString(detail.RequestKind) && !detail.StartedAt.IsZero() && detail.StartedAt.Location() == time.UTC
+	return validString(detail.RequestID) && validString(detail.CredentialID) && validString(detail.Model) &&
+		validString(detail.RequestKind) &&
+		!detail.StartedAt.IsZero() &&
+		detail.StartedAt.Location() == time.UTC
 }
 
-func homeInFlightBoundDetail(detail home.InFlightRequestDetail, maxBytes int) (home.InFlightRequestDetail, bool) {
+func homeInFlightBoundDetail(
+	detail home.InFlightRequestDetail,
+	maxBytes int,
+) (home.InFlightRequestDetail, bool) {
 	truncated := false
 	bound := func(value string) string {
 		bounded := homeInFlightTruncateString(value, maxBytes)

@@ -19,11 +19,14 @@ type executionResources struct {
 	closers []func() error
 }
 
+type homeAttemptCancelContextKey struct{}
+
 type attemptCancel struct {
 	cancel context.CancelFunc
 	once   sync.Once
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *attemptCancel) Cancel() {
 	if a == nil || a.cancel == nil {
 		return
@@ -38,6 +41,7 @@ type attemptCancels struct {
 	cancels map[uint64]*attemptCancel
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *attemptCancels) Add(cancel context.CancelFunc) (func(), error) {
 	if a == nil || cancel == nil {
 		return func() {}, executionregistry.ErrInvalidExecutionResource
@@ -92,6 +96,7 @@ func (a *attemptCancels) Close() error {
 	return nil
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (a *attemptCancels) Len() int {
 	if a == nil {
 		return 0
@@ -101,6 +106,7 @@ func (a *attemptCancels) Len() int {
 	return len(a.cancels)
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (r *executionResources) Add(closeFn func() error) error {
 	if closeFn == nil {
 		return executionregistry.ErrInvalidExecutionResource
@@ -143,6 +149,8 @@ type HomeDispatchSelection struct {
 	Auth                       *Auth
 	Executor                   ProviderExecutor
 	Provider                   string
+	CanonicalSessionID         string
+	ParentSessionID            string
 	requestRetry               int
 	hasRequestRetry            bool
 	modelInfo                  *registry.ModelInfo
@@ -208,22 +216,22 @@ func (s *HomeDispatchSelection) AttemptContext(ctx context.Context) (context.Con
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	attemptCtx, cancelAttempt := context.WithCancel(ctx)
+	attemptCtx, cancelAttempt := context.WithCancelCause(ctx)
 	if s == nil || s.attemptCancels == nil {
-		cancelAttempt()
+		cancelAttempt(nil)
 		return nil, func() {}, fmt.Errorf("home dispatch selection has no attempt cancels")
 	}
-	release, errAdd := s.attemptCancels.Add(cancelAttempt)
+	release, errAdd := s.attemptCancels.Add(func() { cancelAttempt(nil) })
 	if errAdd != nil {
-		cancelAttempt()
+		cancelAttempt(nil)
 		return nil, func() {}, errAdd
 	}
-	return attemptCtx, release, nil
+	return context.WithValue(attemptCtx, homeAttemptCancelContextKey{}, cancelAttempt), release, nil
 }
 
 // Retain transfers selection ownership from a request to an execution session.
 func (s *HomeDispatchSelection) Retain() {
-	if s == nil || s.ended.Load() {
+	if !s.Active() {
 		return
 	}
 	s.retained.Store(true)
@@ -231,12 +239,17 @@ func (s *HomeDispatchSelection) Retain() {
 
 // Retained reports whether an executor transferred this selection to a session.
 func (s *HomeDispatchSelection) Retained() bool {
-	return s != nil && s.retained.Load() && !s.ended.Load()
+	return s != nil && s.retained.Load() && s.Active()
 }
 
-// Active reports whether the selection has not ended.
+// Active reports whether the selection still owns open execution resources.
 func (s *HomeDispatchSelection) Active() bool {
-	return s != nil && !s.ended.Load()
+	if s == nil || s.scope == nil || s.resources == nil || s.ended.Load() {
+		return false
+	}
+	s.resources.mu.Lock()
+	defer s.resources.mu.Unlock()
+	return !s.resources.closed
 }
 
 // End closes all bound resources and releases the Home execution scope once.
@@ -245,6 +258,8 @@ func (s *HomeDispatchSelection) End(reason string) {
 }
 
 // EndWithRelease closes all bound resources and returns the Home release ticket.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *HomeDispatchSelection) EndWithRelease(reason string) *executionregistry.ReleaseTicket {
 	if s == nil {
 		return nil
@@ -265,6 +280,8 @@ func (s *HomeDispatchSelection) EndWithRelease(reason string) *executionregistry
 }
 
 // ReplaceAuth updates the selection after Home returns refreshed credentials.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *HomeDispatchSelection) ReplaceAuth(auth *Auth) {
 	if s == nil || auth == nil {
 		return
@@ -311,6 +328,8 @@ func (s *HomeDispatchSelection) CloneAuth() *Auth {
 }
 
 // CloneAuthForRoute returns an auth copy adapted for a retained canonical route.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (s *HomeDispatchSelection) CloneAuthForRoute(routeModel string) *Auth {
 	auth := s.CloneAuth()
 	if auth == nil || !s.Retained() {

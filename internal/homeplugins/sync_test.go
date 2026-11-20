@@ -81,7 +81,9 @@ store:
 func TestStoreManifestFromPluginConfigCanonicalizesPluginID(t *testing.T) {
 	item := pluginConfigFromYAML(
 		t,
-		"enabled: true\nstore:\n  schema-version: 2\n  id: Alpha\n  version: 0.2.0\n  source-url: https://example.com/plugins/alpha.so\n  install:\n    type: direct\n",
+		"enabled: true\nstore:\n  schema-version: 2\n  id: Alpha\n  version: 0."+
+			"2.0\n  source-url: https://example.com/plugins/alpha.so\n  install:\n "+
+			"   type: direct\n",
 	)
 
 	manifest, ok, errManifest := storeManifestFromPluginConfig("alpha", item)
@@ -96,7 +98,9 @@ func TestStoreManifestFromPluginConfigCanonicalizesPluginID(t *testing.T) {
 func TestStoreManifestFromPluginConfigRejectsDifferentPluginID(t *testing.T) {
 	item := pluginConfigFromYAML(
 		t,
-		"enabled: true\nstore:\n  schema-version: 2\n  id: beta\n  version: 0.2.0\n  source-url: https://example.com/plugins/beta.so\n  install:\n    type: direct\n",
+		"enabled: true\nstore:\n  schema-version: 2\n  id: beta\n  version: 0.2"+
+			".0\n  source-url: https://example.com/plugins/beta.so\n  install:\n   "+
+			" type: direct\n",
 	)
 
 	_, _, errManifest := storeManifestFromPluginConfig("alpha", item)

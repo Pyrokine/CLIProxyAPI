@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 var homePluginStoreHTTPTimeout = 30 * time.Second
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type Platform struct {
 	GOOS   string `json:"goos"`
 	GOARCH string `json:"goarch"`
@@ -28,6 +30,10 @@ type Platform struct {
 type PluginRuntime interface {
 	PluginBusy(id string) bool
 	UnloadPlugin(id string) bool
+}
+
+type contextualPluginUnloader interface {
+	UnloadPluginContext(ctx context.Context, id string) bool
 }
 
 type PluginLoadInspector interface {
@@ -43,7 +49,7 @@ type SyncReport struct {
 	Phase         string                `json:"phase"`
 	OK            bool                  `json:"ok"`
 	StartedAt     time.Time             `json:"started_at"`
-	FinishedAt    time.Time             `json:"finished_at,omitempty"`
+	FinishedAt    time.Time             `json:"finished_at"`
 	UpdatedAt     time.Time             `json:"updated_at"`
 	Platform      Platform              `json:"platform"`
 	Plugins       []pluginInstallStatus `json:"plugins"`
@@ -134,16 +140,17 @@ func syncPlatformWithReport(
 	pluginRuntime PluginRuntime,
 	platform Platform,
 ) (SyncReport, error) {
-	if errRecover := recoverPluginTransactions(cfg); errRecover != nil {
+	if errRecover := RecoverPluginTransactions(cfg); errRecover != nil {
 		report := newSyncReport(normalizePlatform(platform))
 		finishReport(&report, errRecover)
 		return report, errRecover
 	}
 	prepared, _ := prepareSyncPlatformWithReport(ctx, cfg, platform)
-	return prepared.Apply(pluginRuntime)
+	return prepared.Apply(pluginRuntime, ctx)
 }
 
-func recoverPluginTransactions(cfg *config.Config) error {
+// RecoverPluginTransactions reconciles artifact journals with the published configuration.
+func RecoverPluginTransactions(cfg *config.Config) error {
 	if cfg == nil || !cfg.Home.Enabled || !cfg.Plugins.Enabled {
 		return nil
 	}
@@ -321,7 +328,8 @@ func (p *PreparedSync) cleanupError() error {
 	return nil
 }
 
-func (p *PreparedSync) Apply(pluginRuntime PluginRuntime) (SyncReport, error) {
+// Apply installs the batch; an optional context cancels application independently of preparation.
+func (p *PreparedSync) Apply(pluginRuntime PluginRuntime, contexts ...context.Context) (SyncReport, error) {
 	if p == nil {
 		return SyncReport{}, fmt.Errorf("home plugins: prepared sync is nil")
 	}
@@ -336,6 +344,15 @@ func (p *PreparedSync) Apply(pluginRuntime PluginRuntime) (SyncReport, error) {
 		finishReport(&report, errApply)
 		return report, errApply
 	}
+	ctx := context.Background()
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
+	if errCancel := ctx.Err(); errCancel != nil {
+		errApply := errors.Join(errCancel, p.cleanupError())
+		finishReport(&report, errApply)
+		return report, errApply
+	}
 	rootLock, errRootLock := sdkpluginstore.LockRoot(p.root)
 	if errRootLock != nil {
 		errApply := errors.Join(errRootLock, p.cleanupError())
@@ -344,6 +361,12 @@ func (p *PreparedSync) Apply(pluginRuntime PluginRuntime) (SyncReport, error) {
 	}
 	defer rootLock.Unlock()
 
+	type appliedInstall struct {
+		transaction *sdkpluginstore.InstallTransaction
+		result      sdkpluginstore.InstallResult
+		statusIndex int
+	}
+	transactions := make([]appliedInstall, 0, len(p.installs))
 	syncErrors := append([]error(nil), p.prepareErrors...)
 	for _, install := range p.installs {
 		status := install.status
@@ -351,15 +374,21 @@ func (p *PreparedSync) Apply(pluginRuntime PluginRuntime) (SyncReport, error) {
 			report.Plugins = append(report.Plugins, status)
 			continue
 		}
-		result, errInstall := installPreparedArtifact(
-			install.artifact,
-			status.ID,
-			install.configFingerprint,
-			p.root,
-			p.platform,
-			pluginRuntime,
-			rootLock,
+		if errCancel := ctx.Err(); errCancel != nil {
+			status.InstallStatus = pluginInstallStatusFailed
+			status.Error = errCancel.Error()
+			report.Plugins = append(report.Plugins, status)
+			continue
+		}
+		result, transaction, errInstall := installPreparedArtifact(
+			install.artifact, status.ID, install.configFingerprint, p.root, p.platform, pluginRuntime, rootLock,
 		)
+		if transaction != nil {
+			transactions = append(transactions, appliedInstall{transaction, result, len(report.Plugins)})
+		}
+		// 安装失败时保留已写入的目标路径，供报告和事务回滚使用
+		//noinspection GoDfaErrorMayBeNotNil
+		status.Path = strings.TrimSpace(result.Path)
 		if errInstall != nil {
 			status.InstallStatus = pluginInstallStatusFailed
 			status.Error = errInstall.Error()
@@ -367,7 +396,6 @@ func (p *PreparedSync) Apply(pluginRuntime PluginRuntime) (SyncReport, error) {
 			syncErrors = append(syncErrors, errInstall)
 			continue
 		}
-		status.Path = strings.TrimSpace(result.Path)
 		status.Skipped = result.Skipped
 		status.Overwritten = result.Overwritten
 		if result.Skipped {
@@ -379,6 +407,27 @@ func (p *PreparedSync) Apply(pluginRuntime PluginRuntime) (SyncReport, error) {
 	}
 	if errCleanup := p.cleanupError(); errCleanup != nil {
 		syncErrors = append(syncErrors, errCleanup)
+	}
+	if errCancel := ctx.Err(); errCancel != nil {
+		syncErrors = append(syncErrors, errCancel)
+	}
+	if len(syncErrors) > 0 {
+		for _, installed := range slices.Backward(transactions) {
+
+			status := &report.Plugins[installed.statusIndex]
+			status.InstallStatus = pluginInstallStatusFailed
+			if errRollback := installed.transaction.Rollback(installed.result); errRollback != nil {
+				errRollback = fmt.Errorf("home plugins: rollback %s after failed batch: %w", status.ID, errRollback)
+				syncErrors = append(syncErrors, errRollback)
+				if status.Error == "" {
+					status.Error = errRollback.Error()
+				} else {
+					status.Error += "; " + errRollback.Error()
+				}
+			} else if status.Error == "" {
+				status.Error = "home plugins: installation rolled back after batch failure"
+			}
+		}
 	}
 	errSync := errors.Join(syncErrors...)
 	finishReport(&report, errSync)
@@ -393,10 +442,10 @@ func installPreparedArtifact(
 	platform Platform,
 	pluginRuntime PluginRuntime,
 	rootLock *sdkpluginstore.RootLock,
-) (sdkpluginstore.InstallResult, error) {
+) (sdkpluginstore.InstallResult, *sdkpluginstore.InstallTransaction, error) {
 	id = sdkpluginstore.CanonicalPluginID(id)
 	if id == "" {
-		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: manifest plugin id is empty")
+		return sdkpluginstore.InstallResult{}, nil, fmt.Errorf("home plugins: manifest plugin id is empty")
 	}
 	pluginIsBusy := func() bool {
 		return pluginRuntime != nil && pluginRuntime.PluginBusy(id)
@@ -431,21 +480,14 @@ func installPreparedArtifact(
 		},
 	)
 	if errInstall != nil {
-		if installTransaction != nil {
-			errInstall = errors.Join(errInstall, installTransaction.Rollback(result))
-		}
-		return result, fmt.Errorf("home plugins: install %s: %w", id, errInstall)
+		return result, installTransaction, fmt.Errorf("home plugins: install %s: %w", id, errInstall)
 	}
 	if installTransaction != nil {
 		if errExpected := installTransaction.SetExpectedConfigFingerprint(configFingerprint); errExpected != nil {
-			return result, fmt.Errorf(
-				"home plugins: journal %s config: %w",
-				id,
-				errors.Join(errExpected, installTransaction.Rollback(result)),
-			)
+			return result, installTransaction, fmt.Errorf("home plugins: journal %s config: %w", id, errExpected)
 		}
 	}
-	return result, nil
+	return result, installTransaction, nil
 }
 
 func preparePluginOverwrite(id string, pluginRuntime PluginRuntime) error {
@@ -465,7 +507,6 @@ func DeleteWithReport(
 	taskID uint,
 	pluginID string,
 ) SyncReport {
-	_ = ctx
 	platform := currentPlatform()
 	report := newSyncReport(platform)
 	report.TaskID = taskID
@@ -473,6 +514,16 @@ func DeleteWithReport(
 	report.Phase = pluginTaskPhaseDelete
 	pluginID = sdkpluginstore.CanonicalPluginID(pluginID)
 	status := pluginInstallStatus{ID: pluginID}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		status.InstallStatus = pluginInstallStatusFailed
+		status.Error = errContext.Error()
+		report.Plugins = append(report.Plugins, status)
+		finishReport(&report, errContext)
+		return report
+	}
 	if cfg == nil {
 		status.InstallStatus = pluginInstallStatusFailed
 		status.Error = "home plugins: config is nil"
@@ -489,7 +540,7 @@ func DeleteWithReport(
 		finishReport(&report, errPluginsDir)
 		return report
 	}
-	path, deleted, errDelete := deletePluginArtifact(root, pluginID, pluginRuntime)
+	path, deleted, errDelete := deletePluginArtifact(ctx, root, pluginID, pluginRuntime)
 	status.Path = strings.TrimSpace(path)
 	switch {
 	case errDelete != nil:

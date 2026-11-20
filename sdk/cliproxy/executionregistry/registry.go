@@ -12,6 +12,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 var (
 	ErrRegistryNotAccepting          = errors.New("execution registry is not accepting dispatches")
 	ErrRegistryClosed                = errors.New("execution registry is closed")
@@ -21,8 +22,11 @@ var (
 )
 
 // State is the lifecycle state of a Registry.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type State uint32
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 const (
 	StateAccepting State = iota
 	StateDraining
@@ -109,6 +113,8 @@ func (t *ReleaseTicket) Wait(ctx context.Context) error {
 
 // ReleaseSink receives the latest cumulative sequence for a release group and
 // optionally returns an acknowledgement ticket.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type ReleaseSink func(ReleaseGroup, int64) *ReleaseTicket
 
 // Scope owns the resource for one installed execution.

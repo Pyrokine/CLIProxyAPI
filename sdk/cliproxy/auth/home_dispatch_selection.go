@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -54,12 +55,16 @@ func (m *Manager) pickHomeDispatchSelection(
 			if retained.hasRequestRetry {
 				requestRetry = &retained.requestRetry
 			}
-			state.observeHomeLimit(requestRetry, retained.CloneAuth())
+			state.observeHomeLimit(requestRetry, retained.CloneAuth(), constraints.PinnedAuthID != "")
 		}
 		return retained, nil
 	}
 
-	requestedModel := requestedModelFromMetadata(opts.Metadata, model)
+	if constraints.PinnedAuthID != "" &&
+		slices.Contains(constraints.ExcludedAuthIDs, constraints.PinnedAuthID) {
+		return nil, repeatedHomeAuthError()
+	}
+	requestedModel := authSelectionModelFromOptions(opts, requestedModelFromMetadata(opts.Metadata, model))
 	bundle := m.HomeDispatchBundle()
 	if bundle == nil {
 		client := m.homeDispatcher()
@@ -111,7 +116,14 @@ func (m *Manager) pickHomeDispatchSelection(
 	var raw []byte
 	var errRPop error
 	if constrained, ok := client.(homeConstraintsDispatcher); ok {
-		raw, errRPop = constrained.RPopAuthWithConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), constraints)
+		raw, errRPop = constrained.RPopAuthWithConstraints(
+			ctx,
+			requestedModel,
+			sessionID,
+			dispatchHeaders,
+			homeAuthCountFromMetadata(opts.Metadata),
+			constraints,
+		)
 	} else if credentialPolicy == "" {
 		raw, errRPop = client.RPopAuth(
 			ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata),
@@ -245,7 +257,8 @@ func (m *Manager) pickHomeDispatchSelection(
 		}
 		auth.Attributes[homeUpstreamModelAttributeKey] = upstreamModel
 	}
-	if originalAlias := strings.TrimSpace(dispatch.OriginalAlias); dispatch.ForceMapping && originalAlias != "" {
+	if originalAlias := strings.TrimSpace(dispatch.OriginalAlias); dispatch.ForceMapping &&
+		originalAlias != "" {
 		if auth.Attributes == nil {
 			auth.Attributes = make(map[string]string, 2)
 		}
@@ -316,6 +329,8 @@ func (m *Manager) pickHomeDispatchSelection(
 			HTTPStatus: http.StatusServiceUnavailable,
 		}
 	}
+	selection.CanonicalSessionID = sessionID
+	selection.ParentSessionID = parentSessionID
 	if concurrencyPresent {
 		selection.accountedModel = concurrencyTuple.Model
 	}
@@ -326,20 +341,25 @@ func (m *Manager) pickHomeDispatchSelection(
 	if dispatch.RequestRetry != nil {
 		selection.requestRetry, selection.hasRequestRetry = max(*dispatch.RequestRetry, 0), true
 	}
-	state.observeHomeLimit(dispatch.RequestRetry, authCopy)
-	excluded := false
-	for _, id := range constraints.ExcludedAuthIDs {
-		if id == authCopy.ID {
-			excluded = true
-			break
-		}
-	}
-	if (constraints.PinnedAuthID != "" && constraints.PinnedAuthID != authCopy.ID) || excluded || (state != nil && ((state.homeAuthority && state.round > state.homeLimit) || (!state.homeAuthority && state.round > effectiveRequestRetryLimit(authCopy, state.defaultRetry)))) {
+	state.observeHomeLimit(dispatch.RequestRetry, authCopy, constraints.PinnedAuthID != "")
+	excluded := slices.Contains(constraints.ExcludedAuthIDs, authCopy.ID)
+	if (constraints.PinnedAuthID != "" && constraints.PinnedAuthID != authCopy.ID) || excluded ||
+		(state !=
+			nil &&
+			((state.homeAuthority &&
+				state.round >
+					state.homeLimit) ||
+				(!state.homeAuthority &&
+					state.round >
+						effectiveRequestRetryLimit(
+							authCopy, state.defaultRetry,
+						)))) {
 		if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "retry_constraint_mismatch"); errEnd != nil {
 			return nil, errEnd
 		}
 		if state != nil {
-			state.homeStopped = true
+			_, supportsConstraints := client.(homeConstraintsDispatcher)
+			state.homeStopped = supportsConstraints || constraints.PinnedAuthID != ""
 		}
 		return nil, repeatedHomeAuthError()
 	}

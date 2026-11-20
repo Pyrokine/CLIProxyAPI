@@ -1,6 +1,7 @@
 package homeplugins
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,12 +12,25 @@ import (
 	sdkpluginstore "github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginstore"
 )
 
-func deletePluginArtifact(root string, id string, pluginRuntime PluginRuntime) (string, bool, error) {
+func deletePluginArtifact(ctx context.Context, root string, id string, pluginRuntime PluginRuntime) (
+	string,
+	bool,
+	error,
+) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return "", false, errContext
+	}
 	rootLock, errLock := sdkpluginstore.LockRoot(root)
 	if errLock != nil {
 		return "", false, errLock
 	}
 	defer rootLock.Unlock()
+	if errContext := ctx.Err(); errContext != nil {
+		return "", false, errContext
+	}
 
 	id = sdkpluginstore.CanonicalPluginID(id)
 	if !validPluginFileID(id) {
@@ -33,13 +47,28 @@ func deletePluginArtifact(root string, id string, pluginRuntime PluginRuntime) (
 	if errPaths != nil {
 		return "", false, errPaths
 	}
+	if errContext := ctx.Err(); errContext != nil {
+		return "", false, errContext
+	}
 	if len(paths) == 0 {
 		return "", false, nil
 	}
 	if pluginRuntime != nil && pluginRuntime.PluginBusy(id) {
-		if !pluginRuntime.UnloadPlugin(id) && pluginRuntime.PluginBusy(id) {
-			return paths[0], false, sdkpluginstore.ErrLoadedPluginLocked
+		if errContext := ctx.Err(); errContext != nil {
+			return paths[0], false, errContext
 		}
+		var unloaded bool
+		if contextual, ok := pluginRuntime.(contextualPluginUnloader); ok {
+			unloaded = contextual.UnloadPluginContext(ctx, id)
+		} else {
+			unloaded = pluginRuntime.UnloadPlugin(id)
+		}
+		if !unloaded && pluginRuntime.PluginBusy(id) {
+			return paths[0], false, errors.Join(sdkpluginstore.ErrLoadedPluginLocked, ctx.Err())
+		}
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return paths[0], false, errContext
 	}
 	transaction, errPrepare := sdkpluginstore.PrepareDeletionTransactionLocked(root, id, paths, rootLock)
 	if errPrepare != nil {
@@ -47,6 +76,9 @@ func deletePluginArtifact(root string, id string, pluginRuntime PluginRuntime) (
 	}
 	rollback := func(cause error) error {
 		return errors.Join(cause, transaction.Rollback())
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return paths[0], false, rollback(errContext)
 	}
 	if errHide := transaction.Hide(); errHide != nil {
 		return paths[0], false, rollback(errHide)
@@ -57,6 +89,9 @@ func deletePluginArtifact(root string, id string, pluginRuntime PluginRuntime) (
 	}
 	if len(remaining) > 0 {
 		return paths[0], false, rollback(fmt.Errorf("plugin artifact appeared during deletion: %s", remaining[0]))
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return paths[0], false, rollback(errContext)
 	}
 	if errMark := transaction.MarkCommitted(); errMark != nil {
 		return paths[0], false, rollback(errMark)

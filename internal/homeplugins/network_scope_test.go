@@ -23,27 +23,35 @@ func (do networkScopeDoer) Do(request *http.Request) (*http.Response, error) {
 
 func TestPluginStoreClientSharesProxyCooldown(t *testing.T) {
 	var proxyCalls atomic.Int32
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		proxyCalls.Add(1)
-		w.WriteHeader(http.StatusBadGateway)
-	}))
+	proxy := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				proxyCalls.Add(1)
+				w.WriteHeader(http.StatusBadGateway)
+			},
+		),
+	)
 	defer proxy.Close()
 
 	const tokenEnv = "HOME_PLUGIN_NETWORK_SCOPE_TEST_TOKEN"
 	t.Setenv(tokenEnv, t.Name())
-	auth := []sdkpluginstore.AuthConfig{{
-		Match: "https://api.github.com/", Type: sdkpluginstore.AuthTypeGitHubToken,
-		TokenEnv: tokenEnv,
-	}}
+	auth := []sdkpluginstore.AuthConfig{
+		{
+			Match: "https://api.github.com/", Type: sdkpluginstore.AuthTypeGitHubToken,
+			TokenEnv: tokenEnv,
+		},
+	}
 	plugin := sdkpluginstore.Plugin{Repository: "https://github.com/test/home-network-scope"}
 	seed := sdkpluginstore.NewClientWithAuth(
-		networkScopeDoer(func(*http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusTooManyRequests,
-				Header:     http.Header{"Retry-After": []string{"3600"}},
-				Body:       io.NopCloser(strings.NewReader("limited")),
-			}, nil
-		}),
+		networkScopeDoer(
+			func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     http.Header{"Retry-After": []string{"3600"}},
+					Body:       io.NopCloser(strings.NewReader("limited")),
+				}, nil
+			},
+		),
 		"",
 		auth,
 	).WithNetworkScope(proxy.URL)

@@ -12,8 +12,8 @@ type AuthDispatchConstraints struct {
 }
 
 type authDispatchRequest struct {
-	RetryRound          int               `json:"retry_round,omitempty"`
-	ExcludedAuthIDs     []string          `json:"excluded_auth_ids,omitempty"`
+	RetryRound          *int              `json:"retry_round,omitempty"`
+	ExcludedAuthIDs     []string          `json:"excluded_auth_ids,omitzero"`
 	PinnedAuthID        string            `json:"pinned_auth_id,omitempty"`
 	Type                string            `json:"type"`
 	Model               string            `json:"model"`

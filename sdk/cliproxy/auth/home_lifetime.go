@@ -91,6 +91,15 @@ func (m *Manager) takeHomeSessionSelectionsLocked(sessionID string) []*HomeDispa
 	for _, selection := range selections {
 		result = append(result, selection)
 	}
+	for _, owner := range m.homeRuntimeAuthOwners[sessionID] {
+		result = append(result, owner)
+	}
+	delete(m.homeRuntimeAuthOwners, sessionID)
+	for _, selection := range result {
+		if selection != nil {
+			selection.ended.Store(true)
+		}
+	}
 	return result
 }
 
@@ -99,11 +108,11 @@ func (m *Manager) takeAllHomeSessionSelectionsLocked() []*HomeDispatchSelection 
 		return nil
 	}
 	result := make([]*HomeDispatchSelection, 0)
-	for sessionID, selections := range m.homeSessionSelections {
-		delete(m.homeSessionSelections, sessionID)
-		for _, selection := range selections {
-			result = append(result, selection)
-		}
+	for sessionID := range m.homeRuntimeAuthOwners {
+		result = append(result, m.takeHomeSessionSelectionsLocked(sessionID)...)
+	}
+	for sessionID := range m.homeSessionSelections {
+		result = append(result, m.takeHomeSessionSelectionsLocked(sessionID)...)
 	}
 	return result
 }
@@ -113,17 +122,30 @@ type homeSessionSelectionKey struct {
 	routeModel   string
 }
 
+type homeSessionLock struct {
+	sync.Mutex
+	users int
+}
+
 func (m *Manager) lockHomeSession(sessionID string) func() {
 	if m == nil || sessionID == "" {
 		return func() {}
 	}
-	value, _ := m.homeSessionLocks.LoadOrStore(sessionID, &sync.Mutex{})
-	mutex, ok := value.(*sync.Mutex)
-	if !ok || mutex == nil {
-		return func() {}
-	}
+	m.mu.Lock()
+	value, _ := m.homeSessionLocks.LoadOrStore(sessionID, &homeSessionLock{})
+	mutex := value.(*homeSessionLock)
+	mutex.users++
+	m.mu.Unlock()
 	mutex.Lock()
-	return mutex.Unlock
+	return func() {
+		mutex.Unlock()
+		m.mu.Lock()
+		mutex.users--
+		if mutex.users == 0 {
+			m.homeSessionLocks.CompareAndDelete(sessionID, mutex)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *Manager) lockHomeWebsocketSession(ctx context.Context, opts cliproxyexecutor.Options) func() {
@@ -169,7 +191,8 @@ func (m *Manager) retainedHomeSessionSelection(
 		matchesCredential := credentialID == "" || key.credentialID == credentialID
 		matchesRoute := validRouteModel && key.routeModel == routeModel
 		_, excludedCredential := excluded[key.credentialID]
-		if !excludedCredential && !fallbackAttempt && matchesCredential && matchesRoute && selection.Active() && retained == nil {
+		if !excludedCredential && !fallbackAttempt && matchesCredential && matchesRoute && selection.Active() &&
+			retained == nil {
 			retained = selection
 			continue
 		}
@@ -209,6 +232,10 @@ func (m *Manager) retainHomeWebsocketSelection(
 	}
 	key := homeSessionSelectionKey{credentialID: credentialID, routeModel: routeModel}
 	m.mu.Lock()
+	if !selection.Retained() {
+		m.mu.Unlock()
+		return false
+	}
 	if m.homeSessionSelections == nil {
 		m.homeSessionSelections = make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection)
 	}
@@ -220,7 +247,6 @@ func (m *Manager) retainHomeWebsocketSelection(
 	previous := selections[key]
 	selections[key] = selection
 	m.mu.Unlock()
-	m.rememberHomeSelectionRuntimeAuth(sessionID, selection)
 	if previous != nil && previous != selection {
 		previous.End("target_replaced")
 	}
@@ -259,7 +285,7 @@ func (m *Manager) bindHomeSelectionRuntimeAuth(
 }
 
 func (m *Manager) rememberHomeSelectionRuntimeAuth(sessionID string, selection *HomeDispatchSelection) {
-	if m == nil || selection == nil {
+	if m == nil || selection == nil || !selection.runtimeAuthBound.Load() {
 		return
 	}
 	auth := selection.CloneAuth()
@@ -272,6 +298,11 @@ func (m *Manager) rememberHomeSelectionRuntimeAuth(sessionID string, selection *
 		return
 	}
 	m.mu.Lock()
+	if _, removed := m.removedAuths[authID]; removed || !selection.Active() {
+		m.mu.Unlock()
+		return
+	}
+	auth.homeRuntimeOwner = selection
 	if m.homeRuntimeAuths == nil {
 		m.homeRuntimeAuths = make(map[string]map[string]*Auth)
 	}

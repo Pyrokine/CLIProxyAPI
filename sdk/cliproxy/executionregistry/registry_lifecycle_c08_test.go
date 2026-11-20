@@ -95,25 +95,63 @@ func TestRegistryDrainAndCancellationTable(t *testing.T) {
 	}
 }
 
+func TestWaitPendingDoesNotDrainActiveScope(t *testing.T) {
+	registry := New()
+	activePending, err := registry.BeginDispatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := registry.Install(activePending, ScopeSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scope.End("test cleanup")
+	pending, err := registry.BeginDispatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pending.End()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- registry.WaitPending(ctx) }()
+	select {
+	case err := <-done:
+		t.Fatalf("WaitPending returned before the pending dispatch ended: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	pending.End()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	next, err := registry.BeginDispatch()
+	if err != nil {
+		t.Fatalf("WaitPending ended registry acceptance: %v", err)
+	}
+	next.End()
+}
+
 func TestRegistryBeginDrainCancellationRace(t *testing.T) {
 	registry := New()
 	start := make(chan struct{})
 	var workers sync.WaitGroup
 	for range 64 {
-		workers.Go(func() {
-			<-start
-			for range 32 {
-				pending, errBegin := registry.BeginDispatch()
-				if errors.Is(errBegin, ErrRegistryNotAccepting) {
-					return
+		workers.Go(
+			func() {
+				<-start
+				for range 32 {
+					pending, errBegin := registry.BeginDispatch()
+					if errors.Is(errBegin, ErrRegistryNotAccepting) {
+						return
+					}
+					if errBegin != nil {
+						t.Errorf("BeginDispatch() error = %v", errBegin)
+						return
+					}
+					pending.End()
 				}
-				if errBegin != nil {
-					t.Errorf("BeginDispatch() error = %v", errBegin)
-					return
-				}
-				pending.End()
-			}
-		})
+			},
+		)
 	}
 	close(start)
 	drainCtx, cancelDrain := context.WithTimeout(context.Background(), time.Second)

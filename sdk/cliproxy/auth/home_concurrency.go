@@ -19,9 +19,12 @@ const (
 	asciiWhitespace                    = " \t\r\n\v\f"
 )
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 var ErrMalformedHomeConcurrencyTuple = errors.New("malformed Home concurrency tuple")
 
 // HomeConcurrencyBusyError is a trusted, Home-originated concurrency admission failure.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 type HomeConcurrencyBusyError struct {
 	cause      *Error
 	retryAfter time.Duration
@@ -56,6 +59,8 @@ func (e *HomeConcurrencyBusyError) Error() string {
 }
 
 // Unwrap preserves the Home error's code, retryability, and status for errors.As callers.
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *HomeConcurrencyBusyError) Unwrap() error {
 	if e == nil {
 		return nil
@@ -70,6 +75,7 @@ func (e *HomeConcurrencyBusyError) StatusCode() int {
 	return e.cause.StatusCode()
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *HomeConcurrencyBusyError) RetryAfter() *time.Duration {
 	if e == nil || e.retryAfter <= 0 {
 		return nil
@@ -78,6 +84,7 @@ func (e *HomeConcurrencyBusyError) RetryAfter() *time.Duration {
 	return &value
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (e *HomeConcurrencyBusyError) SafeResponseHeaders() http.Header {
 	if e == nil {
 		return nil
@@ -153,7 +160,8 @@ func recognizedHomeConcurrencySuffix(value string) bool {
 }
 
 func validHomeConcurrencyTupleField(value string) bool {
-	return value != "" && utf8.ValidString(value) && strings.TrimSpace(value) == value && len(value) <= maxHomeConcurrencyTupleFieldLength
+	return value != "" && utf8.ValidString(value) && strings.TrimSpace(value) == value &&
+		len(value) <= maxHomeConcurrencyTupleFieldLength
 }
 
 func installHomeConcurrencyScope(
@@ -251,9 +259,9 @@ func decodeHomeDispatchError(raw []byte) error {
 	case "model_cooldown":
 		result.HTTPStatus = http.StatusTooManyRequests
 		if detail.Retryable {
-			result.DispatchPhase = cliproxyexecutor.DispatchPhaseNotSent
-			result.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
-			result.RetryDirective = cliproxyexecutor.RetryDirectiveRetryAfter
+			result.executionState().DispatchPhase = cliproxyexecutor.DispatchPhaseNotSent
+			result.executionState().Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
+			result.executionState().RetryDirective = cliproxyexecutor.RetryDirectiveRetryAfter
 		}
 	case "model_not_found":
 		result.HTTPStatus = http.StatusNotFound
@@ -266,7 +274,8 @@ func decodeHomeDispatchError(raw []byte) error {
 		result.HTTPStatus = http.StatusPaymentRequired
 	case "user_period_limit_exceeded":
 		result.HTTPStatus = http.StatusTooManyRequests
-	case "concurrency_protocol_required", "concurrency_tracker_unavailable", "concurrency_node_unavailable":
+	case "concurrency_protocol_required", "concurrency_tracker_unavailable", "concurrency_node_unavailable",
+		"auth_not_found", "auth_unavailable", "refresh_temporarily_unavailable", "home_unavailable":
 		result.HTTPStatus = http.StatusServiceUnavailable
 	}
 	if detail.RequestRetry != nil || code == "model_cooldown" {
@@ -291,8 +300,7 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 
 // SafeResponseHeaders returns trusted, locally computed retry headers.
 func SafeResponseHeaders(err error) http.Header {
-	var cooldown *homeDispatchRetryAfterError
-	if errors.As(err, &cooldown) {
+	if cooldown, ok := errors.AsType[*homeDispatchRetryAfterError](err); ok {
 		return safeRetryAfterHeader(cooldown.retryAfter)
 	}
 	var busy *HomeConcurrencyBusyError

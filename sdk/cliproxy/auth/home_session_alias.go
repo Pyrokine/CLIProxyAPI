@@ -239,7 +239,7 @@ func isHierarchyParent(primary, fallback string) bool {
 	primaryPrefix, _, primaryHasPrefix := strings.Cut(primary, ":")
 	fallbackPrefix, _, fallbackHasPrefix := strings.Cut(fallback, ":")
 	if primaryHasPrefix && fallbackHasPrefix {
-		return primaryPrefix == fallbackPrefix
+		return primaryPrefix != "" && primaryPrefix == fallbackPrefix
 	}
 	return !primaryHasPrefix && !fallbackHasPrefix
 }
@@ -248,9 +248,13 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 	primary, fallback := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	hasAuthoritativeInput := primary != ""
 	if primary == "" {
-		if canonicalID := sessionMetadataString(opts.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey); canonicalID != "" {
+		if canonicalID := sessionMetadataString(
+			opts.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey,
+		); canonicalID != "" {
 			primary = canonicalID
-		} else if lcpID := sessionMetadataString(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey); lcpID != "" {
+		} else if lcpID := sessionMetadataString(
+			opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey,
+		); lcpID != "" {
 			primary = lcpID
 		} else {
 			primary, fallback = m.homeLCPSessionIDs(opts)
@@ -334,7 +338,9 @@ func (m *Manager) homeLCPSessionIDs(opts cliproxyexecutor.Options) (string, stri
 	if !ok {
 		return "", ""
 	}
-	setLCPMatchMetadata(opts.Metadata, match.SessionID, match.ParentSessionID, match.IsFork, match.IsCompaction, match.AccessNumber)
+	setLCPMatchMetadata(
+		opts.Metadata, match.SessionID, match.ParentSessionID, match.IsFork, match.IsCompaction, match.AccessNumber,
+	)
 	return match.SessionID, match.ParentSessionID
 }
 
@@ -352,12 +358,14 @@ func (m *Manager) bindHomeLCPSelection(opts cliproxyexecutor.Options, authID str
 }
 
 func providerFromSourceFormat(format sdktranslator.Format) string {
-	switch format {
-	case sdktranslator.FormatGemini, sdktranslator.FormatAntigravity:
+	switch {
+	case strings.EqualFold(format.String(), sdktranslator.FormatGemini.String()), strings.EqualFold(
+		format.String(), sdktranslator.FormatAntigravity.String(),
+	):
 		return "google"
-	case sdktranslator.FormatClaude:
+	case strings.EqualFold(format.String(), sdktranslator.FormatClaude.String()):
 		return "claude"
-	case sdktranslator.FormatInteractions:
+	case strings.EqualFold(format.String(), sdktranslator.FormatInteractions.String()):
 		return "devin"
 	default:
 		return "openai"

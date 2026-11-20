@@ -770,7 +770,10 @@ func TestTryRefreshAfterUnauthorizedSkipsHomeRefreshForRuntimeAuth(t *testing.T)
 		false,
 	)
 	if ok || refreshed != auth || executor.called || client.index != "" {
-		t.Fatalf("runtime refresh: ok=%v changed=%v executor=%v home index=%q", ok, refreshed != auth, executor.called, client.index)
+		t.Fatalf(
+			"runtime refresh: ok=%v changed=%v executor=%v home index=%q", ok, refreshed != auth, executor.called,
+			client.index,
+		)
 	}
 }
 
@@ -2040,6 +2043,9 @@ func TestCompareAndSwapHomeRuntimeAuthRollsBackRejectedFinalPublication(t *testi
 	current, ok := manager.GetExecutionSessionAuthByID("session-1", original.ID)
 	if !ok || authAccessToken(current) != "old" {
 		t.Fatalf("Home runtime auth was not restored: %#v", current)
+	}
+	if owner := original.homeRuntimeOwner; owner == nil || authAccessToken(owner.CloneAuth()) != "old" {
+		t.Fatal("rejected final publication changed selection credential")
 	}
 }
 

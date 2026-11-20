@@ -11,11 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/redis/go-redis/v9"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 type c08RedisCommandLog struct {
@@ -193,6 +196,35 @@ func TestC08KVCompareAndSwapUsesNativeCAS(t *testing.T) {
 }
 
 func TestC08KVCompareAndSwapOmitsPXWithoutTTL(t *testing.T) {
+	for _, swapped := range []bool{false, true} {
+		t.Run(
+			strconv.FormatBool(swapped), func(t *testing.T) {
+				client, commands := newC08RedisCommandClient(
+					t, func(args []string) string {
+						if len(args) > 0 && strings.EqualFold(args[0], "CAS") {
+							if swapped {
+								return ":1\r\n"
+							}
+							return ":0\r\n"
+						}
+						return "-ERR unexpected command\r\n"
+					},
+				)
+
+				got, errCAS := client.KVCompareAndSwap(context.Background(), "key", nil, false, []byte("new"), 0)
+				if errCAS != nil || got != swapped {
+					t.Fatalf("KVCompareAndSwap() = (%t, %v), want %t, nil", got, errCAS, swapped)
+				}
+				want := []string{"CAS", "key", "0", "", "new"}
+				if got := commands.last(); !reflect.DeepEqual(got, want) {
+					t.Fatalf("CAS command = %#v, want %#v", got, want)
+				}
+			},
+		)
+	}
+}
+
+func TestKVCompareAndSwapReportsMismatch(t *testing.T) {
 	client, commands := newC08RedisCommandClient(
 		t, func(args []string) string {
 			if len(args) > 0 && strings.EqualFold(args[0], "CAS") {
@@ -202,20 +234,34 @@ func TestC08KVCompareAndSwapOmitsPXWithoutTTL(t *testing.T) {
 		},
 	)
 
-	swapped, errCAS := client.KVCompareAndSwap(context.Background(), "key", nil, false, []byte("new"), 0)
+	swapped, errCAS := client.KVCompareAndSwap(
+		context.Background(), "key", []byte("old"), true, []byte("new"), time.Minute,
+	)
 	if errCAS != nil || swapped {
 		t.Fatalf("KVCompareAndSwap() = (%t, %v), want false, nil", swapped, errCAS)
 	}
-	want := []string{"CAS", "key", "0", "", "new"}
+	want := []string{"CAS", "key", "1", "old", "new", "PX", "60000"}
 	if got := commands.last(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("CAS command = %#v, want %#v", got, want)
 	}
 }
 
 func TestC08KVCompareAndSwapLatchesUnsupportedPerLifetime(t *testing.T) {
+	logger := log.StandardLogger()
+	oldLevel := logger.GetLevel()
+	logger.SetLevel(log.WarnLevel)
+	capture := &logtest.Hook{}
+	oldHooks := logger.ReplaceHooks(log.LevelHooks{})
+	logger.AddHook(capture)
+	t.Cleanup(func() { logger.ReplaceHooks(oldHooks); logger.SetLevel(oldLevel) })
+
+	var upgraded atomic.Bool
 	client, commands := newC08RedisCommandClient(
 		t, func(args []string) string {
 			if len(args) > 0 && strings.EqualFold(args[0], "CAS") {
+				if upgraded.Load() {
+					return ":1\r\n"
+				}
 				return "-ERR unknown command 'cas'\r\n"
 			}
 			return "-ERR unexpected command\r\n"
@@ -236,7 +282,34 @@ func TestC08KVCompareAndSwapLatchesUnsupportedPerLifetime(t *testing.T) {
 	if !client.casUnsupported.Load() {
 		t.Fatal("CAS unsupported latch was not set")
 	}
-	if next := client.NewLifetime(); next.casUnsupported.Load() {
+	entries := capture.AllEntries()
+	if len(entries) != 1 || entries[0].Level != log.WarnLevel ||
+		!strings.Contains(entries[0].Message, "does not implement CAS") || len(entries[0].Data) != 0 {
+		t.Fatalf("unsupported CAS diagnostics = %+v, want one warning without raw error fields", entries)
+	}
+
+	upgraded.Store(true)
+	next := client.NewLifetime()
+	t.Cleanup(next.Close)
+	if next.casUnsupported.Load() {
 		t.Fatal("CAS unsupported latch leaked into the next Home lifetime")
+	}
+	swapped, errCAS := next.KVCompareAndSwap(
+		context.Background(), "key", nil, false, []byte("new"), time.Minute,
+	)
+	if errCAS != nil || !swapped || commands.count("CAS", "key") != 2 {
+		t.Fatalf("new lifetime CAS = (%t, %v), commands=%d", swapped, errCAS, commands.count("CAS", "key"))
+	}
+	want := []string{"CAS", "key", "0", "", "new", "PX", "60000"}
+	if got := commands.last(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("new lifetime command = %#v, want %#v", got, want)
+	}
+	if _, err := client.KVCompareAndSwap(
+		context.Background(), "key", nil, false, []byte("new"), time.Minute,
+	); !errors.Is(err, ErrCompareAndSwapUnsupported) || commands.count("CAS", "key") != 2 {
+		t.Fatalf("old lifetime changed its unsupported state: %v", err)
+	}
+	if len(capture.AllEntries()) != 1 {
+		t.Fatal("unsupported warning was repeated after lifetime recovery")
 	}
 }

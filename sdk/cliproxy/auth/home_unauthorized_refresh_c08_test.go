@@ -14,7 +14,8 @@ import (
 )
 
 const c08HomeRefreshProvider = "c08-home-refresh"
-const c08UnauthorizedBody = `{"error":{"type":"authentication_error","message":"synthetic upstream token expired","detail":{"reason":"expired_token"}}}`
+const c08UnauthorizedBody = `{"error":{"type":"authentication_error","message":"synthetic upstream ` +
+	`token expired","detail":{"reason":"expired_token"}}}`
 
 type c08HomeRefreshDispatcher struct {
 	calls atomic.Int32
@@ -194,23 +195,38 @@ func TestHomeUnauthorizedSelectionOnlyReadsInstalledSnapshot(t *testing.T) {
 		{"different identity", "another-home-auth", "new", false, false},
 		{"disabled", "synthetic-home-auth", "new", true, false},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			failed := &Auth{ID: "synthetic-home-auth", Metadata: map[string]any{"access_token": "old"}}
-			current := &Auth{ID: test.id, Disabled: test.disabled, Metadata: map[string]any{"access_token": test.token}}
-			executor := &c08HomeRefreshExecutor{requirePrepare: true}
-			selection := &HomeDispatchSelection{Auth: current, Executor: executor, Provider: c08HomeRefreshProvider}
-			updated, reuse, err := NewManager(nil, nil, nil).RefreshHomeSelectionAfterUnauthorized(context.Background(), selection, failed)
-			if err != nil || reuse != test.reuse || executor.refreshCalls.Load() != 0 || executor.prepareCalls.Load() != 0 {
-				t.Fatalf("reuse=%v refresh=%d prepare=%d err=%v", reuse, executor.refreshCalls.Load(), executor.prepareCalls.Load(), err)
-			}
-			if updated == current || authAccessToken(updated) != test.token || authAccessToken(failed) != "old" {
-				t.Fatal("returned snapshot aliases or changed credential state")
-			}
-			updated.Metadata["access_token"] = "caller-change"
-			if authAccessToken(current) != test.token || current.Metadata["project_id"] != nil {
-				t.Fatal("selection was mutated or prepared")
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				failed := &Auth{ID: "synthetic-home-auth", Metadata: map[string]any{"access_token": "old"}}
+				current := &Auth{
+					ID: test.id, Disabled: test.disabled, Metadata: map[string]any{"access_token": test.token},
+				}
+				executor := &c08HomeRefreshExecutor{requirePrepare: true}
+				selection := &HomeDispatchSelection{
+					Auth:     current,
+					Executor: executor,
+					Provider: c08HomeRefreshProvider,
+				}
+				updated, reuse, err := NewManager(
+					nil, nil, nil,
+				).RefreshHomeSelectionAfterUnauthorized(context.Background(), selection, failed)
+				if err != nil || reuse != test.reuse || executor.refreshCalls.Load() != 0 ||
+					executor.prepareCalls.Load() != 0 {
+					t.Fatalf(
+						"reuse=%v refresh=%d prepare=%d err=%v", reuse, executor.refreshCalls.Load(),
+						executor.prepareCalls.Load(), err,
+					)
+				}
+				if updated == current || authAccessToken(updated) != test.token ||
+					authAccessToken(failed) != "old" {
+					t.Fatal("returned snapshot aliases or changed credential state")
+				}
+				updated.Metadata["access_token"] = "caller-change"
+				if authAccessToken(current) != test.token || current.Metadata["project_id"] != nil {
+					t.Fatal("selection was mutated or prepared")
+				}
+			},
+		)
 	}
 }
 
@@ -266,7 +282,8 @@ func TestC08HomeUnauthorizedStopsAllExecutionModes(t *testing.T) {
 				executor := &c08HomeRefreshExecutor{requirePrepare: true}
 				manager := newC08HomeRefreshManager(dispatcher, executor)
 
-				if errRun := test.run(manager); statusCodeFromError(errRun) != http.StatusUnauthorized || errRun.Error() != c08UnauthorizedBody {
+				if errRun := test.run(manager); statusCodeFromError(errRun) != http.StatusUnauthorized ||
+					errRun.Error() != c08UnauthorizedBody {
 					t.Fatalf("execution error = %v, want original upstream 401", errRun)
 				}
 				if got := dispatcher.calls.Load(); got != 1 {
@@ -278,7 +295,10 @@ func TestC08HomeUnauthorizedStopsAllExecutionModes(t *testing.T) {
 				if got := executor.prepareCalls.Load(); got != 1 {
 					t.Fatalf("prepare calls = %d, want only initial preparation", got)
 				}
-				if got := executor.executeCalls.Load() + executor.countCalls.Load() + executor.streamCalls.Load(); got != 1 {
+				if got := executor.executeCalls.Load() +
+					executor.countCalls.Load() +
+					executor.streamCalls.Load(); got !=
+					1 {
 					t.Fatalf("upstream attempts = %d, want 1", got)
 				}
 			},
@@ -314,7 +334,8 @@ func TestC08HomeUnauthorizedBootstrapDoesNotReplayIntoInvalidStream(t *testing.T
 				for chunk := range result.Chunks {
 					streamErr = errors.Join(streamErr, chunk.Err)
 				}
-				if statusCodeFromError(streamErr) != http.StatusUnauthorized || streamErr.Error() != c08UnauthorizedBody {
+				if statusCodeFromError(streamErr) != http.StatusUnauthorized ||
+					streamErr.Error() != c08UnauthorizedBody {
 					t.Fatalf("stream error = %v, want original upstream 401", streamErr)
 				}
 				if got := executor.streamCalls.Load(); got != 1 {

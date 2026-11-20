@@ -41,6 +41,8 @@ func (m *Manager) prepareHomeAttempt(
 		},
 	)
 	attemptCtx := contextWithRequestedModelAlias(ctx, opts, routeModel)
+	attemptCtx = context.WithValue(attemptCtx, homeSelectionContextKey{}, selection)
+	debugLogAuthSelection(logEntryWithRequestID(attemptCtx), auth, selection.Provider, routeModel)
 	prepareStarted := time.Now()
 	preparedAuth, errPrepare := m.prepareRequestAuth(attemptCtx, selection.Executor, auth)
 	var preparedExecutor ProviderExecutor
@@ -50,7 +52,10 @@ func (m *Manager) prepareHomeAttempt(
 		}
 		preparedExecutor, errPrepare = executorForAuth(selection.Executor, preparedAuth)
 	}
-	warnLogUpstreamFailure(attemptCtx, auth, selection.Provider, routeModel, prepareStarted, errPrepare, cliproxyexecutor.DispatchPhaseNotSent)
+	warnLogUpstreamFailure(
+		attemptCtx, auth, selection.Provider, routeModel, prepareStarted, errPrepare,
+		cliproxyexecutor.DispatchPhaseNotSent,
+	)
 	if errPrepare != nil {
 		resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errPrepare, "prepare_failed")
 		publishAuthRouteTraceEvent(
@@ -63,7 +68,7 @@ func (m *Manager) prepareHomeAttempt(
 				RetryAfterMS: retryAfterMS,
 			},
 		)
-		return homePreparedAttempt{}, errPrepare
+		return homePreparedAttempt{ctx: attemptCtx, auth: auth, options: opts}, errPrepare
 	}
 	preserveHomeRoutingAttributes(preparedAuth, auth)
 	if rt := m.roundTripperFor(preparedAuth); rt != nil {
@@ -72,13 +77,26 @@ func (m *Manager) prepareHomeAttempt(
 
 	execReq := req
 	aliasResult := OAuthModelAliasResult{}
-	if preparedAuth.Attributes != nil && strings.TrimSpace(preparedAuth.Attributes[homeUpstreamModelAttributeKey]) != "" {
+	if preparedAuth.Attributes != nil &&
+		strings.TrimSpace(preparedAuth.Attributes[homeUpstreamModelAttributeKey]) != "" {
 		execReq.Model = strings.TrimSpace(preparedAuth.Attributes[homeUpstreamModelAttributeKey])
 		aliasResult = homeForceMappingAliasResult(preparedAuth, execReq.Model)
+		if aliasResult.ForceMapping {
+			aliasResult.OriginalAlias = requestedModelFromMetadata(opts.Metadata, routeModel)
+		}
 	} else {
 		execReq.Model = rewriteModelForAuth(routeModel, preparedAuth)
 		aliasResult = m.resolveExecutionAliasResultForRequested(preparedAuth, execReq.Model)
 		execReq.Model = aliasResult.UpstreamModel
+	}
+	selectedUpstreamModel := execReq.Model
+	if routeModel != req.Model {
+		execReq.Model = req.Model
+		if aliasResult.ForceMapping {
+			aliasResult.UpstreamModel = req.Model
+		} else {
+			aliasResult = OAuthModelAliasResult{}
+		}
 	}
 	execOpts := opts
 	execOpts.ExecutionLifecycle = selection
@@ -99,11 +117,17 @@ func (m *Manager) prepareHomeAttempt(
 				RetryAfterMS: retryAfterMS,
 			},
 		)
-		return homePreparedAttempt{}, errIntercept
+		return homePreparedAttempt{ctx: attemptCtx, auth: preparedAuth, options: execOpts}, errIntercept
 	}
-	localRouteModel := routeModel
-	if selection.modelInfo != nil && thinking.HasContext1MTag(routeModel) {
-		if !modelInfoSupportsContext1M(selection.modelInfo) {
+	selectedModelInfo := selection.modelInfo
+	selectedSupport := selection.configurationUpdateSupport
+	if thinking.ParseSuffix(selectedUpstreamModel).ModelName != thinking.ParseSuffix(execReq.Model).ModelName {
+		selectedModelInfo = nil
+		selectedSupport = nil
+	}
+	localRouteModel := req.Model
+	if selectedModelInfo != nil && thinking.HasContext1MTag(routeModel) {
+		if !ModelSupportsContext1M(selectedModelInfo) {
 			errIntercept = context1MModelSupportError(routeModel)
 		} else {
 			localRouteModel = thinking.ParseSuffix(routeModel).ModelName
@@ -127,10 +151,10 @@ func (m *Manager) prepareHomeAttempt(
 				RetryAfterMS: retryAfterMS,
 			},
 		)
-		return homePreparedAttempt{}, errIntercept
+		return homePreparedAttempt{ctx: attemptCtx, auth: preparedAuth, options: execOpts}, errIntercept
 	}
 	execReq = attachResolvedHomeModelInfo(
-		execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport,
+		execReq, preparedAuth, routeModel, selectedModelInfo, selectedSupport,
 	)
 	execReq = sanitizeDownstreamWebsocketFallbackRequest(attemptCtx, preparedAuth, execReq)
 	publishSelectedAuthMetadata(opts.Metadata, preparedAuth)
@@ -173,6 +197,8 @@ func validateHomeExecutionProvider(selection *HomeDispatchSelection, providers [
 }
 
 // RefreshHomeSelectionAfterUnauthorized 只读取 Home 已安装的新 token 快照，不刷新或修改凭证
+//
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (m *Manager) RefreshHomeSelectionAfterUnauthorized(
 	_ context.Context,
 	selection *HomeDispatchSelection,
@@ -205,8 +231,8 @@ func (m *Manager) executeHome(
 	if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 		defer unlockSession()
 	}
-	routeModel := req.Model
-	opts = ensureRequestedModelMetadata(opts, routeModel)
+	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	opts = ensureRequestedModelMetadata(opts, req.Model)
 	opts = ensureRouteTraceState(opts)
 	tried := make(map[string]struct{})
 	if state := retryRoundFromContext(ctx); state != nil {
@@ -219,12 +245,14 @@ func (m *Manager) executeHome(
 		}
 		attemptOrdinal, previousAttempt := nextRouteTraceAttempt(opts)
 		attemptOpts := withHomeAuthCount(withRouteTraceAttempt(opts, attemptOrdinal, previousAttempt), count)
-		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, attemptOpts)
+		selection, errSelection := m.selectHomeAuthForExecution(ctx, routeModel, attemptOpts)
 		if errSelection != nil {
 			returnedErr := errSelection
-			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) || (lastErr != nil && isHomeCooldownError(errSelection)) {
+			if shouldReturnLastErrorOnPickFailure(
+				true, lastErr, errSelection,
+			) || (lastErr != nil && isHomeCooldownError(errSelection)) {
 				returnedErr = lastErr
-				if state := retryRoundFromContext(ctx); state != nil && isHomeCooldownError(errSelection) {
+				if state := retryRoundFromContext(ctx); state != nil && state.hasHomeWait {
 					returnedErr = &homeDispatchRetryAfterError{cause: lastErr, retryAfter: state.homeWait}
 				}
 			}
@@ -303,6 +331,9 @@ func (m *Manager) executeHome(
 		m.bindHomeLCPSelection(attemptOpts, auth.ID)
 		attempt, errPrepare := m.prepareHomeAttempt(attemptCtx, selection, auth, req, attemptOpts, routeModel)
 		if errPrepare != nil {
+			if attempt.ctx != nil {
+				attemptCtx = attempt.ctx
+			}
 			releaseAttempt()
 			if isRequestScopedError(errPrepare) {
 				selection.End("request_intercepted")
@@ -383,7 +414,10 @@ func (m *Manager) executeHome(
 		)
 		started := time.Now()
 		response, errExecute := execute(attempt)
-		warnLogUpstreamFailure(attempt.ctx, attempt.auth, selection.Provider, attempt.request.Model, started, errExecute, cliproxyexecutor.DispatchPhaseMaybeSent)
+		warnLogUpstreamFailure(
+			attempt.ctx, attempt.auth, selection.Provider, attempt.request.Model, started, errExecute,
+			cliproxyexecutor.DispatchPhaseMaybeSent,
+		)
 		if countTokens && isUnauthorizedError(errExecute) {
 			failedAuth := getEffectiveAuth()
 			failureBody := errExecute.Error()
@@ -399,6 +433,7 @@ func (m *Manager) executeHome(
 			phase = cliproxyexecutor.DispatchPhaseMaybeSent
 		}
 		result := executionResult(attempt.auth, selection.Provider, routeModel, errExecute, phase)
+		retryRoundFromContext(ctx).observeUpstreamError(errExecute, result.Disposition)
 		result.Options = cloneExecutorOptions(attempt.options)
 		decision := requestScopedActionDecision{err: errExecute}
 		compactRequestFault := false
@@ -540,6 +575,7 @@ func validateStreamResult(
 }
 
 func (m *Manager) startHomeStreamAttempt(
+	deliveryCtx context.Context,
 	attempt homePreparedAttempt,
 	selection *HomeDispatchSelection,
 	routeModel string,
@@ -552,11 +588,11 @@ func (m *Manager) startHomeStreamAttempt(
 	}
 	streamResult, errStream = validateStreamResult(streamResult, nil)
 	if errStream != nil {
-		return streamResult, newStreamBootstrapError(errStream, nil)
+		return streamResult, errStream
 	}
 	buffered, closed, bootstrapErr := readStreamBootstrap(attempt.ctx, streamResult.Chunks)
 	if bootstrapErr != nil {
-		discardStreamChunks(streamResult.Chunks)
+		discardStreamChunks(attempt.ctx, streamResult.Chunks, bootstrapErr)
 		return streamResult, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 	}
 	if closed && len(buffered) == 0 {
@@ -573,6 +609,7 @@ func (m *Manager) startHomeStreamAttempt(
 	}
 	return m.wrapStreamResultWithOptions(
 		attempt.ctx,
+		deliveryCtx,
 		attempt.auth.Clone(),
 		selection.Provider,
 		routeModel,
@@ -596,8 +633,8 @@ func (m *Manager) executeHomeStream(
 	if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 		defer unlockSession()
 	}
-	routeModel := req.Model
-	opts = ensureRequestedModelMetadata(opts, routeModel)
+	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	opts = ensureRequestedModelMetadata(opts, req.Model)
 	opts = ensureRouteTraceState(opts)
 	tried := make(map[string]struct{})
 	if state := retryRoundFromContext(ctx); state != nil {
@@ -610,12 +647,14 @@ func (m *Manager) executeHomeStream(
 		}
 		attemptOrdinal, previousAttempt := nextRouteTraceAttempt(opts)
 		attemptOpts := withHomeAuthCount(withRouteTraceAttempt(opts, attemptOrdinal, previousAttempt), count)
-		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, attemptOpts)
+		selection, errSelection := m.selectHomeAuthForExecution(ctx, routeModel, attemptOpts)
 		if errSelection != nil {
 			returnedErr := errSelection
-			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) || (lastErr != nil && isHomeCooldownError(errSelection)) {
+			if shouldReturnLastErrorOnPickFailure(
+				true, lastErr, errSelection,
+			) || (lastErr != nil && isHomeCooldownError(errSelection)) {
 				returnedErr = lastErr
-				if state := retryRoundFromContext(ctx); state != nil && isHomeCooldownError(errSelection) {
+				if state := retryRoundFromContext(ctx); state != nil && state.hasHomeWait {
 					returnedErr = &homeDispatchRetryAfterError{cause: lastErr, retryAfter: state.homeWait}
 				}
 			}
@@ -694,6 +733,9 @@ func (m *Manager) executeHomeStream(
 		m.bindHomeLCPSelection(attemptOpts, auth.ID)
 		attempt, errPrepare := m.prepareHomeAttempt(attemptCtx, selection, auth, req, attemptOpts, routeModel)
 		if errPrepare != nil {
+			if attempt.ctx != nil {
+				attemptCtx = attempt.ctx
+			}
 			releaseAttempt()
 			if isRequestScopedError(errPrepare) {
 				selection.End("request_intercepted")
@@ -745,8 +787,10 @@ func (m *Manager) executeHomeStream(
 		)
 		failurePhase := cliproxyexecutor.DispatchPhaseMaybeSent
 		started := time.Now()
-		streamResult, errStream := m.startHomeStreamAttempt(attempt, selection, routeModel)
-		warnLogUpstreamFailure(attempt.ctx, attempt.auth, selection.Provider, attempt.request.Model, started, errStream, failurePhase)
+		streamResult, errStream := m.startHomeStreamAttempt(ctx, attempt, selection, routeModel)
+		warnLogUpstreamFailure(
+			attempt.ctx, attempt.auth, selection.Provider, attempt.request.Model, started, errStream, failurePhase,
+		)
 		if errStream == nil {
 			publishAuthRouteTraceEvent(
 				attemptOpts, attempt.auth, cliproxyexecutor.RouteTraceEvent{
@@ -759,9 +803,10 @@ func (m *Manager) executeHomeStream(
 				},
 			)
 			retained := m.retainHomeWebsocketSelection(ctx, opts, routeModel, selection)
-			return wrapHomeOwnedStream(attempt.ctx, streamResult, selection, releaseAttempt, !retained), nil
+			return wrapHomeOwnedStream(ctx, streamResult, selection, releaseAttempt, !retained), nil
 		}
 		result := executionResult(attempt.auth, selection.Provider, routeModel, errStream, failurePhase)
+		retryRoundFromContext(ctx).observeUpstreamError(errStream, result.Disposition)
 		result.Options = cloneExecutorOptions(attempt.options)
 		result.RetryAfter = retryAfterFromError(errStream)
 		decision := m.applyRequestScopedErrorRule(attempt.auth, errStream, &result)
@@ -854,21 +899,29 @@ func wrapHomeOwnedStream(
 		if releaseAttempt != nil {
 			defer releaseAttempt()
 		}
-		if selection != nil && endSelection {
-			defer selection.End("stream_closed")
-		}
+		defer func() {
+			if selection != nil && endSelection {
+				selection.End("stream_closed")
+			}
+		}()
 		for {
 			select {
 			case <-ctx.Done():
-				discardStreamChunks(result.Chunks)
+				discardStreamChunks(ctx, result.Chunks, context.Cause(ctx))
 				return
 			case chunk, ok := <-result.Chunks:
 				if !ok {
 					return
 				}
+				if chunk.Err != nil {
+					endSelection = true
+				}
 				select {
 				case <-ctx.Done():
-					discardStreamChunks(result.Chunks)
+					if chunk.Acknowledge != nil {
+						chunk.Acknowledge(context.Cause(ctx))
+					}
+					discardStreamChunks(ctx, result.Chunks, context.Cause(ctx))
 					return
 				case out <- chunk:
 				}

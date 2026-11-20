@@ -213,13 +213,15 @@ func TestAdmissionConcurrentAcceptanceAndPause(t *testing.T) {
 	admission := NewAdmission()
 	var requests sync.WaitGroup
 	for range 100 {
-		requests.Go(func() {
-			_, release, err := admission.Acquire(context.Background(), nil)
-			if err == nil {
-				release()
-				release()
-			}
-		})
+		requests.Go(
+			func() {
+				_, release, err := admission.Acquire(context.Background(), nil)
+				if err == nil {
+					release()
+					release()
+				}
+			},
+		)
 	}
 	confirmation, err := admission.Drain(context.Background(), "attempt", time.Now().Add(time.Second))
 	if err != nil {
