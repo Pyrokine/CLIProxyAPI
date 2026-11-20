@@ -18,5 +18,7 @@ func init() {
 			TokenCount: tokenCount,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatClaude, sdktranslator.FormatGeminiCLI, convertClaudeRequestToCLIChecked)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatClaude, sdktranslator.FormatGeminiCLI, convertClaudeRequestToCLIChecked,
+	)
 }

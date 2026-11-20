@@ -23,7 +23,12 @@ func TestInteractionsClaudeUsageAndStopReasons(t *testing.T) {
 				if tool {
 					steps = `[{"type":"function_call","id":"fixture-tool","name":"lookup","arguments":{}}]`
 				}
-				body := `{"id":"fixture-interaction",` + tc.terminal + `,"steps":` + steps + `,"usage":{"total_input_tokens":100,"total_cached_tokens":40,"cache_creation_tokens":10,"total_output_tokens":8}}`
+				body := `{"id":"fixture-interaction",` +
+					tc.terminal +
+					`,"steps":` +
+					steps +
+					(`,"usage":{"total_input_tokens":100,"total_cached_tokens":40,"cache_creation_tokens":10,"` +
+						`total_output_tokens":8}}`)
 				if nested {
 					body = `{"interaction":` + body + `}`
 				}
@@ -31,9 +36,15 @@ func TestInteractionsClaudeUsageAndStopReasons(t *testing.T) {
 				if tool && want == "end_turn" {
 					want = "tool_use"
 				}
-				out := convertInteractionsResponseToClaudeNonStream(context.Background(), "fixture-model", nil, nil, []byte(body), nil)
-				if gjson.GetBytes(out, "stop_reason").String() != want || gjson.GetBytes(out, "usage.input_tokens").Int() != 50 ||
-					gjson.GetBytes(out, "usage.cache_read_input_tokens").Int() != 40 || gjson.GetBytes(out, "usage.cache_creation_input_tokens").Int() != 10 || gjson.GetBytes(out, "usage.output_tokens").Int() != 8 {
+				out := convertInteractionsResponseToClaudeNonStream(
+					context.Background(), "fixture-model", nil, nil, []byte(body), nil,
+				)
+				if gjson.GetBytes(out, "stop_reason").String() != want || gjson.GetBytes(
+					out, "usage.input_tokens",
+				).Int() != 50 ||
+					gjson.GetBytes(out, "usage.cache_read_input_tokens").Int() != 40 || gjson.GetBytes(
+					out, "usage.cache_creation_input_tokens",
+				).Int() != 10 || gjson.GetBytes(out, "usage.output_tokens").Int() != 8 {
 					t.Fatalf("non-stream result = %s", out)
 				}
 				state := &interactionsToClaudeStreamState{SawToolCall: tool}
@@ -45,7 +56,9 @@ func TestInteractionsClaudeUsageAndStopReasons(t *testing.T) {
 						delta = payload
 					}
 				}
-				if delta.Get("delta.stop_reason").String() != want || delta.Get("usage.input_tokens").Int() != 50 || delta.Get("usage.cache_read_input_tokens").Int() != 40 {
+				if delta.Get("delta.stop_reason").String() != want ||
+					delta.Get("usage.input_tokens").Int() != 50 ||
+					delta.Get("usage.cache_read_input_tokens").Int() != 40 {
 					t.Fatalf("stream delta = %s", delta.Raw)
 				}
 			}
@@ -70,17 +83,28 @@ func TestInteractionsClaudeUsageAndStopReasons(t *testing.T) {
 func TestInteractionsFailedEventToClaudeError(t *testing.T) {
 	for _, event := range []string{
 		`{"event_type":"response.failed","error":{"type":"api_error","message":"model capacity exhausted"}}`,
-		`{"event_type":"interaction.failed","response":{"error":{"type":"api_error","message":"model capacity exhausted"}}}`,
+		`{"event_type":"interaction.failed","response":{"error":{"type":` +
+			`"api_error","message":"model capacity ` +
+			`exhausted"}}}`,
 	} {
 		var state any
-		out := convertInteractionsResponseToClaude(context.Background(), "claude-test", nil, nil, []byte(event), &state)
+		out := convertInteractionsResponseToClaude(
+			context.Background(),
+			"claude-test",
+			nil,
+			nil,
+			[]byte(event),
+			&state,
+		)
 		if len(out) != 1 || !bytes.Contains(out[0], []byte("event: error")) ||
 			!bytes.Contains(out[0], []byte("model capacity exhausted")) {
 			t.Fatalf("failed event = %q, want Claude error SSE", out)
 		}
 		for _, following := range []string{`{"event_type":"interaction.completed"}`, `[DONE]`} {
-			completed := convertInteractionsResponseToClaude(context.Background(), "claude-test", nil, nil,
-				[]byte(following), &state)
+			completed := convertInteractionsResponseToClaude(
+				context.Background(), "claude-test", nil, nil,
+				[]byte(following), &state,
+			)
 			if len(completed) != 0 {
 				t.Fatalf("events after failure = %q", completed)
 			}
@@ -99,24 +123,38 @@ func TestInteractionsToClaudePreservesRecognizedProviderSignatures(t *testing.T)
 		{name: "gpt", model: "gpt-test", signature: gptInteractionSignatureForTest()},
 	}
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			raw := []byte(`{"interaction":{"id":"interaction-1","model":"` + testCase.model + `","steps":[{"type":"thought","signature":"` + testCase.signature + `","content":[]}]}}`)
-			out := convertInteractionsResponseToClaudeNonStream(
-				context.Background(), testCase.model, nil, nil, raw, nil,
-			)
-			if got := gjson.GetBytes(out, "content.0.signature").String(); got != testCase.signature {
-				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.signature, out)
-			}
-			if got := gjson.GetBytes(out, "content.0.thinking").String(); got != "" {
-				t.Fatalf("signature-only thinking text = %q, want empty; output=%s", got, out)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				raw := []byte(
+					`{"interaction":{"id":"interaction-1","model":"` +
+						testCase.model +
+						`","steps":[{"type":"thought","signature":"` +
+						testCase.signature +
+						`","content":[]}]}}`,
+				)
+				out := convertInteractionsResponseToClaudeNonStream(
+					context.Background(), testCase.model, nil, nil, raw, nil,
+				)
+				if got := gjson.GetBytes(out, "content.0.signature").String(); got != testCase.signature {
+					t.Fatalf("signature = %q, want %q; output=%s", got, testCase.signature, out)
+				}
+				if got := gjson.GetBytes(out, "content.0.thinking").String(); got != "" {
+					t.Fatalf("signature-only thinking text = %q, want empty; output=%s", got, out)
+				}
+			},
+		)
 	}
 }
 
 func TestInteractionsToClaudeDropsForeignAndInvalidSignatures(t *testing.T) {
 	for _, rawSignature := range []string{geminiInteractionSignatureForTest(), "claude#invalid"} {
-		raw := []byte(`{"interaction":{"id":"interaction-1","model":"claude-test","steps":[{"type":"thought","signature":"` + rawSignature + `","content":[{"type":"text","text":"reason"}]}]}}`)
+		raw := []byte(
+			`{"interaction":{"id":"interaction-1","model":"claude-test","steps":` +
+				`[{"type":"thought","signature":` +
+				`"` +
+				rawSignature +
+				`","content":[{"type":"text","text":"reason"}]}]}}`,
+		)
 		out := convertInteractionsResponseToClaudeNonStream(
 			context.Background(), "claude-test", nil, nil, raw, nil,
 		)
@@ -139,34 +177,42 @@ func TestInteractionsToClaudeStreamValidatesThoughtSignature(t *testing.T) {
 		{name: "valid", signature: valid, want: valid},
 		{name: "invalid", signature: "claude#invalid"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			var state any
-			convertInteractionsResponseToClaude(
-				context.Background(),
-				"claude-test",
-				nil,
-				nil,
-				[]byte(`{"event_type":"step.start","index":0,"step":{"type":"thought"}}`),
-				&state,
-			)
-			out := convertInteractionsResponseToClaude(
-				context.Background(),
-				"claude-test",
-				nil,
-				nil,
-				[]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":"`+testCase.signature+`"}}`),
-				&state,
-			)
-			var got string
-			for _, event := range out {
-				if value := gjson.GetBytes(interactionsSSEPayload(event), "delta.signature"); value.Exists() {
-					got = value.String()
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				var state any
+				convertInteractionsResponseToClaude(
+					context.Background(),
+					"claude-test",
+					nil,
+					nil,
+					[]byte(`{"event_type":"step.start","index":0,"step":{"type":"thought"}}`),
+					&state,
+				)
+				out := convertInteractionsResponseToClaude(
+					context.Background(),
+					"claude-test",
+					nil,
+					nil,
+					[]byte(
+						`{"event_type":"step.delta","index":0,"delta":{"type":`+
+							`"thought_signature","signature":`+
+							`"`+
+							testCase.signature+
+							`"}}`,
+					),
+					&state,
+				)
+				var got string
+				for _, event := range out {
+					if value := gjson.GetBytes(interactionsSSEPayload(event), "delta.signature"); value.Exists() {
+						got = value.String()
+					}
 				}
-			}
-			if got != testCase.want {
-				t.Fatalf("stream signature = %q, want %q; events=%q", got, testCase.want, out)
-			}
-		})
+				if got != testCase.want {
+					t.Fatalf("stream signature = %q, want %q; events=%q", got, testCase.want, out)
+				}
+			},
+		)
 	}
 }
 

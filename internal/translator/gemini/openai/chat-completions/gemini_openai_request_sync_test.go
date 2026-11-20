@@ -8,7 +8,9 @@ import (
 )
 
 func TestConvertOpenAIRequestToGeminiStrictAndAllowedTools(t *testing.T) {
-	const tool = `{"type":"function","function":{"name":"send/message","strict":true,"parameters":{"type":"object","additionalProperties":false,"properties":{"text":{"type":"string","pattern":"^ok$","minLength":2}}}}}`
+	const tool = `{"type":"function","function":{"name":"send/message","strict":true,"parameters":{"type":"` +
+		`object","additionalProperties":false,"properties":{"text":{"type":"string","pattern":"^ok$","` +
+		`minLength":2}}}}}`
 	tests := []struct {
 		name          string
 		choice        string
@@ -22,43 +24,77 @@ func TestConvertOpenAIRequestToGeminiStrictAndAllowedTools(t *testing.T) {
 		{"null strict", `,"tool_choice":null`, "", "VALIDATED", "", 1},
 		{"required", `,"tool_choice":"required"`, "", "ANY", "", 1},
 		{"none", `,"tool_choice":"none"`, "", "NONE", "", 1},
-		{"specific", `,"tool_choice":{"type":"function","function":{"name":"send/message"}}`, "", "ANY", "send_message", 1},
-		{"unknown specific", `,"tool_choice":{"type":"function","function":{"name":"absent"}}`, "", "NONE", "", 1},
+		{
+			"specific", `,"tool_choice":{"type":"function","function":{"name":"send/message"}}`, "", "ANY",
+			"send_message", 1,
+		},
+		{
+			"unknown specific",
+			`,"tool_choice":{"type":"function","function":{"name":"absent"}}`,
+			"",
+			"NONE",
+			"",
+			1,
+		},
 		{"unknown choice", `,"tool_choice":{"type":"other"}`, "", "NONE", "", 1},
 		{"disable parallel", `,"tool_choice":"required"`, `,"parallel_tool_calls":false`, "NONE", "", 1},
-		{"allowed subset", `,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"send/message"}}]}}`, "", "ANY", "send_message", 1},
+		{
+			"allowed subset",
+			`,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"` +
+				`function","function":{"name":"send/message"}}]}}`,
+			"", "ANY", "send_message", 1,
+		},
 		{"empty allowed subset", `,"tool_choice":{"type":"allowed_tools","tools":[]}`, "", "NONE", "", 0},
 	}
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			input := []byte(`{"messages":[{"role":"user","content":"send"}],"tools":[` + tool + `]` + tc.choice + tc.extra + `}`)
-			output := convertOpenAIRequestToGemini("gemini-3-flash", input, false)
-			if got := gjson.GetBytes(output, "toolConfig.functionCallingConfig.mode").String(); got != tc.wantMode {
-				t.Fatalf("mode = %q, want %q: %s", got, tc.wantMode, output)
-			}
-			declarations := gjson.GetBytes(output, "tools.0.functionDeclarations").Array()
-			if len(declarations) != tc.wantToolCount {
-				t.Fatalf("declarations = %d, want %d: %s", len(declarations), tc.wantToolCount, output)
-			}
-			if tc.wantName != "" {
-				allowed := gjson.GetBytes(output, "toolConfig.functionCallingConfig.allowedFunctionNames").Array()
-				if len(allowed) != 1 || allowed[0].String() != tc.wantName {
-					t.Fatalf("allowedFunctionNames = %v, want %q: %s", allowed, tc.wantName, output)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				input := []byte(
+					`{"messages":[{"role":"user","content":"send"}],"tools":[` +
+						tool +
+						`]` +
+						tc.choice +
+						tc.extra +
+						`}`,
+				)
+				output, err := convertOpenAIRequestToGeminiChecked("gemini-3-flash", input, false)
+				if tc.extra == `,"parallel_tool_calls":false` {
+					if err == nil || len(output) != 0 {
+						t.Fatalf("unsupported parallel setting = %s, error %v", output, err)
+					}
+					return
 				}
-			}
-			if len(declarations) > 0 {
-				schema := declarations[0].Get("parametersJsonSchema")
-				if got := schema.Get("additionalProperties"); got.Type != gjson.False {
-					t.Fatalf("additionalProperties = %s, want false: %s", got.Raw, output)
+				if err != nil {
+					t.Fatal(err)
 				}
-				if got := schema.Get("properties.text.pattern").String(); got != "^ok$" {
-					t.Fatalf("pattern = %q, want ^ok$: %s", got, output)
+				if got := gjson.GetBytes(output, "toolConfig.functionCallingConfig.mode").String(); got != tc.wantMode {
+					t.Fatalf("mode = %q, want %q: %s", got, tc.wantMode, output)
 				}
-				if got := schema.Get("properties.text.minLength").Int(); got != 2 {
-					t.Fatalf("minLength = %d, want 2: %s", got, output)
+				declarations := gjson.GetBytes(output, "tools.0.functionDeclarations").Array()
+				if len(declarations) != tc.wantToolCount {
+					t.Fatalf("declarations = %d, want %d: %s", len(declarations), tc.wantToolCount, output)
 				}
-			}
-		})
+				if tc.wantName != "" {
+					allowed := gjson.GetBytes(output, "toolConfig.functionCallingConfig.allowedFunctionNames").
+						Array()
+					if len(allowed) != 1 || allowed[0].String() != tc.wantName {
+						t.Fatalf("allowedFunctionNames = %v, want %q: %s", allowed, tc.wantName, output)
+					}
+				}
+				if len(declarations) > 0 {
+					schema := declarations[0].Get("parametersJsonSchema")
+					if got := schema.Get("additionalProperties"); got.Type != gjson.False {
+						t.Fatalf("additionalProperties = %s, want false: %s", got.Raw, output)
+					}
+					if got := schema.Get("properties.text.pattern").String(); got != "^ok$" {
+						t.Fatalf("pattern = %q, want ^ok$: %s", got, output)
+					}
+					if got := schema.Get("properties.text.minLength").Int(); got != 2 {
+						t.Fatalf("minLength = %d, want 2: %s", got, output)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -77,16 +113,14 @@ func TestConvertOpenAIRequestToGeminiRejectsSanitizedNameCollision(t *testing.T)
 }
 
 func TestConvertOpenAIRequestToGeminiToolResultsAreScopedAndOpaque(t *testing.T) {
-	input := []byte(`{"messages":[
-		{"role":"assistant","tool_calls":[
-			{"type":"function","id":"call_1","function":{"name":"lookup","arguments":"{}"}},
-			{"type":"function","id":"call_2","function":{"name":"search","arguments":"{}"}}
-		]},
-		{"role":"tool","tool_call_id":"call_2","content":{"schema":{"$ref":"#/defs/Error"}}},
-		{"role":"tool","tool_call_id":"call_1","content":"ok"},
-		{"role":"assistant","tool_calls":[{"type":"function","id":"call_1","function":{"name":"lookup_again","arguments":"{}"}}]},
-		{"role":"tool","tool_call_id":"call_1","content":"second"}
-	]}`)
+	input := []byte(("{\"messages\":[\n\t\t{\"role\":\"assistant\",\"tool_calls\":[\n\t\t\t{\"type\":\"" +
+		"function\",\"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}},\n\t\t\t{\"" +
+		"type\":\"function\",\"id\":\"call_2\",\"function\":{\"name\":\"search\",\"arguments\":\"{}\"}}\n\t\t" +
+		"]},\n\t\t{\"role\":\"tool\",\"tool_call_id\":\"call_2\",\"content\":{\"schema\":{\"$ref\":\"#/defs/" +
+		"Error\"}}},\n\t\t{\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":\"ok\"},\n\t\t{\"role\":" +
+		"\"assistant\",\"tool_calls\":[{\"type\":\"function\",\"id\":\"call_1\",\"function\":{\"name\":\"" +
+		"lookup_again\",\"arguments\":\"{}\"}}]},\n\t\t{\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"" +
+		"content\":\"second\"}\n\t]}"))
 	output := convertOpenAIRequestToGemini("gemini-3-flash", input, false)
 	contents := gjson.GetBytes(output, "contents").Array()
 	if len(contents) != 4 {
@@ -114,25 +148,57 @@ func TestConvertOpenAIRequestToGeminiToolResultsAreScopedAndOpaque(t *testing.T)
 
 func TestConvertOpenAIRequestToGeminiDoesNotInventIncompleteToolResults(t *testing.T) {
 	tests := []struct {
-		name     string
-		messages string
-		wantText string
+		name        string
+		messages    string
+		wantText    string
+		wantMatched bool
 	}{
-		{"missing", `[{"role":"assistant","tool_calls":[{"type":"function","id":"call_1","function":{"name":"lookup","arguments":"{}"}}]}]`, ""},
-		{"orphan", `[{"role":"tool","tool_call_id":"orphan","content":"unmatched"}]`, "unmatched"},
-		{"repeated", `[{"role":"assistant","tool_calls":[{"type":"function","id":"call_1","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"first"},{"role":"tool","tool_call_id":"call_1","content":"second"}]`, "second"},
-		{"intervening user", `[{"role":"assistant","tool_calls":[{"type":"function","id":"call_1","function":{"name":"lookup","arguments":"{}"}}]},{"role":"user","content":"other"},{"role":"tool","tool_call_id":"call_1","content":"late"}]`, "late"},
+		{
+			"missing",
+			`[{"role":"assistant","tool_calls":[{"type":"function","id":"call_1",` +
+				`"function":{"name":"lookup","arguments":` +
+				`"{}"}}]}]`,
+			"", false,
+		},
+		{"orphan", `[{"role":"tool","tool_call_id":"orphan","content":"unmatched"}]`, "unmatched", false},
+		{
+			"repeated",
+			`[{"role":"assistant","tool_calls":[{"type":"function","id":"call_1","f` +
+				`unction":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_ca` +
+				`ll_id":"call_1","content":"first"},{"role":"tool","tool_call_id":"call` +
+				`_1","content":"second"}]`,
+			"second", false,
+		},
+		{
+			"intervening user",
+			`[{"role":"assistant","tool_calls":[{"type":"function","id":"call_1","f` +
+				`unction":{"name":"lookup","arguments":"{}"}}]},{"role":"user","content` +
+				`":"other"},{"role":"tool","tool_call_id":"call_1","content":"late"}]`,
+			"late", true,
+		},
 	}
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			output := convertOpenAIRequestToGemini("gemini-3-flash", []byte(`{"messages":`+tc.messages+`}`), false)
-			if strings.Contains(string(output), `"functionResponse":`) {
-				t.Fatalf("ambiguous or missing results must not become function responses: %s", output)
-			}
-			if tc.wantText != "" && !strings.Contains(string(output), tc.wantText) {
-				t.Fatalf("unmatched tool content %q was lost: %s", tc.wantText, output)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				output := convertOpenAIRequestToGemini(
+					"gemini-3-flash",
+					[]byte(`{"messages":`+tc.messages+`}`),
+					false,
+				)
+				if found := strings.Contains(string(output), `"functionResponse":`); found != tc.wantMatched {
+					t.Fatalf("function response present = %t, want %t: %s", found, tc.wantMatched, output)
+				}
+				if tc.wantMatched && (gjson.GetBytes(
+					output, "contents.1.parts.0.functionResponse.response.result",
+				).String() != "late" ||
+					gjson.GetBytes(output, "contents.2.parts.0.text").String() != "other") {
+					t.Fatalf("matched late result or intervening user text changed: %s", output)
+				}
+				if tc.wantText != "" && !strings.Contains(string(output), tc.wantText) {
+					t.Fatalf("unmatched tool content %q was lost: %s", tc.wantText, output)
+				}
+			},
+		)
 	}
 }
 
@@ -165,7 +231,9 @@ func TestConvertOpenAIRequestToGeminiDemotesMidConversationSystem(t *testing.T) 
 	if gjson.GetBytes(output, "systemInstruction.parts.1").Exists() {
 		t.Fatalf("mid-session developer message must not be hoisted: %s", output)
 	}
-	if got := gjson.GetBytes(output, "contents.1.parts.0.text").String(); got != "<system-reminder>\nlater\n</system-reminder>" {
+	if got := gjson.GetBytes(
+		output, "contents.1.parts.0.text",
+	).String(); got != "<system-reminder>\nlater\n</system-reminder>" {
 		t.Fatalf("mid-session developer reminder = %q: %s", got, output)
 	}
 }

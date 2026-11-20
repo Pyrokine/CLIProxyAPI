@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -56,7 +57,7 @@ func getVertexAction(model string, isStream bool) string {
 }
 
 func isGeminiStreamTerminalChunk(chunk []byte) bool {
-	for _, line := range bytes.Split(chunk, []byte("\n")) {
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
 		if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
 			return true
@@ -248,7 +249,8 @@ func (*GeminiVertexExecutor) RequestToFormatForAuth(
 	_ cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) sdktranslator.Format {
-	if !opts.CountTokens && opts.Alt != "responses/compact" && opts.SourceFormat == sdktranslator.FormatInteractions && isNativeVertexInteractionsAuth(auth) {
+	if !opts.CountTokens && opts.Alt != "responses/compact" && opts.SourceFormat == sdktranslator.FormatInteractions &&
+		isNativeVertexInteractionsAuth(auth) {
 		return sdktranslator.FormatInteractions
 	}
 	return ""
@@ -272,7 +274,8 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
-		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, isStream, helps.APIKeyModelIsCompat(req), &req,
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, isStream,
+		helps.APIKeyModelIsCompat(req), &req,
 	)
 	if err != nil {
 		return nil, err
@@ -287,7 +290,6 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 	body = fixGeminiImageAspectRatio(baseModel, body)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
-	body = stripVertexOpenAIResponsesToolCallIDs(body, from.String())
 	body = signature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
 	isCountTokens := false
@@ -303,8 +305,11 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
-	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body,
-		originalTranslated, requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier())
+	body = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", body,
+		originalTranslated, requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
+	body = stripVertexOpenAIResponsesToolCallIDs(body, from.String())
 
 	return &vertexGeminiBody{responseFormat: cliproxyexecutor.ResponseFormatOrSource(opts), to: to, body: body}, nil
 }
@@ -422,9 +427,7 @@ func (e *GeminiVertexExecutor) CountTokens(
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
 	countMetadata := make(map[string]any, len(req.Metadata)+1)
-	for key, value := range req.Metadata {
-		countMetadata[key] = value
-	}
+	maps.Copy(countMetadata, req.Metadata)
 	countMetadata["action"] = "countTokens"
 	req.Metadata = countMetadata
 
@@ -465,6 +468,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 
 	var body []byte
@@ -482,9 +486,11 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 			originalImagen, _ = convertToImagenRequest(opts.OriginalRequest)
 		}
 		body, _ = sjson.DeleteBytes(imagenBody, "session_id")
-		body = applyPayloadConfigWithRequest(e.cfg, baseModel, sdktranslator.FormatGemini.String(),
+		body = applyPayloadConfigWithRequest(
+			e.cfg, baseModel, sdktranslator.FormatGemini.String(),
 			opts.SourceFormat.String(), "", body, originalImagen, payloadRequestedModel(opts, req.Model),
-			payloadRequestPath(opts), opts.Headers, e.Identifier())
+			payloadRequestPath(opts), opts.Headers, e.Identifier(),
+		)
 		from = cliproxyexecutor.ResponseFormatOrSource(opts)
 		to = sdktranslator.FromString("gemini")
 	} else {
@@ -532,7 +538,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
-		recordAPIResponseError(ctx, e.cfg, errDo)
+		recordAPIResponseError(ctx, e.cfg, errDo, httpResp)
 		return resp, errDo
 	}
 	defer func() {
@@ -540,7 +546,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 			log.Errorf("vertex executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -591,6 +597,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 
 	prepared, errPrep := e.prepareVertexGeminiBody(ctx, req, opts, baseModel, false)
@@ -633,7 +640,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
-		recordAPIResponseError(ctx, e.cfg, errDo)
+		recordAPIResponseError(ctx, e.cfg, errDo, httpResp)
 		return resp, errDo
 	}
 	defer func() {
@@ -641,7 +648,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 			log.Errorf("vertex executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -685,6 +692,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 
 	prepared, errPrep := e.prepareVertexGeminiBody(ctx, req, opts, baseModel, true)
@@ -740,6 +748,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 
 	prepared, errPrep := e.prepareVertexGeminiBody(ctx, req, opts, baseModel, true)
@@ -796,10 +805,10 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 ) (*cliproxyexecutor.StreamResult, error) {
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
-		recordAPIResponseError(ctx, e.cfg, errDo)
+		recordAPIResponseError(ctx, e.cfg, errDo, httpResp)
 		return nil, errDo
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -828,7 +837,7 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 		defer func() {
 			if errStream := streamError(nil); errStream != nil {
 				recordAPIResponseError(ctx, e.cfg, errStream)
-				reporter.publishFailure(ctx, errStream)
+				reporter.publishFailureWithDetail(ctx, streamUsage.detail, errStream)
 				return
 			}
 			publishCtx := ctx
@@ -846,6 +855,7 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		var param any
+		inputTokensHandled := opts.SourceFormat != sdktranslator.FormatClaude || from != sdktranslator.FormatClaude
 		receivedResponse := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -864,11 +874,12 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 			lines := sdktranslator.TranslateStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
+			lines = estimateClaudeStreamInputTokens(ctx, lines, opts.OriginalRequest, &inputTokensHandled)
 			for i := range lines {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
 					if errStream := streamError(scanner); errStream != nil {
 						recordAPIResponseError(ctx, e.cfg, errStream)
-						reporter.publishFailure(ctx, errStream)
+						reporter.publishFailureWithDetail(ctx, streamUsage.detail, errStream)
 					}
 					return
 				}
@@ -885,12 +896,16 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 		}
 		if errScan := streamError(scanner); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx, errScan)
+			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 			return
 		}
 		if !receivedResponse {
-			errEmpty := markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "gemini executor: empty upstream stream"})
+			errEmpty := markResponseStarted(
+				statusErr{
+					code: http.StatusBadGateway, msg: "gemini executor: empty upstream stream",
+				},
+			)
 			recordAPIResponseError(ctx, e.cfg, errEmpty)
 			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errEmpty)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errEmpty})
@@ -899,11 +914,12 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 		lines := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
+		lines = estimateClaudeStreamInputTokens(ctx, lines, opts.OriginalRequest, &inputTokensHandled)
 		for i := range lines {
 			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
 				if errStream := streamError(scanner); errStream != nil {
 					recordAPIResponseError(ctx, e.cfg, errStream)
-					reporter.publishFailure(ctx, errStream)
+					reporter.publishFailureWithDetail(ctx, streamUsage.detail, errStream)
 				}
 				return
 			}
@@ -964,7 +980,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
-		recordAPIResponseError(ctx, e.cfg, errDo)
+		recordAPIResponseError(ctx, e.cfg, errDo, httpResp)
 		return cliproxyexecutor.Response{}, errDo
 	}
 	defer func() {
@@ -972,7 +988,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 			log.Errorf("vertex executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -1033,7 +1049,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
-		recordAPIResponseError(ctx, e.cfg, errDo)
+		recordAPIResponseError(ctx, e.cfg, errDo, httpResp)
 		return cliproxyexecutor.Response{}, errDo
 	}
 	defer func() {
@@ -1041,7 +1057,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 			log.Errorf("vertex executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)

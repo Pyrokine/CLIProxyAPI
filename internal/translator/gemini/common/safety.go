@@ -80,7 +80,11 @@ func CleanToolSchemas(rawJSON []byte) []byte {
 							if !schema.Exists() {
 								continue
 							}
-							cleaned := util.CleanJSONSchemaForGemini(schema.Raw)
+							clean := util.CleanJSONSchemaForGemini
+							if schemaKey == "parametersJsonSchema" {
+								clean = util.CleanJSONSchemaForGeminiJSONSchema
+							}
+							cleaned := clean(schema.Raw)
 							if cleaned == schema.Raw {
 								continue
 							}

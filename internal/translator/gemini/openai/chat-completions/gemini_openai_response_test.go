@@ -49,7 +49,8 @@ func TestConvertGeminiResponseToOpenAINonStreamKeepsAssistantRole(t *testing.T) 
 }
 
 func TestConvertGeminiResponseToOpenAIStreamingSetsAssistantRoleOnce(t *testing.T) {
-	input := []byte(`{"candidates":[{"index":0,"content":{"parts":[{"text":"hello"},{"functionCall":{"name":"lookup","args":{}}},{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}}]}`)
+	input := []byte((`{"candidates":[{"index":0,"content":{"parts":[{"text":"hello"},{"functionCall":{"name":"` +
+		`lookup","args":{}}},{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}}]}`))
 	var param any
 
 	outputs := convertGeminiResponseToOpenAI(
@@ -79,7 +80,8 @@ func TestConvertGeminiResponseToOpenAIStreamingSetsAssistantRoleOnce(t *testing.
 }
 
 func TestConvertGeminiResponseToOpenAIValidatesUsageBoundaries(t *testing.T) {
-	response := []byte(`{"usageMetadata":{"promptTokenCount":-1,"candidatesTokenCount":7,"thoughtsTokenCount":1.5,"totalTokenCount":"8","cachedContentTokenCount":-3}}`)
+	response := []byte((`{"usageMetadata":{"promptTokenCount":-1,"candidatesTokenCount":7,"thoughtsTokenCount"` +
+		`:1.5,"totalTokenCount":"8","cachedContentTokenCount":-3}}`))
 	var param any
 	stream := convertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, response, &param)
 	if len(stream) != 1 {
@@ -106,7 +108,8 @@ func TestConvertGeminiResponseToOpenAIValidatesUsageBoundaries(t *testing.T) {
 }
 
 func TestConvertGeminiResponseToOpenAIPreservesTextAndAudioTranscriptionOrder(t *testing.T) {
-	response := []byte(`{"candidates":[{"index":0,"content":{"parts":[{"text":"first "},{"audioTranscription":{"text":"second "}},{"text":"third"}]}}]}`)
+	response := []byte((`{"candidates":[{"index":0,"content":{"parts":[{"text":"first "},{"audi` +
+		`oTranscription":{"text":"second "}},{"text":"third"}]}}]}`))
 	var param any
 	stream := convertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, response, &param)
 	if len(stream) != 1 || gjson.GetBytes(stream[0], "choices.0.delta.content").String() != "first second third" {
@@ -125,7 +128,9 @@ func TestConvertGeminiResponseToOpenAIAccumulatesWrappedStreamMetadata(t *testin
 	var param any
 	first := convertGeminiResponseToOpenAI(
 		context.Background(), "fallback", nil, nil,
-		[]byte(`{"response":{"responseId":"response-1","modelVersion":"gemini-model","usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"thoughtsTokenCount":4,"totalTokenCount":9}}}`),
+		[]byte((`{"response":{"responseId":"response-1","modelVersion":"gemini-model","` +
+			`usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"thought` +
+			`sTokenCount":4,"totalTokenCount":9}}}`)),
 		&param,
 	)
 	if len(first) != 1 {
@@ -153,9 +158,13 @@ func TestConvertGeminiResponseToOpenAIAccumulatesWrappedStreamMetadata(t *testin
 func TestGeminiFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	var param any
 	first := convertGeminiResponseToOpenAI(
-		context.Background(), "gemini-2.5-pro", nil, nil, []byte(`{
-		"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"x"}}}]},"finishReason":"STOP"}]
-	}`), &param,
+		context.Background(),
+		"gemini-2.5-pro",
+		nil,
+		nil,
+		[]byte(("{\n\t\t\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"" +
+			"lookup\",\"args\":{\"q\":\"x\"}}}]},\"finishReason\":\"STOP\"}]\n\t}")),
+		&param,
 	)
 	if len(first) != 1 {
 		t.Fatalf("first chunks = %d, want 1", len(first))

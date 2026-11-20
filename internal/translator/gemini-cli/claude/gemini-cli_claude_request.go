@@ -27,6 +27,7 @@ func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, stream boo
 func convertClaudeRequestToCLIChecked(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
 	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
+	nameMap := util.SanitizedFunctionNameMap(rawJSON)
 
 	// Build output Gemini CLI request JSON
 	out := []byte(`{"model":"","request":{"contents":[]}}`)
@@ -69,7 +70,9 @@ func convertClaudeRequestToCLIChecked(modelName string, inputRawJSON []byte, _ b
 		flushUserRun := func() {
 			merged := translatorcommon.MergeAdjacentGeminiContents(contentItems[userRunStart:])
 			if len(merged) > 0 {
-				parts := translatorcommon.AlignGeminiFunctionResponses(gjson.GetBytes(merged[0], "parts"), pendingToolUseIDs)
+				parts := translatorcommon.AlignGeminiFunctionResponses(
+					gjson.GetBytes(merged[0], "parts"), pendingToolUseIDs,
+				)
 				merged[0], _ = sjson.SetRawBytes(merged[0], "parts", []byte(parts.Raw))
 			}
 			contentItems = append(contentItems[:userRunStart], merged...)
@@ -108,7 +111,9 @@ func convertClaudeRequestToCLIChecked(modelName string, inputRawJSON []byte, _ b
 								contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
 							case "tool_use":
-								functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
+								functionName := util.MapSanitizedFunctionName(
+									nameMap, contentResult.Get("name").String(),
+								)
 								toolUseID := contentResult.Get("id").String()
 								functionArgs := contentResult.Get("input").String()
 								argsResult := gjson.Parse(functionArgs)
@@ -143,13 +148,21 @@ func convertClaudeRequestToCLIChecked(modelName string, inputRawJSON []byte, _ b
 								result, images := translatorcommon.ClaudeToolResultContent(contentResult.Get("content"))
 								part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
 								part, _ = sjson.SetBytes(part, "functionResponse.id", toolCallID)
-								part, _ = sjson.SetBytes(part, "functionResponse.name", util.SanitizeFunctionName(funcName))
-								part = translatorcommon.SetGeminiFunctionResponseRaw(part, "functionResponse.response.result", result.Raw)
+								part, _ = sjson.SetBytes(
+									part, "functionResponse.name", util.MapSanitizedFunctionName(nameMap, funcName),
+								)
+								part = translatorcommon.SetGeminiFunctionResponseRaw(
+									part, "functionResponse.response.result", result.Raw,
+								)
 								contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 								for _, source := range images {
 									imagePart := []byte(`{"inlineData":{"mime_type":"","data":""}}`)
-									imagePart, _ = sjson.SetBytes(imagePart, "inlineData.mime_type", source.Get("media_type").String())
-									imagePart, _ = sjson.SetBytes(imagePart, "inlineData.data", source.Get("data").String())
+									imagePart, _ = sjson.SetBytes(
+										imagePart, "inlineData.mime_type", source.Get("media_type").String(),
+									)
+									imagePart, _ = sjson.SetBytes(
+										imagePart, "inlineData.data", source.Get("data").String(),
+									)
 									contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", imagePart)
 								}
 
@@ -176,7 +189,10 @@ func convertClaudeRequestToCLIChecked(modelName string, inputRawJSON []byte, _ b
 							rawParts = append(rawParts, []byte(part.Raw))
 						}
 						drops.EndTurn(translatorcommon.CountSendableGeminiParts(rawParts))
-						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts", translatorcommon.JoinRawArray(translatorcommon.ReorderGeminiUserParts(rawParts)))
+						contentJSON, _ = sjson.SetRawBytes(
+							contentJSON, "parts",
+							translatorcommon.JoinRawArray(translatorcommon.ReorderGeminiUserParts(rawParts)),
+						)
 					}
 					if len(parts) > 0 {
 						contentItems = append(contentItems, contentJSON)
@@ -213,7 +229,9 @@ func convertClaudeRequestToCLIChecked(modelName string, inputRawJSON []byte, _ b
 					tool, _ = sjson.DeleteBytes(tool, "cache_control")
 					tool, _ = sjson.DeleteBytes(tool, "defer_loading")
 					tool, _ = sjson.DeleteBytes(tool, "eager_input_streaming")
-					tool, _ = sjson.SetBytes(tool, "name", util.SanitizeFunctionName(toolResult.Get("name").String()))
+					tool, _ = sjson.SetBytes(
+						tool, "name", util.MapSanitizedFunctionName(nameMap, toolResult.Get("name").String()),
+					)
 					if gjson.ValidBytes(tool) && gjson.ParseBytes(tool).IsObject() {
 						if !hasTools {
 							out, _ = sjson.SetRawBytes(out, "request.tools", []byte(`[{"functionDeclarations":[]}]`))
@@ -253,7 +271,8 @@ func convertClaudeRequestToCLIChecked(modelName string, inputRawJSON []byte, _ b
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
 			if toolChoiceName != "" {
 				out, _ = sjson.SetBytes(
-					out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)},
+					out, "request.toolConfig.functionCallingConfig.allowedFunctionNames",
+					[]string{util.MapSanitizedFunctionName(nameMap, toolChoiceName)},
 				)
 			}
 		}

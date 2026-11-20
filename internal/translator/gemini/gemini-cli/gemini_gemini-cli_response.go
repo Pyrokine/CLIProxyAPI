@@ -40,7 +40,8 @@ func convertGeminiResponseToGeminiCLI(_ context.Context, _ string, _, _, rawJSON
 	return [][]byte{rawJSON}
 }
 
-// convertGeminiResponseToGeminiCLINonStream converts a non-streaming Gemini response to a non-streaming Gemini CLI response.
+// convertGeminiResponseToGeminiCLINonStream converts a non-streaming Gemini response to a non-streaming Gemini CLI
+// response.
 //
 // Parameters:
 //   - ctx: The context for the request.
@@ -50,7 +51,12 @@ func convertGeminiResponseToGeminiCLI(_ context.Context, _ string, _, _, rawJSON
 //
 // Returns:
 //   - []byte: A Gemini CLI-compatible JSON response.
-func convertGeminiResponseToGeminiCLINonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+func convertGeminiResponseToGeminiCLINonStream(
+	_ context.Context,
+	_ string,
+	_, _, rawJSON []byte,
+	_ *any,
+) []byte {
 	rawJSON, _ = sjson.SetRawBytes([]byte(`{"response":{}}`), "response", rawJSON)
 	return rawJSON
 }

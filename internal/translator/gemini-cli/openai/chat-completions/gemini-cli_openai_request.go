@@ -96,7 +96,8 @@ func convertOpenAIRequestToGeminiCLIChecked(modelName string, inputRawJSON []byt
 	}
 
 	// OpenRouter-style image_config support
-	// If the input uses top-level image_config.aspect_ratio, map it into request.generationConfig.imageConfig.aspectRatio.
+	// If the input uses top-level image_config.aspect_ratio, map it into
+	// request.generationConfig.imageConfig.aspectRatio.
 	if imgCfg := gjson.GetBytes(rawJSON, "image_config"); imgCfg.Exists() && imgCfg.IsObject() {
 		if ar := imgCfg.Get("aspect_ratio"); ar.Exists() && ar.Type == gjson.String {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.imageConfig.aspectRatio", ar.Str)
@@ -148,14 +149,16 @@ func convertOpenAIRequestToGeminiCLIChecked(modelName string, inputRawJSON []byt
 		for i := range arr {
 			m := arr[i]
 			role := m.Get("role").String()
-			content := m.Get("content")
+			content := translatorcommon.OpenAIMessageContentWithImages(m)
 
 			if (role == "system" || role == "developer") && len(arr) > 1 {
 				// system -> request.systemInstruction as a user message style
 				if content.Type == gjson.String {
 					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
 					out, _ = sjson.SetBytes(
-						out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), content.String(),
+						out,
+						fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex),
+						content.String(),
 					)
 					systemPartIndex++
 				} else if content.IsObject() && content.Get("type").String() == "text" {
@@ -196,11 +199,15 @@ func convertOpenAIRequestToGeminiCLIChecked(modelName string, inputRawJSON []byt
 								partCount++
 							}
 						case "image_url":
-							mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("image_url.url").String())
+							mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(
+								"", "", item.Get("image_url.url").String(),
+							)
 							if ok && strings.HasPrefix(mimeType, "image/") {
 								node, _ = sjson.SetBytes(node, partIndex+".inlineData.mime_type", mimeType)
 								node, _ = sjson.SetBytes(node, partIndex+".inlineData.data", data)
-								node, _ = sjson.SetBytes(node, partIndex+".thoughtSignature", geminiCLIFunctionThoughtSignature)
+								node, _ = sjson.SetBytes(
+									node, partIndex+".thoughtSignature", geminiCLIFunctionThoughtSignature,
+								)
 								partCount++
 							} else {
 								drops.Drop("image_url")
@@ -249,9 +256,11 @@ func convertOpenAIRequestToGeminiCLIChecked(modelName string, inputRawJSON []byt
 									data := pieces[1][7:]
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									node, _ = sjson.SetBytes(
-										node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature,
-									)
+									signature := item.Get("extra_content.google.thought_signature").String()
+									if signature == "" {
+										signature = geminiCLIFunctionThoughtSignature
+									}
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", signature)
 									p++
 								}
 							}
@@ -271,7 +280,9 @@ func convertOpenAIRequestToGeminiCLIChecked(modelName string, inputRawJSON []byt
 						functionName := tc.Get("function.name").String()
 						functionArguments := tc.Get("function.arguments").String()
 						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", functionName)
-						node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(functionArguments))
+						node, _ = sjson.SetRawBytes(
+							node, "parts."+itoa(p)+".functionCall.args", []byte(functionArguments),
+						)
 						node, _ = sjson.SetBytes(
 							node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature,
 						)
@@ -325,18 +336,25 @@ func convertOpenAIRequestToGeminiCLIChecked(modelName string, inputRawJSON []byt
 						renamed, errRename := util.RenameKey(fn.Raw, "parameters", "parametersJsonSchema")
 						if errRename != nil {
 							log.Warnf(
-								"Failed to rename parameters for tool '%s': %v", fn.Get("name").String(), errRename,
+								"Failed to rename parameters for tool '%s': %v",
+								fn.Get("name").String(),
+								errRename,
 							)
 							var errSet error
 							fnRaw, errSet = sjson.SetBytes(fnRaw, "parametersJsonSchema.type", "object")
 							if errSet != nil {
 								log.Warnf(
-									"Failed to set default schema type for tool '%s': %v", fn.Get("name").String(),
+									"Failed to set default schema type for tool '%s': %v",
+									fn.Get("name").String(),
 									errSet,
 								)
 								continue
 							}
-							fnRaw, errSet = sjson.SetRawBytes(fnRaw, "parametersJsonSchema.properties", []byte(`{}`))
+							fnRaw, errSet = sjson.SetRawBytes(
+								fnRaw,
+								"parametersJsonSchema.properties",
+								[]byte(`{}`),
+							)
 							if errSet != nil {
 								log.Warnf(
 									"Failed to set default schema properties for tool '%s': %v",
@@ -367,11 +385,19 @@ func convertOpenAIRequestToGeminiCLIChecked(modelName string, inputRawJSON []byt
 					}
 					fnRaw, _ = sjson.DeleteBytes(fnRaw, "strict")
 					if !hasFunction {
-						functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", []byte("[]"))
+						functionToolNode, _ = sjson.SetRawBytes(
+							functionToolNode,
+							"functionDeclarations",
+							[]byte("[]"),
+						)
 					}
 					tmp, errSet := sjson.SetRawBytes(functionToolNode, "functionDeclarations.-1", fnRaw)
 					if errSet != nil {
-						log.Warnf("Failed to append tool declaration for '%s': %v", fn.Get("name").String(), errSet)
+						log.Warnf(
+							"Failed to append tool declaration for '%s': %v",
+							fn.Get("name").String(),
+							errSet,
+						)
 						continue
 					}
 					functionToolNode = tmp
@@ -409,7 +435,8 @@ func convertOpenAIRequestToGeminiCLIChecked(modelName string, inputRawJSON []byt
 				urlContextNodes = append(urlContextNodes, urlToolNode)
 			}
 		}
-		if hasFunction || len(googleSearchNodes) > 0 || len(codeExecutionNodes) > 0 || len(urlContextNodes) > 0 {
+		if hasFunction || len(googleSearchNodes) > 0 || len(codeExecutionNodes) > 0 ||
+			len(urlContextNodes) > 0 {
 			toolsNode := []byte("[]")
 			if hasFunction {
 				toolsNode, _ = sjson.SetRawBytes(toolsNode, "-1", functionToolNode)

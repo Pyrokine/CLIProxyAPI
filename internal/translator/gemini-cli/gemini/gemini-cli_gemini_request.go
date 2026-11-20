@@ -3,6 +3,8 @@
 // extracting model information, system instructions, message contents, and tool declarations.
 // The package performs JSON data transformation to ensure compatibility
 // between Gemini CLI API format and Gemini API's expected format.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (
@@ -254,7 +256,20 @@ func fixCLIToolResponse(input string) (string, error) {
 					}
 				}
 
-				return true // Skip adding this content, responses are merged
+				remaining := []byte(`[]`)
+				parts.ForEach(
+					func(_, part gjson.Result) bool {
+						if !part.Get("functionResponse").Exists() {
+							remaining, _ = sjson.SetRawBytes(remaining, "-1", []byte(part.Raw))
+						}
+						return true
+					},
+				)
+				if gjson.GetBytes(remaining, "#").Int() > 0 {
+					content, _ := sjson.SetRawBytes([]byte(value.Raw), "parts", remaining)
+					contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", content)
+				}
+				return true
 			}
 
 			// If this is a model with function calls, create a new group

@@ -26,7 +26,9 @@ func init() {
 			NonStream: convertGeminiResponseToInteractionsNonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatInteractions, sdktranslator.FormatGemini, convertInteractionsRequestToGeminiChecked)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatInteractions, sdktranslator.FormatGemini, convertInteractionsRequestToGeminiChecked,
+	)
 	translator.Register(
 		constant.Gemini,
 		constant.Interactions,
@@ -36,5 +38,7 @@ func init() {
 			NonStream: convertInteractionsResponseToGeminiNonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatGemini, sdktranslator.FormatInteractions, convertGeminiRequestToInteractionsChecked)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatGemini, sdktranslator.FormatInteractions, convertGeminiRequestToInteractionsChecked,
+	)
 }

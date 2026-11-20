@@ -7,6 +7,52 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+//goland:noinspection GoUnusedGlobalVariable
+var (
+	leadingGeminiUserContentOutput  []byte
+	trailingGeminiUserContentOutput []byte
+)
+
+func TestEnsureGeminiLeadingUserContentReusesLargeValidPayload(t *testing.T) {
+	input := []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"video/mp4","data":"` +
+		strings.Repeat("A", 4<<20) + `"}}]}]}`)
+	output := EnsureGeminiLeadingUserContent(input, "contents")
+	if &output[0] != &input[0] {
+		t.Fatal("valid request should reuse the input payload")
+	}
+	result := testing.Benchmark(
+		func(b *testing.B) {
+			for b.Loop() {
+				leadingGeminiUserContentOutput = EnsureGeminiLeadingUserContent(input, "contents")
+			}
+		},
+	)
+	t.Logf("valid 4 MiB leading request: %d bytes/op", result.AllocedBytesPerOp())
+	if allocated := result.AllocedBytesPerOp(); allocated >= 1<<20 {
+		t.Fatalf("valid 4 MiB request allocated %d bytes/op, want less than 1 MiB", allocated)
+	}
+}
+
+func TestEnsureGeminiTrailingUserContentReusesLargeValidPayload(t *testing.T) {
+	input := []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"video/mp4","data":"` +
+		strings.Repeat("A", 4<<20) + `"}}]}]}`)
+	output := EnsureGeminiTrailingUserContent(input, "contents")
+	if &output[0] != &input[0] {
+		t.Fatal("valid request should reuse the input payload")
+	}
+	result := testing.Benchmark(
+		func(b *testing.B) {
+			for b.Loop() {
+				trailingGeminiUserContentOutput = EnsureGeminiTrailingUserContent(input, "contents")
+			}
+		},
+	)
+	t.Logf("valid 4 MiB trailing request: %d bytes/op", result.AllocedBytesPerOp())
+	if allocated := result.AllocedBytesPerOp(); allocated >= 1<<20 {
+		t.Fatalf("valid 4 MiB request allocated %d bytes/op, want less than 1 MiB", allocated)
+	}
+}
+
 func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -21,8 +67,10 @@ func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 			wantRoles: "user",
 		},
 		{
-			name:      "model first prepends empty user",
-			inputJSON: `{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text":"continue"}]}]}`,
+			name: "model first prepends empty user",
+			inputJSON: `{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":` +
+				`"user","parts":[{"text":` +
+				`"continue"}]}]}`,
 			path:      "contents",
 			wantRoles: "user,model,user",
 		},
@@ -37,24 +85,26 @@ func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := []byte(test.inputJSON)
-			output := EnsureGeminiLeadingUserContent(input, test.path)
-			contents := gjson.GetBytes(output, test.path).Array()
-			roles := make([]string, 0, len(contents))
-			for _, content := range contents {
-				roles = append(roles, content.Get("role").String())
-			}
-			if got := strings.Join(roles, ","); got != test.wantRoles {
-				t.Fatalf("roles = %q, want %q; output=%s", got, test.wantRoles, output)
-			}
-			if strings.HasPrefix(test.wantRoles, "user,model") {
-				text := gjson.GetBytes(output, test.path+".0.parts.0.text")
-				if !text.Exists() || text.String() != "" {
-					t.Fatalf("leading empty user turn missing: %s", output)
+		t.Run(
+			test.name, func(t *testing.T) {
+				input := []byte(test.inputJSON)
+				output := EnsureGeminiLeadingUserContent(input, test.path)
+				contents := gjson.GetBytes(output, test.path).Array()
+				roles := make([]string, 0, len(contents))
+				for _, content := range contents {
+					roles = append(roles, content.Get("role").String())
 				}
-			}
-		})
+				if got := strings.Join(roles, ","); got != test.wantRoles {
+					t.Fatalf("roles = %q, want %q; output=%s", got, test.wantRoles, output)
+				}
+				if strings.HasPrefix(test.wantRoles, "user,model") {
+					text := gjson.GetBytes(output, test.path+".0.parts.0.text")
+					if !text.Exists() || text.String() != "" {
+						t.Fatalf("leading empty user turn missing: %s", output)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -72,8 +122,10 @@ func TestEnsureGeminiTrailingUserContent(t *testing.T) {
 			wantRoles: "user",
 		},
 		{
-			name:      "model last appends empty user",
-			inputJSON: `{"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"text":"answer"}]}]}`,
+			name: "model last appends empty user",
+			inputJSON: `{"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":` +
+				`"model","parts":[{"text":` +
+				`"answer"}]}]}`,
 			path:      "contents",
 			wantRoles: "user,model,user",
 		},
@@ -84,8 +136,10 @@ func TestEnsureGeminiTrailingUserContent(t *testing.T) {
 			wantRoles: "assistant,user",
 		},
 		{
-			name:      "trailing function response unchanged",
-			inputJSON: `{"contents":[{"role":"model","parts":[{"functionResponse":{"name":"run","response":{"result":"ok"}}}]}]}`,
+			name: "trailing function response unchanged",
+			inputJSON: `{"contents":[{"role":"model","parts":[{"functionResponse":{"name":` +
+				`"run","response":{"result":` +
+				`"ok"}}}]}]}`,
 			path:      "contents",
 			wantRoles: "model",
 		},
@@ -94,29 +148,31 @@ func TestEnsureGeminiTrailingUserContent(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			output := EnsureGeminiTrailingUserContent([]byte(test.inputJSON), test.path)
-			contents := gjson.GetBytes(output, test.path).Array()
-			roles := make([]string, 0, len(contents))
-			for _, content := range contents {
-				roles = append(roles, content.Get("role").String())
-			}
-			if got := strings.Join(roles, ","); got != test.wantRoles {
-				t.Fatalf("roles = %q, want %q; output=%s", got, test.wantRoles, output)
-			}
-			if strings.HasSuffix(test.wantRoles, ",user") {
-				last := contents[len(contents)-1]
-				text := last.Get("parts.0.text")
-				if !text.Exists() || text.String() != "" {
-					t.Fatalf("trailing empty user turn missing: %s", output)
+		t.Run(
+			test.name, func(t *testing.T) {
+				output := EnsureGeminiTrailingUserContent([]byte(test.inputJSON), test.path)
+				contents := gjson.GetBytes(output, test.path).Array()
+				roles := make([]string, 0, len(contents))
+				for _, content := range contents {
+					roles = append(roles, content.Get("role").String())
 				}
-			}
-		})
+				if got := strings.Join(roles, ","); got != test.wantRoles {
+					t.Fatalf("roles = %q, want %q; output=%s", got, test.wantRoles, output)
+				}
+				if strings.HasSuffix(test.wantRoles, ",user") {
+					last := contents[len(contents)-1]
+					text := last.Get("parts.0.text")
+					if !text.Exists() || text.String() != "" {
+						t.Fatalf("trailing empty user turn missing: %s", output)
+					}
+				}
+			},
+		)
 	}
 }
 
 func TestEnsureGeminiBoundaryUserContent(t *testing.T) {
-	output := EnsureGeminiBoundaryUserContent(
+	output := ensureGeminiBoundaryUserContent(
 		[]byte(`{"contents":[{"role":"model","parts":[{"text":"answer"}]}]}`),
 		"contents",
 	)
@@ -137,7 +193,7 @@ func TestEnsureGeminiBoundaryUserContent(t *testing.T) {
 
 func TestEnsureGeminiBoundaryUserContentReusesValidPayload(t *testing.T) {
 	input := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
-	output := EnsureGeminiBoundaryUserContent(input, "contents")
+	output := ensureGeminiBoundaryUserContent(input, "contents")
 	if &output[0] != &input[0] {
 		t.Fatal("valid request should reuse the input payload")
 	}

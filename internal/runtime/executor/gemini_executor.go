@@ -164,6 +164,7 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 	apiKey, bearer := geminiCreds(auth)
 
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
+	ctx = reporter.withContext(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
@@ -210,25 +211,27 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
 	}
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
+	endpointURL := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
 	if isStream {
 		if opts.Alt == "" {
-			url = url + "?alt=sse"
+			endpointURL = endpointURL + "?alt=sse"
 		} else {
-			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
+			endpointURL = endpointURL + fmt.Sprintf("?$alt=%s", opts.Alt)
 		}
 	} else if opts.Alt != "" && action != "countTokens" {
-		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
+		endpointURL = endpointURL + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
 
 	body, _ = sjson.DeleteBytes(body, "session_id")
-	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body,
-		originalTranslated, requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier())
+	body = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", body,
+		originalTranslated, requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
 	body = capGeminiMaxOutputTokens(body, baseModel)
 	body = signature.SanitizeGeminiRequestThoughtSignatures(body, "contents", isCompat)
 	reporter.setTranslatedReasoningEffort(body, to.String())
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +244,7 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 	}
 	util.ApplyCredentialHeader(httpReq, credentialName, credentialValue)
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
-	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
+	recordUpstreamRequest(ctx, e.cfg, endpointURL, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
 	return &geminiRequest{
 		responseFormat: cliproxyexecutor.ResponseFormatOrSource(opts),
@@ -271,12 +274,13 @@ func (e *GeminiExecutor) Execute(
 	if err != nil {
 		return resp, err
 	}
+	ctx = prepared.reporter.withContext(ctx)
 	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return resp, err
 	}
 	defer func() {
@@ -284,7 +288,7 @@ func (e *GeminiExecutor) Execute(
 			log.Errorf("gemini executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -337,15 +341,16 @@ func (e *GeminiExecutor) ExecuteStream(
 	if err != nil {
 		return nil, err
 	}
+	ctx = prepared.reporter.withContext(ctx)
 	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, httpResp)
 		return nil, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -370,7 +375,7 @@ func (e *GeminiExecutor) ExecuteStream(
 		defer func() {
 			if errStream := scannerOrContextError(ctx, nil); errStream != nil {
 				recordAPIResponseError(ctx, e.cfg, errStream)
-				reporter.publishFailure(ctx, errStream)
+				reporter.publishFailureWithDetail(ctx, streamUsage.detail, errStream)
 			} else {
 				streamUsage.publish(ctx, reporter)
 				reporter.ensurePublished(ctx)
@@ -382,6 +387,7 @@ func (e *GeminiExecutor) ExecuteStream(
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		var param any
+		inputTokensHandled := opts.SourceFormat != sdktranslator.FormatClaude || from != sdktranslator.FormatClaude
 		receivedResponse := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -401,11 +407,12 @@ func (e *GeminiExecutor) ExecuteStream(
 			lines := sdktranslator.TranslateStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(payload), &param,
 			)
+			lines = estimateClaudeStreamInputTokens(ctx, lines, opts.OriginalRequest, &inputTokensHandled)
 			for i := range lines {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
 					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
 						recordAPIResponseError(ctx, e.cfg, errStream)
-						reporter.publishFailure(ctx, errStream)
+						reporter.publishFailureWithDetail(ctx, streamUsage.detail, errStream)
 					}
 					return
 				}
@@ -419,12 +426,16 @@ func (e *GeminiExecutor) ExecuteStream(
 		}
 		if errScan := markResponseStarted(scanner.Err()); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx, errScan)
+			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 			return
 		}
 		if !receivedResponse {
-			errEmpty := markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "gemini executor: empty upstream stream"})
+			errEmpty := markResponseStarted(
+				statusErr{
+					code: http.StatusBadGateway, msg: "gemini executor: empty upstream stream",
+				},
+			)
 			recordAPIResponseError(ctx, e.cfg, errEmpty)
 			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errEmpty)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errEmpty})
@@ -433,11 +444,12 @@ func (e *GeminiExecutor) ExecuteStream(
 		lines := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
+		lines = estimateClaudeStreamInputTokens(ctx, lines, opts.OriginalRequest, &inputTokensHandled)
 		for i := range lines {
 			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
 				if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
 					recordAPIResponseError(ctx, e.cfg, errStream)
-					reporter.publishFailure(ctx, errStream)
+					reporter.publishFailureWithDetail(ctx, streamUsage.detail, errStream)
 				}
 				return
 			}
@@ -489,7 +501,9 @@ func (e *GeminiExecutor) prepareInteractionsRequest(
 		}
 		requestURL = baseURL + "/v1beta1/interactions"
 		if projectID = strings.TrimSpace(projectID); projectID != "" {
-			requestURL = fmt.Sprintf("%s/v1beta1/projects/%s/locations/global/interactions", baseURL, url.PathEscape(projectID))
+			requestURL = fmt.Sprintf(
+				"%s/v1beta1/projects/%s/locations/global/interactions", baseURL, url.PathEscape(projectID),
+			)
 		}
 		if stream {
 			requestURL += "?alt=sse"
@@ -521,6 +535,7 @@ func (e *GeminiExecutor) executeInteractions(
 ) (resp cliproxyexecutor.Response, err error) {
 	targetName := thinking.ParseSuffix(req.Model).ModelName
 	reporter := newUsageReporter(ctx, e, targetName, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 	isCompat := helps.APIKeyModelIsCompat(req)
 
@@ -553,6 +568,10 @@ func (e *GeminiExecutor) executeInteractions(
 		opts.Headers,
 		e.Identifier(),
 	)
+
+	if err := bindFinalModelContext(&req, auth, opts, gjson.GetBytes(body, "model").String()); err != nil {
+		return resp, err
+	}
 	body = sanitizeGeminiInteractionsUnsupportedInputIDs(body)
 	reporter.setTranslatedReasoningEffort(body, sdktranslator.FormatInteractions.String())
 
@@ -565,7 +584,7 @@ func (e *GeminiExecutor) executeInteractions(
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
-		recordAPIResponseError(ctx, e.cfg, errDo)
+		recordAPIResponseError(ctx, e.cfg, errDo, httpResp)
 		return resp, errDo
 	}
 	defer func() {
@@ -573,7 +592,7 @@ func (e *GeminiExecutor) executeInteractions(
 			log.Errorf("gemini executor: close interactions response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	data, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if errRead != nil {
 		errRead = markResponseStarted(errRead)
@@ -619,6 +638,7 @@ func (e *GeminiExecutor) executeInteractionsStream(
 ) (_ *cliproxyexecutor.StreamResult, err error) {
 	targetName := thinking.ParseSuffix(req.Model).ModelName
 	reporter := newUsageReporter(ctx, e, targetName, auth)
+	ctx = reporter.withContext(ctx)
 	defer reporter.trackFailure(ctx, &err)
 	isCompat := helps.APIKeyModelIsCompat(req)
 
@@ -651,6 +671,10 @@ func (e *GeminiExecutor) executeInteractionsStream(
 		opts.Headers,
 		e.Identifier(),
 	)
+
+	if err := bindFinalModelContext(&req, auth, opts, gjson.GetBytes(body, "model").String()); err != nil {
+		return nil, err
+	}
 	body = sanitizeGeminiInteractionsUnsupportedInputIDs(body)
 	body = helps.SetBoolIfDifferent(body, "stream", true)
 	reporter.setTranslatedReasoningEffort(body, sdktranslator.FormatInteractions.String())
@@ -664,10 +688,10 @@ func (e *GeminiExecutor) executeInteractionsStream(
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
-		recordAPIResponseError(ctx, e.cfg, errDo)
+		recordAPIResponseError(ctx, e.cfg, errDo, httpResp)
 		return nil, errDo
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone(), httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -685,7 +709,7 @@ func (e *GeminiExecutor) executeInteractionsStream(
 		defer func() {
 			if errStream := scannerOrContextError(ctx, nil); errStream != nil {
 				recordAPIResponseError(ctx, e.cfg, errStream)
-				reporter.publishFailure(ctx, errStream)
+				reporter.publishFailureWithDetail(ctx, streamUsage.detail, errStream)
 			} else {
 				streamUsage.publish(ctx, reporter)
 				reporter.ensurePublished(ctx)
@@ -697,6 +721,8 @@ func (e *GeminiExecutor) executeInteractionsStream(
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		var param any
+		inputTokensHandled := opts.SourceFormat != sdktranslator.FormatClaude ||
+			responseFormat != sdktranslator.FormatClaude
 		var frame []byte
 		sawTerminalEvent := false
 		sendChunk := func(chunk cliproxyexecutor.StreamChunk) bool {
@@ -705,7 +731,7 @@ func (e *GeminiExecutor) executeInteractionsStream(
 			}
 			if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
 				recordAPIResponseError(ctx, e.cfg, errStream)
-				reporter.publishFailure(ctx, errStream)
+				reporter.publishFailureWithDetail(ctx, streamUsage.detail, errStream)
 			}
 			return false
 		}
@@ -731,11 +757,34 @@ func (e *GeminiExecutor) executeInteractionsStream(
 				observeResponseTokenEvent(ctx, payload)
 				reporter.observeResponseModel(payload)
 				detail, hasUsage, hasTier := parseInteractionsStreamUsageState(payload)
-				streamUsage.observe(detail, hasUsage, hasTier)
+				writes := streamUsage.cacheWriteUsage
+				writes.observe(
+					cacheWriteUsageNode(
+						interactionsUsageNode(gjson.ParseBytes(payload)), "cache_creation_tokens",
+						"cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens",
+					), [4]gjson.Result{},
+				)
+				streamUsage.observe(detail, hasUsage, hasTier, writes)
 			}
 			if responseFormat == sdktranslator.FormatInteractions {
 				visibleFrame := append(bytes.TrimRight(rawFrame, "\r\n"), '\n', '\n')
-				return sendChunk(cliproxyexecutor.StreamChunk{Payload: visibleFrame}) && !done
+				if !sendChunk(cliproxyexecutor.StreamChunk{Payload: visibleFrame}) {
+					return false
+				}
+				root := gjson.ParseBytes(payload)
+				errorNode := root.Get("error")
+				if (errorNode.Exists() && errorNode.Type != gjson.Null) || root.Get("status").String() == "failed" ||
+					root.Get("interaction.status").
+						String() ==
+						"failed" || root.Get("event_type").String() == "interaction.failed" ||
+					root.Get("type").String() == "interaction.failed" {
+					errUpstream := newUpstreamStatusErr(http.StatusBadGateway, payload, httpResp.Header)
+					recordAPIResponseError(ctx, e.cfg, errUpstream)
+					reporter.publishFailureWithDetail(ctx, streamUsage.detail, errUpstream)
+					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errUpstream})
+					return false
+				}
+				return !done
 			}
 			if len(payload) == 0 {
 				return true
@@ -750,6 +799,7 @@ func (e *GeminiExecutor) executeInteractionsStream(
 				payload,
 				&param,
 			)
+			lines = estimateClaudeStreamInputTokens(ctx, lines, opts.OriginalRequest, &inputTokensHandled)
 			for i := range lines {
 				if !sendChunk(cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
 					return false
@@ -785,7 +835,7 @@ func (e *GeminiExecutor) executeInteractionsStream(
 					),
 				}
 				recordAPIResponseError(ctx, e.cfg, errFrame)
-				reporter.publishFailure(ctx, errFrame)
+				reporter.publishFailureWithDetail(ctx, streamUsage.detail, errFrame)
 				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errFrame})
 				return
 			}
@@ -796,7 +846,7 @@ func (e *GeminiExecutor) executeInteractionsStream(
 		}
 		if errScan := markResponseStarted(scanner.Err()); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx, errScan)
+			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 			return
 		}
@@ -809,7 +859,7 @@ func (e *GeminiExecutor) executeInteractionsStream(
 				msg:  "gemini interactions stream ended before terminal event",
 			}
 			recordAPIResponseError(ctx, e.cfg, errTerminal)
-			reporter.publishFailure(ctx, errTerminal)
+			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errTerminal)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errTerminal})
 		}
 	}()
@@ -831,7 +881,9 @@ func (e *GeminiExecutor) CountTokens(
 	to := sdktranslator.FromString("gemini")
 	isCompat := helps.APIKeyModelIsCompat(req)
 	if shouldExecuteNativeInteractions(auth, opts) && from == sdktranslator.FormatGemini {
-		if _, err := translateGeminiInteractionsRequestBody(ctx, e.cfg, baseModel, req.Payload, opts, false, isCompat); err != nil {
+		if _, err := translateGeminiInteractionsRequestBody(
+			ctx, e.cfg, baseModel, req.Payload, opts, false, isCompat,
+		); err != nil {
 			return cliproxyexecutor.Response{}, err
 		}
 	}
@@ -864,17 +916,20 @@ func (e *GeminiExecutor) CountTokens(
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
-	translatedReq = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translatedReq,
-		originalTranslated, payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier())
+	translatedReq = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", translatedReq,
+		originalTranslated, payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers,
+		e.Identifier(),
+	)
 	translatedReq = signature.SanitizeGeminiRequestThoughtSignatures(translatedReq, "contents", isCompat)
 	translatedReq = helps.SetStringIfDifferent(translatedReq, "model", baseModel)
 
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "countTokens")
+	endpointURL := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "countTokens")
 
 	requestBody := bytes.NewReader(translatedReq)
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, requestBody)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, requestBody)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -887,16 +942,16 @@ func (e *GeminiExecutor) CountTokens(
 	}
 	util.ApplyCredentialHeader(httpReq, credentialName, credentialValue)
 	applyGeminiHeaders(httpReq, auth, opts.Headers)
-	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translatedReq, e.Identifier(), auth)
+	recordUpstreamRequest(ctx, e.cfg, endpointURL, httpReq.Header.Clone(), translatedReq, e.Identifier(), auth)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		recordAPIResponseError(ctx, e.cfg, err, resp)
 		return cliproxyexecutor.Response{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
+	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone(), resp)
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 	if err != nil {
@@ -914,7 +969,9 @@ func (e *GeminiExecutor) CountTokens(
 	}
 
 	count := gjson.GetBytes(data, "totalTokens").Int()
-	translated := sdktranslator.TranslateTokenCount(respCtx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, data)
+	translated := sdktranslator.TranslateTokenCount(
+		respCtx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, data,
+	)
 	return cliproxyexecutor.Response{Payload: translated, Headers: resp.Header.Clone()}, nil
 }
 
@@ -968,7 +1025,11 @@ func shouldExecuteNativeInteractions(auth *cliproxyauth.Auth, opts cliproxyexecu
 
 func nativeInteractionsSourceFormat(format sdktranslator.Format) bool {
 	switch format {
-	case sdktranslator.FormatInteractions, sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatClaude, sdktranslator.FormatGemini:
+	case sdktranslator.FormatInteractions,
+		sdktranslator.FormatOpenAI,
+		sdktranslator.FormatOpenAIResponse,
+		sdktranslator.FormatClaude,
+		sdktranslator.FormatGemini:
 		return true
 	default:
 		return false
@@ -984,7 +1045,8 @@ func sanitizeGeminiInteractionsUnsupportedInputIDs(body []byte) []byte {
 	}
 	for i, item := range input.Array() {
 		if item.Get("type").String() == "function_call" {
-			if callID := item.Get("call_id"); callID.Type == gjson.String && callID.String() != "" && item.Get("id").String() != callID.String() {
+			if callID := item.Get("call_id"); callID.Type == gjson.String && callID.String() != "" &&
+				item.Get("id").String() == "" {
 				body, _ = sjson.SetBytes(body, fmt.Sprintf("input.%d.id", i), callID.String())
 			}
 			if item.Get("call_id").Exists() {
@@ -1205,7 +1267,10 @@ func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
 					newPartsJson, _ = sjson.SetRaw(
 						newPartsJson,
 						"-1",
-						`{"text": "Based on the following requirements, create an image within the uploaded picture. The new content *MUST* completely cover the entire area of the original picture, maintaining its exact proportions, and *NO* blank areas should appear."}`,
+						`{"text": "Based on the following requirements, create an image within the uploaded `+
+							`picture. The new content *MUST* completely cover the entire area of the `+
+							`original picture, maintaining its exact proportions, and *NO* blank areas `+
+							`should appear."}`,
 					)
 					newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", emptyImagePart)
 
@@ -1231,7 +1296,11 @@ func geminiResponseError(param *any, payloads ...[]byte) error {
 		return err
 	}
 	invalid := func() error {
-		return markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "gemini executor: invalid or failed upstream response"})
+		return markResponseStarted(
+			statusErr{
+				code: http.StatusBadGateway, msg: "gemini executor: invalid or failed upstream response",
+			},
+		)
 	}
 	for _, payload := range payloads {
 		payload = bytes.TrimSpace(payload)
@@ -1265,6 +1334,7 @@ func geminiResponseError(param *any, payloads ...[]byte) error {
 			upstreamError := root.Get("error")
 			if !gjson.ValidBytes(data) || root.Get("type").String() == "response.failed" ||
 				root.Get("status").String() == "failed" || root.Get("response.status").String() == "failed" ||
+				root.Get("interaction.status").String() == "failed" ||
 				(upstreamError.Exists() && upstreamError.Type != gjson.Null) {
 				return invalid()
 			}

@@ -24,46 +24,67 @@ type googlePayloadTransport func(*http.Request) (*http.Response, error)
 func (f googlePayloadTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func googlePayloadResponse(req *http.Request, body string) *http.Response {
-	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}
+	return &http.Response{
+		StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req,
+	}
 }
 
 func googlePayloadAuth(provider string) *cliproxyauth.Auth {
-	return &cliproxyauth.Auth{ID: "payload-contract-" + provider, Provider: provider,
-		Attributes: map[string]string{"api_key": "synthetic-key", "base_url": "https://payload-contract.invalid", "interactions": "true"},
-		Metadata:   map[string]any{"access_token": "synthetic-token", "project_id": "synthetic-project", "expired": time.Now().Add(time.Hour).Format(time.RFC3339)}}
+	return &cliproxyauth.Auth{
+		ID: "payload-contract-" + provider, Provider: provider,
+		Attributes: map[string]string{
+			"api_key": "synthetic-key", "base_url": "https://payload-contract.invalid", "interactions": "true",
+		},
+		Metadata: map[string]any{
+			"access_token": "synthetic-token", "project_id": "synthetic-project",
+			"expired": time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
 }
 
 // googlePayloadCall observes the bytes consumed by the HTTP transport, not an intermediate payload.
-func googlePayloadCall(t *testing.T, provider, route, model string, cfg *config.Config, payload []byte, opts cliproxyexecutor.Options) []byte {
+func googlePayloadCall(
+	t *testing.T,
+	provider, route, model string,
+	cfg *config.Config,
+	payload []byte,
+	opts cliproxyexecutor.Options,
+) []byte {
 	t.Helper()
 	var captured []byte
 	calls := 0
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	ctx = util.WithRoundTripper(ctx, googlePayloadTransport(func(req *http.Request) (*http.Response, error) {
-		calls++
-		if req.URL.Host != "payload-contract.invalid" {
-			return nil, fmt.Errorf("unexpected upstream host %q", req.URL.Host)
-		}
-		var err error
-		captured, err = io.ReadAll(req.Body)
-		if err != nil {
-			return nil, err
-		}
-		response := `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1,"totalTokenCount":3}}`
-		if provider == "antigravity" {
-			response = `{"response":` + response + `}`
-		}
-		if route == "count" {
-			if !strings.HasSuffix(req.URL.Path, ":countTokens") {
-				return nil, fmt.Errorf("count URL %s", req.URL)
-			}
-			response = `{"totalTokens":7}`
-		} else if strings.Contains(req.URL.Path, "streamGenerateContent") {
-			response = "data: " + response + "\n\n"
-		}
-		return googlePayloadResponse(req, response), nil
-	}))
+	ctx = util.WithRoundTripper(
+		ctx, googlePayloadTransport(
+			func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.URL.Host != "payload-contract.invalid" {
+					return nil, fmt.Errorf("unexpected upstream host %q", req.URL.Host)
+				}
+				var err error
+				captured, err = io.ReadAll(req.Body)
+				if err != nil {
+					return nil, err
+				}
+				response := `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"fi` +
+					`nishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidates` +
+					`TokenCount":1,"totalTokenCount":3}}`
+				if provider == "antigravity" {
+					response = `{"response":` + response + `}`
+				}
+				if route == "count" {
+					if !strings.HasSuffix(req.URL.Path, ":countTokens") {
+						return nil, fmt.Errorf("count URL %s", req.URL)
+					}
+					response = `{"totalTokens":7}`
+				} else if strings.Contains(req.URL.Path, "streamGenerateContent") {
+					response = "data: " + response + "\n\n"
+				}
+				return googlePayloadResponse(req, response), nil
+			},
+		),
+	)
 	var exec cliproxyauth.ProviderExecutor
 	switch provider {
 	case "gemini":
@@ -105,28 +126,111 @@ func googlePayloadCall(t *testing.T, provider, route, model string, cfg *config.
 	return captured
 }
 
+func TestGeminiStringifiedToolMediaReachesEveryExecutionEntry(t *testing.T) {
+	payload := []byte(`{"model":"gemini-3.7-flash-high","input":[{"type":"function_call","cal` +
+		`l_id":"call_1","name":"screenshot","arguments":"{}"},{"type":"function` +
+		`_call_output","call_id":"call_1","output":"[{\"type\":\"input_text\",\` +
+		`"text\":\"done\"},{\"type\":\"input_image\",\"image_url\":\"data:image` +
+		`/jpeg;base64,/9j/4AAQSkZJRg==\"}]"}]}`)
+	for _, provider := range []string{"gemini", "vertex", "antigravity"} {
+		for _, route := range []string{"generate", "stream", "count"} {
+			t.Run(
+				provider+"/"+route, func(t *testing.T) {
+					body := googlePayloadCall(
+						t, provider, route, "gemini-3.7-flash-high", &config.Config{}, payload,
+						cliproxyexecutor.Options{
+							SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: payload,
+							Stream: route == "stream",
+						},
+					)
+					prefix := ""
+					if provider == "antigravity" {
+						prefix = "request."
+					}
+					var responses []gjson.Result
+					for _, content := range gjson.GetBytes(body, prefix+"contents").Array() {
+						for _, part := range content.Get("parts").Array() {
+							if response := part.Get("functionResponse"); response.Exists() {
+								responses = append(responses, response)
+							}
+						}
+					}
+					if len(responses) != 1 || responses[0].Get("name").String() != "screenshot" ||
+						responses[0].Get("response.result").String() != "done" {
+						t.Fatalf("final tool output changed ownership or text: %s", body)
+					}
+					if provider == "vertex" {
+						if responses[0].Get("id").Exists() {
+							t.Fatalf("Vertex Responses output retained a tool ID: %s", body)
+						}
+					} else if responses[0].Get("id").String() != "call_1" {
+						t.Fatalf("tool output ID changed: %s", body)
+					}
+					media := responses[0].Get("parts").Array()
+					if len(media) != 1 || media[0].Get("inlineData.mimeType").String() != "image/jpeg" ||
+						media[0].Get("inlineData.data").String() != "/9j/4AAQSkZJRg==" {
+						t.Fatalf("final upstream body lost the tool image: %s", body)
+					}
+				},
+			)
+		}
+	}
+}
+
 func TestGeminiPayloadContentIndices(t *testing.T) {
 	for _, route := range []string{"generate", "stream"} {
 		for _, role := range []string{"model", "user"} {
-			t.Run(route+"/"+role, func(t *testing.T) {
-				models := []config.PayloadModelRule{{Name: "gemini-2.5-flash", Protocol: "gemini"}}
-				cfg := &config.Config{Payload: config.PayloadConfig{
-					Default:  []config.PayloadRule{{Models: models, Params: map[string]any{"generationConfig.temperature": 0.25}}},
-					Override: []config.PayloadRule{{Models: models, Params: map[string]any{"contents.0.parts.0.text": "configured", "generationConfig.topP": 0.9}}},
-					Filter:   []config.PayloadFilterRule{{Models: models, Params: []string{"generationConfig.topP"}}},
-				}}
-				payload := []byte(fmt.Sprintf(`{"contents":[{"role":%q,"parts":[{"text":"history"}]}],"generationConfig":{"temperature":0.4}}`, role))
-				body := googlePayloadCall(t, "gemini", route, "gemini-2.5-flash", cfg, payload, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
-				if gjson.GetBytes(body, "contents.0.role").String() != "user" || gjson.GetBytes(body, "contents.0.parts.0.text").String() != "configured" {
-					t.Fatalf("final first user content = %s", body)
-				}
-				if role == "model" && (gjson.GetBytes(body, "contents.1.role").String() != "model" || gjson.GetBytes(body, "contents.1.parts.0.text").String() != "history") {
-					t.Fatalf("model history changed: %s", body)
-				}
-				if gjson.GetBytes(body, "generationConfig.temperature").Float() != 0.4 || gjson.GetBytes(body, "generationConfig.topP").Exists() {
-					t.Fatalf("default/filter semantics changed: %s", body)
-				}
-			})
+			t.Run(
+				route+"/"+role, func(t *testing.T) {
+					models := []config.PayloadModelRule{{Name: "gemini-2.5-flash", Protocol: "gemini"}}
+					cfg := &config.Config{
+						Payload: config.PayloadConfig{
+							Default: []config.PayloadRule{
+								{
+									Models: models, Params: map[string]any{"generationConfig.temperature": 0.25},
+								},
+							},
+							Override: []config.PayloadRule{
+								{
+									Models: models, Params: map[string]any{
+										"contents.0.parts.0.text": "configured", "generationConfig.topP": 0.9,
+									},
+								},
+							},
+							Filter: []config.PayloadFilterRule{
+								{
+									Models: models, Params: []string{"generationConfig.topP"},
+								},
+							},
+						},
+					}
+					payload := []byte(fmt.Sprintf(
+						`{"contents":[{"role":%q,"parts":[{"text":"history"}]}],`+
+							`"generationConfig":{"temperature":`+
+							`0.4}}`,
+						role,
+					))
+					body := googlePayloadCall(
+						t, "gemini", route, "gemini-2.5-flash", cfg, payload,
+						cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini},
+					)
+					if gjson.GetBytes(body, "contents.0.role").String() != "user" || gjson.GetBytes(
+						body, "contents.0.parts.0.text",
+					).String() != "configured" {
+						t.Fatalf("final first user content = %s", body)
+					}
+					if role == "model" && (gjson.GetBytes(
+						body, "contents.1.role",
+					).String() != "model" || gjson.GetBytes(body, "contents.1.parts.0.text").String() != "history") {
+						t.Fatalf("model history changed: %s", body)
+					}
+					if gjson.GetBytes(body, "generationConfig.temperature").Float() != 0.4 || gjson.GetBytes(
+						body, "generationConfig.topP",
+					).Exists() {
+						t.Fatalf("default/filter semantics changed: %s", body)
+					}
+				},
+			)
 		}
 	}
 }
@@ -142,24 +246,47 @@ func TestGeminiPayloadSourceProtocol(t *testing.T) {
 	} {
 		for _, route := range []string{"generate", "stream"} {
 			for _, matching := range []bool{true, false} {
-				t.Run(fmt.Sprintf("%s/%s/%t", source.format, route, matching), func(t *testing.T) {
-					from := source.format.String()
-					if !matching {
-						from = "claude"
-					}
-					cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
-						Models: []config.PayloadModelRule{{Name: "gemini-2.5-flash", Protocol: "gemini", FromProtocol: from, Headers: map[string]string{"X-Payload-Test": "match"}}},
-						Params: map[string]any{"contents.0.parts.0.text": "configured"},
-					}}}}
-					body := googlePayloadCall(t, "gemini", route, "gemini-2.5-flash", cfg, []byte(source.body), cliproxyexecutor.Options{SourceFormat: source.format, Headers: http.Header{"X-Payload-Test": {"match"}}})
-					want := "original"
-					if matching {
-						want = "configured"
-					}
-					if got := gjson.GetBytes(body, "contents.0.parts.0.text").String(); got != want {
-						t.Fatalf("text=%q want=%q body=%s", got, want, body)
-					}
-				})
+				t.Run(
+					fmt.Sprintf("%s/%s/%t", source.format, route, matching), func(t *testing.T) {
+						from := source.format.String()
+						if !matching {
+							from = "claude"
+						}
+						cfg := &config.Config{
+							Payload: config.PayloadConfig{
+								Override: []config.PayloadRule{
+									{
+										Models: []config.PayloadModelRule{
+											{
+												Name: "gemini-2.5-flash", Protocol: "gemini", FromProtocol: from,
+												Headers: map[string]string{"X-Payload-Test": "match"},
+											},
+										},
+										Params: map[string]any{"contents.0.parts.0.text": "configured"},
+									},
+								},
+							},
+						}
+						body := googlePayloadCall(
+							t,
+							"gemini",
+							route,
+							"gemini-2.5-flash",
+							cfg,
+							[]byte(source.body),
+							cliproxyexecutor.Options{
+								SourceFormat: source.format, Headers: http.Header{"X-Payload-Test": {"match"}},
+							},
+						)
+						want := "original"
+						if matching {
+							want = "configured"
+						}
+						if got := gjson.GetBytes(body, "contents.0.parts.0.text").String(); got != want {
+							t.Fatalf("text=%q want=%q body=%s", got, want, body)
+						}
+					},
+				)
 			}
 		}
 	}
@@ -168,40 +295,77 @@ func TestGeminiPayloadSourceProtocol(t *testing.T) {
 func TestGeminiTokenCountPayloadRules(t *testing.T) {
 	for _, provider := range []string{"gemini", "vertex"} {
 		for _, kind := range []string{"override", "default", "filter", "none"} {
-			t.Run(provider+"/"+kind, func(t *testing.T) {
-				models := []config.PayloadModelRule{{Name: "gemini-2.5-flash", Protocol: "gemini", FromProtocol: "gemini"}}
-				cfg := &config.Config{}
-				payload := `{"contents":[{"role":"user","parts":[{"text":"original"}]}],"systemInstruction":{"parts":[{"text":"original-system"}]},"generationConfig":{"temperature":0.1}}`
-				wantText, wantSystem := "original", "original-system"
-				switch kind {
-				case "override":
-					cfg.Payload.Override = []config.PayloadRule{{Models: models, Params: map[string]any{"contents.0.parts.0.text": "configured", "systemInstruction.parts.0.text": "configured-system", "generationConfig.temperature": 0.2, "tools": []any{map[string]any{"googleSearch": map[string]any{}}}, "safetySettings": []any{map[string]any{"category": "configured"}}}}}
-					wantText, wantSystem = "configured", "configured-system"
-				case "default":
-					payload = `{"contents":[{"role":"user","parts":[{"text":"original"}]}]}`
-					cfg.Payload.Default = []config.PayloadRule{{Models: models, Params: map[string]any{"contents.0.parts.0.text": "unused", "systemInstruction.parts.0.text": "configured-system"}}}
-					wantSystem = "configured-system"
-				case "filter":
-					cfg.Payload.Filter = []config.PayloadFilterRule{{Models: models, Params: []string{"systemInstruction"}}}
-					wantSystem = ""
-				}
-				body := googlePayloadCall(t, provider, "count", "gemini-2.5-flash", cfg, []byte(payload), cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
-				if got := gjson.GetBytes(body, "contents.0.parts.0.text").String(); got != wantText {
-					t.Fatalf("text=%q want=%q body=%s", got, wantText, body)
-				}
-				if got := gjson.GetBytes(body, "systemInstruction.parts.0.text").String(); got != wantSystem {
-					t.Fatalf("system=%q want=%q body=%s", got, wantSystem, body)
-				}
-				for _, field := range []string{"generationConfig", "tools", "safetySettings"} {
-					if gjson.GetBytes(body, field).Exists() != (kind == "override") {
-						t.Fatalf("count cleanup/config precedence for %s: %s", field, body)
+			t.Run(
+				provider+"/"+kind, func(t *testing.T) {
+					models := []config.PayloadModelRule{
+						{
+							Name: "gemini-2.5-flash", Protocol: "gemini", FromProtocol: "gemini",
+						},
 					}
-				}
-				if kind == "override" && (gjson.GetBytes(body, "generationConfig.temperature").Float() != 0.2 ||
-					!gjson.GetBytes(body, "tools.0.googleSearch").Exists() || gjson.GetBytes(body, "safetySettings.0.category").String() != "configured") {
-					t.Fatalf("explicit count configuration lost before transport: %s", body)
-				}
-			})
+					cfg := &config.Config{}
+					payload := `{"contents":[{"role":"user","parts":[{"text":"original"}]}],"` +
+						`systemInstruction":{"parts":[{"text":"original-system"}]},"generationConfig":{"` +
+						`temperature":0.1}}`
+					wantText, wantSystem := "original", "original-system"
+					switch kind {
+					case "override":
+						cfg.Payload.Override = []config.PayloadRule{
+							{
+								Models: models, Params: map[string]any{
+									"contents.0.parts.0.text":        "configured",
+									"systemInstruction.parts.0.text": "configured-system",
+									"generationConfig.temperature":   0.2,
+									"tools": []any{
+										map[string]any{"googleSearch": map[string]any{}},
+									},
+									"safetySettings": []any{map[string]any{"category": "configured"}},
+								},
+							},
+						}
+						wantText, wantSystem = "configured", "configured-system"
+					case "default":
+						payload = `{"contents":[{"role":"user","parts":[{"text":"original"}]}]}`
+						cfg.Payload.Default = []config.PayloadRule{
+							{
+								Models: models, Params: map[string]any{
+									"contents.0.parts.0.text":        "unused",
+									"systemInstruction.parts.0.text": "configured-system",
+								},
+							},
+						}
+						wantSystem = "configured-system"
+					case "filter":
+						cfg.Payload.Filter = []config.PayloadFilterRule{
+							{
+								Models: models, Params: []string{"systemInstruction"},
+							},
+						}
+						wantSystem = ""
+					}
+					body := googlePayloadCall(
+						t, provider, "count", "gemini-2.5-flash", cfg, []byte(payload),
+						cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini},
+					)
+					if got := gjson.GetBytes(body, "contents.0.parts.0.text").String(); got != wantText {
+						t.Fatalf("text=%q want=%q body=%s", got, wantText, body)
+					}
+					if got := gjson.GetBytes(body, "systemInstruction.parts.0.text").String(); got != wantSystem {
+						t.Fatalf("system=%q want=%q body=%s", got, wantSystem, body)
+					}
+					for _, field := range []string{"generationConfig", "tools", "safetySettings"} {
+						if gjson.GetBytes(body, field).Exists() != (kind == "override") {
+							t.Fatalf("count cleanup/config precedence for %s: %s", field, body)
+						}
+					}
+					if kind == "override" &&
+						(gjson.GetBytes(body, "generationConfig.temperature").Float() != 0.2 ||
+							!gjson.GetBytes(body, "tools.0.googleSearch").Exists() || gjson.GetBytes(
+							body, "safetySettings.0.category",
+						).String() != "configured") {
+						t.Fatalf("explicit count configuration lost before transport: %s", body)
+					}
+				},
+			)
 		}
 	}
 }

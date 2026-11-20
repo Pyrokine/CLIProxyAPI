@@ -3,7 +3,8 @@ package common
 import "testing"
 
 func TestCleanToolSchemasReusesNormalizedPayload(t *testing.T) {
-	input := []byte(`{"tools":[{"function_declarations":[{"name":"lookup","parametersJsonSchema":{"type":"object","properties":{"query":{"type":"string"}}}}]}]}`)
+	input := []byte((`{"tools":[{"function_declarations":[{"name":"lookup","parametersJsonSchema":{"type":"` +
+		`object","properties":{"query":{"type":"string"}}}}]}]}`))
 
 	output := CleanToolSchemas(input)
 

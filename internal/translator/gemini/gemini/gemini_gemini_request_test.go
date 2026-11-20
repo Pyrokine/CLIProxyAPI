@@ -24,15 +24,29 @@ func TestConvertGeminiRequestToGeminiDefaultsFunctionResponseRoleToUser(t *testi
 		{name: "invalid snake role", role: `"role":"function",`, partKey: "function_response"},
 	}
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			input := []byte(`{"contents":[{"role":"user","parts":[{"text":"before"}]},{` + testCase.role + `"parts":[{"` + testCase.partKey + `":{"name":"lookup","response":{"result":"ok"}}}]}]}`)
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				input := []byte(
+					(`{"contents":[{"role":"user","parts":[{"text":"before"}]},` +
+						`{`) +
+						testCase.role +
+						(`"parts":` +
+							`[{"`) +
+						testCase.partKey +
+						(`":{"name":` +
+							`"lookup",` +
+							`"response":` +
+							`{"result":` +
+							`"ok"}}}]}]}`),
+				)
 
-			output := convertGeminiRequestToGemini("gemini-test", input, false)
+				output := convertGeminiRequestToGemini("gemini-test", input, false)
 
-			if got := gjson.GetBytes(output, "contents.1.role").String(); got != "user" {
-				t.Fatalf("function response role = %q, want user; output: %s", got, output)
-			}
-		})
+				if got := gjson.GetBytes(output, "contents.1.role").String(); got != "user" {
+					t.Fatalf("function response role = %q, want user; output: %s", got, output)
+				}
+			},
+		)
 	}
 }
 
@@ -131,8 +145,31 @@ func TestConvertGeminiRequestToGeminiCleansToolSchema(t *testing.T) {
 	if gjson.GetBytes(out, "tools.0.function_declarations.0.parametersJsonSchema.title").Exists() {
 		t.Fatalf("schema title should be removed: %s", out)
 	}
-	if gjson.GetBytes(out, "tools.0.function_declarations.0.parametersJsonSchema.properties.query.nullable").Exists() {
-		t.Fatalf("schema nullable should be removed: %s", out)
+	query := gjson.GetBytes(out, "tools.0.function_declarations.0.parametersJsonSchema.properties.query")
+	if query.Get("nullable").Exists() || query.Get("type").Raw != `["string","null"]` {
+		t.Fatalf("native schema lost its nullable string type: %s", out)
+	}
+}
+
+func TestConvertGeminiRequestToGeminiPreservesNativeSchemaConstraints(t *testing.T) {
+	input := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+		"tools":[{"functionDeclarations":[{"name":"lookup","parametersJsonSchema":{
+			"type":"object","properties":{
+				"priority":{"type":"integer","enum":[0,1,2]},
+				"enabled":{"type":"boolean","enum":[true,false]},
+				"query":{"type":"string","nullable":true}
+			},"required":["query"],"additionalProperties":false
+		}}]}]}`)
+	out := convertGeminiRequestToGemini("", input, false)
+	schema := gjson.GetBytes(out, "tools.0.function_declarations.0.parametersJsonSchema")
+	for path, want := range map[string]string{
+		"properties.priority.type": "integer", "properties.priority.enum": "[0,1,2]",
+		"properties.enabled.type": "boolean", "properties.enabled.enum": "[true,false]",
+		"properties.query.type": `["string","null"]`, "required": `["query"]`, "additionalProperties": "false",
+	} {
+		if got := schema.Get(path).String(); got != want {
+			t.Errorf("%s = %s, want %s; schema=%s", path, got, want, schema.Raw)
+		}
 	}
 }
 
@@ -300,7 +337,10 @@ func TestBackfillEmptyFunctionResponseNames_MoreResponsesThanCalls(t *testing.T)
 }
 
 func TestConvertGeminiRequestToGeminiReusesNormalizedPayload(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"tools":[{"function_declarations":[{"name":"lookup","parametersJsonSchema":{"type":"object","properties":{"query":{"type":"string"}}}}]}],"safetySettings":[{"category":"HARM_CATEGORY_HARASSMENT","threshold":"OFF"}]}`)
+	input := []byte((`{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"tools":[{"` +
+		`function_declarations":[{"name":"lookup","parametersJsonSchema":{"type":"object","properties":{"` +
+		`query":{"type":"string"}}}}]}],"safetySettings":[{"category":"HARM_CATEGORY_HARASSMENT","threshold":` +
+		`"OFF"}]}`))
 
 	out := convertGeminiRequestToGemini("gemini-3-pro", input, false)
 
@@ -310,7 +350,8 @@ func TestConvertGeminiRequestToGeminiReusesNormalizedPayload(t *testing.T) {
 }
 
 func TestBackfillEmptyFunctionResponseNamesReusesNormalizedPayload(t *testing.T) {
-	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}}}]}]}`)
+	input := []byte((`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{}}}]},{"` +
+		`role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}}}]}]}`))
 
 	out := backfillEmptyFunctionResponseNames(input)
 

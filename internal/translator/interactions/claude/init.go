@@ -17,7 +17,10 @@ func init() {
 			NonStream: convertInteractionsResponseToClaudeNonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatClaude, sdktranslator.FormatInteractions, func(model string, body []byte, stream bool) ([]byte, error) {
-		return convertClaudeRequestToInteractionsChecked(model, body, stream, false)
-	})
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatClaude, sdktranslator.FormatInteractions,
+		func(model string, body []byte, stream bool) ([]byte, error) {
+			return convertClaudeRequestToInteractionsChecked(model, body, stream, false)
+		},
+	)
 }

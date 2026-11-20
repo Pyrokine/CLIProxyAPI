@@ -15,6 +15,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	geminiopenai "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -27,7 +28,13 @@ type params struct {
 	HasFirstResponse bool // Indicates if the initial message_start event has been sent
 	ResponseType     int  // Current response type: 0=none, 1=content, 2=thinking, 3=function
 	ResponseIndex    int  // Index counter for content blocks in the streaming response
+	ToolNames        map[string]string
+	SawToolCall      bool
+	HasFinalEvents   bool
+	Done             bool
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
+	FinishReason     string
+	Usage            geminiopenai.GeminiUsage
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -49,28 +56,95 @@ var toolUseIDCounter atomic.Uint64
 //
 // Returns:
 //   - [][]byte: A slice of bytes, each containing a Claude Code-compatible SSE payload.
-func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
+func convertGeminiCLIResponseToClaude(
+	ctx context.Context,
+	_ string,
+	originalRequestRawJSON, _, rawJSON []byte,
+	param *any,
+) [][]byte {
 	if *param == nil {
 		*param = &params{
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
+			ToolNames:        util.DisambiguatedToolNameMap(originalRequestRawJSON),
 		}
 	}
 
-	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		// Only send message_stop if we have actually output content
-		if (*param).(*params).HasContent {
-			return [][]byte{translatorcommon.AppendSSEEventString(nil, "message_stop", `{"type":"message_stop"}`, 3)}
-		}
-		return [][]byte{}
+	state := (*param).(*params)
+	if state.Done || ctx.Err() != nil {
+		return nil
 	}
-
-	// Track whether tools are being used in this response chunk
-	usedTool := false
 	output := make([]byte, 0, 1024)
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
+	}
+	appendUsageDelta := func(final bool) {
+		template := []byte(`{"type":"message_delta","delta":{},"usage":{"input_tokens":0,"output_tokens":0}}`)
+		if final {
+			stopReason := "end_turn"
+			if state.SawToolCall {
+				stopReason = "tool_use"
+			} else if state.FinishReason == "MAX_TOKENS" {
+				stopReason = "max_tokens"
+			}
+			template, _ = sjson.SetBytes(template, "delta.stop_reason", stopReason)
+			template, _ = sjson.SetBytes(template, "delta.stop_sequence", nil)
+		}
+		template, _ = sjson.SetBytes(
+			template, "usage.input_tokens", max(state.Usage.PromptTokens-state.Usage.CachedTokens, 0),
+		)
+		template, _ = sjson.SetBytes(template, "usage.output_tokens", state.Usage.OutputTokens())
+		if state.Usage.HasCachedTokens {
+			template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", state.Usage.CachedTokens)
+		}
+		appendEvent("message_delta", string(template))
+	}
+	finishMessage := func() {
+		if !state.HasFirstResponse || state.HasFinalEvents {
+			return
+		}
+		if !state.HasContent {
+			appendEvent(
+				"content_block_start", fmt.Sprintf(
+					`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`,
+					state.ResponseIndex,
+				),
+			)
+			state.ResponseType = 1
+			state.HasContent = true
+		}
+		if state.ResponseType != 0 {
+			appendEvent(
+				"content_block_stop",
+				fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, state.ResponseIndex),
+			)
+			state.ResponseType = 0
+		}
+		appendUsageDelta(true)
+		state.HasFinalEvents = true
+	}
+	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+		state.Done = true
+		if !state.HasFirstResponse {
+			return nil
+		}
+		finishMessage()
+		appendEvent("message_stop", `{"type":"message_stop"}`)
+		return [][]byte{output}
+	}
+
+	previousUsage := state.Usage
+	state.Usage.Update(gjson.GetBytes(rawJSON, "response.cpaUsageMetadata"))
+	state.Usage.Update(gjson.GetBytes(rawJSON, "response.usageMetadata"))
+	if finish := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finish.Exists() {
+		state.FinishReason = finish.String()
+	}
+	if state.HasFinalEvents {
+		if state.Usage != previousUsage {
+			appendUsageDelta(false)
+		}
+		return [][]byte{output}
 	}
 
 	// Initialize the streaming session with a message_start event
@@ -78,14 +152,26 @@ func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 	if !(*param).(*params).HasFirstResponse {
 		// Create the initial message structure with default values according to Claude Code API specification
 		// This follows the Claude Code API specification for streaming message initialization
-		messageStartTemplate := []byte(`{"type":"message_start","message":{"id":"msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`)
+		messageStartTemplate := []byte(
+			(`{"type":"message_start","message":{"id":"msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY","type":"` +
+				`message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":` +
+				`null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`),
+		)
 
 		// Override default values with actual response metadata if available from the Gemini CLI response
 		if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
-			messageStartTemplate, _ = sjson.SetBytes(messageStartTemplate, "message.model", modelVersionResult.String())
+			messageStartTemplate, _ = sjson.SetBytes(
+				messageStartTemplate,
+				"message.model",
+				modelVersionResult.String(),
+			)
 		}
 		if responseIDResult := gjson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
-			messageStartTemplate, _ = sjson.SetBytes(messageStartTemplate, "message.id", responseIDResult.String())
+			messageStartTemplate, _ = sjson.SetBytes(
+				messageStartTemplate,
+				"message.id",
+				responseIDResult.String(),
+			)
 		}
 		appendEvent("message_start", string(messageStartTemplate))
 
@@ -122,8 +208,8 @@ func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 			} else if functionCallResult.Exists() {
 				// Handle function/tool calls from the AI model
 				// This processes tool usage requests and formats them for Claude Code API compatibility
-				usedTool = true
-				fcName := functionCallResult.Get("name").String()
+				state.SawToolCall = true
+				fcName := util.RestoreSanitizedToolName(state.ToolNames, functionCallResult.Get("name").String())
 
 				// Handle streaming split/delta where name might be empty in subsequent chunks.
 				// If we are already in tool use mode and name is empty, treat as continuation (delta).
@@ -131,7 +217,9 @@ func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
 						data, _ := sjson.SetBytes(
 							[]byte(fmt.Sprintf(
-								`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`,
+								`{"type":"content_block_delta","index":%d,"delta":{"type":`+
+									`"input_json_delta","partial_json":`+
+									`""}}`,
 								(*param).(*params).ResponseIndex,
 							)), "delta.partial_json", fcArgsResult.Raw,
 						)
@@ -154,7 +242,11 @@ func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 				// Special handling for thinking state transition
 				if (*param).(*params).ResponseType == 2 {
 					// output = output + "event: content_block_delta\n"
-					// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, (*param).(*Params).ResponseIndex)
+					// output = output + fmt.Sprintf(
+					//     `data: {"type":"content_block_delta","index":%d,`+
+					//         `"delta":{"type":"signature_delta","signature":null}}`,
+					//     (*param).(*Params).ResponseIndex,
+					// )
 					// output = output + "\n\n\n"
 				}
 
@@ -171,7 +263,9 @@ func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 				// This creates the structure for a function call in Claude Code format
 				// Create the tool use block with unique ID and function details
 				data := []byte(fmt.Sprintf(
-					`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`,
+					`{"type":"content_block_start","index":%d,"content_block":{"type":`+
+						`"tool_use","id":"","name":"","input":`+
+						`{}}}`,
 					(*param).(*params).ResponseIndex,
 				))
 				data, _ = sjson.SetBytes(
@@ -181,13 +275,18 @@ func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 						),
 					),
 				)
+				if id := translatorcommon.GeminiToolCallID(functionCallResult); id != "" {
+					data, _ = sjson.SetBytes(data, "content_block.id", util.SanitizeClaudeToolID(id))
+				}
 				data, _ = sjson.SetBytes(data, "content_block.name", fcName)
 				appendEvent("content_block_start", string(data))
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
 					data, _ = sjson.SetBytes(
 						[]byte(fmt.Sprintf(
-							`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`,
+							`{"type":"content_block_delta","index":%d,"delta":{"type":`+
+								`"input_json_delta","partial_json":`+
+								`""}}`,
 							(*param).(*params).ResponseIndex,
 						)), "delta.partial_json", fcArgsResult.Raw,
 					)
@@ -199,45 +298,15 @@ func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 		}
 	}
 
-	usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata")
-	// Process usage metadata and finish reason when present in the response
-	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) {
-		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			// Only send final events if we have actually output content
-			if (*param).(*params).HasContent {
-				// Close the final content block
-				appendEvent(
-					"content_block_stop",
-					fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*params).ResponseIndex),
-				)
-
-				// Create the message delta template with appropriate stop reason
-				template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				// Set tool_use stop reason if tools were used in this response
-				if usedTool {
-					template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				} else if finish := gjson.GetBytes(
-					rawJSON, "response.candidates.0.finishReason",
-				); finish.Exists() && finish.String() == "MAX_TOKENS" {
-					template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				}
-
-				// Include thinking tokens in output token count if present
-				thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-				template, _ = sjson.SetBytes(
-					template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount,
-				)
-				template, _ = sjson.SetBytes(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
-
-				appendEvent("message_delta", string(template))
-			}
-		}
+	if state.FinishReason != "" {
+		finishMessage()
 	}
 
 	return [][]byte{output}
 }
 
-// convertGeminiCLIResponseToClaudeNonStream converts a non-streaming Gemini CLI response to a non-streaming Claude response.
+// convertGeminiCLIResponseToClaudeNonStream converts a non-streaming Gemini CLI response to a non-streaming Claude
+// response.
 //
 // Parameters:
 //   - ctx: The context for the request.
@@ -250,20 +319,23 @@ func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 func convertGeminiCLIResponseToClaudeNonStream(
 	_ context.Context,
 	_ string,
-	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	originalRequestRawJSON, _, rawJSON []byte,
 	_ *any,
 ) []byte {
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
+	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 
 	root := gjson.ParseBytes(rawJSON)
 
-	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
+	out := []byte((`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"` +
+		`stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`))
 	out, _ = sjson.SetBytes(out, "id", root.Get("response.responseId").String())
 	out, _ = sjson.SetBytes(out, "model", root.Get("response.modelVersion").String())
 
 	inputTokens := root.Get("response.usageMetadata.promptTokenCount").Int()
-	outputTokens := root.Get("response.usageMetadata.candidatesTokenCount").Int() + root.Get("response.usageMetadata.thoughtsTokenCount").Int()
+	outputTokens := root.Get("response.usageMetadata.candidatesTokenCount").
+		Int() +
+		root.Get("response.usageMetadata.thoughtsTokenCount").
+			Int()
 	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
 
@@ -311,10 +383,13 @@ func convertGeminiCLIResponseToClaudeNonStream(
 				flushText()
 				hasToolCall = true
 
-				name := functionCall.Get("name").String()
+				name := util.RestoreSanitizedToolName(nameMap, functionCall.Get("name").String())
 				toolIDCounter++
 				toolBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolBlock, _ = sjson.SetBytes(toolBlock, "id", fmt.Sprintf("tool_%d", toolIDCounter))
+				if id := translatorcommon.GeminiToolCallID(functionCall); id != "" {
+					toolBlock, _ = sjson.SetBytes(toolBlock, "id", util.SanitizeClaudeToolID(id))
+				}
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", name)
 				inputRaw := "{}"
 				if args := functionCall.Get("args"); args.Exists() && gjson.Valid(args.Raw) && args.IsObject() {

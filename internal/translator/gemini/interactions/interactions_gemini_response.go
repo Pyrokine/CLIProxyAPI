@@ -88,6 +88,10 @@ func convertInteractionsResponseToGeminiNonStream(
 			interaction.Get("service_tier").String(), root.Get("service_tier").String(),
 		),
 	}
+	if interaction.Get("status").String() == "failed" {
+		failure, _ := sjson.SetBytes(rawJSON, "event_type", "interaction.failed")
+		return convertInteractionsEventToGemini(modelName, failure, st)[0]
+	}
 	var parts [][]byte
 	steps := interaction.Get("steps")
 	if !steps.Exists() {
@@ -103,9 +107,7 @@ func convertInteractionsResponseToGeminiNonStream(
 	return out
 }
 
-func convertInteractionsRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
-	_ = modelName
-	_ = stream
+func convertInteractionsRequestToInteractions(_ string, inputRawJSON []byte, _ bool) []byte {
 	return inputRawJSON
 }
 
@@ -167,7 +169,9 @@ func convertInteractionsEventToGemini(modelName string, rawJSON []byte, st *inte
 		if message == "" {
 			message = "upstream execution failed"
 		}
-		code := firstNonEmptyInteractionString(errNode.Get("code").String(), root.Get("code").String(), errNode.Get("status").String())
+		code := firstNonEmptyInteractionString(
+			errNode.Get("code").String(), root.Get("code").String(), errNode.Get("status").String(),
+		)
 		statusCode, statusName := interactionsGeminiErrorStatus(code)
 		out := []byte(`{"error":{"code":500,"message":"","status":"INTERNAL"}}`)
 		out, _ = sjson.SetBytes(out, "error.code", statusCode)
@@ -218,7 +222,8 @@ func rememberInteractionsGeminiStep(root gjson.Result, st *interactionsToGeminiS
 	st.StepSignatures[index] = compatibleGeminiInteractionSignature(
 		st.Model,
 		firstNonEmptyInteractionString(
-			step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String(),
+			step.Get("signature").String(), step.Get("thoughtSignature").String(),
+			step.Get("thought_signature").String(),
 		),
 		st.StepTypes[index] == "function_call",
 	)
@@ -376,7 +381,8 @@ func interactionsFunctionCallStepToGeminiPart(step gjson.Result, modelName strin
 	if signature := compatibleGeminiInteractionSignature(
 		modelName,
 		firstNonEmptyInteractionString(
-			step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String(),
+			step.Get("signature").String(), step.Get("thoughtSignature").String(),
+			step.Get("thought_signature").String(),
 		),
 		true,
 	); signature != "" {

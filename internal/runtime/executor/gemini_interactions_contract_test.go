@@ -19,15 +19,26 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const googleInteractionSnapshot = `{"id":"contract-complete","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"ok"}]}],"usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5}}`
+const googleInteractionSnapshot = `{"id":"contract-complete","status":"completed","steps":[{"type":"model` +
+	`_output","content":[{"type":"text","text":"ok"}]}],"usage":{"total_inp` +
+	`ut_tokens":2,"total_output_tokens":3,"total_tokens":5}}`
 
 func googleInteractionFrame() string {
-	return "event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":" + googleInteractionSnapshot + "}\n\n"
+	return "event: interaction.completed\ndata: {\"event_type\":" +
+		"\"interaction.completed\",\"interaction\":" +
+		googleInteractionSnapshot +
+		"}\n\n"
 }
 
 type googleInteractionHooks struct{ calls int }
 
-func (h *googleInteractionHooks) NormalizeRequest(_ context.Context, _, _ sdktranslator.Format, _ string, body []byte, _ bool) []byte {
+func (h *googleInteractionHooks) NormalizeRequest(
+	_ context.Context,
+	_, _ sdktranslator.Format,
+	_ string,
+	body []byte,
+	_ bool,
+) []byte {
 	h.calls++
 	out, err := sjson.SetBytes(body, "translation_call", h.calls)
 	if err != nil {
@@ -35,84 +46,244 @@ func (h *googleInteractionHooks) NormalizeRequest(_ context.Context, _, _ sdktra
 	}
 	return out
 }
-func (*googleInteractionHooks) TranslateRequest(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, bool) ([]byte, bool) {
+func (*googleInteractionHooks) TranslateRequest(
+	context.Context,
+	sdktranslator.Format,
+	sdktranslator.Format,
+	string,
+	[]byte,
+	bool,
+) ([]byte, bool) {
 	return nil, false
 }
-func (*googleInteractionHooks) NormalizeResponseBefore(_ context.Context, _, _ sdktranslator.Format, _ string, _, _, body []byte, _ bool) []byte {
+func (*googleInteractionHooks) NormalizeResponseBefore(
+	_ context.Context,
+	_, _ sdktranslator.Format,
+	_ string,
+	_, _, body []byte,
+	_ bool,
+) []byte {
 	return body
 }
-func (*googleInteractionHooks) TranslateResponse(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, []byte, []byte, bool) ([]byte, bool) {
+func (*googleInteractionHooks) TranslateResponse(
+	context.Context,
+	sdktranslator.Format,
+	sdktranslator.Format,
+	string,
+	[]byte,
+	[]byte,
+	[]byte,
+	bool,
+) ([]byte, bool) {
 	return nil, false
 }
-func (*googleInteractionHooks) NormalizeResponseAfter(_ context.Context, _, _ sdktranslator.Format, _ string, _, _, body []byte, _ bool) []byte {
+func (*googleInteractionHooks) NormalizeResponseAfter(
+	_ context.Context,
+	_, _ sdktranslator.Format,
+	_ string,
+	_, _, body []byte,
+	_ bool,
+) []byte {
 	return body
 }
 
 func TestGeminiInteractionsTranslationPair(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		for _, originalKind := range []string{"nil", "same", "equal-copy", "different"} {
-			t.Run(fmt.Sprintf("stream=%t/%s", stream, originalKind), func(t *testing.T) {
-				hooks := &googleInteractionHooks{}
-				ctx := sdktranslator.WithPluginHooks(t.Context(), hooks)
-				calls := 0
-				var sent []byte
-				ctx = util.WithRoundTripper(ctx, googlePayloadTransport(func(req *http.Request) (*http.Response, error) {
-					calls++
-					if !strings.HasSuffix(req.URL.Path, "/interactions") {
-						return nil, fmt.Errorf("unexpected URL %s", req.URL)
+			t.Run(
+				fmt.Sprintf("stream=%t/%s", stream, originalKind), func(t *testing.T) {
+					hooks := &googleInteractionHooks{}
+					ctx := sdktranslator.WithPluginHooks(t.Context(), hooks)
+					calls := 0
+					var sent []byte
+					ctx = util.WithRoundTripper(
+						ctx, googlePayloadTransport(
+							func(req *http.Request) (*http.Response, error) {
+								calls++
+								if !strings.HasSuffix(req.URL.Path, "/interactions") {
+									return nil, fmt.Errorf("unexpected URL %s", req.URL)
+								}
+								var err error
+								sent, err = io.ReadAll(req.Body)
+								if err != nil {
+									return nil, err
+								}
+								response := googleInteractionSnapshot
+								if stream {
+									response = googleInteractionFrame()
+								}
+								return googlePayloadResponse(req, response), nil
+							},
+						),
+					)
+					payload := []byte(`{"messages":[{"role":"user","content":"working"}]}`)
+					before := bytes.Clone(payload)
+					opts := cliproxyexecutor.Options{
+						SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatInteractions,
 					}
+					wantHooks := 1
+					switch originalKind {
+					case "same":
+						opts.OriginalRequest = payload
+					case "equal-copy":
+						opts.OriginalRequest = bytes.Clone(payload)
+					case "different":
+						opts.OriginalRequest = []byte(`{"messages":[{"role":"user","content":"original"}]}`)
+						wantHooks = 2
+					}
+					// The source baseline must retain the first translation result, including its hook output.
+					cfg := &config.Config{
+						Payload: config.PayloadConfig{
+							Default: []config.PayloadRule{
+								{
+									Models: []config.PayloadModelRule{
+										{
+											Name: "*", Protocol: "interactions",
+										},
+									}, Params: map[string]any{"translation_call": 99},
+								},
+							},
+						},
+					}
+					exec := NewGeminiInteractionsExecutor(cfg)
+					req := cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: payload}
 					var err error
-					sent, err = io.ReadAll(req.Body)
-					if err != nil {
-						return nil, err
-					}
-					response := googleInteractionSnapshot
 					if stream {
-						response = googleInteractionFrame()
-					}
-					return googlePayloadResponse(req, response), nil
-				}))
-				payload := []byte(`{"messages":[{"role":"user","content":"working"}]}`)
-				before := bytes.Clone(payload)
-				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatInteractions}
-				wantHooks := 1
-				switch originalKind {
-				case "same":
-					opts.OriginalRequest = payload
-				case "equal-copy":
-					opts.OriginalRequest = bytes.Clone(payload)
-				case "different":
-					opts.OriginalRequest = []byte(`{"messages":[{"role":"user","content":"original"}]}`)
-					wantHooks = 2
-				}
-				// The source baseline must retain the first translation result, including its hook output.
-				cfg := &config.Config{Payload: config.PayloadConfig{Default: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "*", Protocol: "interactions"}}, Params: map[string]any{"translation_call": 99}}}}}
-				exec := NewGeminiInteractionsExecutor(cfg)
-				req := cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: payload}
-				var err error
-				if stream {
-					var result *cliproxyexecutor.StreamResult
-					result, err = exec.ExecuteStream(ctx, googlePayloadAuth("gemini-interactions"), req, opts)
-					if err == nil {
-						for chunk := range result.Chunks {
-							if chunk.Err != nil {
-								err = chunk.Err
+						var result *cliproxyexecutor.StreamResult
+						result, err = exec.ExecuteStream(
+							ctx,
+							googlePayloadAuth("gemini-interactions"),
+							req,
+							opts,
+						)
+						if err == nil {
+							for chunk := range result.Chunks {
+								if chunk.Err != nil {
+									err = chunk.Err
+								}
 							}
 						}
+					} else {
+						_, err = exec.Execute(ctx, googlePayloadAuth("gemini-interactions"), req, opts)
 					}
-				} else {
-					_, err = exec.Execute(ctx, googlePayloadAuth("gemini-interactions"), req, opts)
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				if hooks.calls != wantHooks || calls != 1 || gjson.GetBytes(sent, "translation_call").Int() != int64(wantHooks) {
-					t.Fatalf("hook=%d HTTP=%d body=%s", hooks.calls, calls, sent)
-				}
-				if !bytes.Equal(before, payload) || bytes.Contains(sent, []byte(`"original"`)) || !bytes.Contains(sent, []byte("working")) {
-					t.Fatalf("working payload changed: %s", sent)
-				}
-			})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if hooks.calls != wantHooks || calls != 1 || gjson.GetBytes(
+						sent, "translation_call",
+					).Int() != int64(wantHooks) {
+						t.Fatalf("hook=%d HTTP=%d body=%s", hooks.calls, calls, sent)
+					}
+					if !bytes.Equal(before, payload) || bytes.Contains(
+						sent, []byte(`"original"`),
+					) || !bytes.Contains(sent, []byte("working")) {
+						t.Fatalf("working payload changed: %s", sent)
+					}
+				},
+			)
+		}
+	}
+}
+
+func TestGeminiInteractionsPreservesOrdinaryAutomationTools(t *testing.T) {
+	for _, model := range []string{"gemini-2.5-pro", "custom-interactions-model"} {
+		for _, namespace := range []bool{false, true} {
+			for _, stream := range []bool{false, true} {
+				t.Run(
+					fmt.Sprintf("%s/namespace=%t/stream=%t", model, namespace, stream), func(t *testing.T) {
+						declaration := `{"type":"function","name":"mcp__codex_app__automation_update",` +
+							`"parameters":{"type":"object","properties":` +
+							`{}}}`
+						choice := `{"type":"function","name":"mcp__codex_app__automation_update"}`
+						if namespace {
+							declaration = `{"type":"namespace","name":"mcp__codex_app","children":[{"type":"` +
+								`function","name":"automation_update","parameters":{"type":"object","` +
+								`properties":{}}}]}`
+							choice = `{"type":"function","name":"automation_update","namespace":"mcp__codex_app"}`
+						}
+						payload := []byte(fmt.Sprintf(
+							`{"model":%q,"input":"hello","tools":[%s,{"type":"function","name":"exe`+
+								`c_command","description":"returning output or a session ID for ongoing`+
+								` interaction"}],"tool_choice":%s}`,
+							model, declaration, choice,
+						))
+						original := bytes.Clone(payload)
+						var sent []byte
+						calls := 0
+						ctx := util.WithRoundTripper(
+							t.Context(), googlePayloadTransport(
+								func(req *http.Request) (*http.Response, error) {
+									calls++
+									if req.URL.Host != "payload-contract.invalid" || !strings.HasSuffix(
+										req.URL.Path, "/interactions",
+									) {
+										return nil, fmt.Errorf("unexpected local transport target %s", req.URL)
+									}
+									var err error
+									sent, err = io.ReadAll(req.Body)
+									if err != nil {
+										return nil, err
+									}
+									response := googleInteractionSnapshot
+									if stream {
+										response = googleInteractionFrame()
+									}
+									return googlePayloadResponse(req, response), nil
+								},
+							),
+						)
+						cfg := &config.Config{}
+						auth := googlePayloadAuth("gemini-interactions")
+						if _, ok := newProxyAwareHTTPClient(ctx, cfg, auth, 0).Transport.(googlePayloadTransport); !ok {
+							t.Fatal("Interactions fixture must use the in-memory transport")
+						}
+						exec := NewGeminiInteractionsExecutor(cfg)
+						req := cliproxyexecutor.Request{Model: model, Payload: payload}
+						opts := cliproxyexecutor.Options{
+							SourceFormat:   sdktranslator.FormatOpenAIResponse,
+							ResponseFormat: sdktranslator.FormatInteractions,
+						}
+						var err error
+						if stream {
+							var result *cliproxyexecutor.StreamResult
+							result, err = exec.ExecuteStream(ctx, auth, req, opts)
+							if err == nil {
+								for chunk := range result.Chunks {
+									if chunk.Err != nil {
+										err = chunk.Err
+									}
+									if chunk.Acknowledge != nil {
+										chunk.Acknowledge(nil)
+									}
+								}
+							}
+						} else {
+							_, err = exec.Execute(ctx, auth, req, opts)
+						}
+						if err != nil || calls != 1 || !bytes.Equal(payload, original) {
+							t.Fatalf(
+								"HTTP calls=%d, original=%t, error=%v",
+								calls,
+								bytes.Equal(payload, original),
+								err,
+							)
+						}
+						if gjson.GetBytes(sent, "tools.#").Int() != 2 || gjson.GetBytes(
+							sent, "tools.0.name",
+						).String() != "mcp__codex_app__automation_update" ||
+							gjson.GetBytes(
+								sent, "generation_config.tool_choice.name",
+							).String() != "mcp__codex_app__automation_update" {
+							t.Fatalf("ordinary Gemini declaration or forced choice was removed: %s", sent)
+						}
+						if gjson.GetBytes(
+							sent, "tools.1.description",
+						).String() != "returning output or a session ID for ongoing interaction" {
+							t.Fatalf("Devin-only description rewrite reached native Gemini: %s", sent)
+						}
+					},
+				)
+			}
 		}
 	}
 }
@@ -140,49 +311,78 @@ func TestGeminiInteractionsCompletedEOF(t *testing.T) {
 		}{
 			{name: "complete", wire: googleInteractionFrame()},
 			{name: "complete without separator", wire: strings.TrimRight(googleInteractionFrame(), "\n")},
-			{name: "delta only", wire: "data: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"text\":\"partial\"}}\n\n", wantError: true},
-			{name: "malformed completed", wire: "event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"x\",\"status\":\"completed\"}\n\n", wantError: true},
+			{
+				name:      "delta only",
+				wire:      "data: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"text\":\"partial\"}}\n\n",
+				wantError: true,
+			},
+			{
+				name: "malformed completed",
+				wire: "event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"" +
+					"interaction\":{\"id\":\"x\",\"status\":\"completed\"}\n\n",
+				wantError: true,
+			},
 			{name: "missing snapshot", wire: "data: {\"event_type\":\"interaction.completed\"}\n\n", wantError: true},
-			{name: "incomplete snapshot", wire: "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"x\",\"status\":\"in_progress\",\"steps\":[]}}\n\n", wantError: true},
+			{
+				name: "incomplete snapshot",
+				wire: "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id" +
+					"\":\"x\",\"status\":\"in_progress\",\"steps\":[]}}\n\n",
+				wantError: true,
+			},
 			{name: "transport error", wire: googleInteractionFrame(), readError: io.ErrUnexpectedEOF, wantError: true},
 		} {
-			t.Run(provider+"/"+tc.name, func(t *testing.T) {
-				calls, closes := 0, 0
-				ctx := util.WithRoundTripper(t.Context(), googlePayloadTransport(func(req *http.Request) (*http.Response, error) {
-					calls++
-					resp := googlePayloadResponse(req, tc.wire)
-					var reader io.Reader = strings.NewReader(tc.wire)
-					if tc.readError != nil {
-						reader = googleInteractionBrokenBody{Reader: reader, err: tc.readError}
+			t.Run(
+				provider+"/"+tc.name, func(t *testing.T) {
+					calls, closes := 0, 0
+					ctx := util.WithRoundTripper(
+						t.Context(), googlePayloadTransport(
+							func(req *http.Request) (*http.Response, error) {
+								calls++
+								resp := googlePayloadResponse(req, tc.wire)
+								var reader io.Reader = strings.NewReader(tc.wire)
+								if tc.readError != nil {
+									reader = googleInteractionBrokenBody{Reader: reader, err: tc.readError}
+								}
+								resp.Body = &googleInteractionClosingBody{Reader: reader, closed: &closes}
+								return resp, nil
+							},
+						),
+					)
+					var exec cliproxyauth.ProviderExecutor = NewGeminiInteractionsExecutor(&config.Config{})
+					if provider == "vertex" {
+						exec = NewGeminiVertexExecutor(&config.Config{})
 					}
-					resp.Body = &googleInteractionClosingBody{Reader: reader, closed: &closes}
-					return resp, nil
-				}))
-				var exec cliproxyauth.ProviderExecutor = NewGeminiInteractionsExecutor(&config.Config{})
-				if provider == "vertex" {
-					exec = NewGeminiVertexExecutor(&config.Config{})
-				}
-				stream, err := exec.ExecuteStream(ctx, googlePayloadAuth(provider), cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: []byte(`{"input":"hi"}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions})
-				if err != nil {
-					t.Fatal(err)
-				}
-				var output bytes.Buffer
-				for chunk := range stream.Chunks {
-					output.Write(chunk.Payload)
-					if chunk.Err != nil {
-						err = chunk.Err
+					stream, err := exec.ExecuteStream(
+						ctx, googlePayloadAuth(provider),
+						cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: []byte(`{"input":"hi"}`)},
+						cliproxyexecutor.Options{
+							SourceFormat:   sdktranslator.FormatInteractions,
+							ResponseFormat: sdktranslator.FormatInteractions,
+						},
+					)
+					if err != nil {
+						t.Fatal(err)
 					}
-				}
-				if (err != nil) != tc.wantError || calls != 1 || closes != 1 {
-					t.Fatalf("err=%v wantError=%t HTTP=%d close=%d", err, tc.wantError, calls, closes)
-				}
-				if !tc.wantError && (!bytes.Contains(output.Bytes(), []byte("contract-complete")) || bytes.Contains(output.Bytes(), []byte("[DONE]"))) {
-					t.Fatalf("complete snapshot changed: %s", output.Bytes())
-				}
-				if tc.readError != nil && !errors.Is(err, tc.readError) {
-					t.Fatalf("read error lost: %v", err)
-				}
-			})
+					var output bytes.Buffer
+					for chunk := range stream.Chunks {
+						output.Write(chunk.Payload)
+						if chunk.Err != nil {
+							err = chunk.Err
+						}
+					}
+					if (err != nil) != tc.wantError || calls != 1 || closes != 1 {
+						t.Fatalf("err=%v wantError=%t HTTP=%d close=%d", err, tc.wantError, calls, closes)
+					}
+					if !tc.wantError && (!bytes.Contains(
+						output.Bytes(), []byte("contract-complete"),
+					) || bytes.Contains(output.Bytes(), []byte("[DONE]"))) {
+						t.Fatalf("complete snapshot changed: %s", output.Bytes())
+					}
+					if tc.readError != nil && !errors.Is(err, tc.readError) {
+						t.Fatalf("read error lost: %v", err)
+					}
+				},
+			)
 		}
 	}
 }
@@ -196,24 +396,41 @@ func (body *googleInteractionClosingBody) Close() error { *body.closed++; return
 
 func TestGeminiInteractionsRejectsUnsupportedContent(t *testing.T) {
 	for _, stream := range []bool{false, true} {
-		t.Run(fmt.Sprint(stream), func(t *testing.T) {
-			calls := 0
-			ctx := util.WithRoundTripper(t.Context(), googlePayloadTransport(func(*http.Request) (*http.Response, error) {
-				calls++
-				return nil, errors.New("unexpected HTTP request")
-			}))
-			req := cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"not-stored"}}]}]}`)}
-			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatInteractions}
-			var err error
-			if stream {
-				_, err = NewGeminiInteractionsExecutor(&config.Config{}).ExecuteStream(ctx, googlePayloadAuth("gemini-interactions"), req, opts)
-			} else {
-				_, err = NewGeminiInteractionsExecutor(&config.Config{}).Execute(ctx, googlePayloadAuth("gemini-interactions"), req, opts)
-			}
-			status, ok := err.(interface{ StatusCode() int })
-			if !ok || status.StatusCode() != http.StatusBadRequest || calls != 0 {
-				t.Fatalf("error=%v HTTP=%d", err, calls)
-			}
-		})
+		t.Run(
+			fmt.Sprint(stream), func(t *testing.T) {
+				calls := 0
+				ctx := util.WithRoundTripper(
+					t.Context(), googlePayloadTransport(
+						func(*http.Request) (*http.Response, error) {
+							calls++
+							return nil, errors.New("unexpected HTTP request")
+						},
+					),
+				)
+				req := cliproxyexecutor.Request{
+					Model: "gemini-2.5-flash",
+					Payload: []byte(
+						`{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"not-stored"}}]}]}`,
+					),
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatInteractions,
+				}
+				var err error
+				if stream {
+					_, err = NewGeminiInteractionsExecutor(&config.Config{}).ExecuteStream(
+						ctx, googlePayloadAuth("gemini-interactions"), req, opts,
+					)
+				} else {
+					_, err = NewGeminiInteractionsExecutor(&config.Config{}).Execute(
+						ctx, googlePayloadAuth("gemini-interactions"), req, opts,
+					)
+				}
+				status, ok := err.(interface{ StatusCode() int })
+				if !ok || status.StatusCode() != http.StatusBadRequest || calls != 0 {
+					t.Fatalf("error=%v HTTP=%d", err, calls)
+				}
+			},
+		)
 	}
 }

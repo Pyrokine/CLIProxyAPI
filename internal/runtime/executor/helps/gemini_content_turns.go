@@ -79,8 +79,8 @@ func EnsureGeminiTrailingUserContent(payload []byte, path string) []byte {
 	return out
 }
 
-// EnsureGeminiBoundaryUserContent ensures that the contents array at path starts and ends with a user turn.
-func EnsureGeminiBoundaryUserContent(payload []byte, path string) []byte {
+// ensureGeminiBoundaryUserContent ensures that the contents array at path starts and ends with a user turn.
+func ensureGeminiBoundaryUserContent(payload []byte, path string) []byte {
 	payload = EnsureGeminiLeadingUserContent(payload, path)
 	return EnsureGeminiTrailingUserContent(payload, path)
 }

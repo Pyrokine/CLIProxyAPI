@@ -43,7 +43,10 @@ func TestParseDevinInteractionsPayloadPreservesHistoryAndTools(t *testing.T) {
 		t.Fatalf("temperature = %v, want explicit zero", parsed.temperature)
 	}
 	if parsed.maxTokens != 16000 || parsed.thinkingLevel != "high" || parsed.budgetTokens != 32000 {
-		t.Fatalf("generation settings = max %d level %q budget %d", parsed.maxTokens, parsed.thinkingLevel, parsed.budgetTokens)
+		t.Fatalf(
+			"generation settings = max %d level %q budget %d", parsed.maxTokens, parsed.thinkingLevel,
+			parsed.budgetTokens,
+		)
 	}
 	if parsed.sessionID != "session-1" || parsed.cascadeID != "cascade-1" {
 		t.Fatalf("session/cascade = %q/%q", parsed.sessionID, parsed.cascadeID)
@@ -75,12 +78,15 @@ func TestParseDevinInteractionsPayloadPreservesHistoryAndTools(t *testing.T) {
 }
 
 func TestDevinInteractionResultPrefersCallIDOverUnrelatedStepID(t *testing.T) {
-	payload := []byte(`{"input":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"read_file","arguments":{}},{"type":"function_result","id":"step-id","call_id":"call-1","result":"found"}]}`)
+	payload := []byte(`{"input":[{"type":"function_call","id":"item-1","call_id":"call-1","na` +
+		`me":"read_file","arguments":{}},{"type":"function_result","id":"step-i` +
+		`d","call_id":"call-1","result":"found"}]}`)
 	parsed := parseDevinInteractionsPayload(payload, nil)
 	if len(parsed.prompts) != 2 || len(parsed.prompts[0].ToolCalls) != 1 {
 		t.Fatalf("tool prompts = %#v", parsed.prompts)
 	}
-	if parsed.prompts[0].ToolCalls[0].ID != "call-1" || parsed.prompts[1].ToolCallID != "call-1" || parsed.prompts[1].Content != "found" {
+	if parsed.prompts[0].ToolCalls[0].ID != "call-1" || parsed.prompts[1].ToolCallID != "call-1" ||
+		parsed.prompts[1].Content != "found" {
 		t.Fatalf("tool call/result pairing = %#v", parsed.prompts)
 	}
 }
@@ -95,23 +101,34 @@ func TestDevinToolResultPairingFromTranslatedRequests(t *testing.T) {
 	}{
 		{
 			name: "Claude", format: sdktranslator.FormatClaude, id: "toolu_abc_123", result: "file.txt",
-			body: `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc_123","name":"bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc_123","content":"file.txt"}]}]}`,
+			body: `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc_123","name"` +
+				`:"bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","` +
+				`tool_use_id":"toolu_abc_123","content":"file.txt"}]}]}`,
 		},
 		{
 			name: "OpenAI", format: sdktranslator.FormatOpenAI, id: "call_xyz_456", result: "package main",
-			body: `{"messages":[{"role":"assistant","tool_calls":[{"id":"call_xyz_456","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"main.go\"}"}}]},{"role":"tool","tool_call_id":"call_xyz_456","content":"package main"}]}`,
+			body: `{"messages":[{"role":"assistant","tool_calls":[{"id":"call_xyz_456","type":"function","` +
+				`function":{"name":"read_file","arguments":"{\"path\":\"main.go\"}"}}]},{"role":"tool","` +
+				`tool_call_id":"call_xyz_456","content":"package main"}]}`,
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			translated, err := sdktranslator.TranslateRequestChecked(context.Background(), tc.format, sdktranslator.FormatInteractions, "devin/swe-2", []byte(tc.body), false)
-			if err != nil {
-				t.Fatalf("translate tool history: %v", err)
-			}
-			prompts := parseDevinInteractionsPayload(translated, nil).prompts
-			if len(prompts) != 2 || len(prompts[0].ToolCalls) != 1 || prompts[0].ToolCalls[0].ID != tc.id || prompts[1].ToolCallID != tc.id || prompts[1].Content != tc.result {
-				t.Fatalf("translated tool call/result pairing = %#v, payload = %s", prompts, translated)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				translated, err := sdktranslator.TranslateRequestChecked(
+					context.Background(), tc.format, sdktranslator.FormatInteractions, "devin/swe-2", []byte(tc.body),
+					false,
+				)
+				if err != nil {
+					t.Fatalf("translate tool history: %v", err)
+				}
+				prompts := parseDevinInteractionsPayload(translated, nil).prompts
+				if len(prompts) != 2 || len(prompts[0].ToolCalls) != 1 || prompts[0].ToolCalls[0].ID != tc.id ||
+					prompts[1].ToolCallID != tc.id ||
+					prompts[1].Content != tc.result {
+					t.Fatalf("translated tool call/result pairing = %#v, payload = %s", prompts, translated)
+				}
+			},
+		)
 	}
 }
 
@@ -135,7 +152,8 @@ func TestParseDevinInteractionsPayloadKeepsNonSystemTextUntouched(t *testing.T) 
 	if parsed.prompts[1].ToolCalls[0].Arguments != `{"value":"SECRET"}` {
 		t.Fatalf("tool arguments changed: %q", parsed.prompts[1].ToolCalls[0].Arguments)
 	}
-	if parsed.tools[0].Description != "SECRET description" || string(parsed.tools[0].Parameters) != `{"const":"SECRET"}` {
+	if parsed.tools[0].Description != "SECRET description" ||
+		string(parsed.tools[0].Parameters) != `{"const":"SECRET"}` {
 		t.Fatalf("tool schema changed: %#v", parsed.tools[0])
 	}
 }
@@ -172,7 +190,9 @@ func TestParseDevinInteractionsPayloadImagesAndOriginalSignature(t *testing.T) {
 		t.Fatalf("image header missing: %q", parsed.prompts[0].Content)
 	}
 	assistant := parsed.prompts[1]
-	if assistant.Thinking != "reasoning" || string(assistant.Signature) != "CAQSsig" || assistant.SignatureType != "anthropic" {
+	//goland:noinspection SpellCheckingInspection
+	if assistant.Thinking != "reasoning" || string(assistant.Signature) != "CAQSsig" ||
+		assistant.SignatureType != "anthropic" {
 		t.Fatalf("supplemented assistant = %#v", assistant)
 	}
 }
@@ -206,7 +226,8 @@ func TestParseDevinMessagesFallbackPreservesToolCallIdentity(t *testing.T) {
 	if parsed.prompts[2].ToolCallID != "call-9" || parsed.prompts[2].Content != "result" {
 		t.Fatalf("tool result = %#v", parsed.prompts[2])
 	}
-	if len(parsed.tools) != 1 || parsed.tools[0].Name != "lookup" || string(parsed.tools[0].Parameters) != `{"type":"object"}` {
+	if len(parsed.tools) != 1 || parsed.tools[0].Name != "lookup" ||
+		string(parsed.tools[0].Parameters) != `{"type":"object"}` {
 		t.Fatalf("tools = %#v", parsed.tools)
 	}
 }
@@ -217,7 +238,8 @@ func TestDevinDirectToolDeclarationsPreserveAliases(t *testing.T) {
 		`[{"functionDeclarations":[{"name":"lookup","parametersJsonSchema":{"type":"object"}}]}]`,
 		`[{"name":"lookup","parametersJsonSchema":{"type":"object"}}]`,
 		`[{"function":{"name":"lookup","parametersJsonSchema":{"type":"object"}}}]`,
-		`[{"type":"namespace","name":"mcp__codex_app","children":[{"name":"automation_update"},{"name":"lookup","parameters":{"type":"object"}}]}]`,
+		`[{"type":"namespace","name":"mcp__codex_app","children":[{"name":"automation_update"},{"name":"` +
+			`lookup","parameters":{"type":"object"}}]}]`,
 	} {
 		parsed := parseDevinTools(gjson.Parse(tools))
 		if len(parsed) != 1 || parsed[0].Name != "lookup" || string(parsed[0].Parameters) != `{"type":"object"}` {
@@ -249,10 +271,15 @@ func TestDevinToolResultProjectionPreservesBusinessValues(t *testing.T) {
 
 func TestDevinOriginalToolResultImagesFollowCallIdentity(t *testing.T) {
 	encoded := devinContractPNG(t, 9)
-	payload := []byte(`{"input":[{"type":"function_call","id":"call_image","name":"screenshot","arguments":{}},{"type":"function_result","call_id":"call_image","result":"captured"}]}`)
-	original := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_image","name":"screenshot","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_image","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + encoded + `"}}]}]}]}`)
+	payload := []byte((`{"input":[{"type":"function_call","id":"call_image","name":"screenshot","arguments":{}` +
+		`},{"type":"function_result","call_id":"call_image","result":"captured"}]}`))
+	original := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c` +
+		`all_image","name":"screenshot","input":{}}]},{"role":"user","content":` +
+		`[{"type":"tool_result","tool_use_id":"call_image","content":[{"type":"` +
+		`image","source":{"type":"base64","media_type":"image/png","data":"` + encoded + `"}}]}]}]}`)
 	parsed := parseDevinInteractionsPayload(payload, original)
-	if len(parsed.prompts) != 2 || parsed.prompts[1].ToolCallID != "call_image" || len(parsed.prompts[1].Images) != 1 || parsed.prompts[1].Images[0].Base64Data != encoded {
+	if len(parsed.prompts) != 2 || parsed.prompts[1].ToolCallID != "call_image" || len(parsed.prompts[1].Images) != 1 ||
+		parsed.prompts[1].Images[0].Base64Data != encoded {
 		t.Fatalf("original tool image association changed: %+v", parsed.prompts)
 	}
 }

@@ -1,6 +1,9 @@
 // Package gemini provides in-provider request normalization for Gemini API.
-// It ensures incoming v1beta requests meet minimal schema requirements
+// It ensures incoming requests for API version 1 beta meet minimal schema requirements
 // expected by Google's Generative Language API.
+//
+//goland:noinspection GrazieInspection
+//goland:noinspection GrazieInspection
 package gemini
 
 import (
@@ -16,11 +19,13 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// convertGeminiRequestToGemini normalizes Gemini v1beta requests.
+// convertGeminiRequestToGemini normalizes requests for Gemini API version 1 beta.
 //   - Adds a default role for each content if missing or invalid.
 //     The first message defaults to "user", then alternates user/model when needed.
 //
 // It keeps the payload otherwise unchanged.
+//
+//goland:noinspection GrazieInspection
 func convertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 	// Fast path: if no contents field, only attach safety settings
@@ -198,21 +203,27 @@ func backfillEmptyFunctionResponseNames(data []byte) []byte {
 	changed := false
 	contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 	var pendingCallNames []string
+	var pendingCallNamesByID map[string]string
 	contents.ForEach(
 		func(contentIdx, content gjson.Result) bool {
 			role := content.Get("role").String()
 			contentRaw := []byte(content.Raw)
 			if role == "model" {
 				var names []string
+				namesByID := make(map[string]string)
 				content.Get("parts").ForEach(
 					func(_, part gjson.Result) bool {
 						if part.Get("functionCall").Exists() {
 							names = append(names, part.Get("functionCall.name").String())
+							if id := part.Get("functionCall.id").String(); id != "" {
+								namesByID[id] = part.Get("functionCall.name").String()
+							}
 						}
 						return true
 					},
 				)
 				pendingCallNames = names
+				pendingCallNamesByID = namesByID
 				contentItems = append(contentItems, contentRaw)
 				return true
 			}
@@ -227,11 +238,17 @@ func backfillEmptyFunctionResponseNames(data []byte) []byte {
 						if part.Get("functionResponse").Exists() {
 							name := part.Get("functionResponse.name").String()
 							if strings.TrimSpace(name) == "" {
-								if responseIndex < len(pendingCallNames) {
+								nameToUse := ""
+								if id := part.Get("functionResponse.id").String(); id != "" {
+									nameToUse = pendingCallNamesByID[id]
+								} else if responseIndex < len(pendingCallNames) {
+									nameToUse = pendingCallNames[responseIndex]
+								}
+								if nameToUse != "" {
 									partRaw, _ = sjson.SetBytes(
 										partRaw,
 										"functionResponse.name",
-										pendingCallNames[responseIndex],
+										nameToUse,
 									)
 									partsChanged = true
 								} else {
@@ -324,19 +341,25 @@ func geminiFunctionResponseNamesNeedBackfill(contents gjson.Result) (bool, []int
 func backfillEmptyFunctionResponseNamesLegacy(data []byte, contents gjson.Result) []byte {
 	out := data
 	var pendingCallNames []string
+	var pendingCallNamesByID map[string]string
 	contents.ForEach(
 		func(contentIdx, content gjson.Result) bool {
 			if content.Get("role").String() == "model" {
 				var names []string
+				namesByID := make(map[string]string)
 				content.Get("parts").ForEach(
 					func(_, part gjson.Result) bool {
 						if part.Get("functionCall").Exists() {
 							names = append(names, part.Get("functionCall.name").String())
+							if id := part.Get("functionCall.id").String(); id != "" {
+								namesByID[id] = part.Get("functionCall.name").String()
+							}
 						}
 						return true
 					},
 				)
 				pendingCallNames = names
+				pendingCallNamesByID = namesByID
 				return true
 			}
 			if len(pendingCallNames) > 0 {
@@ -345,13 +368,19 @@ func backfillEmptyFunctionResponseNamesLegacy(data []byte, contents gjson.Result
 					func(partIdx, part gjson.Result) bool {
 						if part.Get("functionResponse").Exists() {
 							if strings.TrimSpace(part.Get("functionResponse.name").String()) == "" {
-								if responseIndex < len(pendingCallNames) {
+								nameToUse := ""
+								if id := part.Get("functionResponse.id").String(); id != "" {
+									nameToUse = pendingCallNamesByID[id]
+								} else if responseIndex < len(pendingCallNames) {
+									nameToUse = pendingCallNames[responseIndex]
+								}
+								if nameToUse != "" {
 									path := fmt.Sprintf(
 										"contents.%d.parts.%d.functionResponse.name",
 										contentIdx.Int(),
 										partIdx.Int(),
 									)
-									out, _ = sjson.SetBytes(out, path, pendingCallNames[responseIndex])
+									out, _ = sjson.SetBytes(out, path, nameToUse)
 								} else {
 									log.Debugf(
 										"more function responses than calls at contents[%d], skipping name backfill",

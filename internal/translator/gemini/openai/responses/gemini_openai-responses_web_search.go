@@ -152,7 +152,9 @@ func responsesWebSearchAllowedDomains(root gjson.Result) ([]string, error) {
 		}
 		for _, domain := range filter.Array() {
 			if domain.Type != gjson.String || strings.TrimSpace(domain.String()) == "" {
-				return nil, responsesWebSearchRequestError("web search allowed_domains contains an empty or non-string domain")
+				return nil, responsesWebSearchRequestError(
+					"web search allowed_domains contains an empty or non-string domain",
+				)
 			}
 			domains = append(domains, strings.TrimSpace(domain.String()))
 		}
@@ -279,9 +281,13 @@ func responsesMergeGroundingMetadata(existing, update gjson.Result) gjson.Result
 		merged, _ = sjson.SetRawBytes(merged, "groundingChunks", translatorcommon.JoinRawArray(chunks))
 	}
 
-	supports := make([][]byte, 0, len(existing.Get("groundingSupports").Array())+len(update.Get("groundingSupports").Array()))
+	supports := make(
+		[][]byte, 0, len(existing.Get("groundingSupports").Array())+len(update.Get("groundingSupports").Array()),
+	)
 	seenSupports := make(map[string]bool)
-	for _, support := range append(existing.Get("groundingSupports").Array(), update.Get("groundingSupports").Array()...) {
+	for _, support := range append(
+		existing.Get("groundingSupports").Array(), update.Get("groundingSupports").Array()...,
+	) {
 		if !seenSupports[support.Raw] {
 			supports = append(supports, []byte(support.Raw))
 			seenSupports[support.Raw] = true
@@ -297,10 +303,14 @@ func responsesMergeCitations(existing, incoming [][]byte) [][]byte {
 	merged := make([][]byte, 0, len(existing)+len(incoming))
 	indices := make(map[string]int)
 	for _, citation := range append(existing, incoming...) {
-		key := fmt.Sprintf("%s:%d:%d", gjson.GetBytes(citation, "url").String(),
-			gjson.GetBytes(citation, "start_index").Int(), gjson.GetBytes(citation, "end_index").Int())
+		key := fmt.Sprintf(
+			"%s:%d:%d", gjson.GetBytes(citation, "url").String(),
+			gjson.GetBytes(citation, "start_index").Int(), gjson.GetBytes(citation, "end_index").Int(),
+		)
 		if index, ok := indices[key]; ok {
-			if gjson.GetBytes(merged[index], "title").String() == "" && gjson.GetBytes(citation, "title").String() != "" {
+			if gjson.GetBytes(merged[index], "title").String() == "" && gjson.GetBytes(
+				citation, "title",
+			).String() != "" {
 				merged[index] = citation
 			}
 			continue
@@ -369,7 +379,11 @@ func responsesByteRanges(mappings []responsesPartMapping, start, end int64) []re
 	return ranges
 }
 
-func responsesCitationsByMessage(grounding gjson.Result, mappings []responsesPartMapping, messageTexts []string) map[int][][]byte {
+func responsesCitationsByMessage(
+	grounding gjson.Result,
+	mappings []responsesPartMapping,
+	messageTexts []string,
+) map[int][][]byte {
 	chunks := grounding.Get("groundingChunks").Array()
 	if len(chunks) == 0 {
 		return nil
@@ -379,7 +393,8 @@ func responsesCitationsByMessage(grounding gjson.Result, mappings []responsesPar
 	}
 	coalesced := make([]responsesPartMapping, 0, len(mappings))
 	for _, mapping := range mappings {
-		if n := len(coalesced); n > 0 && coalesced[n-1].partIndex == mapping.partIndex && coalesced[n-1].message == mapping.message {
+		if n := len(coalesced); n > 0 && coalesced[n-1].partIndex == mapping.partIndex &&
+			coalesced[n-1].message == mapping.message {
 			coalesced[n-1].text += mapping.text
 		} else {
 			coalesced = append(coalesced, mapping)

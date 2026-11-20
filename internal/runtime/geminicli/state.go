@@ -91,6 +91,7 @@ func (s *SharedCredential) StageMetadata(values map[string]any) (map[string]any,
 	}
 }
 
+//goland:noinspection GoUnnecessarilyExportedIdentifiers
 func (c *MetadataRefreshCommit) Current() bool {
 	if c == nil || c.owner == nil {
 		return false

@@ -10,7 +10,10 @@ func convertOpenAIResponsesRequestToGeminiCLI(modelName string, inputRawJSON []b
 	return out
 }
 
-func convertOpenAIResponsesRequestToGeminiCLIChecked(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+func convertOpenAIResponsesRequestToGeminiCLIChecked(modelName string, inputRawJSON []byte, stream bool) (
+	[]byte,
+	error,
+) {
 	geminiRequest, err := geminiresp.ConvertOpenAIResponsesRequestToGeminiChecked(modelName, inputRawJSON, stream)
 	if err != nil {
 		return nil, err

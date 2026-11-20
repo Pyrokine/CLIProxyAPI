@@ -7,7 +7,9 @@ import (
 )
 
 func TestConvertClaudeRequestToInteractionsWithCompatPreservesEmptyThinking(t *testing.T) {
-	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":""}]}]}`)
+	payload := []byte(
+		`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":""}]}]}`,
+	)
 
 	withoutCompat := convertClaudeRequestToInteractionsDefault("deepseek-v4", payload, false)
 	if gjson.GetBytes(withoutCompat, "input.#").Int() != 0 {

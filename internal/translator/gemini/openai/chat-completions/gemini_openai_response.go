@@ -9,11 +9,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	geminiopenai "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -24,8 +26,11 @@ type convertGeminiResponseToOpenAIChatParams struct {
 	ResponseID    string
 	Model         string
 	Usage         geminiopenai.GeminiUsage
+	ToolNames     map[string]string
+	FinishEmitted map[int]bool
 	// FunctionIndex tracks tool call indices per candidate index to support multiple candidates.
 	FunctionIndex        map[int]int
+	ImageIndex           map[int]int
 	SawToolCall          map[int]bool
 	UpstreamFinishReason map[int]string
 }
@@ -47,11 +52,18 @@ var functionCallIDCounter atomic.Uint64
 //
 // Returns:
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
-func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, rawJSON []byte, param *any) [][]byte {
+func convertGeminiResponseToOpenAI(
+	_ context.Context,
+	modelName string,
+	originalRequestRawJSON, _, rawJSON []byte,
+	param *any,
+) [][]byte {
 	// Initialize parameters if nil.
 	if *param == nil {
 		*param = &convertGeminiResponseToOpenAIChatParams{
 			UnixTimestamp:        0,
+			ToolNames:            util.DisambiguatedToolNameMap(originalRequestRawJSON),
+			FinishEmitted:        make(map[int]bool),
 			FunctionIndex:        make(map[int]int),
 			SawToolCall:          make(map[int]bool),
 			UpstreamFinishReason: make(map[int]string),
@@ -62,6 +74,9 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 	p := (*param).(*convertGeminiResponseToOpenAIChatParams)
 	if p.FunctionIndex == nil {
 		p.FunctionIndex = make(map[int]int)
+	}
+	if p.ImageIndex == nil {
+		p.ImageIndex = make(map[int]int)
 	}
 	if p.SawToolCall == nil {
 		p.SawToolCall = make(map[int]bool)
@@ -82,12 +97,14 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 	if !root.Exists() {
 		return [][]byte{}
 	}
-	if modelVersionResult := root.Get("modelVersion"); modelVersionResult.Type == gjson.String && modelVersionResult.String() != "" {
+	if modelVersionResult := root.Get("modelVersion"); modelVersionResult.Type == gjson.String &&
+		modelVersionResult.String() != "" {
 		p.Model = modelVersionResult.String()
 	} else if p.Model == "" {
 		p.Model = modelName
 	}
-	if responseIDResult := root.Get("responseId"); responseIDResult.Type == gjson.String && responseIDResult.String() != "" {
+	if responseIDResult := root.Get("responseId"); responseIDResult.Type == gjson.String &&
+		responseIDResult.String() != "" {
 		p.ResponseID = responseIDResult.String()
 	}
 	if createTimeResult := root.Get("createTime"); createTimeResult.Type == gjson.String {
@@ -100,7 +117,9 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 
 	// Initialize the OpenAI SSE base template.
 	// We use a base template and clone it for each candidate to support multiple candidates.
-	baseTemplate := []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
+	baseTemplate := []byte((`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"` +
+		`index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"` +
+		`finish_reason":null,"native_finish_reason":null}]}`))
 	baseTemplate, _ = sjson.SetBytes(baseTemplate, "id", p.ResponseID)
 	baseTemplate, _ = sjson.SetBytes(baseTemplate, "model", p.Model)
 	baseTemplate, _ = sjson.SetBytes(baseTemplate, "created", p.UnixTimestamp)
@@ -133,7 +152,8 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 				if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
 					p.UpstreamFinishReason[candidateIndex] = strings.ToUpper(finishReasonResult.String())
 				}
-				if stopReasonResult := root.Get("stop_reason"); stopReasonResult.Exists() && stopReasonResult.String() != "" {
+				if stopReasonResult := root.Get("stop_reason"); stopReasonResult.Exists() &&
+					stopReasonResult.String() != "" {
 					p.UpstreamFinishReason[candidateIndex] = strings.ToUpper(stopReasonResult.String())
 				}
 
@@ -165,8 +185,10 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 							thoughtSignatureResult = partResult.Get("thought_signature")
 						}
 
-						hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
-						hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+						hasThoughtSignature := thoughtSignatureResult.Exists() &&
+							thoughtSignatureResult.String() != ""
+						hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() ||
+							inlineDataResult.Exists()
 
 						// Skip pure thoughtSignature parts but keep any actual payload in the same part.
 						if hasThoughtSignature && !hasContentPayload {
@@ -178,8 +200,11 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 							setAssistantRole()
 							// Handle text content, distinguishing between regular content and reasoning/thoughts.
 							if partResult.Get("thought").Bool() {
-								oldValue := gjson.GetBytes(template, "choices.0.delta.reasoning_content").String()
-								template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", oldValue+text)
+								oldValue := gjson.GetBytes(template, "choices.0.delta.reasoning_content").
+									String()
+								template, _ = sjson.SetBytes(
+									template, "choices.0.delta.reasoning_content", oldValue+text,
+								)
 							} else {
 								oldValue := gjson.GetBytes(template, "choices.0.delta.content").String()
 								template, _ = sjson.SetBytes(template, "choices.0.delta.content", oldValue+text)
@@ -199,8 +224,12 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 								template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
 							}
 
-							functionCallTemplate := []byte(`{"id":"","index":0,"type":"function","function":{"name":"","arguments":""}}`)
-							fcName := functionCallResult.Get("name").String()
+							functionCallTemplate := []byte((`{"id":"","index":0,"type":"function","function":` +
+								`{"name":"","arguments":` +
+								`""}}`))
+							fcName := util.RestoreSanitizedToolName(
+								p.ToolNames, functionCallResult.Get("name").String(),
+							)
 							functionCallTemplate, _ = sjson.SetBytes(
 								functionCallTemplate, "id", fmt.Sprintf(
 									"%s-%d-%d", fcName, time.Now().UnixNano(),
@@ -235,10 +264,20 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 							if !imagesResult.Exists() || !imagesResult.IsArray() {
 								template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
 							}
-							imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
+							imageIndex := p.ImageIndex[candidateIndex]
+							p.ImageIndex[candidateIndex]++
 							imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
 							imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+							signature := partResult.Get("thoughtSignature").String()
+							if signature == "" {
+								signature = partResult.Get("thought_signature").String()
+							}
+							if signature != "" {
+								imagePayload, _ = sjson.SetBytes(
+									imagePayload, "extra_content.google.thought_signature", signature,
+								)
+							}
 							setAssistantRole()
 							template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
 						}
@@ -247,15 +286,15 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 
 				upstreamFinishReason := p.UpstreamFinishReason[candidateIndex]
 				sawToolCall := p.SawToolCall[candidateIndex]
-				isFinalChunk := upstreamFinishReason != "" && p.Usage.Seen
+				isFinalChunk := upstreamFinishReason != "" && root.Get("usageMetadata").Exists() &&
+					!p.FinishEmitted[candidateIndex]
 
 				if isFinalChunk {
-					finishReason := "stop"
-					if sawToolCall {
-						finishReason = "tool_calls"
-					} else if upstreamFinishReason == "MAX_TOKENS" {
-						finishReason = "max_tokens"
+					if p.FinishEmitted == nil {
+						p.FinishEmitted = make(map[int]bool)
 					}
+					p.FinishEmitted[candidateIndex] = true
+					finishReason := geminiChatFinishReason(upstreamFinishReason, sawToolCall)
 					template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
 					template, _ = sjson.SetBytes(
 						template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason),
@@ -266,10 +305,35 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 				return true // continue loop
 			},
 		)
-	} else {
-		// If there are no candidates (e.g., a pure usageMetadata chunk), return the usage chunk if present.
-		if root.Get("usageMetadata").Exists() && len(responseStrings) == 0 {
-			responseStrings = append(responseStrings, append([]byte(nil), baseTemplate...))
+	}
+	if len(responseStrings) == 0 && root.Get("usageMetadata").Exists() {
+		indices := make([]int, 0, len(p.UpstreamFinishReason))
+		for index := range p.UpstreamFinishReason {
+			indices = append(indices, index)
+		}
+		slices.Sort(indices)
+		for _, index := range indices {
+			if p.UpstreamFinishReason[index] == "" || p.FinishEmitted[index] {
+				continue
+			}
+			chunk := append([]byte(nil), baseTemplate...)
+			chunk, _ = sjson.SetBytes(chunk, "choices.0.index", index)
+			chunk, _ = sjson.SetBytes(
+				chunk, "choices.0.finish_reason",
+				geminiChatFinishReason(p.UpstreamFinishReason[index], p.SawToolCall[index]),
+			)
+			chunk, _ = sjson.SetBytes(
+				chunk, "choices.0.native_finish_reason", strings.ToLower(p.UpstreamFinishReason[index]),
+			)
+			responseStrings = append(responseStrings, chunk)
+			if p.FinishEmitted == nil {
+				p.FinishEmitted = make(map[int]bool)
+			}
+			p.FinishEmitted[index] = true
+		}
+		if len(responseStrings) == 0 {
+			chunk, _ := sjson.SetRawBytes(baseTemplate, "choices", []byte(`[]`))
+			responseStrings = append(responseStrings, chunk)
 		}
 	}
 
@@ -292,16 +356,18 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 func ConvertGeminiResponseToOpenAINonStream(
 	_ context.Context,
 	modelName string,
-	_, _, rawJSON []byte,
+	originalRequestRawJSON, _, rawJSON []byte,
 	_ *any,
 ) []byte {
+	toolNames := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	root := unwrapGeminiChatResponseRoot(gjson.ParseBytes(rawJSON))
 	var unixTimestamp int64
 	// Initialize template with an empty choices array to support multiple candidates.
 	template := []byte(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[]}`)
 
 	model := modelName
-	if modelVersionResult := root.Get("modelVersion"); modelVersionResult.Type == gjson.String && modelVersionResult.String() != "" {
+	if modelVersionResult := root.Get("modelVersion"); modelVersionResult.Type == gjson.String &&
+		modelVersionResult.String() != "" {
 		model = modelVersionResult.String()
 	}
 	template, _ = sjson.SetBytes(template, "model", model)
@@ -335,7 +401,11 @@ func ConvertGeminiResponseToOpenAINonStream(
 		candidates.ForEach(
 			func(_, candidate gjson.Result) bool {
 				// Construct a single Choice object.
-				choiceTemplate := []byte(`{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}`)
+				choiceTemplate := []byte(
+					(`{"index":0,"message":{"role":"assistant","content":null,"reasoning_con` +
+						`tent":null,"tool_calls":null},"finish_reason":null,"native_finish_reas` +
+						`on":null}`),
+				)
 
 				// Set the index for this choice.
 				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "index", candidate.Get("index").Int())
@@ -343,7 +413,8 @@ func ConvertGeminiResponseToOpenAINonStream(
 				// Set finish reason.
 				if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
 					choiceTemplate, _ = sjson.SetBytes(
-						choiceTemplate, "finish_reason", strings.ToLower(finishReasonResult.String()),
+						choiceTemplate, "finish_reason",
+						geminiChatFinishReason(strings.ToUpper(finishReasonResult.String()), false),
 					)
 					choiceTemplate, _ = sjson.SetBytes(
 						choiceTemplate, "native_finish_reason", strings.ToLower(finishReasonResult.String()),
@@ -388,8 +459,10 @@ func ConvertGeminiResponseToOpenAINonStream(
 									choiceTemplate, "message.tool_calls", []byte(`[]`),
 								)
 							}
-							functionCallItemTemplate := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-							fcName := functionCallResult.Get("name").String()
+							functionCallItemTemplate := []byte((`{"id":"","type":"function","function":` +
+								`{"name":"","arguments":` +
+								`""}}`))
+							fcName := util.RestoreSanitizedToolName(toolNames, functionCallResult.Get("name").String())
 							functionCallItemTemplate, _ = sjson.SetBytes(
 								functionCallItemTemplate, "id", fmt.Sprintf(
 									"%s-%d-%d", fcName, time.Now().UnixNano(),
@@ -428,6 +501,15 @@ func ConvertGeminiResponseToOpenAINonStream(
 								imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 								imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
 								imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+								signature := partResult.Get("thoughtSignature").String()
+								if signature == "" {
+									signature = partResult.Get("thought_signature").String()
+								}
+								if signature != "" {
+									imagePayload, _ = sjson.SetBytes(
+										imagePayload, "extra_content.google.thought_signature", signature,
+									)
+								}
 								choiceTemplate, _ = sjson.SetRawBytes(choiceTemplate, "message.images.-1", imagePayload)
 							}
 						}
@@ -447,6 +529,19 @@ func ConvertGeminiResponseToOpenAINonStream(
 	}
 
 	return template
+}
+
+func geminiChatFinishReason(reason string, sawTool bool) string {
+	switch reason {
+	case "MAX_TOKENS":
+		return "length"
+	case "SAFETY", "RECITATION", "PROHIBITED_CONTENT", "SPII", "BLOCKLIST":
+		return "content_filter"
+	}
+	if sawTool {
+		return "tool_calls"
+	}
+	return "stop"
 }
 
 func unwrapGeminiChatResponseRoot(root gjson.Result) gjson.Result {

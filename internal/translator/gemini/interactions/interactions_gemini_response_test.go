@@ -13,17 +13,28 @@ import (
 func TestInteractionsFailedEventToGeminiError(t *testing.T) {
 	for _, event := range []string{
 		`{"event_type":"response.failed","error":{"code":"resource_exhausted","message":"model capacity exhausted"}}`,
-		`{"event_type":"interaction.failed","interaction":{"error":{"code":"429","message":"model capacity exhausted"}}}`,
+		`{"event_type":"interaction.failed","interaction":{"error":{"code":` +
+			`"429","message":"model capacity ` +
+			`exhausted"}}}`,
 		`{"event_type":"response.failed","response":{"error":{"code":"429","message":"model capacity exhausted"}}}`,
 	} {
 		var state any
-		out := convertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil, []byte(event), &state)
+		out := convertInteractionsResponseToGemini(
+			context.Background(),
+			"gemini-test",
+			nil,
+			nil,
+			[]byte(event),
+			&state,
+		)
 		if len(out) != 1 || gjson.GetBytes(out[0], "error.code").Int() != 429 ||
 			gjson.GetBytes(out[0], "error.message").String() != "model capacity exhausted" {
 			t.Fatalf("failed event = %s, want Gemini error 429; output=%q", event, out)
 		}
-		completed := convertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil,
-			[]byte(`{"event_type":"interaction.completed"}`), &state)
+		completed := convertInteractionsResponseToGemini(
+			context.Background(), "gemini-test", nil, nil,
+			[]byte(`{"event_type":"interaction.completed"}`), &state,
+		)
 		if len(completed) != 0 {
 			t.Fatalf("completed after failure = %q", completed)
 		}
@@ -36,7 +47,10 @@ func TestConvertGeminiResponseToInteractionsNonStreamSnakeCaseUsage(t *testing.T
 		"gemini-test",
 		nil,
 		nil,
-		[]byte(`{"responseId":"resp_snake","candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usage_metadata":{"prompt_token_count":11,"candidates_token_count":22,"total_token_count":33,"thoughts_token_count":44,"cached_content_token_count":55}}`),
+		[]byte(`{"responseId":"resp_snake","candidates":[{"content":{"role":"model","p`+
+			`arts":[{"text":"ok"}]},"finishReason":"STOP"}],"usage_metadata":{"prom`+
+			`pt_token_count":11,"candidates_token_count":22,"total_token_count":33,`+
+			`"thoughts_token_count":44,"cached_content_token_count":55}}`),
 		nil,
 	)
 	assertInteractionsUsage(
@@ -57,7 +71,10 @@ func TestConvertGeminiResponseToInteractionsStreamSnakeCaseUsage(t *testing.T) {
 		"gemini-test",
 		nil,
 		nil,
-		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usage_metadata":{"prompt_token_count":11,"candidates_token_count":22,"total_token_count":33,"thoughts_token_count":44,"cached_content_token_count":55}}`),
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"fi`+
+			`nishReason":"STOP"}],"usage_metadata":{"prompt_token_count":11,"candid`+
+			`ates_token_count":22,"total_token_count":33,"thoughts_token_count":44,`+
+			`"cached_content_token_count":55}}`),
 		&state,
 	)
 	var completed []byte
@@ -103,18 +120,26 @@ func TestGeminiResponseToInteractionsValidatesSignatures(t *testing.T) {
 		{name: "foreign", signature: claudeInteractionsSignatureForTest()},
 		{name: "invalid", signature: "gemini#invalid"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			raw := []byte(`{"responseId":"resp-1","candidates":[{"content":{"role":"model","parts":[{"thought":true,"thoughtSignature":"` + testCase.signature + `"}]}}]}`)
-			out := convertGeminiResponseToInteractionsNonStream(
-				context.Background(), "gemini-test", nil, nil, raw, nil,
-			)
-			if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
-				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
-			}
-			if testCase.want == "" && gjson.GetBytes(out, "steps.#").Int() != 0 {
-				t.Fatalf("invalid signature-only part produced a step: %s", out)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				raw := []byte(
+					`{"responseId":"resp-1","candidates":[{"content":{"role":"model",` +
+						`"parts":[{"thought":true,"thoughtSignature":` +
+						`"` +
+						testCase.signature +
+						`"}]}}]}`,
+				)
+				out := convertGeminiResponseToInteractionsNonStream(
+					context.Background(), "gemini-test", nil, nil, raw, nil,
+				)
+				if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
+					t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
+				}
+				if testCase.want == "" && gjson.GetBytes(out, "steps.#").Int() != 0 {
+					t.Fatalf("invalid signature-only part produced a step: %s", out)
+				}
+			},
+		)
 	}
 }
 
@@ -129,20 +154,36 @@ func TestInteractionsResponseToGeminiPreservesRecognizedSignatureOnlyParts(t *te
 		{name: "gpt", model: "gpt-test", signature: gptInteractionsSignatureForTest()},
 	}
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			raw := []byte(`{"interaction":{"id":"interaction-1","model":"` + testCase.model + `","steps":[{"type":"thought","signature":"` + testCase.signature + `","content":[]}]}}`)
-			out := convertInteractionsResponseToGeminiNonStream(
-				context.Background(), testCase.model, nil, nil, raw, nil,
-			)
-			if got := gjson.GetBytes(out, "candidates.0.content.parts.0.thoughtSignature").String(); got != testCase.signature {
-				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.signature, out)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				raw := []byte(
+					`{"interaction":{"id":"interaction-1","model":"` +
+						testCase.model +
+						`","steps":[{"type":"thought","signature":"` +
+						testCase.signature +
+						`","content":[]}]}}`,
+				)
+				out := convertInteractionsResponseToGeminiNonStream(
+					context.Background(), testCase.model, nil, nil, raw, nil,
+				)
+				if got := gjson.GetBytes(
+					out, "candidates.0.content.parts.0.thoughtSignature",
+				).String(); got != testCase.signature {
+					t.Fatalf("signature = %q, want %q; output=%s", got, testCase.signature, out)
+				}
+			},
+		)
 	}
 }
 
 func TestInteractionsResponseToGeminiDropsForeignSignature(t *testing.T) {
-	raw := []byte(`{"interaction":{"id":"interaction-1","model":"gemini-test","steps":[{"type":"thought","signature":"` + claudeInteractionsSignatureForTest() + `","content":[{"type":"text","text":"reason"}]}]}}`)
+	raw := []byte(
+		`{"interaction":{"id":"interaction-1","model":"gemini-test","steps":` +
+			`[{"type":"thought","signature":` +
+			`"` +
+			claudeInteractionsSignatureForTest() +
+			`","content":[{"type":"text","text":"reason"}]}]}}`,
+	)
 	out := convertInteractionsResponseToGeminiNonStream(
 		context.Background(), "gemini-test", nil, nil, raw, nil,
 	)
@@ -198,7 +239,8 @@ func TestInteractionsFunctionArgumentsAreAssembledAtStepStop(t *testing.T) {
 		"test-model",
 		nil,
 		nil,
-		[]byte(`{"event_type":"step.start","index":1,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"weather","arguments":{}}}`),
+		[]byte(`{"event_type":"step.start","index":1,"step":{"type":"function_call","i`+
+			`d":"item-1","call_id":"call-1","name":"weather","arguments":{}}}`),
 		&state,
 	)
 	if len(start) != 0 {

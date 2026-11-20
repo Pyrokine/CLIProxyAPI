@@ -9,13 +9,17 @@ import (
 
 func TestGeminiUsageValidatesAndAddsOutputTokens(t *testing.T) {
 	var usage GeminiUsage
-	usage.Update(gjson.Parse(`{
+	usage.Update(
+		gjson.Parse(
+			`{
 		"promptTokenCount":12,
 		"candidatesTokenCount":7,
 		"thoughtsTokenCount":5,
 		"totalTokenCount":24,
 		"cachedContentTokenCount":3
-	}`))
+	}`,
+		),
+	)
 
 	if !usage.Seen || usage.PromptTokens != 12 || usage.OutputTokens() != 12 ||
 		usage.ThoughtTokens != 5 || usage.TotalTokens != 24 || usage.CachedTokens != 3 {
@@ -25,12 +29,16 @@ func TestGeminiUsageValidatesAndAddsOutputTokens(t *testing.T) {
 
 func TestGeminiUsageRejectsInvalidCountsAndOverflow(t *testing.T) {
 	var usage GeminiUsage
-	usage.Update(gjson.Parse(`{
+	usage.Update(
+		gjson.Parse(
+			`{
 		"promptTokenCount":-1,
 		"candidatesTokenCount":1.5,
 		"thoughtsTokenCount":"4",
 		"totalTokenCount":null
-	}`))
+	}`,
+		),
+	)
 	if usage.PromptTokens != 0 || usage.CandidateTokens != 0 || usage.ThoughtTokens != 0 ||
 		usage.TotalTokens != 0 || usage.OutputTokens() != 0 {
 		t.Fatalf("invalid counters were accepted: %#v", usage)

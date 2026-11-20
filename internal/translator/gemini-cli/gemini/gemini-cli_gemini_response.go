@@ -3,6 +3,8 @@
 // extracting model information, system instructions, message contents, and tool declarations.
 // The package performs JSON data transformation to ensure compatibility
 // between Gemini API format and Gemini CLI API's expected format.
+//
+//goland:noinspection GrazieInspection
 package gemini
 
 import (
@@ -62,7 +64,8 @@ func convertGeminiCliResponseToGemini(ctx context.Context, _ string, _, _, rawJS
 	return [][]byte{chunk}
 }
 
-// convertGeminiCliResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
+// convertGeminiCliResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini
+// response.
 // This function processes the complete Gemini CLI request and transforms it into a single Gemini-compatible
 // JSON response. It extracts the response data from the request and returns it in the expected format.
 //
@@ -74,7 +77,12 @@ func convertGeminiCliResponseToGemini(ctx context.Context, _ string, _, _, rawJS
 //
 // Returns:
 //   - []byte: A Gemini-compatible JSON response containing the response data
-func convertGeminiCliResponseToGeminiNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+func convertGeminiCliResponseToGeminiNonStream(
+	_ context.Context,
+	_ string,
+	_, _, rawJSON []byte,
+	_ *any,
+) []byte {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		return []byte(responseResult.Raw)

@@ -29,7 +29,9 @@ func parseSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
 func TestConvertGeminiResponseToOpenAIResponsesCreatedIncludesOriginalRequestModel(t *testing.T) {
 	originalRequest := []byte(`{"model":"original-gemini-model"}`)
 	translatedRequest := []byte(`{"model":"translated-gemini-model"}`)
-	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]}}],"responseId":"gemini_1"}`)
+	chunk := []byte(
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]}}],"responseId":"gemini_1"}`,
+	)
 
 	var state any
 	outputs := translateGeminiFrameWithEOF(
@@ -56,13 +58,32 @@ func TestConvertGeminiResponseToOpenAIResponsesCreatedIncludesOriginalRequestMod
 func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testing.T) {
 	// Vertex-style Gemini stream wraps the actual response payload under "response".
 	// This test ensures we unwrap and that output_text.done contains the full text.
+	//goland:noinspection SpellCheckingInspection
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"让"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"我先"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"了解"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"mcp__serena__list_dir","args":{"recursive":false,"relative_path":"internal"},"id":"toolu_1"}}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15,"cachedContentTokenCount":2},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]}}],"usageMetadata"` +
+			`:{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"cachedContentTokenCount":0}` +
+			`,"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"让"}]}}],"` +
+			`usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"` +
+			`cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"` +
+			`t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"我先"}]}}],"` +
+			`usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"` +
+			`cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"` +
+			`t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"了解"}]}}],"` +
+			`usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"` +
+			`cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"` +
+			`t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"` +
+			`mcp__serena__list_dir","args":{"recursive":false,"relative_path":"internal"},"id":"toolu_1"}}]}}` +
+			`],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"` +
+			`cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"` +
+			`t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` +
+			`STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15,"` +
+			`cachedContentTokenCount":2},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"` +
+			`t1"}`,
 	}
 
 	originalReq := []byte(`{"instructions":"test instructions","model":"gpt-5","max_output_tokens":123}`)
@@ -141,14 +162,20 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 	}
 	if posTextDone == -1 || posPartDone == -1 || posMessageDone == -1 || posFuncAdded == -1 {
 		t.Fatalf(
-			"missing ordering events: textDone=%d partDone=%d messageDone=%d funcAdded=%d", posTextDone, posPartDone,
-			posMessageDone, posFuncAdded,
+			"missing ordering events: textDone=%d partDone=%d messageDone=%d funcAdded=%d",
+			posTextDone,
+			posPartDone,
+			posMessageDone,
+			posFuncAdded,
 		)
 	}
 	if !(posTextDone < posPartDone && posPartDone < posMessageDone && posMessageDone < posFuncAdded) {
 		t.Fatalf(
-			"unexpected message/function ordering: textDone=%d partDone=%d messageDone=%d funcAdded=%d", posTextDone,
-			posPartDone, posMessageDone, posFuncAdded,
+			"unexpected message/function ordering: textDone=%d partDone=%d messageDone=%d funcAdded=%d",
+			posTextDone,
+			posPartDone,
+			posMessageDone,
+			posFuncAdded,
 		)
 	}
 	if !gotMessageDone {
@@ -178,6 +205,7 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 		t.Fatalf("unexpected cached token count: got %d", cachedTokens)
 	}
 
+	//goland:noinspection SpellCheckingInspection
 	if funcName != "mcp__serena__list_dir" {
 		t.Fatalf("unexpected function name: got %q", funcName)
 	}
@@ -211,12 +239,23 @@ func decodedResponsesCarrierSignature(t *testing.T, encryptedContent string) str
 	return signature
 }
 
-func TestConvertGeminiResponseToOpenAIResponses_ConsecutiveSignedVisibleTextPreservesEverySignature(t *testing.T) {
+func TestConvertGeminiResponseToOpenAIResponses_ConsecutiveSignedVisibleTextPreservesEverySignature(
+	t *testing.T,
+) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"a"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"signed-text"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"b","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"signed-text"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"c","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"signed-text"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"a"}]}}]` +
+			`,"modelVersion":"gemini-3.6-flash","responseId":"signed-text"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"b",` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"signed-text"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"c",` +
+			`"thoughtSignature":` +
+			`"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"signed-text"}}`,
 	}
 	var param any
 	added := make(map[string]string)
@@ -270,23 +309,40 @@ func TestConvertGeminiResponseToOpenAIResponses_ConsecutiveSignedVisibleTextPres
 			visibleParts = append(visibleParts, part)
 		}
 	}
-	if len(visibleParts) != 2 || visibleParts[0].Get("text").String() != "ab" || visibleParts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || visibleParts[1].Get("text").String() != "c" || visibleParts[1].Get("thoughtSignature").String() != signature2 {
+	if len(visibleParts) != 2 || visibleParts[0].Get("text").String() != "ab" ||
+		visibleParts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+		visibleParts[1].Get("text").String() != "c" ||
+		visibleParts[1].Get("thoughtSignature").String() != signature2 {
 		t.Fatalf("signed visible text did not round-trip by segment: %s", translated)
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponsesNonStream_ConsecutiveSignedVisibleTextPreservesEverySignature(t *testing.T) {
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_ConsecutiveSignedVisibleTextPreservesEverySignature(
+	t *testing.T,
+) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"a"},{"text":"b","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"c","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"signed-text-nonstream"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"text":"a"},{"text":"b",` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"c","thoughtSignature":"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"signed-text-nonstream"}`,
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
 	output := gjson.GetBytes(out, "output")
 	if decodedResponsesCarrierSignature(
 		t, output.Get("0.encrypted_content").String(),
-	) != testResponsesGeminiThoughtSignature || output.Get("1.content.0.text").String() != "ab" || decodedResponsesCarrierSignature(
-		t, output.Get("2.encrypted_content").String(),
-	) != signature2 || output.Get("3.content.0.text").String() != "c" {
+	) !=
+		testResponsesGeminiThoughtSignature ||
+		output.Get("1.content.0.text").String() !=
+			"ab" ||
+		decodedResponsesCarrierSignature(
+			t, output.Get("2.encrypted_content").String(),
+		) != signature2 || output.Get("3.content.0.text").String() != "c" {
 		t.Fatalf("non-stream signed visible text was not segmented: %s", out)
 	}
 
@@ -302,15 +358,22 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_ConsecutiveSignedVisibl
 			visibleParts = append(visibleParts, part)
 		}
 	}
-	if len(visibleParts) != 2 || visibleParts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || visibleParts[1].Get("thoughtSignature").String() != signature2 {
+	if len(visibleParts) != 2 ||
+		visibleParts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+		visibleParts[1].Get("thoughtSignature").String() != signature2 {
 		t.Fatalf("non-stream signatures did not round-trip after client stripped reasoning IDs: %s", translated)
 	}
 }
 
 func TestConvertGeminiResponseToOpenAIResponses_SignedVisibleThenUnsignedPreservesBoundary(t *testing.T) {
 	lines := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"signed","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"signed-then-unsigned"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned"}]},"finishReason":"STOP"}],"responseId":"signed-then-unsigned"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"signed","thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"responseId":"signed-then-unsigned"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned"}]},"finishReason":"STOP"}],` +
+			`"responseId":"signed-then-unsigned"}}`,
 	}
 	var param any
 	var completed gjson.Result
@@ -328,14 +391,18 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedVisibleThenUnsignedPreserv
 	request, _ = sjson.SetRawBytes(request, "input", []byte(completed.Raw))
 	translated := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", request, false)
 	parts := gjson.GetBytes(translated, "contents.0.parts").Array()
-	if len(parts) != 2 || parts[0].Get("text").String() != "signed" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || parts[1].Get("text").String() != "unsigned" || parts[1].Get("thoughtSignature").String() != "" {
+	if len(parts) != 2 || parts[0].Get("text").String() != "signed" ||
+		parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+		parts[1].Get("text").String() != "unsigned" ||
+		parts[1].Get("thoughtSignature").String() != "" {
 		t.Fatalf("signed/unsigned visible boundary changed: output=%s translated=%s", completed.Raw, translated)
 	}
 	if !strings.Contains(completed.Raw, geminiResponsesCarrierPrefix) || strings.Contains(
 		string(translated), geminiResponsesCarrierPrefix,
 	) {
 		t.Fatalf(
-			"Responses carrier must exist only on the client-facing wire: output=%s translated=%s", completed.Raw,
+			"Responses carrier must exist only on the client-facing wire: output=%s translated=%s",
+			completed.Raw,
 			translated,
 		)
 	}
@@ -344,9 +411,19 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedVisibleThenUnsignedPreserv
 func TestConvertGeminiResponseToOpenAIResponses_LeadingCarrierDoesNotCrossSignedThought(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
 	lines := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"leading-before-signed-thought"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"reason","thought":true,"thoughtSignature":"` + signature2 + `"}]}}],"responseId":"leading-before-signed-thought"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"responseId":"leading-before-signed-thought"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"responseId":"leading-before-signed-thought"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"reason","thought":true,"thoughtSignature":` +
+			`"` +
+			signature2 +
+			`"}]}}],"responseId":"leading-before-signed-thought"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"` +
+			`}]},"finishReason":"STOP"}],"responseId":"leading-before-signed-though` +
+			`t"}}`,
 	}
 	var param any
 	var streamOutput gjson.Result
@@ -360,7 +437,14 @@ func TestConvertGeminiResponseToOpenAIResponses_LeadingCarrierDoesNotCrossSigned
 			}
 		}
 	}
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"reason","thought":true,"thoughtSignature":"` + signature2 + `"},{"text":"answer"}]},"finishReason":"STOP"}],"responseId":"leading-before-signed-thought-nonstream"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"reason","thought":true,"thoughtSignature":"` +
+			signature2 +
+			(`"},{"text":"answer"}]},"finishReason":"STOP"}],"responseId":"leading-before-signed-thought-` +
+				`nonstream"}`),
+	)
 	nonStream := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -372,14 +456,33 @@ func TestConvertGeminiResponseToOpenAIResponses_LeadingCarrierDoesNotCrossSigned
 		request, _ = sjson.SetRawBytes(request, "input", []byte(output.Raw))
 		translated := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", request, false)
 		parts := gjson.GetBytes(translated, "contents.0.parts").Array()
-		if len(parts) != 3 || !parts[0].Get("text").Exists() || parts[0].Get("text").String() != "" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || parts[1].Get("text").String() != "reason" || !parts[1].Get("thought").Bool() || parts[1].Get("thoughtSignature").String() != signature2 || parts[2].Get("text").String() != "answer" || parts[2].Get("thoughtSignature").String() != "" {
-			t.Fatalf("%s leading carrier crossed signed thought: output=%s translated=%s", name, output.Raw, translated)
+		if len(parts) != 3 || !parts[0].Get("text").Exists() || parts[0].Get("text").String() != "" ||
+			parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+			parts[1].Get("text").String() != "reason" ||
+			!parts[1].Get("thought").Bool() ||
+			parts[1].Get("thoughtSignature").String() != signature2 ||
+			parts[2].Get("text").String() != "answer" ||
+			parts[2].Get("thoughtSignature").String() != "" {
+			t.Fatalf(
+				"%s leading carrier crossed signed thought: output=%s translated=%s",
+				name,
+				output.Raw,
+				translated,
+			)
 		}
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponsesNonStream_SignedVisibleThenUnsignedPreservesBoundary(t *testing.T) {
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"signed","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"unsigned"}]},"finishReason":"STOP"}],"responseId":"signed-then-unsigned-nonstream"}`)
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_SignedVisibleThenUnsignedPreservesBoundary(
+	t *testing.T,
+) {
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"text":"signed",` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"unsigned"}]},"finishReason":"STOP"}],"responseId":"signed-then-unsigned-nonstream"}`,
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -387,7 +490,10 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_SignedVisibleThenUnsign
 	request, _ = sjson.SetRawBytes(request, "input", []byte(gjson.GetBytes(out, "output").Raw))
 	translated := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", request, false)
 	parts := gjson.GetBytes(translated, "contents.0.parts").Array()
-	if len(parts) != 2 || parts[0].Get("text").String() != "signed" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || parts[1].Get("text").String() != "unsigned" || parts[1].Get("thoughtSignature").String() != "" {
+	if len(parts) != 2 || parts[0].Get("text").String() != "signed" ||
+		parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+		parts[1].Get("text").String() != "unsigned" ||
+		parts[1].Get("thoughtSignature").String() != "" {
 		t.Fatalf(
 			"non-stream signed/unsigned visible boundary changed: output=%s translated=%s",
 			gjson.GetBytes(out, "output").Raw, translated,
@@ -395,9 +501,19 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_SignedVisibleThenUnsign
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponsesNonStream_TrailingCarrierDirectionDoesNotDependOnID(t *testing.T) {
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_TrailingCarrierDirectionDoesNotDependOnID(
+	t *testing.T,
+) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"trailing-direction-nonstream"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"text":"answer",` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"","thoughtSignature":"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"trailing-direction-nonstream"}`,
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -405,9 +521,14 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_TrailingCarrierDirectio
 	request, _ = sjson.SetRawBytes(request, "input", []byte(gjson.GetBytes(out, "output").Raw))
 	translated := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", request, false)
 	parts := gjson.GetBytes(translated, "contents.0.parts").Array()
-	if len(parts) != 2 || parts[0].Get("text").String() != "answer" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || !parts[1].Get("text").Exists() || parts[1].Get("text").String() != "" || parts[1].Get("thoughtSignature").String() != signature2 {
+	if len(parts) != 2 || parts[0].Get("text").String() != "answer" ||
+		parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+		!parts[1].Get("text").Exists() ||
+		parts[1].Get("text").String() != "" ||
+		parts[1].Get("thoughtSignature").String() != signature2 {
 		t.Fatalf(
-			"non-stream trailing carrier changed direction: output=%s translated=%s", gjson.GetBytes(out, "output").Raw,
+			"non-stream trailing carrier changed direction: output=%s translated=%s",
+			gjson.GetBytes(out, "output").Raw,
 			translated,
 		)
 	}
@@ -416,8 +537,16 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_TrailingCarrierDirectio
 func TestConvertGeminiResponseToOpenAIResponses_TrailingCarrierDirectionSurvivesStrippedIDs(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
 	lines := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"trailing-direction-stream"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"trailing-direction-stream"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"answer","thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"responseId":"trailing-direction-stream"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+			`"thoughtSignature":` +
+			`"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"trailing-direction-stream"}}`,
 	}
 	var param any
 	var completed gjson.Result
@@ -438,14 +567,23 @@ func TestConvertGeminiResponseToOpenAIResponses_TrailingCarrierDirectionSurvives
 	request, _ = sjson.SetRawBytes(request, "input", withoutIDs)
 	translated := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", request, false)
 	parts := gjson.GetBytes(translated, "contents.0.parts").Array()
-	if len(parts) != 2 || parts[0].Get("text").String() != "answer" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || !parts[1].Get("text").Exists() || parts[1].Get("text").String() != "" || parts[1].Get("thoughtSignature").String() != signature2 {
-		t.Fatalf("ID-stripped trailing carrier changed direction: output=%s translated=%s", completed.Raw, translated)
+	if len(parts) != 2 || parts[0].Get("text").String() != "answer" ||
+		parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+		!parts[1].Get("text").Exists() ||
+		parts[1].Get("text").String() != "" ||
+		parts[1].Get("thoughtSignature").String() != signature2 {
+		t.Fatalf(
+			"ID-stripped trailing carrier changed direction: output=%s translated=%s",
+			completed.Raw,
+			translated,
+		)
 	}
 	if !strings.Contains(completed.Raw, geminiResponsesCarrierPrefix) || strings.Contains(
 		string(translated), geminiResponsesCarrierPrefix,
 	) {
 		t.Fatalf(
-			"ID-stripped Responses carrier leaked across protocol boundary: output=%s translated=%s", completed.Raw,
+			"ID-stripped Responses carrier leaked across protocol boundary: output=%s translated=%s",
+			completed.Raw,
 			translated,
 		)
 	}
@@ -454,8 +592,16 @@ func TestConvertGeminiResponseToOpenAIResponses_TrailingCarrierDirectionSurvives
 func TestConvertGeminiResponseToOpenAIResponses_VisibleSignatureDoesNotOverwriteSignedThought(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"one","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"signed-thought-visible"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"signed-thought-visible"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"one",` +
+			`"thought":true,"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"responseId":"signed-thought-visible"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"answer","thoughtSignature":` +
+			`"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"signed-thought-visible"}}`,
 	}
 	var param any
 	added := make(map[string]string)
@@ -516,9 +662,21 @@ func TestConvertGeminiResponseToOpenAIResponses_FlushesVisibleSignatureBeforeLat
 	signature2 := differentResponsesGeminiThoughtSignature(t)
 	const signature3 = "third-distinct-gemini-signature-123456"
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"thought-a","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"visible-before-thought"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + signature2 + `"}]}}],"responseId":"visible-before-thought"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"thought-c","thought":true,"thoughtSignature":"` + signature3 + `"}]},"finishReason":"STOP"}],"responseId":"visible-before-thought"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"thought-a","thought":true,"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"responseId":"visible-before-thought"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"answer","thoughtSignature":` +
+			`"` +
+			signature2 +
+			`"}]}}],"responseId":"visible-before-thought"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"thought-c","thought":true,"thoughtSignature":` +
+			`"` +
+			signature3 +
+			`"}]},"finishReason":"STOP"}],"responseId":"visible-before-thought"}}`,
 	}
 	var param any
 	var completed gjson.Result
@@ -534,9 +692,13 @@ func TestConvertGeminiResponseToOpenAIResponses_FlushesVisibleSignatureBeforeLat
 	}
 	if decodedResponsesCarrierSignature(
 		t, completed.Get("0.encrypted_content").String(),
-	) != testResponsesGeminiThoughtSignature || completed.Get("1.type").String() != "message" || decodedResponsesCarrierSignature(
-		t, completed.Get("2.encrypted_content").String(),
-	) != signature2 || decodedResponsesCarrierSignature(
+	) !=
+		testResponsesGeminiThoughtSignature ||
+		completed.Get("1.type").String() !=
+			"message" ||
+		decodedResponsesCarrierSignature(
+			t, completed.Get("2.encrypted_content").String(),
+		) != signature2 || decodedResponsesCarrierSignature(
 		t, completed.Get("3.encrypted_content").String(),
 	) != signature3 {
 		t.Fatalf("visible signature crossed later thought: %s", completed.Raw)
@@ -546,8 +708,23 @@ func TestConvertGeminiResponseToOpenAIResponses_FlushesVisibleSignatureBeforeLat
 func TestConvertGeminiResponseToOpenAIResponses_FunctionAndTrailingSignaturesRoundTrip(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `","functionCall":{"name":"run_command","args":{"command":"true"}}}]}}],"responseId":"function-trailing"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"function-trailing"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":` +
+			`[{"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			(`","functionCal` +
+				`l":{"name":` +
+				`"run_command",` +
+				`"args":{"comma` +
+				`nd":"true"}}}]` +
+				`}}],"responseI` +
+				`d":"function-t` +
+				`railing"}}`),
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+			`"thoughtSignature":` +
+			`"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"function-trailing"}}`,
 	}
 	var param any
 	var completed gjson.Result
@@ -572,14 +749,29 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionAndTrailingSignaturesRou
 			}
 		}
 	}
-	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature || signatures[1] != signature2 {
-		t.Fatalf("function/trailing signatures = %v; completed=%s translated=%s", signatures, completed.Raw, translated)
+	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature ||
+		signatures[1] != signature2 {
+		t.Fatalf(
+			"function/trailing signatures = %v; completed=%s translated=%s",
+			signatures,
+			completed.Raw,
+			translated,
+		)
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponsesNonStream_FunctionAndTrailingSignaturesPreserveOrder(t *testing.T) {
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_FunctionAndTrailingSignaturesPreserveOrder(
+	t *testing.T,
+) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `","functionCall":{"name":"run_command","args":{"command":"true"}}},{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"function-trailing-nonstream"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"thoughtSignature":"` +
+			testResponsesGeminiThoughtSignature +
+			(`","functionCall":{"name":"run_command","args":{"command":"true"}}},{"text":"","thoughtSignature"` +
+				`:"`) +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"function-trailing-nonstream"}`,
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -595,7 +787,12 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_FunctionAndTrailingSign
 }
 
 func TestConvertGeminiResponseToOpenAIResponses_FunctionThenTrailingSignatureHasStreamParity(t *testing.T) {
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"preamble"},{"functionCall":{"name":"run_command","args":{"command":"true"}}},{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}],"responseId":"function-trailing-parity"}`)
+	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"preamble"},{"functionCall` +
+		`":{"name":"run_command","args":{"command":"true"}}},{"text":"","though` +
+		(`tSignature":` +
+			`"`) +
+		testResponsesGeminiThoughtSignature +
+		`"}]},"finishReason":"STOP"}],"responseId":"function-trailing-parity"}`)
 
 	var param any
 	var streamOutput gjson.Result
@@ -613,26 +810,44 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionThenTrailingSignatureHas
 	nonStreamOutput := gjson.GetBytes(nonStream, "output")
 	for name, output := range map[string]gjson.Result{"stream": streamOutput, "non-stream": nonStreamOutput} {
 		items := output.Array()
-		if len(items) != 3 || items[0].Get("type").String() != "message" || items[1].Get("type").String() != "function_call" || items[2].Get("type").String() != "reasoning" {
+		if len(items) != 3 || items[0].Get("type").String() != "message" ||
+			items[1].Get("type").String() != "function_call" ||
+			items[2].Get("type").String() != "reasoning" {
 			t.Fatalf("%s function/trailing order malformed: %s", name, output.Raw)
 		}
-		signature, direction, targetKind, marked, ok := decodeGeminiResponsesCarrier(items[2].Get("encrypted_content").String())
-		if !marked || !ok || signature != testResponsesGeminiThoughtSignature || direction != geminiResponsesCarrierPrevious || targetKind != geminiResponsesCarrierFunction {
+		signature, direction, targetKind, marked, ok := decodeGeminiResponsesCarrier(
+			items[2].Get("encrypted_content").String(),
+		)
+		if !marked || !ok || signature != testResponsesGeminiThoughtSignature ||
+			direction != geminiResponsesCarrierPrevious ||
+			targetKind != geminiResponsesCarrierFunction {
 			t.Fatalf("%s function/trailing carrier malformed: %s", name, output.Raw)
 		}
 		request := []byte(`{"model":"gemini-3.6-flash-high","input":[]}`)
 		request, _ = sjson.SetRawBytes(request, "input", []byte(output.Raw))
 		translated := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", request, false)
 		parts := gjson.GetBytes(translated, "contents.0.parts").Array()
-		if len(parts) != 2 || parts[0].Get("text").String() != "preamble" || parts[1].Get("functionCall.name").String() != "run_command" || parts[1].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature {
+		if len(parts) != 2 || parts[0].Get("text").String() != "preamble" ||
+			parts[1].Get("functionCall.name").String() != "run_command" ||
+			parts[1].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature {
 			t.Fatalf("%s trailing function signature did not replay: %s", name, translated)
 		}
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponsesNonStream_TrailingSignatureFollowsPendingReasoning(t *testing.T) {
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_TrailingSignatureFollowsPendingReasoning(
+	t *testing.T,
+) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"thought","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"reasoning-trailing-nonstream"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"text":"thought","thought":true,` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"","thoughtSignature":"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"reasoning-trailing-nonstream"}`,
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -645,8 +860,15 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_TrailingSignatureFollow
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponsesNonStream_UnsignedThoughtDoesNotStealFunctionSignature(t *testing.T) {
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `","functionCall":{"name":"run_command","args":{"command":"true"}}},{"text":"later thought","thought":true}]},"finishReason":"STOP"}],"responseId":"function-unsigned-thought"}`)
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_UnsignedThoughtDoesNotStealFunctionSignature(
+	t *testing.T,
+) {
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"thoughtSignature":"` +
+			testResponsesGeminiThoughtSignature +
+			(`","functionCall":{"name":"run_command","args":{"command":"true"}}},{"text":"later thought","` +
+				`thought":true}]},"finishReason":"STOP"}],"responseId":"function-unsigned-thought"}`),
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -663,7 +885,21 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_UnsignedThoughtDoesNotS
 
 func TestConvertGeminiResponseToOpenAIResponses_InterleavedThoughtAndTextPreservesOrder(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
-	line := []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"thought-a","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"answer-a"},{"text":"thought-b","thought":true,"thoughtSignature":"` + signature2 + `"},{"text":"answer-b"}]},"finishReason":"STOP"}],"responseId":"interleaved"}}`)
+	line := []byte(
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"thought-a","thought":true,"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"answer-a"},{"text":"thought-b","thought":true,"thoughtSignature":"` +
+			signature2 +
+			(`"},{"text":` +
+				`"answer-b"}]},` +
+				`"finishReason"` +
+				`:"STOP"}],` +
+				`"responseId":` +
+				`"interleaved"}` +
+				`}`),
+	)
 	var param any
 	var doneTypes []string
 	var completed gjson.Result
@@ -681,14 +917,31 @@ func TestConvertGeminiResponseToOpenAIResponses_InterleavedThoughtAndTextPreserv
 	if got := strings.Join(doneTypes, ","); got != "reasoning,message,reasoning,message" {
 		t.Fatalf("interleaved done order = %q", got)
 	}
-	if completed.Get("0.summary.0.text").String() != "thought-a" || completed.Get("1.content.0.text").String() != "answer-a" || completed.Get("2.summary.0.text").String() != "thought-b" || completed.Get("3.content.0.text").String() != "answer-b" {
+	if completed.Get("0.summary.0.text").String() != "thought-a" ||
+		completed.Get("1.content.0.text").String() != "answer-a" ||
+		completed.Get("2.summary.0.text").String() != "thought-b" ||
+		completed.Get("3.content.0.text").String() != "answer-b" {
 		t.Fatalf("interleaved completed output malformed: %s", completed.Raw)
 	}
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStream_InterleavedThoughtAndTextPreservesOrder(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"thought-a","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"answer-a"},{"text":"thought-b","thought":true,"thoughtSignature":"` + signature2 + `"},{"text":"answer-b"}]},"finishReason":"STOP"}],"responseId":"interleaved-nonstream"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"text":"thought-a","thought":` +
+			`true,"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"answer-a"},{"text":"thought-b","thought":true,"thoughtSignature":"` +
+			signature2 +
+			(`"},{"text":` +
+				`"answer-b"}]},` +
+				`"finishReason"` +
+				`:"STOP"}],` +
+				`"responseId":` +
+				`"interleaved-n` +
+				`onstream"}`),
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -707,8 +960,16 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_InterleavedThoughtAndTe
 func TestConvertGeminiResponseToOpenAIResponses_LeadingEmptyAndSignedTextRoundTripInOrder(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"leading-empty-signed-text"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"leading-empty-signed-text"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"responseId":"leading-empty-signed-text"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"answer","thoughtSignature":` +
+			`"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"leading-empty-signed-text"}}`,
 	}
 	var param any
 	var completed gjson.Result
@@ -735,9 +996,11 @@ func TestConvertGeminiResponseToOpenAIResponses_LeadingEmptyAndSignedTextRoundTr
 			}
 		}
 	}
-	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature || visibleSignature != signature2 {
+	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature ||
+		visibleSignature != signature2 {
 		t.Fatalf(
-			"leading empty/signed text signatures=%v visible=%q translated=%s", signatures, visibleSignature, translated,
+			"leading empty/signed text signatures=%v visible=%q translated=%s", signatures, visibleSignature,
+			translated,
 		)
 	}
 }
@@ -745,8 +1008,16 @@ func TestConvertGeminiResponseToOpenAIResponses_LeadingEmptyAndSignedTextRoundTr
 func TestConvertGeminiResponseToOpenAIResponses_SignedTextAndTrailingSignatureRoundTripInOrder(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"signed-text-trailing"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"signed-text-trailing"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":` +
+			`"answer","thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"responseId":"signed-text-trailing"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+			`"thoughtSignature":` +
+			`"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"signed-text-trailing"}}`,
 	}
 	var param any
 	var completed gjson.Result
@@ -776,14 +1047,23 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedTextAndTrailingSignatureRo
 			signatures = append(signatures, signature)
 		}
 	}
-	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature || signatures[1] != signature2 {
+	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature ||
+		signatures[1] != signature2 {
 		t.Fatalf("signed text/trailing signatures = %v; translated=%s", signatures, translated)
 	}
 }
 
 func TestConvertGeminiResponseToOpenAIResponses_PreservesMultipleLeadingEmptySignatures(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
-	line := []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"leading-empty-signatures"}}`)
+	line := []byte(
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"",` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"","thoughtSignature":"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"leading-empty-signatures"}}`,
+	)
 	var param any
 	var completed gjson.Result
 	for _, chunk := range translateGeminiFrameWithEOF(
@@ -803,9 +1083,19 @@ func TestConvertGeminiResponseToOpenAIResponses_PreservesMultipleLeadingEmptySig
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponsesNonStream_SignedTextAndTrailingSignatureRoundTripInOrder(t *testing.T) {
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_SignedTextAndTrailingSignatureRoundTripInOrder(
+	t *testing.T,
+) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"signed-text-trailing-nonstream"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"text":"answer",` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"","thoughtSignature":"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"signed-text-trailing-nonstream"}`,
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -823,8 +1113,16 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_SignedTextAndTrailingSi
 func TestConvertGeminiResponseToOpenAIResponses_DistinctSignedThoughtsUseDistinctItems(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"one","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"signed-thoughts"}}`,
-		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"two","thought":true,"thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"signed-thoughts"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"one",` +
+			`"thought":true,"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"signed-thoughts"}}`,
+		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"two",` +
+			`"thought":true,"thoughtSignature":` +
+			`"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"signed-thoughts"}}`,
 	}
 	var param any
 	added := make(map[string]string)
@@ -868,7 +1166,15 @@ func TestConvertGeminiResponseToOpenAIResponses_DistinctSignedThoughtsUseDistinc
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStream_DistinctSignedThoughtsUseDistinctItems(t *testing.T) {
 	signature2 := differentResponsesGeminiThoughtSignature(t)
-	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"one","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"two","thought":true,"thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"signed-thoughts-nonstream"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"parts":[{"text":"one","thought":true,` +
+			`"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"},{"text":"two","thought":true,"thoughtSignature":"` +
+			signature2 +
+			`"}]},"finishReason":"STOP"}],"responseId":"signed-thoughts-nonstream"}`,
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -889,8 +1195,16 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_DistinctSignedThoughtsU
 
 func TestConvertGeminiResponseToOpenAIResponses_VisibleSignatureCompletesActiveReasoning(t *testing.T) {
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hidden thought","thought":true}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp_active_reasoning"}}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"visible answer","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"resp_active_reasoning"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+			`"text":"hidden thought","thought":true}]}}],"modelVersion":"gemini-3.6` +
+			`-flash","responseId":"resp_active_reasoning"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+			`[{"text":"visible answer","thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			(`"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"` +
+				`thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"` +
+				`resp_active_reasoning"}}`),
 	}
 	var param any
 	var out [][]byte
@@ -925,8 +1239,11 @@ func TestConvertGeminiResponseToOpenAIResponses_VisibleSignatureCompletesActiveR
 		t, addedSignature,
 	) != testResponsesGeminiThoughtSignature || doneSignature != addedSignature {
 		t.Fatalf(
-			"reasoning item changed between added and done: added=(%q,%q) done=(%q,%q)", addedID, addedSignature,
-			doneID, doneSignature,
+			"reasoning item changed between added and done: added=(%q,%q) done=(%q,%q)",
+			addedID,
+			addedSignature,
+			doneID,
+			doneSignature,
 		)
 	}
 }
@@ -934,8 +1251,14 @@ func TestConvertGeminiResponseToOpenAIResponses_VisibleSignatureCompletesActiveR
 func TestConvertGeminiResponseToOpenAIResponses_LateThoughtSignatureIsImmutable(t *testing.T) {
 	signature := differentResponsesGeminiThoughtSignature(t)
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"one","thought":true}]}}],"responseId":"late-thought-signature"}}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"two","thought":true,"thoughtSignature":"` + signature + `"}]},"finishReason":"STOP"}],"responseId":"late-thought-signature"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+			`"text":"one","thought":true}]}}],"responseId":"late-thought-signature"` +
+			`}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+			`[{"text":"two","thought":true,"thoughtSignature":` +
+			`"` +
+			signature +
+			`"}]},"finishReason":"STOP"}],"responseId":"late-thought-signature"}}`,
 	}
 	var param any
 	var addedID, addedSignature, doneID, doneSignature, doneText string
@@ -959,41 +1282,54 @@ func TestConvertGeminiResponseToOpenAIResponses_LateThoughtSignatureIsImmutable(
 			}
 		}
 	}
+	//goland:noinspection SpellCheckingInspection
 	if addedID == "" || addedID != doneID || decodedResponsesCarrierSignature(
 		t, addedSignature,
 	) != signature || doneSignature != addedSignature || doneText != "onetwo" {
 		t.Fatalf(
-			"late thought signature replay malformed: added=(%q,%q) done=(%q,%q,%q)", addedID, addedSignature, doneID,
-			doneSignature, doneText,
+			"late thought signature replay malformed: added=(%q,%q) done=(%q,%q,%q)",
+			addedID,
+			addedSignature,
+			doneID,
+			doneSignature,
+			doneText,
 		)
 	}
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesDoneFailsStartedStreamWithoutFinishReasonOnce(t *testing.T) {
 	var param any
-	translateGeminiFrameWithEOF(
-		context.Background(),
-		"gemini-3.6-flash-high",
-		nil,
-		nil,
-		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned thought","thought":true}]}}],"responseId":"done-finalize"}}`),
-		&param,
-	)
 	out := translateGeminiFrameWithEOF(
 		context.Background(),
 		"gemini-3.6-flash-high",
 		nil,
 		nil,
-		[]byte("[DONE]"),
+		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned thought"`+
+			`,"thought":true}]}}],"responseId":"done-flush"}}`),
 		&param,
 	)
+	out = append(
+		out, translateGeminiFrameWithEOF(
+			context.Background(),
+			"gemini-3.6-flash-high",
+			nil,
+			nil,
+			[]byte("[DONE]"),
+			&param,
+		)...,
+	)
 
+	var addedSignature string
 	var deltas []string
 	outputDoneCount := 0
 	failedCount := 0
 	for _, chunk := range out {
 		event, data := parseSSEEvent(t, chunk)
 		switch event {
+		case "response.output_item.added":
+			if data.Get("item.type").String() == "reasoning" {
+				addedSignature = data.Get("item.encrypted_content").String()
+			}
 		case "response.reasoning_summary_text.delta":
 			deltas = append(deltas, data.Get("delta").String())
 		case "response.output_item.done":
@@ -1007,7 +1343,9 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneFailsStartedStreamWithoutFini
 			t.Fatal("DONE without a provider finish reason emitted response.completed")
 		}
 	}
-	if strings.Join(deltas, "") != "unsigned thought" || outputDoneCount != 1 || failedCount != 1 {
+	if addedSignature != "" || strings.Join(
+		deltas, "",
+	) != "unsigned thought" || outputDoneCount != 1 || failedCount != 1 {
 		t.Fatalf(
 			"DONE finalization malformed: deltas=%q output_done=%d failed=%d", deltas, outputDoneCount,
 			failedCount,
@@ -1027,7 +1365,9 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneClosesMessageBeforeFailure(t 
 		"gemini-3.6-flash-high",
 		nil,
 		nil,
-		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]}}],"responseId":"done-message"}}`),
+		[]byte(
+			`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]}}],"responseId":"done-message"}}`,
+		),
 		&param,
 	)
 	out := translateGeminiFrameWithEOF(
@@ -1073,7 +1413,8 @@ func TestConvertGeminiResponseToOpenAIResponsesFinishReasonThenDoneIsIdempotent(
 	var param any
 	out := ConvertGeminiResponseToOpenAIResponses(
 		context.Background(), "gemini-3.6-flash-high", nil, nil,
-		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"responseId":"finish-then-done"}}`),
+		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"`+
+			`}]},"finishReason":"STOP"}],"responseId":"finish-then-done"}}`),
 		&param,
 	)
 	for _, chunk := range out {
@@ -1126,7 +1467,10 @@ func TestConvertGeminiResponseToOpenAIResponsesBareDoneBeforeStartEmitsNothing(t
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStream_VisibleSignatureCompletesReasoning(t *testing.T) {
-	raw := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hidden thought","thought":true},{"text":"visible answer","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"resp_nonstream_active"}`)
+	raw := []byte((`{"candidates":[{"content":{"role":"model","parts":[{"text":"hidden thought","thought":` +
+		`true},{"text":"visible answer","thoughtSignature":"`) +
+		testResponsesGeminiThoughtSignature +
+		`"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"resp_nonstream_active"}`)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -1145,9 +1489,15 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_VisibleSignatureComplet
 
 func TestConvertGeminiResponseToOpenAIResponses_PreservesTextAroundFunction(t *testing.T) {
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"preface"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp_mixed_stream"}}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"command":"true"}}}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp_mixed_stream"}}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"after"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"resp_mixed_stream"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+			`"text":"preface"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"` +
+			`resp_mixed_stream"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+			`"functionCall":{"name":"run_command","args":{"command":"true"}}}]}}],"` +
+			`modelVersion":"gemini-3.6-flash","responseId":"resp_mixed_stream"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+			`"text":"after"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-f` +
+			`lash","responseId":"resp_mixed_stream"}}`,
 	}
 	var param any
 	var out [][]byte
@@ -1186,11 +1536,14 @@ func TestConvertGeminiResponseToOpenAIResponses_PreservesTextAroundFunction(t *t
 	request, _ = sjson.SetRawBytes(request, "input.-1", functionOutput)
 	translated := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", request, false)
 	contents := gjson.GetBytes(translated, "contents").Array()
-	if len(contents) != 2 || contents[0].Get("role").String() != "model" || contents[1].Get("role").String() != "user" {
+	if len(contents) != 2 || contents[0].Get("role").String() != "model" ||
+		contents[1].Get("role").String() != "user" {
 		t.Fatalf("mixed turn round-trip roles malformed: %s", translated)
 	}
 	parts := contents[0].Get("parts").Array()
-	if len(parts) != 3 || parts[0].Get("text").String() != "preface" || !parts[1].Get("functionCall").Exists() || parts[2].Get("text").String() != "after" {
+	if len(parts) != 3 || parts[0].Get("text").String() != "preface" ||
+		!parts[1].Get("functionCall").Exists() ||
+		parts[2].Get("text").String() != "after" {
 		t.Fatalf("mixed turn model parts malformed: %s", translated)
 	}
 	if !contents[1].Get("parts.0.functionResponse").Exists() {
@@ -1200,8 +1553,15 @@ func TestConvertGeminiResponseToOpenAIResponses_PreservesTextAroundFunction(t *t
 
 func TestConvertGeminiResponseToOpenAIResponses_PendingSignatureBeforeFunctionRoundTrips(t *testing.T) {
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"pending-function-signature"}}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"native-pending-call","name":"run_command","args":{"command":"true"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"pending-function-signature"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+			`[{"text":"","thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"pending-function-signature"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+			`"functionCall":{"id":"native-pending-call","name":"run_command","args"` +
+			`:{"command":"true"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini` +
+			`-3.6-flash","responseId":"pending-function-signature"}}`,
 	}
 	var param any
 	var completed gjson.Result
@@ -1245,7 +1605,8 @@ func TestConvertGeminiResponseToOpenAIResponses_PendingSignatureBeforeFunctionRo
 			if part.Get("functionCall").Exists() {
 				functionSignature = part.Get("thoughtSignature").String()
 			}
-			if part.Get("text").Exists() && part.Get("text").String() == "" && part.Get("thoughtSignature").String() != "" {
+			if part.Get("text").Exists() && part.Get("text").String() == "" &&
+				part.Get("thoughtSignature").String() != "" {
 				detachedSignatures++
 			}
 			return true
@@ -1254,7 +1615,9 @@ func TestConvertGeminiResponseToOpenAIResponses_PendingSignatureBeforeFunctionRo
 	if functionSignature != testResponsesGeminiThoughtSignature || detachedSignatures != 0 {
 		t.Fatalf(
 			"pending signature was not rebound to function call: function signature=%q detached=%d translated=%s",
-			functionSignature, detachedSignatures, translated,
+			functionSignature,
+			detachedSignatures,
+			translated,
 		)
 	}
 }
@@ -1267,9 +1630,21 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedTextBeforeSignedFunctionRo
 	toolRaw[len(toolRaw)-1] ^= 1
 	toolSignature := base64.StdEncoding.EncodeToString(toolRaw)
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"before "}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp_signed_mixed"}}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"tool","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp_signed_mixed"}}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + toolSignature + `","functionCall":{"name":"run_command","args":{"command":"true"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"resp_signed_mixed"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+			`"text":"before "}]}}],"modelVersion":"gemini-3.6-flash","responseId":"` +
+			`resp_signed_mixed"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+			`[{"text":"tool","thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			`"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp_signed_mixed"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+			`[{"thoughtSignature":` +
+			`"` +
+			toolSignature +
+			(`","functionCall":{"name":"run_command","args":{"command":"true"}}}]},"` +
+				`finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":` +
+				`"resp_signed_mixed"}}`),
 	}
 	var param any
 	var completed gjson.Result
@@ -1316,7 +1691,15 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedTextBeforeSignedFunctionRo
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStream_PreservesTextAroundSignedFunction(t *testing.T) {
-	raw := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"preface"},{"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `","functionCall":{"name":"run_command","args":{"command":"true"}}},{"text":"after"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"resp_nonstream_order"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"preface"},` +
+			`{"thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			(`","functionCall":{"name":"run_command","args":{"command":"true"}}},{"t` +
+				`ext":"after"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-fla` +
+				`sh","responseId":"resp_nonstream_order"}`),
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -1339,8 +1722,15 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_PreservesTextAroundSign
 
 func TestConvertGeminiResponseToOpenAIResponses_DetachedSignatureAfterVisibleText(t *testing.T) {
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"visible answer"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp_detached"}}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"resp_detached"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"visible answer"}]}}],"` +
+			`modelVersion":"gemini-3.6-flash","responseId":"resp_detached"}}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+			`[{"text":"","thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			(`"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"` +
+				`thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"` +
+				`resp_detached"}}`),
 	}
 	var param any
 	var out [][]byte
@@ -1383,7 +1773,13 @@ func TestConvertGeminiResponseToOpenAIResponses_DetachedSignatureAfterVisibleTex
 }
 
 func TestConvertGeminiResponseToOpenAIResponses_GeminiToolSignature(t *testing.T) {
-	line := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `","functionCall":{"id":"native-id","name":"run_command","args":{"command":"true"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"resp_tool_sig"}}`
+	line := `data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+		`[{"thoughtSignature":` +
+		`"` +
+		testResponsesGeminiThoughtSignature +
+		(`","functionCall":{"id":"native-id","name":"run_command","args":{"command":"true"}}}]},"finishReason"` +
+			`:"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":` +
+			`3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"resp_tool_sig"}}`)
 	var param any
 	out := translateGeminiFrameWithEOF(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
@@ -1409,7 +1805,15 @@ func TestConvertGeminiResponseToOpenAIResponses_GeminiToolSignature(t *testing.T
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStream_DetachedSignature(t *testing.T) {
-	raw := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"visible answer"},{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"resp_nonstream_detached"}`)
+	raw := []byte(
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"visible ` +
+			`answer"},{"text":"","thoughtSignature":` +
+			`"` +
+			testResponsesGeminiThoughtSignature +
+			(`"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"` +
+				`thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"` +
+				`resp_nonstream_detached"}`),
+	)
 	out := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil,
 	)
@@ -1427,12 +1831,30 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_DetachedSignature(t *te
 }
 
 func TestConvertGeminiResponseToOpenAIResponses_ReasoningEncryptedContent(t *testing.T) {
-	sig := "RXE0RENrZ0lDeEFDR0FJcVFOZDdjUzlleGFuRktRdFcvSzNyZ2MvWDNCcDQ4RmxSbGxOWUlOVU5kR1l1UHMrMGdkMVp0Vkg3ekdKU0g4YVljc2JjN3lNK0FrdGpTNUdqamI4T3Z0VVNETzdQd3pmcFhUOGl3U3hXUEJvTVFRQ09mWTFyMEtTWGZxUUlJakFqdmFGWk83RW1XRlBKckJVOVpkYzdDKw=="
+	sig := "RXE0RENrZ0lDeEFDR0FJcVFOZDdjUzlleGFuRktRdFcvSzNyZ2MvWDNCcDQ4RmxSbGxOWU" +
+		"lOVU5kR1l1UHMrMGdkMVp0Vkg3ekdKU0g4YVljc2JjN3lNK0FrdGpTNUdqamI4T3Z0VVNE" +
+		"TzdQd3pmcFhUOGl3U3hXUEJvTVFRQ09mWTFyMEtTWGZxUUlJakFqdmFGWk83RW1XRlBKck" +
+		"JVOVpkYzdDKw=="
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"thoughtSignature":"` + sig + `","text":""}]}}],"modelVersion":"test-model","responseId":"req_vrtx_sig"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"a"}]}}],"modelVersion":"test-model","responseId":"req_vrtx_sig"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]}}],"modelVersion":"test-model","responseId":"req_vrtx_sig"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"modelVersion":"test-model","responseId":"req_vrtx_sig"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":` +
+			`[{"thought":true,"thoughtSignature":` +
+			`"` +
+			sig +
+			(`","text":` +
+				`""}]}}],` +
+				`"modelVersion"` +
+				`:"test-model",` +
+				`"responseId":` +
+				`"req_vrtx_sig"` +
+				`},"traceId":` +
+				`"t1"}`),
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{` +
+			`"thought":true,"text":"a"}]}}],"modelVersion":"test-model","responseId` +
+			`":"req_vrtx_sig"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]}}],"` +
+			`modelVersion":"test-model","responseId":"req_vrtx_sig"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` +
+			`STOP"}],"modelVersion":"test-model","responseId":"req_vrtx_sig"},"traceId":"t1"}`,
 	}
 
 	var param any
@@ -1472,11 +1894,18 @@ func TestConvertGeminiResponseToOpenAIResponses_ReasoningEncryptedContent(t *tes
 }
 
 func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool0"}}]}}],"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool1"}}]}}],"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool2","args":{"a":1}}}]}}],"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15,"cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool0"` +
+			`}}]}}],"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool1"` +
+			`}}]}}],"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool2"` +
+			`,"args":{"a":1}}}]}}],"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` +
+			`STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15,"` +
+			`cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_1"},"traceId":"` +
+			`t1"}`,
 	}
 
 	var param any
@@ -1536,10 +1965,12 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 			if len(output.Array()) != 3 {
 				t.Fatalf("unexpected response.output length: got %d", len(output.Array()))
 			}
-			if data.Get("response.output.0.name").String() != "tool0" || data.Get("response.output.0.arguments").String() != "{}" {
+			if data.Get("response.output.0.name").String() != "tool0" ||
+				data.Get("response.output.0.arguments").String() != "{}" {
 				t.Fatalf("unexpected output[0]: %s", data.Get("response.output.0").Raw)
 			}
-			if data.Get("response.output.1.name").String() != "tool1" || data.Get("response.output.1.arguments").String() != "{}" {
+			if data.Get("response.output.1.name").String() != "tool1" ||
+				data.Get("response.output.1.arguments").String() != "{}" {
 				t.Fatalf("unexpected output[1]: %s", data.Get("response.output.1").Raw)
 			}
 			if data.Get("response.output.2.name").String() != "tool2" {
@@ -1557,11 +1988,20 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 	for idx := range 3 {
 		if posAdded[idx] == -1 || posArgsDelta[idx] == -1 || posArgsDone[idx] == -1 || posItemDone[idx] == -1 {
 			t.Fatalf(
-				"missing function call events for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx,
-				posAdded[idx], posArgsDelta[idx], posArgsDone[idx], posItemDone[idx],
+				"missing function call events for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d",
+				idx,
+				posAdded[idx],
+				posArgsDelta[idx],
+				posArgsDone[idx],
+				posItemDone[idx],
 			)
 		}
-		if !(posAdded[idx] < posArgsDelta[idx] && posArgsDelta[idx] < posArgsDone[idx] && posArgsDone[idx] < posItemDone[idx]) {
+		if !(posAdded[idx] <
+			posArgsDelta[idx] &&
+			posArgsDelta[idx] <
+				posArgsDone[idx] &&
+			posArgsDone[idx] <
+				posItemDone[idx]) {
 			t.Fatalf(
 				"unexpected ordering for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx,
 				posAdded[idx], posArgsDelta[idx], posArgsDone[idx], posItemDone[idx],
@@ -1593,10 +2033,16 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 }
 
 func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testing.T) {
+	//goland:noinspection SpellCheckingInspection
 	in := []string{
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool0","args":{"x":"y"}}}]}}],"modelVersion":"test-model","responseId":"req_vrtx_2"},"traceId":"t2"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"modelVersion":"test-model","responseId":"req_vrtx_2"},"traceId":"t2"}`,
-		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_2"},"traceId":"t2"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool0"` +
+			`,"args":{"x":"y"}}}]}}],"modelVersion":"test-model","responseId":"req_vrtx_2"},"traceId":"t2"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"` +
+			`modelVersion":"test-model","responseId":"req_vrtx_2"},"traceId":"t2"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` +
+			`STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2,"` +
+			`cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_vrtx_2"},"traceId":"` +
+			`t2"}`,
 	}
 
 	var param any
@@ -1627,7 +2073,10 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 		case "response.completed":
 			posCompleted = i
 			if data.Get("response.output.0.type").String() != "function_call" {
-				t.Fatalf("expected response.output[0] to be function_call: %s", data.Get("response.output.0").Raw)
+				t.Fatalf(
+					"expected response.output[0] to be function_call: %s",
+					data.Get("response.output.0").Raw,
+				)
 			}
 			if data.Get("response.output.1.type").String() != "message" {
 				t.Fatalf("expected response.output[1] to be message: %s", data.Get("response.output.1").Raw)
@@ -1640,7 +2089,10 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 
 	if posFuncDone == -1 || posMsgAdded == -1 || posCompleted == -1 {
 		t.Fatalf(
-			"missing required events: funcDone=%d msgAdded=%d completed=%d", posFuncDone, posMsgAdded, posCompleted,
+			"missing required events: funcDone=%d msgAdded=%d completed=%d",
+			posFuncDone,
+			posMsgAdded,
+			posCompleted,
 		)
 	}
 	if !(posFuncDone < posMsgAdded) {
@@ -1650,12 +2102,17 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 		)
 	}
 	if !(posMsgAdded < posCompleted) {
-		t.Fatalf("expected response.completed after message added: msgAdded=%d completed=%d", posMsgAdded, posCompleted)
+		t.Fatalf(
+			"expected response.completed after message added: msgAdded=%d completed=%d",
+			posMsgAdded,
+			posCompleted,
+		)
 	}
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesMessageOutputItemDoneFields(t *testing.T) {
-	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"responseId":"message-fields"}`)
+	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hell` +
+		`o"}]},"finishReason":"STOP"}],"responseId":"message-fields"}`)
 	var state any
 	for _, output := range translateGeminiFrameWithEOF(
 		context.Background(), "gemini-test", nil, nil, chunk, &state,
@@ -1690,7 +2147,8 @@ func TestConvertGeminiResponseToOpenAIResponsesRestoresNamespacedCustomTool(t *t
 		"fallback-model",
 		request,
 		nil,
-		[]byte(`{"response":{"responseId":"response-1","modelVersion":"provider-model","usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"thoughtsTokenCount":4,"totalTokenCount":9}}}`),
+		[]byte((`{"response":{"responseId":"response-1","modelVersion":"provider-model","usageMetadata":{"` +
+			`promptTokenCount":3,"candidatesTokenCount":2,"thoughtsTokenCount":4,"totalTokenCount":9}}}`)),
 		&state,
 	)
 	if len(first) != 2 {
@@ -1701,7 +2159,8 @@ func TestConvertGeminiResponseToOpenAIResponsesRestoresNamespacedCustomTool(t *t
 		"fallback-model",
 		request,
 		nil,
-		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-call","name":"ops__run","args":{"input":"raw input"}}}]},"finishReason":"STOP"}]}}`),
+		[]byte((`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-call","name":"` +
+			`ops__run","args":{"input":"raw input"}}}]},"finishReason":"STOP"}]}}`)),
 		&state,
 	)
 
@@ -1752,13 +2211,10 @@ func TestConvertGeminiResponseToOpenAIResponsesRestoresNamespacedCustomTool(t *t
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStreamRestoresNamespacedCustomTool(t *testing.T) {
 	request := []byte(`{"tools":[{"type":"namespace","name":"ops","tools":[{"type":"custom","name":"run"}]}]}`)
-	response := []byte(`{
-		"responseId":"nonstream-custom",
-		"candidates":[{
-			"content":{"parts":[{"functionCall":{"id":"native-custom","name":"ops__run","args":{"input":"raw input"}}}]},
-			"finishReason":"STOP"
-		}]
-	}`)
+	response := []byte("{\n\t\t\"responseId\":\"nonstream-custom\",\n\t\t\"candidates\":[{\n\t" +
+		`		"content":{"parts":[{"functionCall":{"id":"native-custom","name":"op` +
+		"s__run\",\"args\":{\"input\":\"raw input\"}}}]},\n\t\t\t\"finishReason" +
+		"\":\"STOP\"\n\t\t}]\n\t}")
 	output := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "fallback-model", request, nil, response, nil,
 	)
@@ -1777,7 +2233,8 @@ func TestConvertGeminiResponseToOpenAIResponsesPreservesTextAndAudioOrder(t *tes
 		"gemini-model",
 		nil,
 		nil,
-		[]byte(`{"candidates":[{"content":{"parts":[{"text":"first "},{"audioTranscription":{"text":"second "}},{"text":"third"}]},"finishReason":"STOP"}]}`),
+		[]byte((`{"candidates":[{"content":{"parts":[{"text":"first "},{"audioTranscription":{"text":"second "` +
+			`}},{"text":"third"}]},"finishReason":"STOP"}]}`)),
 		&state,
 	)
 	var deltas strings.Builder
@@ -1800,16 +2257,12 @@ func TestConvertGeminiResponseToOpenAIResponsesPreservesTextAndAudioOrder(t *tes
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStreamPreservesAllCandidatesAndAudioOrder(t *testing.T) {
-	response := []byte(`{
-		"response":{
-			"responseId":"multi-candidate",
-			"candidates":[
-				{"index":0,"content":{"parts":[{"text":"first "},{"audioTranscription":{"text":"audio"}}]},"finishReason":"STOP"},
-				{"index":1,"content":{"parts":[{"text":"second"}]},"finishReason":"STOP"}
-			]
-		},
-		"traceId":"vertex-trace"
-	}`)
+	response := []byte("{\n\t\t\"response\":{\n\t\t\t\"responseId\":\"multi-candidate\",\n\t\t" +
+		"\t\"candidates\":[\n\t\t\t\t{\"index\":0,\"content\":{\"parts\":[{\"te" +
+		`xt":"first "},{"audioTranscription":{"text":"audio"}}]},"finishReason"` +
+		":\"STOP\"},\n\t\t\t\t{\"index\":1,\"content\":{\"parts\":[{\"text\":\"" +
+		"second\"}]},\"finishReason\":\"STOP\"}\n\t\t\t]\n\t\t},\n\t\t\"traceId" +
+		"\":\"vertex-trace\"\n\t}")
 	output := ConvertGeminiResponseToOpenAIResponsesNonStream(
 		context.Background(), "gemini-model", nil, nil, response, nil,
 	)
@@ -1828,85 +2281,101 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStreamPreservesAllCandidatesAn
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesTerminalClassification(t *testing.T) {
-	t.Run("max tokens is incomplete", func(t *testing.T) {
-		response := []byte(`{
-			"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}],
-			"usageMetadata":{"promptTokenCount":-1,"candidatesTokenCount":7,"thoughtsTokenCount":2,"totalTokenCount":"9","cachedContentTokenCount":1.5}
-		}`)
-		var state any
-		var terminal gjson.Result
-		for _, chunk := range translateGeminiFrameWithEOF(
-			context.Background(), "model", nil, nil, response, &state,
-		) {
-			event, data := parseSSEEvent(t, chunk)
-			if event == "response.completed" {
-				t.Fatal("MAX_TOKENS emitted response.completed")
+	t.Run(
+		"max tokens is incomplete", func(t *testing.T) {
+			response := []byte(("{\n\t\t\t\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]},\"" +
+				"finishReason\":\"MAX_TOKENS\"}],\n\t\t\t\"usageMetadata\":{\"promptTokenCount\":-1,\"" +
+				"candidatesTokenCount\":7,\"thoughtsTokenCount\":2,\"totalTokenCount\":\"9\",\"" +
+				"cachedContentTokenCount\":1.5}\n\t\t}"))
+			var state any
+			var terminal gjson.Result
+			for _, chunk := range translateGeminiFrameWithEOF(
+				context.Background(), "model", nil, nil, response, &state,
+			) {
+				event, data := parseSSEEvent(t, chunk)
+				if event == "response.completed" {
+					t.Fatal("MAX_TOKENS emitted response.completed")
+				}
+				if event == "response.incomplete" {
+					terminal = data
+				}
 			}
-			if event == "response.incomplete" {
-				terminal = data
+			if terminal.Get("response.status").String() != "incomplete" ||
+				terminal.Get("response.incomplete_details.reason").String() != "max_output_tokens" {
+				t.Fatalf("MAX_TOKENS terminal malformed: %s", terminal.Raw)
 			}
-		}
-		if terminal.Get("response.status").String() != "incomplete" ||
-			terminal.Get("response.incomplete_details.reason").String() != "max_output_tokens" {
-			t.Fatalf("MAX_TOKENS terminal malformed: %s", terminal.Raw)
-		}
-		if got := terminal.Get("response.usage.output_tokens").Int(); got != 9 {
-			t.Fatalf("output_tokens = %d, want 9; terminal=%s", got, terminal.Raw)
-		}
-		for path, want := range map[string]int64{
-			"response.usage.input_tokens":                       0,
-			"response.usage.input_tokens_details.cached_tokens": 0,
-			"response.usage.total_tokens":                       0,
-		} {
-			if got := terminal.Get(path).Int(); got != want {
-				t.Fatalf("%s = %d, want %d; terminal=%s", path, got, want, terminal.Raw)
+			if got := terminal.Get("response.usage.output_tokens").Int(); got != 9 {
+				t.Fatalf("output_tokens = %d, want 9; terminal=%s", got, terminal.Raw)
 			}
-		}
-	})
+			for path, want := range map[string]int64{
+				"response.usage.input_tokens":                       0,
+				"response.usage.input_tokens_details.cached_tokens": 0,
+				"response.usage.total_tokens":                       0,
+			} {
+				if got := terminal.Get(path).Int(); got != want {
+					t.Fatalf("%s = %d, want %d; terminal=%s", path, got, want, terminal.Raw)
+				}
+			}
+		},
+	)
 
-	t.Run("provider error is failed", func(t *testing.T) {
-		var state any
-		var failed gjson.Result
-		for _, chunk := range translateGeminiFrameWithEOF(
-			context.Background(),
-			"model",
-			nil,
-			nil,
-			[]byte(`{"response":{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}}`),
-			&state,
-		) {
-			event, data := parseSSEEvent(t, chunk)
-			if event == "response.completed" {
-				t.Fatal("provider error emitted response.completed")
+	t.Run(
+		"provider error is failed", func(t *testing.T) {
+			var state any
+			var failed gjson.Result
+			for _, chunk := range translateGeminiFrameWithEOF(
+				context.Background(),
+				"model",
+				nil,
+				nil,
+				[]byte(`{"response":{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}}`),
+				&state,
+			) {
+				event, data := parseSSEEvent(t, chunk)
+				if event == "response.completed" {
+					t.Fatal("provider error emitted response.completed")
+				}
+				if event == "response.failed" {
+					failed = data
+				}
 			}
-			if event == "response.failed" {
-				failed = data
+			if failed.Get("response.status").String() != "failed" ||
+				failed.Get("response.error.code").String() != "RESOURCE_EXHAUSTED" ||
+				failed.Get("response.error.message").String() != "quota" {
+				t.Fatalf("provider failure malformed: %s", failed.Raw)
 			}
-		}
-		if failed.Get("response.status").String() != "failed" ||
-			failed.Get("response.error.code").String() != "RESOURCE_EXHAUSTED" ||
-			failed.Get("response.error.message").String() != "quota" {
-			t.Fatalf("provider failure malformed: %s", failed.Raw)
-		}
-	})
+		},
+	)
 
-	t.Run("empty stop emits no terminal", func(t *testing.T) {
-		var state any
-		output := translateGeminiFrameWithEOF(
-			context.Background(),
-			"model",
-			nil,
-			nil,
-			[]byte(`{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}`),
-			&state,
-		)
-		for _, chunk := range output {
-			event, _ := parseSSEEvent(t, chunk)
-			if event == "response.completed" || event == "response.incomplete" || event == "response.failed" {
-				t.Fatalf("empty response emitted terminal event %s", event)
+	t.Run(
+		"empty stop emits failed terminal", func(t *testing.T) {
+			var state any
+			output := translateGeminiFrameWithEOF(
+				context.Background(),
+				"model",
+				nil,
+				nil,
+				[]byte(`{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}`),
+				&state,
+			)
+			terminals := 0
+			for _, chunk := range output {
+				event, payload := parseSSEEvent(t, chunk)
+				if event == "response.completed" || event == "response.incomplete" {
+					t.Fatalf("empty STOP produced success: %s", payload.Raw)
+				}
+				if event == "response.failed" {
+					terminals++
+					if payload.Get("response.error.code").String() != "provider_empty_response" {
+						t.Fatalf("empty failure: %s", payload.Raw)
+					}
+				}
 			}
-		}
-	})
+			if terminals != 1 {
+				t.Fatalf("empty response terminal count = %d", terminals)
+			}
+		},
+	)
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStreamTerminalClassification(t *testing.T) {
@@ -1949,22 +2418,24 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStreamTerminalClassification(t
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			output := ConvertGeminiResponseToOpenAIResponsesNonStream(
-				context.Background(), "model", nil, nil, []byte(test.response), nil,
-			)
-			if got := gjson.GetBytes(output, "status").String(); got != test.wantStatus {
-				t.Fatalf("status = %q, want %q; output=%s", got, test.wantStatus, output)
-			}
-			if got := gjson.GetBytes(output, "incomplete_details.reason").String(); got != test.wantReason {
-				t.Fatalf("incomplete reason = %q, want %q; output=%s", got, test.wantReason, output)
-			}
-			if got := gjson.GetBytes(output, "error.code").String(); got != test.wantCode {
-				t.Fatalf("error code = %q, want %q; output=%s", got, test.wantCode, output)
-			}
-			if got := gjson.GetBytes(output, "status").String(); got == "completed" {
-				t.Fatalf("non-success response was marked completed: %s", output)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				output := ConvertGeminiResponseToOpenAIResponsesNonStream(
+					context.Background(), "model", nil, nil, []byte(test.response), nil,
+				)
+				if got := gjson.GetBytes(output, "status").String(); got != test.wantStatus {
+					t.Fatalf("status = %q, want %q; output=%s", got, test.wantStatus, output)
+				}
+				if got := gjson.GetBytes(output, "incomplete_details.reason").String(); got != test.wantReason {
+					t.Fatalf("incomplete reason = %q, want %q; output=%s", got, test.wantReason, output)
+				}
+				if got := gjson.GetBytes(output, "error.code").String(); got != test.wantCode {
+					t.Fatalf("error code = %q, want %q; output=%s", got, test.wantCode, output)
+				}
+				if got := gjson.GetBytes(output, "status").String(); got == "completed" {
+					t.Fatalf("non-success response was marked completed: %s", output)
+				}
+			},
+		)
 	}
 }

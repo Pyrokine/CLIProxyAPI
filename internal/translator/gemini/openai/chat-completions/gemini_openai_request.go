@@ -8,6 +8,7 @@ import (
 	"mime"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -121,13 +122,20 @@ func convertOpenAIRequestToGeminiChecked(modelName string, inputRawJSON []byte, 
 	messages := gjson.GetBytes(rawJSON, "messages")
 	if messages.IsArray() {
 		arr := messages.Array()
+		rawMessages := make([][]byte, 0, len(arr))
+		for _, message := range arr {
+			rawMessages = append(rawMessages, []byte(message.Raw))
+		}
+		for index, message := range translatorcommon.AlignOpenAIToolCallMessages(rawMessages) {
+			arr[index] = gjson.ParseBytes(message)
+		}
 		consumedToolMessages := make(map[int]bool)
 		hasEncounteredConversation := false
 		systemPartIndex := 0
 		for i := range arr {
 			m := arr[i]
 			role := m.Get("role").String()
-			content := m.Get("content")
+			content := translatorcommon.OpenAIMessageContentWithImages(m)
 			isDemotedSystem := (role == "system" || role == "developer") && hasEncounteredConversation
 			if role != "system" && role != "developer" {
 				hasEncounteredConversation = true
@@ -198,12 +206,15 @@ func convertOpenAIRequestToGeminiChecked(modelName string, inputRawJSON []byte, 
 						case "image_url":
 							before := p
 							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 {
+							if strings.HasPrefix(imageURL, "data:") {
 								pieces := strings.SplitN(imageURL[5:], ";", 2)
 								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									mime := pieces[0]
+									inlineMIMEType := pieces[0]
 									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
+									node, _ = sjson.SetBytes(
+										node, "parts."+itoa(p)+".inlineData.mime_type",
+										inlineMIMEType,
+									)
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
 									p++
 								}
@@ -275,7 +286,10 @@ func convertOpenAIRequestToGeminiChecked(modelName string, inputRawJSON []byte, 
 			} else if role == "assistant" {
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
-				if reasoningContent := m.Get("reasoning_content"); reasoningContent.Type == gjson.String && reasoningContent.String() != "" {
+				if reasoningContent := m.Get("reasoning_content"); reasoningContent.Type ==
+					gjson.String &&
+					reasoningContent.String() !=
+						"" {
 					node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", reasoningContent.String())
 					node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thought", true)
 					node, _ = sjson.SetBytes(
@@ -300,15 +314,19 @@ func convertOpenAIRequestToGeminiChecked(modelName string, inputRawJSON []byte, 
 						case "image_url":
 							// If the assistant returned an inline data URL, preserve it for history fidelity.
 							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 { // expect data:...
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									mime := pieces[0]
-									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									p++
+							if !strings.HasPrefix(imageURL, "data:") {
+								return nil, &translatorcommon.UnsupportedPartError{Type: "image_url"}
+							}
+							pieces := strings.SplitN(imageURL[5:], ";", 2)
+							if len(pieces) == 2 && len(pieces[1]) > 7 {
+								inlineMIMEType := pieces[0]
+								data := pieces[1][7:]
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", inlineMIMEType)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
+								if signature := item.Get("extra_content.google.thought_signature").String(); signature != "" {
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", signature)
 								}
+								p++
 							}
 						}
 					}
@@ -332,9 +350,19 @@ func convertOpenAIRequestToGeminiChecked(modelName string, inputRawJSON []byte, 
 						}
 						functionArguments := tc.Get("function.arguments").String()
 						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", functionName)
-						node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(functionArguments))
+						node, _ = sjson.SetRawBytes(
+							node, "parts."+itoa(p)+".functionCall.args", []byte(functionArguments),
+						)
+						rawSignature := tc.Get("extra_content.google.thought_signature").String()
+						if rawSignature == "" {
+							rawSignature = tc.Get("thought_signature").String()
+						}
 						node, _ = sjson.SetBytes(
-							node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature,
+							node, "parts."+itoa(p)+".thoughtSignature",
+							signature.GeminiReplaySignatureOrBypass(
+								rawSignature,
+								signature.BlockKindGeminiFunctionCall,
+							),
 						)
 						p++
 						toolCalls = append(toolCalls, assistantToolCall{tc.Get("id").String(), functionName})
@@ -385,7 +413,8 @@ func convertOpenAIRequestToGeminiChecked(modelName string, inputRawJSON []byte, 
 				}
 				node := []byte(`{"role":"user","parts":[]}`)
 				node, _ = sjson.SetBytes(
-					node, "parts.0.text", fmt.Sprintf("Tool result (call_id=%s): %s", m.Get("tool_call_id").String(), result),
+					node, "parts.0.text",
+					fmt.Sprintf("Tool result (call_id=%s): %s", m.Get("tool_call_id").String(), result),
 				)
 				out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 			}
@@ -444,14 +473,21 @@ func convertOpenAIRequestToGeminiChecked(modelName string, inputRawJSON []byte, 
 						renamed, errRename := util.RenameKey(fnRaw, "parameters", "parametersJsonSchema")
 						if errRename != nil {
 							log.Warnf(
-								"Failed to rename parameters for tool '%s': %v", fn.Get("name").String(), errRename,
+								"Failed to rename parameters for tool '%s': %v",
+								fn.Get("name").String(),
+								errRename,
 							)
 							var errSet error
 							fnRawBytes := []byte(fnRaw)
-							fnRawBytes, errSet = sjson.SetBytes(fnRawBytes, "parametersJsonSchema.type", "object")
+							fnRawBytes, errSet = sjson.SetBytes(
+								fnRawBytes,
+								"parametersJsonSchema.type",
+								"object",
+							)
 							if errSet != nil {
 								log.Warnf(
-									"Failed to set default schema type for tool '%s': %v", fn.Get("name").String(),
+									"Failed to set default schema type for tool '%s': %v",
+									fn.Get("name").String(),
 									errSet,
 								)
 								continue
@@ -508,7 +544,11 @@ func convertOpenAIRequestToGeminiChecked(modelName string, inputRawJSON []byte, 
 							)
 						}
 					}
-					if fn.Get("strict").Type == gjson.True || t.Get("strict").Type == gjson.True {
+					strict := fn.Get("strict")
+					if !strict.Exists() {
+						strict = t.Get("strict")
+					}
+					if strict.Type == gjson.True {
 						hasStrictTool = true
 					}
 					if gjson.GetBytes(fnRawBytes, "strict").Exists() {
@@ -645,13 +685,22 @@ func convertOpenAIRequestToGeminiChecked(modelName string, inputRawJSON []byte, 
 	case hasStrictTool && len(functionDeclarations) > 0:
 		out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "VALIDATED")
 	}
-	if gjson.GetBytes(rawJSON, "parallel_tool_calls").Type == gjson.False {
-		out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "NONE")
-		out, _ = sjson.DeleteBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames")
+	if gjson.GetBytes(
+		rawJSON, "parallel_tool_calls",
+	).Type == gjson.False && len(functionDeclarations) > 0 && gjson.GetBytes(
+		out, "toolConfig.functionCallingConfig.mode",
+	).String() != "NONE" {
+		return nil, geminiToolChoiceError("Gemini does not support parallel_tool_calls=false")
 	}
 
 	return common.AttachDefaultSafetySettings(out, "safetySettings"), drops.Err()
 }
+
+type geminiToolChoiceError string
+
+func (e geminiToolChoiceError) Error() string       { return string(e) }
+func (geminiToolChoiceError) StatusCode() int       { return 400 }
+func (geminiToolChoiceError) IsRequestScoped() bool { return true }
 
 func applyOpenAIResponseFormatToGemini(out []byte, rawJSON []byte) []byte {
 	responseFormat := gjson.GetBytes(rawJSON, "response_format")
@@ -690,10 +739,13 @@ func parseOpenAIVideoDataURL(rawURL string) (string, string, bool) {
 		return "", "", false
 	}
 	metadataParts := strings.Split(metadata, ";")
-	if len(metadataParts) < 2 || !strings.EqualFold(strings.TrimSpace(metadataParts[len(metadataParts)-1]), "base64") {
+	if len(metadataParts) < 2 ||
+		!strings.EqualFold(strings.TrimSpace(metadataParts[len(metadataParts)-1]), "base64") {
 		return "", "", false
 	}
-	mediaType, _, errParseMediaType := mime.ParseMediaType(strings.Join(metadataParts[:len(metadataParts)-1], ";"))
+	mediaType, _, errParseMediaType := mime.ParseMediaType(
+		strings.Join(metadataParts[:len(metadataParts)-1], ";"),
+	)
 	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
 	if errParseMediaType != nil || !strings.HasPrefix(mediaType, "video/") || len(mediaType) == len("video/") {
 		return "", "", false

@@ -30,10 +30,14 @@ func encodeGeminiResponsesCarrier(rawSignature, direction, targetKind string) st
 	if rawSignature == "" {
 		return ""
 	}
-	return geminiResponsesCarrierPrefix + direction + ":" + targetKind + ":" + base64.RawStdEncoding.EncodeToString([]byte(rawSignature))
+	return geminiResponsesCarrierPrefix + direction + ":" + targetKind + ":" + base64.RawStdEncoding.EncodeToString(
+		[]byte(rawSignature),
+	)
 }
 
-func decodeGeminiResponsesCarrier(rawSignature string) (signatureValue, direction, targetKind string, marked, ok bool) {
+func decodeGeminiResponsesCarrier(
+	rawSignature string,
+) (signatureValue, direction, targetKind string, marked, ok bool) {
 	rawSignature = strings.TrimSpace(rawSignature)
 	if !strings.HasPrefix(rawSignature, geminiResponsesCarrierPrefix) {
 		return rawSignature, "", "", false, true
@@ -58,7 +62,8 @@ func decodeGeminiResponsesCarrier(rawSignature string) (signatureValue, directio
 		return "", "", "", true, false
 	}
 	decoded, errDecode := base64.RawStdEncoding.DecodeString(fields[2])
-	if errDecode != nil || len(decoded) == 0 || strings.HasPrefix(string(decoded), geminiResponsesCarrierPrefix) {
+	if errDecode != nil || len(decoded) == 0 ||
+		strings.HasPrefix(string(decoded), geminiResponsesCarrierPrefix) {
 		return "", "", "", true, false
 	}
 	return string(decoded), direction, targetKind, true, true
@@ -80,7 +85,7 @@ func compatibleGeminiResponsesCarrierSignature(rawSignature, targetKind string) 
 
 func geminiResponsesCarrierSemanticTarget(item gjson.Result) string {
 	switch item.Get("type").String() {
-	case "function_call":
+	case "function_call", "custom_tool_call":
 		return geminiResponsesCarrierFunction
 	case "reasoning":
 		if strings.TrimSpace(item.Get("summary.0.text").String()) != "" {
@@ -155,7 +160,15 @@ func normalizeGeminiResponsesCarriers(items []gjson.Result) ([]gjson.Result, boo
 		}
 		isDetached := isOpenAIResponsesDetachedCarrier(item)
 		hasSummary := strings.TrimSpace(item.Get("summary.0.text").String()) != ""
-		validSummaryCarrier := hasSummary && ((direction == geminiResponsesCarrierStandalone && (targetKind == geminiResponsesCarrierText || targetKind == geminiResponsesCarrierAny)) || direction == geminiResponsesCarrierNext)
+		validSummaryCarrier := hasSummary &&
+			((direction ==
+				geminiResponsesCarrierStandalone &&
+				(targetKind ==
+					geminiResponsesCarrierText ||
+					targetKind ==
+						geminiResponsesCarrierAny)) ||
+				direction ==
+					geminiResponsesCarrierNext)
 		if !ok || (!isDetached && !validSummaryCarrier) {
 			if strings.TrimSpace(item.Get("summary.0.text").String()) == "" {
 				continue
@@ -182,5 +195,7 @@ func geminiResponsesCarrierTarget(item gjson.Result) string {
 }
 
 func isOpenAIResponsesDetachedCarrier(item gjson.Result) bool {
-	return item.Get("type").String() == "reasoning" && strings.TrimSpace(item.Get("encrypted_content").String()) != "" && strings.TrimSpace(item.Get("summary.0.text").String()) == ""
+	return item.Get("type").String() == "reasoning" &&
+		strings.TrimSpace(item.Get("encrypted_content").String()) != "" &&
+		strings.TrimSpace(item.Get("summary.0.text").String()) == ""
 }

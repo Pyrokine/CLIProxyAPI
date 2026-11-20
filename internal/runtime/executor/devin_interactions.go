@@ -26,10 +26,12 @@ type devinRequestPayload struct {
 func parseDevinInteractionsPayload(payload, originalRequest []byte) devinRequestPayload {
 	root := gjson.ParseBytes(payload)
 	parsed := devinRequestPayload{
-		systemPrompt: strings.TrimSpace(firstNonEmptyDevinValue(
-			root.Get("system_instruction").String(),
-			root.Get("systemInstruction").String(),
-		)),
+		systemPrompt: strings.TrimSpace(
+			firstNonEmptyDevinValue(
+				root.Get("system_instruction").String(),
+				root.Get("systemInstruction").String(),
+			),
+		),
 	}
 
 	generationConfig := root.Get("generation_config")
@@ -41,18 +43,26 @@ func parseDevinInteractionsPayload(payload, originalRequest []byte) devinRequest
 			value := temperature.Float()
 			parsed.temperature = &value
 		}
-		parsed.maxTokens = int(firstExistingDevinResult(
-			generationConfig.Get("max_output_tokens"),
-			generationConfig.Get("maxOutputTokens"),
-		).Int())
-		parsed.thinkingLevel = strings.TrimSpace(firstNonEmptyDevinValue(
-			generationConfig.Get("thinking_level").String(),
-			generationConfig.Get("thinkingLevel").String(),
-		))
-		parsed.budgetTokens = int(firstExistingDevinResult(
+		parsed.maxTokens = int(
+			firstExistingDevinResult(
+				generationConfig.Get("max_output_tokens"),
+				generationConfig.Get("maxOutputTokens"),
+			).Int(),
+		)
+		parsed.thinkingLevel = strings.TrimSpace(
+			firstNonEmptyDevinValue(
+				generationConfig.Get("thinking_level").String(),
+				generationConfig.Get("thinkingLevel").String(),
+			),
+		)
+		budget := firstExistingDevinResult(
 			generationConfig.Get("thinking_config.thinking_budget"),
 			generationConfig.Get("thinkingConfig.thinkingBudget"),
-		).Int())
+		)
+		parsed.budgetTokens = int(budget.Int())
+		if parsed.thinkingLevel == "" && budget.Type == gjson.Number && budget.Int() == 0 {
+			parsed.thinkingLevel = "none"
+		}
 	}
 	if parsed.temperature == nil {
 		if temperature := root.Get("temperature"); temperature.Exists() {
@@ -64,17 +74,19 @@ func parseDevinInteractionsPayload(payload, originalRequest []byte) devinRequest
 		}
 	}
 	if parsed.maxTokens <= 0 {
-		parsed.maxTokens = helps.DevinDefaultMaxTokens
+		parsed.maxTokens = 64000
 	}
 
 	parsed.sessionID = devinSessionIDFromJSON(root)
 	if parsed.sessionID == "" && len(originalRequest) > 0 {
 		parsed.sessionID = devinSessionIDFromJSON(gjson.ParseBytes(originalRequest))
 	}
-	parsed.cascadeID = strings.TrimSpace(firstNonEmptyDevinValue(
-		root.Get("cascade_id").String(),
-		root.Get("cascadeId").String(),
-	))
+	parsed.cascadeID = strings.TrimSpace(
+		firstNonEmptyDevinValue(
+			root.Get("cascade_id").String(),
+			root.Get("cascadeId").String(),
+		),
+	)
 	if parsed.cascadeID == "" {
 		parsed.cascadeID = parsed.sessionID
 	}
@@ -94,14 +106,16 @@ func parseDevinInteractionsPayload(payload, originalRequest []byte) devinRequest
 }
 
 func devinSessionIDFromJSON(root gjson.Result) string {
-	return strings.TrimSpace(firstNonEmptyDevinValue(
-		root.Get("session_id").String(),
-		root.Get("sessionId").String(),
-		root.Get("conversation_id").String(),
-		root.Get("conversationId").String(),
-		root.Get("previous_interaction_id").String(),
-		root.Get("previousInteractionId").String(),
-	))
+	return strings.TrimSpace(
+		firstNonEmptyDevinValue(
+			root.Get("session_id").String(),
+			root.Get("sessionId").String(),
+			root.Get("conversation_id").String(),
+			root.Get("conversationId").String(),
+			root.Get("previous_interaction_id").String(),
+			root.Get("previousInteractionId").String(),
+		),
+	)
 }
 
 func parseDevinInteractionSteps(steps []gjson.Result) []helps.DevinPrompt {
@@ -110,18 +124,22 @@ func parseDevinInteractionSteps(steps []gjson.Result) []helps.DevinPrompt {
 		switch strings.ToLower(strings.TrimSpace(step.Get("type").String())) {
 		case "user_input":
 			text, images := extractDevinContent(step)
-			prompts = append(prompts, helps.DevinPrompt{
-				MessageID: uuid.NewString(),
-				Source:    1,
-				Content:   text,
-				Images:    images,
-			})
+			prompts = append(
+				prompts, helps.DevinPrompt{
+					MessageID: uuid.NewString(),
+					Source:    1,
+					Content:   text,
+					Images:    images,
+				},
+			)
 		case "thought":
 			text := extractDevinText(step)
-			signature, signatureType := parseDevinSignature(firstNonEmptyDevinValue(
-				step.Get("signature").String(),
-				step.Get("thought_signature").String(),
-			))
+			signature, signatureType := parseDevinSignature(
+				firstNonEmptyDevinValue(
+					step.Get("signature").String(),
+					step.Get("thought_signature").String(),
+				),
+			)
 			assistant := ensureDevinAssistantPrompt(&prompts)
 			if assistant.Thinking == "" {
 				assistant.Thinking = text
@@ -131,10 +149,12 @@ func parseDevinInteractionSteps(steps []gjson.Result) []helps.DevinPrompt {
 			mergeDevinSignature(assistant, signature, signatureType)
 		case "model_output":
 			text := extractDevinText(step)
-			signature, signatureType := parseDevinSignature(firstNonEmptyDevinValue(
-				step.Get("signature").String(),
-				step.Get("thought_signature").String(),
-			))
+			signature, signatureType := parseDevinSignature(
+				firstNonEmptyDevinValue(
+					step.Get("signature").String(),
+					step.Get("thought_signature").String(),
+				),
+			)
 			assistant := ensureDevinAssistantPrompt(&prompts)
 			if assistant.Content == "" {
 				assistant.Content = text
@@ -152,29 +172,35 @@ func parseDevinInteractionSteps(steps []gjson.Result) []helps.DevinPrompt {
 					step.Get("name").String(),
 					step.Get("function.name").String(),
 				),
-				Arguments: devinJSONValue(firstExistingDevinResult(
-					step.Get("arguments"),
-					step.Get("function.arguments"),
-				)),
+				Arguments: devinJSONValue(
+					firstExistingDevinResult(
+						step.Get("arguments"),
+						step.Get("function.arguments"),
+					),
+				),
 			}
 			assistant := ensureDevinAssistantPrompt(&prompts)
 			assistant.ToolCalls = append(assistant.ToolCalls, call)
 		case "function_result":
-			text, images := devinToolResultContent(firstExistingDevinResult(
-				step.Get("result"),
-				step.Get("output"),
-				step.Get("content"),
-			))
-			prompts = append(prompts, helps.DevinPrompt{
-				MessageID: uuid.NewString(),
-				Source:    4,
-				ToolCallID: firstNonEmptyDevinValue(
-					step.Get("call_id").String(),
-					step.Get("id").String(),
+			text, images := devinToolResultContent(
+				firstExistingDevinResult(
+					step.Get("result"),
+					step.Get("output"),
+					step.Get("content"),
 				),
-				Content: text,
-				Images:  images,
-			})
+			)
+			prompts = append(
+				prompts, helps.DevinPrompt{
+					MessageID: uuid.NewString(),
+					Source:    4,
+					ToolCallID: firstNonEmptyDevinValue(
+						step.Get("call_id").String(),
+						step.Get("id").String(),
+					),
+					Content: text,
+					Images:  images,
+				},
+			)
 		}
 	}
 	return prompts
@@ -193,12 +219,14 @@ func parseDevinMessages(messages []gjson.Result, systemPrompt string) ([]helps.D
 			}
 		case "user":
 			text, images := extractDevinContent(message)
-			prompts = append(prompts, helps.DevinPrompt{
-				MessageID: uuid.NewString(),
-				Source:    1,
-				Content:   text,
-				Images:    images,
-			})
+			prompts = append(
+				prompts, helps.DevinPrompt{
+					MessageID: uuid.NewString(),
+					Source:    1,
+					Content:   text,
+					Images:    images,
+				},
+			)
 		case "assistant":
 			prompt := helps.DevinPrompt{
 				MessageID: uuid.NewString(),
@@ -206,35 +234,43 @@ func parseDevinMessages(messages []gjson.Result, systemPrompt string) ([]helps.D
 				Content:   extractDevinText(message),
 			}
 			for _, call := range message.Get("tool_calls").Array() {
-				prompt.ToolCalls = append(prompt.ToolCalls, helps.DevinToolCall{
-					ID: call.Get("id").String(),
-					Name: firstNonEmptyDevinValue(
-						call.Get("function.name").String(),
-						call.Get("name").String(),
-					),
-					Arguments: devinJSONValue(firstExistingDevinResult(
-						call.Get("function.arguments"),
-						call.Get("arguments"),
-					)),
-				})
+				prompt.ToolCalls = append(
+					prompt.ToolCalls, helps.DevinToolCall{
+						ID: call.Get("id").String(),
+						Name: firstNonEmptyDevinValue(
+							call.Get("function.name").String(),
+							call.Get("name").String(),
+						),
+						Arguments: devinJSONValue(
+							firstExistingDevinResult(
+								call.Get("function.arguments"),
+								call.Get("arguments"),
+							),
+						),
+					},
+				)
 			}
 			prompts = append(prompts, prompt)
 		case "tool":
-			text, images := devinToolResultContent(firstExistingDevinResult(
-				message.Get("content"),
-				message.Get("output"),
-				message.Get("result"),
-			))
-			prompts = append(prompts, helps.DevinPrompt{
-				MessageID: uuid.NewString(),
-				Source:    4,
-				ToolCallID: firstNonEmptyDevinValue(
-					message.Get("tool_call_id").String(),
-					message.Get("id").String(),
+			text, images := devinToolResultContent(
+				firstExistingDevinResult(
+					message.Get("content"),
+					message.Get("output"),
+					message.Get("result"),
 				),
-				Content: text,
-				Images:  images,
-			})
+			)
+			prompts = append(
+				prompts, helps.DevinPrompt{
+					MessageID: uuid.NewString(),
+					Source:    4,
+					ToolCallID: firstNonEmptyDevinValue(
+						message.Get("tool_call_id").String(),
+						message.Get("id").String(),
+					),
+					Content: text,
+					Images:  images,
+				},
+			)
 		}
 	}
 	return prompts, systemPrompt
@@ -269,16 +305,23 @@ func parseDevinTools(result gjson.Result) []helps.DevinTool {
 		}
 		parameters := firstExistingDevinResult(
 			tool.Get("parameters"), tool.Get("input_schema"),
-			tool.Get("function.parameters"), tool.Get("parametersJsonSchema"), tool.Get("function.parametersJsonSchema"),
+			tool.Get("function.parameters"), tool.Get("parametersJsonSchema"),
+			tool.Get("function.parametersJsonSchema"),
 		)
-		tools = append(tools, helps.DevinTool{
-			Name:        name,
-			Description: firstNonEmptyDevinValue(tool.Get("description").String(), tool.Get("function.description").String()),
-			Parameters:  []byte(parameters.Raw),
-		})
+		tools = append(
+			tools, helps.DevinTool{
+				Name: name,
+				Description: firstNonEmptyDevinValue(
+					tool.Get("description").String(), tool.Get("function.description").String(),
+				),
+				Parameters: []byte(parameters.Raw),
+			},
+		)
 	}
 	for _, tool := range result.Array() {
-		if tool.Get("type").String() == "namespace" && strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), "mcp__codex_app") {
+		if tool.Get("type").String() == "namespace" && strings.EqualFold(
+			strings.TrimSpace(tool.Get("name").String()), "mcp__codex_app",
+		) {
 			children := tool.Get("tools")
 			if !children.IsArray() {
 				children = tool.Get("children")
@@ -337,16 +380,20 @@ func extractDevinContent(container gjson.Result) (string, []helps.DevinImage) {
 }
 
 func extractDevinImage(part gjson.Result) (helps.DevinImage, bool) {
-	data := strings.TrimSpace(firstNonEmptyDevinValue(
-		part.Get("data").String(),
-		part.Get("source.data").String(),
-		part.Get("inline_data.data").String(),
-	))
-	mimeType := strings.TrimSpace(firstNonEmptyDevinValue(
-		part.Get("mime_type").String(),
-		part.Get("source.media_type").String(),
-		part.Get("inline_data.mime_type").String(),
-	))
+	data := strings.TrimSpace(
+		firstNonEmptyDevinValue(
+			part.Get("data").String(),
+			part.Get("source.data").String(),
+			part.Get("inline_data.data").String(),
+		),
+	)
+	mimeType := strings.TrimSpace(
+		firstNonEmptyDevinValue(
+			part.Get("mime_type").String(),
+			part.Get("source.media_type").String(),
+			part.Get("inline_data.mime_type").String(),
+		),
+	)
 	if data == "" {
 		rawURL := firstNonEmptyDevinValue(
 			part.Get("image_url.url").String(),
@@ -378,12 +425,14 @@ func addDevinImageHeaders(text string, images []helps.DevinImage) string {
 	}
 	headers := make([]string, 0, len(images))
 	for index, image := range images {
-		headers = append(headers, fmt.Sprintf(
-			"[Image %d: pasted_image_%d.%s]",
-			index+1,
-			index+1,
-			devinMIMEExtension(image.MimeType),
-		))
+		headers = append(
+			headers, fmt.Sprintf(
+				"[Image %d: pasted_image_%d.%s]",
+				index+1,
+				index+1,
+				devinMIMEExtension(image.MimeType),
+			),
+		)
 	}
 	header := strings.Join(headers, "\n")
 	if text == "" {
@@ -416,20 +465,22 @@ func devinToolResultContent(result gjson.Result) (string, []helps.DevinImage) {
 		}
 		explicit := strings.EqualFold(strings.TrimSpace(object.Get("type").String()), "tool_result")
 		pure := true
-		object.ForEach(func(key, _ gjson.Result) bool {
-			name := key.String()
-			if name == field || name == "cache_control" {
-				return true
-			}
-			if explicit {
-				switch name {
-				case "type", "tool_use_id", "id", "is_error":
+		object.ForEach(
+			func(key, _ gjson.Result) bool {
+				name := key.String()
+				if name == field || name == "cache_control" {
 					return true
 				}
-			}
-			pure = false
-			return false
-		})
+				if explicit {
+					switch name {
+					case "type", "tool_use_id", "id", "is_error":
+						return true
+					}
+				}
+				pure = false
+				return false
+			},
+		)
 		return pure
 	}
 	var project func(gjson.Result) (string, []helps.DevinImage, bool)
@@ -458,14 +509,16 @@ func devinToolResultContent(result gjson.Result) (string, []helps.DevinImage) {
 			}
 			if kind == "text" || kind == "input_text" || kind == "output_text" {
 				pure := target.Get("text").Type == gjson.String
-				target.ForEach(func(key, _ gjson.Result) bool {
-					switch key.String() {
-					case "type", "text", "cache_control":
-					default:
-						pure = false
-					}
-					return pure
-				})
+				target.ForEach(
+					func(key, _ gjson.Result) bool {
+						switch key.String() {
+						case "type", "text", "cache_control":
+						default:
+							pure = false
+						}
+						return pure
+					},
+				)
 				if pure {
 					return target.Get("text").String(), nil, true
 				}
@@ -599,14 +652,20 @@ func supplementDevinImages(original []byte, prompts []helps.DevinPrompt) {
 	for _, message := range messages.Array() {
 		switch strings.ToLower(strings.TrimSpace(message.Get("role").String())) {
 		case "tool":
-			addToolImages(firstNonEmptyDevinValue(message.Get("tool_call_id").String(), message.Get("id").String()), message.Get("content"))
+			addToolImages(
+				firstNonEmptyDevinValue(message.Get("tool_call_id").String(), message.Get("id").String()),
+				message.Get("content"),
+			)
 		case "user":
 			content := message.Get("content")
 			hasUserContent := content.Type == gjson.String || (content.IsArray() && len(content.Array()) == 0)
 			var images []helps.DevinImage
 			for _, part := range content.Array() {
 				if strings.EqualFold(strings.TrimSpace(part.Get("type").String()), "tool_result") {
-					addToolImages(firstNonEmptyDevinValue(part.Get("tool_use_id").String(), part.Get("id").String()), part.Get("content"))
+					addToolImages(
+						firstNonEmptyDevinValue(part.Get("tool_use_id").String(), part.Get("id").String()),
+						part.Get("content"),
+					)
 					continue
 				}
 				hasUserContent = true
@@ -651,8 +710,8 @@ func parseDevinSignature(raw string) ([]byte, string) {
 		"gpt#":    "openai",
 		"gemini#": "gemini",
 	} {
-		if strings.HasPrefix(signature, prefix) {
-			return []byte(strings.TrimPrefix(signature, prefix)), provider
+		if after, ok := strings.CutPrefix(signature, prefix); ok {
+			return []byte(after), provider
 		}
 	}
 	if strings.HasPrefix(signature, "sealed.v1.") {

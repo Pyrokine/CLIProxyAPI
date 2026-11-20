@@ -17,7 +17,9 @@ func TestConvertOpenAIRequestToGeminiMapsMaxTokens(t *testing.T) {
 }
 
 func TestConvertOpenAIRequestToGeminiMapsMaxCompletionTokens(t *testing.T) {
-	input := []byte(`{"model":"gemini-3-flash","max_completion_tokens":654,"messages":[{"role":"user","content":"hi"}]}`)
+	input := []byte(
+		`{"model":"gemini-3-flash","max_completion_tokens":654,"messages":[{"role":"user","content":"hi"}]}`,
+	)
 
 	out := convertOpenAIRequestToGemini("gemini-3-flash", input, false)
 
@@ -45,6 +47,7 @@ func TestConvertOpenAIRequestToGeminiPreservesVideoURL(t *testing.T) {
 	if got := gjson.GetBytes(out, "contents.0.parts.0.inlineData.mime_type").String(); got != "video/mp4" {
 		t.Fatalf("video mime = %q, want video/mp4; payload=%s", got, out)
 	}
+	//goland:noinspection SpellCheckingInspection
 	if got := gjson.GetBytes(out, "contents.0.parts.0.inlineData.data").String(); got != "AAAAIGZ0eXBtcDQy" {
 		t.Fatalf("video data = %q, want base64 payload; payload=%s", got, out)
 	}
@@ -66,19 +69,28 @@ func TestConvertOpenAIRequestToGeminiRejectsInvalidVideoURLs(t *testing.T) {
 	}
 
 	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			input := []byte(`{"messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"` + testCase.url + `"}},{"type":"text","text":"describe"}]}]}`)
-			out := convertOpenAIRequestToGemini("gemini-3-flash", input, false)
-			parts := gjson.GetBytes(out, "contents.0.parts").Array()
-			if len(parts) != 1 || parts[0].Get("text").String() != "describe" {
-				t.Fatalf("invalid video URL created a media part: %s", out)
-			}
-		})
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				input := []byte(
+					`{"messages":[{"role":"user","content":[{"type":"video_url",` +
+						`"video_url":{"url":` +
+						`"` +
+						testCase.url +
+						`"}},{"type":"text","text":"describe"}]}]}`,
+				)
+				out := convertOpenAIRequestToGemini("gemini-3-flash", input, false)
+				parts := gjson.GetBytes(out, "contents.0.parts").Array()
+				if len(parts) != 1 || parts[0].Get("text").String() != "describe" {
+					t.Fatalf("invalid video URL created a media part: %s", out)
+				}
+			},
+		)
 	}
 }
 
 func TestConvertOpenAIRequestToGeminiAcceptsParameterizedVideoMIME(t *testing.T) {
-	input := []byte(`{"messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"data:video/mp4;codecs=avc1;base64,aGVsbG8="}}]}]}`)
+	input := []byte(`{"messages":[{"role":"user","content":[{"type":"video_url","video_url"` +
+		`:{"url":"data:video/mp4;codecs=avc1;base64,aGVsbG8="}}]}]}`)
 	out := convertOpenAIRequestToGemini("gemini-3-flash", input, false)
 	if got := gjson.GetBytes(out, "contents.0.parts.0.inlineData.mime_type").String(); got != "video/mp4" {
 		t.Fatalf("video MIME = %q, want video/mp4; output=%s", got, out)
@@ -127,7 +139,11 @@ func TestConvertOpenAIRequestToGeminiNormalizesFunctionDeclarations(t *testing.T
 }
 
 func TestConvertOpenAIRequestToGeminiNormalizesToolNameAndStrict(t *testing.T) {
-	input := []byte(`{"messages":[],"tools":[{"type":"function","function":{"name":true,"strict":true,"parameters":{"type":"object"}}}]}`)
+	input := []byte(
+		`{"messages":[],"tools":[{"type":"function","function":{"name":true,` +
+			`"strict":true,"parameters":{"type":` +
+			`"object"}}}]}`,
+	)
 
 	output := convertOpenAIRequestToGemini("gemini-test", input, false)
 
@@ -171,15 +187,13 @@ func TestConvertOpenAIRequestToGeminiPreservesReasoningContent(t *testing.T) {
 }
 
 func TestConvertOpenAIRequestToGeminiPreservesReasoningBeforeVisibleContentAndToolCall(t *testing.T) {
-	inputJSON := `{
-		"model": "gemini-3-flash",
-		"messages": [
-			{"role": "user", "content": "hi"},
-			{"role": "assistant", "content": "visible answer", "reasoning_content": "thinking only", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
-			{"role": "tool", "tool_call_id": "call_1", "content": "{\"output\":\"ok\"}"},
-			{"role": "user", "content": "say ok"}
-		]
-	}`
+	inputJSON := "{\n\t\t\"model\": \"gemini-3-flash\",\n\t\t\"messages\": [\n\t\t\t{\"r" +
+		"ole\": \"user\", \"content\": \"hi\"},\n\t\t\t{\"role\": \"assistant\"" +
+		`, "content": "visible answer", "reasoning_content": "thinking only", "` +
+		`tool_calls": [{"id": "call_1", "type": "function", "function": {"name"` +
+		": \"read_file\", \"arguments\": \"{}\"}}]},\n\t\t\t{\"role\": \"tool\"" +
+		`, "tool_call_id": "call_1", "content": "{\"output\":\"ok\"}"},` +
+		"\n\t\t\t{\"role\": \"user\", \"content\": \"say ok\"}\n\t\t]\n\t}"
 
 	result := convertOpenAIRequestToGemini("gemini-3-flash", []byte(inputJSON), true)
 	contents := gjson.GetBytes(result, "contents").Array()
@@ -208,14 +222,11 @@ func TestConvertOpenAIRequestToGeminiPreservesReasoningBeforeVisibleContentAndTo
 }
 
 func TestConvertOpenAIRequestToGeminiSkipsEmptyAssistantMessages(t *testing.T) {
-	inputJSON := `{
-		"model": "gemini-3-flash",
-		"messages": [
-			{"role": "user", "content": "hi"},
-			{"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": "", "arguments": "{}"}}, {"type": "custom"}]},
-			{"role": "user", "content": "say ok"}
-		]
-	}`
+	inputJSON := "{\n\t\t\"model\": \"gemini-3-flash\",\n\t\t\"messages\": [\n\t\t\t{\"r" +
+		"ole\": \"user\", \"content\": \"hi\"},\n\t\t\t{\"role\": \"assistant\"" +
+		`, "content": "", "tool_calls": [{"type": "function", "function": {"nam` +
+		"e\": \"\", \"arguments\": \"{}\"}}, {\"type\": \"custom\"}]},\n\t\t\t{" +
+		"\"role\": \"user\", \"content\": \"say ok\"}\n\t\t]\n\t}"
 
 	result := convertOpenAIRequestToGemini("gemini-3-flash", []byte(inputJSON), true)
 	contents := gjson.GetBytes(result, "contents").Array()
@@ -259,7 +270,8 @@ func TestConvertOpenAIRequestToGeminiMapsJSONSchemaResponseFormat(t *testing.T) 
 	if got := schema.Get("type").String(); got != "object" {
 		t.Fatalf("responseJsonSchema.type = %q, want object: %s", got, output)
 	}
-	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() || additionalProperties.Bool() {
+	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() ||
+		additionalProperties.Bool() {
 		t.Fatalf("additionalProperties = %s, want false: %s", additionalProperties.Raw, output)
 	}
 	if got := generationConfig.Get("temperature").Float(); got != 0.2 {

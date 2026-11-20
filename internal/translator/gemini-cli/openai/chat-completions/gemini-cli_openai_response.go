@@ -23,6 +23,7 @@ import (
 type convertCliResponseToOpenAIChatParams struct {
 	UnixTimestamp        int64
 	FunctionIndex        int
+	ImageIndex           int
 	SawToolCall          bool
 	UpstreamFinishReason string
 }
@@ -57,7 +58,9 @@ func convertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 	}
 
 	// Initialize the OpenAI SSE template.
-	template := []byte(`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
+	template := []byte((`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[` +
+		`{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"` +
+		`finish_reason":null,"native_finish_reason":null}]}`))
 
 	// Extract and set the model version.
 	if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
@@ -116,7 +119,11 @@ func convertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 		// Include cached token count if present (indicates prompt caching is working)
 		if usageResult.Get("cachedContentTokenCount").Exists() {
 			var err error
-			template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
+			template, err = sjson.SetBytes(
+				template,
+				"usage.prompt_tokens_details.cached_tokens",
+				cachedTokenCount,
+			)
 			if err != nil {
 				log.Warnf("gemini-cli openai response: failed to set cached_tokens: %v", err)
 			}
@@ -141,7 +148,8 @@ func convertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 			}
 
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
-			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() ||
+				inlineDataResult.Exists()
 
 			// Ignore encrypted thoughtSignature but keep any actual content in the same part.
 			if hasThoughtSignature && !hasContentPayload {
@@ -170,7 +178,9 @@ func convertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 					template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
 				}
 
-				functionCallTemplate := []byte(`{"id":"","index":0,"type":"function","function":{"name":"","arguments":""}}`)
+				functionCallTemplate := []byte((`{"id":"","index":0,"type":"function","function":{"name":"",` +
+					`"arguments":` +
+					`""}}`))
 				fcName := functionCallResult.Get("name").String()
 				functionCallTemplate, _ = sjson.SetBytes(
 					functionCallTemplate, "id",
@@ -202,10 +212,18 @@ func convertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 				if !imagesResult.Exists() || !imagesResult.IsArray() {
 					template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
 				}
-				imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
+				imageIndex := params.ImageIndex
+				params.ImageIndex++
 				imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 				imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
 				imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+				signature := partResult.Get("thoughtSignature").String()
+				if signature == "" {
+					signature = partResult.Get("thought_signature").String()
+				}
+				if signature != "" {
+					imagePayload, _ = sjson.SetBytes(imagePayload, "extra_content.google.thought_signature", signature)
+				}
 				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 				template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
 			}
@@ -222,10 +240,14 @@ func convertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 		if sawToolCall {
 			finishReason = "tool_calls"
 		} else if upstreamFinishReason == "MAX_TOKENS" {
-			finishReason = "max_tokens"
+			finishReason = "length"
 		}
 		template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason))
+		template, _ = sjson.SetBytes(
+			template,
+			"choices.0.native_finish_reason",
+			strings.ToLower(upstreamFinishReason),
+		)
 	}
 
 	return [][]byte{template}

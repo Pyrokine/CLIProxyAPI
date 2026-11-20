@@ -64,7 +64,11 @@ type responsesSearchEvent struct {
 	data gjson.Result
 }
 
-func responsesSyncSearchStreamEvents(t *testing.T, request, translated []byte, frames ...string) []responsesSearchEvent {
+func responsesSyncSearchStreamEvents(
+	t *testing.T,
+	request, translated []byte,
+	frames ...string,
+) []responsesSearchEvent {
 	t.Helper()
 	var state any
 	var events []responsesSearchEvent
@@ -82,21 +86,27 @@ func responsesSyncSearchStreamEvents(t *testing.T, request, translated []byte, f
 func TestResponsesSyncStreamSearchOrderAndLateGrounding(t *testing.T) {
 	request := []byte(`{"model":"gemini-3.1-flash-image","input":"查询","tools":[{"type":"web_search"}]}`)
 	var state any
-	first := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.1-flash-image", request, request,
-		[]byte(`{"responseId":"search-order","candidates":[{"content":{"parts":[{"text":"中文"}]}}]}`), &state)
+	first := ConvertGeminiResponseToOpenAIResponses(
+		context.Background(), "gemini-3.1-flash-image", request, request,
+		[]byte(`{"responseId":"search-order","candidates":[{"content":{"parts":[{"text":"中文"}]}}]}`), &state,
+	)
 	for _, chunk := range first {
 		if name, _ := parseSSEEvent(t, chunk); name == "response.output_text.delta" {
 			t.Fatal("answer text was emitted before search grounding could be processed")
 		}
 	}
-	second := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.1-flash-image", request, request,
+	second := ConvertGeminiResponseToOpenAIResponses(
+		context.Background(), "gemini-3.1-flash-image", request, request,
 		[]byte(`{"candidates":[{"content":{"parts":[{"text":"回答"}]},"groundingMetadata":{
 			"webSearchQueries":["查询中文"],
 			"groundingChunks":[{"web":{"uri":"https://example.com/zh","title":"中文来源"}}],
 			"groundingSupports":[{"segment":{"partIndex":0,"startIndex":0,"endIndex":6},"groundingChunkIndices":[0]}
-			]}}]}`), &state)
-	third := translateGeminiFrameWithEOF(context.Background(), "gemini-3.1-flash-image", request, request,
-		[]byte(`{"candidates":[{"finishReason":"STOP"}]}`), &state)
+			]}}]}`), &state,
+	)
+	third := translateGeminiFrameWithEOF(
+		context.Background(), "gemini-3.1-flash-image", request, request,
+		[]byte(`{"candidates":[{"finishReason":"STOP"}]}`), &state,
+	)
 	var events []responsesSearchEvent
 	for _, chunk := range append(append(first, second...), third...) {
 		name, data := parseSSEEvent(t, chunk)
@@ -114,7 +124,10 @@ func TestResponsesSyncStreamSearchOrderAndLateGrounding(t *testing.T) {
 	}
 	for i, event := range events {
 		if event.name != order[i] || event.data.Get("sequence_number").Int() != int64(i+1) {
-			t.Fatalf("event %d = %s seq %d, want %s seq %d", i, event.name, event.data.Get("sequence_number").Int(), order[i], i+1)
+			t.Fatalf(
+				"event %d = %s seq %d, want %s seq %d", i, event.name, event.data.Get("sequence_number").Int(),
+				order[i], i+1,
+			)
 		}
 	}
 	search := events[5].data.Get("item")
@@ -137,12 +150,18 @@ func TestResponsesSyncStreamSearchOrderAndLateGrounding(t *testing.T) {
 }
 
 func TestResponsesSyncStreamSearchLateSourcesAndCitations(t *testing.T) {
-	request := []byte(`{"model":"gemini-3.1-flash-image","input":"search","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}]}`)
-	events := responsesSyncSearchStreamEvents(t, request, request,
-		`{"responseId":"late-source","candidates":[{"content":{"parts":[{"text":"甲乙"}]},"groundingMetadata":{"webSearchQueries":["first"]}}]}`,
+	request := []byte(`{"model":"gemini-3.1-flash-image","input":"search","tools":[{"type":"w` +
+		`eb_search"},{"type":"function","name":"lookup"}]}`)
+	events := responsesSyncSearchStreamEvents(
+		t, request, request,
+		`{"responseId":"late-source","candidates":[{"content":{"parts":[{"text"`+
+			`:"甲乙"}]},"groundingMetadata":{"webSearchQueries":["first"]}}]}`,
 		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{}}}]}}]}`,
-		`{"candidates":[{"groundingMetadata":{"webSearchQueries":["second"],"groundingChunks":[{"web":{"uri":"https://example.com/late","title":"延迟来源"}}]}}]}`,
-		`{"candidates":[{"groundingMetadata":{"groundingSupports":[{"segment":{"partIndex":0,"startIndex":0,"endIndex":3},"groundingChunkIndices":[0]}]},"finishReason":"STOP"}]}`,
+		`{"candidates":[{"groundingMetadata":{"webSearchQueries":["second"],"groundingChunks":[{"web":{"uri":`+
+			`"https://example.com/late","title":"延迟来源"}}]}}]}`,
+		`{"candidates":[{"groundingMetadata":{"groundingSupports":[{"segment":{`+
+			`"partIndex":0,"startIndex":0,"endIndex":3},"groundingChunkIndices":[0]`+
+			`}]},"finishReason":"STOP"}]}`,
 	)
 	searchCompletions, annotations := 0, 0
 	messageDone, annotationAdded, responseDone := -1, -1, -1
@@ -184,12 +203,19 @@ func TestResponsesSyncStreamSearchLateSourcesAndCitations(t *testing.T) {
 }
 
 func TestResponsesSyncStreamGroundingChunkIndicesAndPartMapping(t *testing.T) {
-	request := []byte(`{"model":"gemini-3.1-flash-image","input":"search","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}]}`)
-	events := responsesSyncSearchStreamEvents(t, request, request,
-		`{"responseId":"raw-indices","candidates":[{"content":{"parts":[{"text":"甲"}]},"groundingMetadata":{"webSearchQueries":["search"]}}]}`,
-		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{}}}]},"groundingMetadata":{"groundingChunks":[{"web":{"uri":"https://example.com/a"}},{"web":{"uri":"https://example.com/a"}}]}}]}`,
-		`{"candidates":[{"content":{"parts":[{"text":"乙"}]},"groundingMetadata":{"groundingChunks":[{"web":{"uri":"https://example.com/b","title":"B"}}],
-			"groundingSupports":[{"segment":{"partIndex":2,"startIndex":0,"endIndex":3},"groundingChunkIndices":[2]}]}}]}`,
+	request := []byte(`{"model":"gemini-3.1-flash-image","input":"search","tools":[{"type":"w` +
+		`eb_search"},{"type":"function","name":"lookup"}]}`)
+	events := responsesSyncSearchStreamEvents(
+		t, request, request,
+		`{"responseId":"raw-indices","candidates":[{"content":{"parts":[{"text"`+
+			`:"甲"}]},"groundingMetadata":{"webSearchQueries":["search"]}}]}`,
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","`+
+			`args":{}}}]},"groundingMetadata":{"groundingChunks":[{"web":{"uri":"ht`+
+			`tps://example.com/a"}},{"web":{"uri":"https://example.com/a"}}]}}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"乙"}]},"groundingMetadata"`+
+			`:{"groundingChunks":[{"web":{"uri":"https://example.com/b","title":"B"`+
+			"}}],\n\t\t\t\"groundingSupports\":[{\"segment\":{\"partIndex\":2,\"sta"+
+			`rtIndex":0,"endIndex":3},"groundingChunkIndices":[2]}]}}]}`,
 		`{"candidates":[{"finishReason":"STOP"}]}`,
 	)
 	var completed gjson.Result
@@ -208,20 +234,25 @@ func TestResponsesSyncStreamGroundingChunkIndicesAndPartMapping(t *testing.T) {
 }
 
 func TestResponsesSyncStreamCitationAcrossMessages(t *testing.T) {
-	request := []byte(`{"model":"gemini-3.1-flash-image","input":"search","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}]}`)
-	events := responsesSyncSearchStreamEvents(t, request, request,
-		`{"responseId":"cross-message","candidates":[{"content":{"parts":[{"text":"甲"}]},"groundingMetadata":{"webSearchQueries":["query"]}}]}`,
+	request := []byte(`{"model":"gemini-3.1-flash-image","input":"search","tools":[{"type":"w` +
+		`eb_search"},{"type":"function","name":"lookup"}]}`)
+	events := responsesSyncSearchStreamEvents(
+		t, request, request,
+		`{"responseId":"cross-message","candidates":[{"content":{"parts":[{"tex`+
+			`t":"甲"}]},"groundingMetadata":{"webSearchQueries":["query"]}}]}`,
 		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{}}}]}}]}`,
 		`{"candidates":[{"content":{"parts":[{"text":"乙"}]}}]}`,
-		`{"candidates":[{"groundingMetadata":{"groundingChunks":[{"web":{"uri":"https://example.com/two"}}],
-			"groundingSupports":[{"segment":{"startIndex":0,"endIndex":6},"groundingChunkIndices":[0]}]},"finishReason":"STOP"}]}`,
+		"{\"candidates\":[{\"groundingMetadata\":{\"groundingChunks\":[{\"web\":{\"uri\":\"https://example."+
+			"com/two\"}}],\n\t\t\t\"groundingSupports\":[{\"segment\":{\"startIndex\":0,\"endIndex\":6},\""+
+			"groundingChunkIndices\":[0]}]},\"finishReason\":\"STOP\"}]}",
 	)
 	var completed gjson.Result
 	var citedMessages []int64
 	for _, event := range events {
 		if event.name == "response.output_text.annotation.added" {
 			citedMessages = append(citedMessages, event.data.Get("output_index").Int())
-			if event.data.Get("annotation.start_index").Int() != 0 || event.data.Get("annotation.end_index").Int() != 1 {
+			if event.data.Get("annotation.start_index").Int() != 0 ||
+				event.data.Get("annotation.end_index").Int() != 1 {
 				t.Fatalf("cross-message rune range = %s", event.data.Raw)
 			}
 		}
@@ -237,8 +268,10 @@ func TestResponsesSyncStreamCitationAcrossMessages(t *testing.T) {
 }
 
 func TestResponsesSyncStreamInterleavedFunctionWithoutGrounding(t *testing.T) {
-	request := []byte(`{"model":"gemini-3.1-flash-image","input":"search then calculate","tools":[{"type":"web_search"},{"type":"function","name":"calculate"}]}`)
-	events := responsesSyncSearchStreamEvents(t, request, request,
+	request := []byte(`{"model":"gemini-3.1-flash-image","input":"search then calculate","too` +
+		`ls":[{"type":"web_search"},{"type":"function","name":"calculate"}]}`)
+	events := responsesSyncSearchStreamEvents(
+		t, request, request,
 		`{"responseId":"interleaved","candidates":[{"content":{"parts":[{"text":"first"}]}}]}`,
 		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculate","args":{"expr":"1+1"}}}]}}]}`,
 		`{"candidates":[{"content":{"parts":[{"text":"second"}]}}]}`,
@@ -273,8 +306,10 @@ func TestResponsesSyncStreamSearchDisabledAndNoGrounding(t *testing.T) {
 		{request, translated},
 	} {
 		var state any
-		first := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.1-flash-image", pair[0], pair[1],
-			[]byte(`{"responseId":"disabled-search","candidates":[{"content":{"parts":[{"text":"answer"}]}}]}`), &state)
+		first := ConvertGeminiResponseToOpenAIResponses(
+			context.Background(), "gemini-3.1-flash-image", pair[0], pair[1],
+			[]byte(`{"responseId":"disabled-search","candidates":[{"content":{"parts":[{"text":"answer"}]}}]}`), &state,
+		)
 		hasDelta := false
 		for _, chunk := range first {
 			if name, _ := parseSSEEvent(t, chunk); name == "response.output_text.delta" {
@@ -285,12 +320,17 @@ func TestResponsesSyncStreamSearchDisabledAndNoGrounding(t *testing.T) {
 			t.Fatalf("search-disabled response buffered ordinary text: %s", pair[0])
 		}
 	}
-	events := responsesSyncSearchStreamEvents(t, request, request,
-		`{"responseId":"no-grounding","candidates":[{"content":{"parts":[{"text":"answer"}]},"groundingMetadata":{"groundingChunks":[{"retrievedContext":{"uri":"internal-doc"}}],"groundingSupports":[{"segment":{"startIndex":0,"endIndex":6},"groundingChunkIndices":[0]}]}}]}`,
+	events := responsesSyncSearchStreamEvents(
+		t, request, request,
+		`{"responseId":"no-grounding","candidates":[{"content":{"parts":[{"text`+
+			`":"answer"}]},"groundingMetadata":{"groundingChunks":[{"retrievedConte`+
+			`xt":{"uri":"internal-doc"}}],"groundingSupports":[{"segment":{"startIn`+
+			`dex":0,"endIndex":6},"groundingChunkIndices":[0]}]}}]}`,
 		`{"candidates":[{"finishReason":"STOP"}]}`,
 	)
 	for _, event := range events {
-		if event.name == "response.web_search_call.searching" || event.data.Get("item.type").String() == "web_search_call" {
+		if event.name == "response.web_search_call.searching" ||
+			event.data.Get("item.type").String() == "web_search_call" {
 			t.Fatalf("non-web grounding claimed web search: %+v", events)
 		}
 	}

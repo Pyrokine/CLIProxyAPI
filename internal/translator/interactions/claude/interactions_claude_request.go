@@ -34,7 +34,11 @@ func convertClaudeRequestToInteractions(
 }
 
 // ConvertClaudeRequestToInteractionsWithCompatReturningError reports unsupported user attachments.
-func ConvertClaudeRequestToInteractionsWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+func ConvertClaudeRequestToInteractionsWithCompatReturningError(
+	modelName string,
+	inputRawJSON []byte,
+	stream bool,
+) ([]byte, error) {
 	return convertClaudeRequestToInteractionsChecked(modelName, inputRawJSON, stream, true)
 }
 
@@ -173,7 +177,9 @@ func appendClaudeMessagesToInteractions(
 		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 		if role == "system" || role == "developer" {
 			if text, ok := translatorcommon.ClaudeMessageSystemReminderText(message.Get("content")); ok {
-				step, _ := sjson.SetBytes([]byte(`{"type":"user_input","content":[{"type":"text","text":""}]}`), "content.0.text", text)
+				step, _ := sjson.SetBytes(
+					[]byte(`{"type":"user_input","content":[{"type":"text","text":""}]}`), "content.0.text", text,
+				)
 				if len(pendingToolUseIDs) > 0 {
 					pendingSystemReminders = append(pendingSystemReminders, step)
 				} else {
@@ -188,7 +194,15 @@ func appendClaudeMessagesToInteractions(
 			message = gjson.ParseBytes(body)
 		}
 		pendingToolUseIDs = nil
-		out = appendClaudeMessageToInteractions(out, message, preserveEmptyThinkingBlocks, toolNamesByID, drops, &pendingToolUseIDs, &pendingSystemReminders)
+		out = appendClaudeMessageToInteractions(
+			out,
+			message,
+			preserveEmptyThinkingBlocks,
+			toolNamesByID,
+			drops,
+			&pendingToolUseIDs,
+			&pendingSystemReminders,
+		)
 		for _, reminder := range pendingSystemReminders {
 			out, _ = sjson.SetRawBytes(out, "input.-1", reminder)
 		}
@@ -264,9 +278,15 @@ func appendClaudeMessageToInteractions(
 			case "thinking":
 				flushContent()
 				text := part.Get("thinking").String()
-				if text != "" || preserveEmptyThinkingBlocks {
+				signature := compatibleInteractionSignature(
+					gjson.GetBytes(out, "model").String(), interactionsSignature(part), false,
+				)
+				if text != "" || preserveEmptyThinkingBlocks || signature != "" {
 					step := []byte(`{"type":"thought","content":[{"type":"text","text":""}]}`)
 					step, _ = sjson.SetBytes(step, "content.0.text", text)
+					if signature != "" {
+						step, _ = sjson.SetBytes(step, "signature", signature)
+					}
 					out, _ = sjson.SetRawBytes(out, "input.-1", step)
 					if strings.TrimSpace(text) != "" {
 						sendable++
@@ -373,16 +393,20 @@ func appendClaudeToolResultToInteractions(out []byte, part gjson.Result, toolNam
 					switch partType := item.Get("type").String(); partType {
 					case "text":
 						pureText := true
-						item.ForEach(func(key, _ gjson.Result) bool {
-							switch key.String() {
-							case "type", "text", "cache_control":
-							default:
-								pureText = false
-							}
-							return pureText
-						})
+						item.ForEach(
+							func(key, _ gjson.Result) bool {
+								switch key.String() {
+								case "type", "text", "cache_control":
+								default:
+									pureText = false
+								}
+								return pureText
+							},
+						)
 						if pureText {
-							contentPart, _ = sjson.SetBytes([]byte(`{"type":"text","text":""}`), "text", item.Get("text").String())
+							contentPart, _ = sjson.SetBytes(
+								[]byte(`{"type":"text","text":""}`), "text", item.Get("text").String(),
+							)
 						}
 					case "image", "document", "container_upload":
 						if media, ok := claudeMediaPartToInteractions(item, partType); ok {

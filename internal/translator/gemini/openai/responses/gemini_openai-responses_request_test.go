@@ -17,9 +17,10 @@ func TestReorderOpenAIResponsesDetachedReasoningDoesNotCrossUserMessage(t *testi
 	items := gjson.Parse(
 		`[
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]},
-		{"id":"rs_test_detached_after_1","type":"reasoning","encrypted_content":"` + testResponsesGeminiThoughtSignature + `","summary":[]},
-		{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{}"}
-	]`,
+		{"id":"rs_test_detached_after_1","type":"reasoning","encrypted_content":"` +
+			testResponsesGeminiThoughtSignature +
+			("\",\"summary\":[]},\n\t\t{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"" +
+				"run_command\",\"arguments\":\"{}\"}\n\t]"),
 	).Array()
 	reordered := reorderOpenAIResponsesDetachedReasoning(items)
 	if got := reordered[0].Get("role").String(); got != "user" {
@@ -70,11 +71,12 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesReasoningAndSignatureTo
 		"model":"gemini-3.6-flash-high",
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
-			{"type":"reasoning","encrypted_content":"` + testResponsesGeminiThoughtSignature + `","summary":[{"type":"summary_text","text":"hidden thought"}]},
-			{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{\"command\":\"true\"}"},
-			{"type":"function_call_output","call_id":"call-1","output":"ok"}
-		]
-	}`
+			{"type":"reasoning","encrypted_content":"` +
+		testResponsesGeminiThoughtSignature +
+		("\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"hidden thought\"}]},\n\t\t\t{\"type\":\"" +
+			"function_call\",\"call_id\":\"call-1\",\"name\":\"run_command\",\"arguments\":\"{\\\"command\\\"" +
+			":\\\"true\\\"}\"},\n\t\t\t{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":" +
+			"\"ok\"}\n\t\t]\n\t}")
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
 	parts := gjson.GetBytes(result, "contents.1.parts").Array()
 	if len(parts) != 2 || !parts[0].Get("thought").Bool() {
@@ -84,7 +86,12 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesReasoningAndSignatureTo
 		t.Fatalf("function name = %q; result=%s", got, result)
 	}
 	if got := parts[1].Get("thoughtSignature").String(); got != testResponsesGeminiThoughtSignature {
-		t.Fatalf("function signature = %q, want %q; result=%s", got, testResponsesGeminiThoughtSignature, result)
+		t.Fatalf(
+			"function signature = %q, want %q; result=%s",
+			got,
+			testResponsesGeminiThoughtSignature,
+			result,
+		)
 	}
 }
 
@@ -152,9 +159,11 @@ func TestConvertOpenAIResponsesRequestToGemini_PreservesMultipleLeadingToolSigna
 		"model":"gemini-3.6-flash-high",
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"run twice"}]},
-			{"id":"rs_before_1","type":"reasoning","encrypted_content":"` + testResponsesGeminiThoughtSignature + `","summary":[]},
-			{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{\"command\":\"one\"}"},
-			{"id":"rs_before_2","type":"reasoning","encrypted_content":"` + secondSignature + `","summary":[]},
+			{"id":"rs_before_1","type":"reasoning","encrypted_content":"` +
+		testResponsesGeminiThoughtSignature +
+		("\",\"summary\":[]},\n\t\t\t{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"" +
+			"run_command\",\"arguments\":\"{\\\"command\\\":\\\"one\\\"}\"},\n\t\t\t{\"id\":\"rs_before_2\"," +
+			"\"type\":\"reasoning\",\"encrypted_content\":\"") + secondSignature + `","summary":[]},
 			{"type":"function_call","call_id":"call-2","name":"run_command","arguments":"{\"command\":\"two\"}"},
 			{"type":"function_call_output","call_id":"call-1","output":"one"},
 			{"type":"function_call_output","call_id":"call-2","output":"two"}
@@ -173,7 +182,8 @@ func TestConvertOpenAIResponsesRequestToGemini_PreservesMultipleLeadingToolSigna
 			}
 		}
 	}
-	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature || signatures[1] != secondSignature {
+	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature ||
+		signatures[1] != secondSignature {
 		t.Fatalf("tool signatures = %v; result=%s", signatures, result)
 	}
 	if got := strings.Join(sequence, ","); got != "call:call-1,call:call-2,output:call-1,output:call-2" {
@@ -199,7 +209,8 @@ func TestConvertOpenAIResponsesRequestToGemini_GroupsReversedParallelToolOutputs
 		t.Fatalf("parallel tool history is invalid: %v; result=%s", errValidate, result)
 	}
 	contents := gjson.GetBytes(result, "contents").Array()
-	if len(contents) != 2 || contents[0].Get("role").String() != "model" || contents[1].Get("role").String() != "user" {
+	if len(contents) != 2 || contents[0].Get("role").String() != "model" ||
+		contents[1].Get("role").String() != "user" {
 		t.Fatalf("parallel tool roles malformed; result=%s", result)
 	}
 	responses := contents[1].Get("parts").Array()
@@ -233,7 +244,10 @@ func TestConvertOpenAIResponsesRequestToGemini_GroupsNonContiguousParallelToolOu
 	}`
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
 	contents := gjson.GetBytes(result, "contents").Array()
-	if len(contents) != 4 || contents[0].Get("role").String() != "model" || contents[1].Get("role").String() != "user" || contents[2].Get("role").String() != "user" || contents[3].Get("role").String() != "user" {
+	if len(contents) != 4 || contents[0].Get("role").String() != "model" ||
+		contents[1].Get("role").String() != "user" ||
+		contents[2].Get("role").String() != "user" ||
+		contents[3].Get("role").String() != "user" {
 		t.Fatalf("non-contiguous tool output roles malformed; result=%s", result)
 	}
 	if got := contents[1].Get("parts.0.functionResponse.id").String(); got != "call-1" {
@@ -252,12 +266,22 @@ func TestConvertOpenAIResponsesRequestToGemini_PreservesReasoningBeforePairedFun
 	inputJSON := `{
 		"model":"gemini-3.6-flash-high",
 		"input":[
-			{"type":"reasoning","encrypted_content":"` + testResponsesGeminiThoughtSignature + `","summary":[{"type":"summary_text","text":"first"}]},
-			{"type":"reasoning","encrypted_content":"` + secondSignature + `","summary":[{"type":"summary_text","text":"second"}]},
-			{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{\"command\":\"true\"}"},
-			{"type":"function_call_output","call_id":"call-1","output":"ok"}
-		]
-	}`
+			{"type":"reasoning","encrypted_content":"` +
+		testResponsesGeminiThoughtSignature +
+		("\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"first\"}]},\n\t\t\t{\"type\":\"reasoning\",\"" +
+			"encrypted_content\":\"") +
+		secondSignature +
+		(`","summary":[{"type":` +
+			`"summary_text","text":` +
+			"\"second\"}]},\n\t\t\t{\"type\":" +
+			`"function_call","call_id":` +
+			`"call-1","name":"run_command",` +
+			`"arguments":"{\"command\":` +
+			"\\\"true\\\"}\"},\n\t\t\t" +
+			`{"type":"function_call_output",` +
+			`"call_id":"call-1","output":` +
+			"\"ok\"}\n\t\t]\n\t" +
+			`}`)
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
 	var signatures []string
 	for _, content := range gjson.GetBytes(result, "contents").Array() {
@@ -267,7 +291,8 @@ func TestConvertOpenAIResponsesRequestToGemini_PreservesReasoningBeforePairedFun
 			}
 		}
 	}
-	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature || signatures[1] != secondSignature {
+	if len(signatures) != 2 || signatures[0] != testResponsesGeminiThoughtSignature ||
+		signatures[1] != secondSignature {
 		t.Fatalf("reasoning/function signatures = %v; result=%s", signatures, result)
 	}
 }
@@ -306,10 +331,20 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesTrailingDetachedSignatu
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"turn one"}]},
 			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"visible answer"}]},
-			{"id":"rs_text_detached_after_1","type":"reasoning","encrypted_content":"` + testResponsesGeminiThoughtSignature + `","summary":[]},
-			{"type":"message","role":"user","content":[{"type":"input_text","text":"turn two"}]}
-		]
-	}`
+			{"id":"rs_text_detached_after_1","type":"reasoning","encrypted_content":"` +
+		testResponsesGeminiThoughtSignature +
+		(`","summary":` +
+			"[]},\n\t\t\t" +
+			`{"type":` +
+			`"message",` +
+			`"role":"user",` +
+			`"content":` +
+			`[{"type":` +
+			`"input_text",` +
+			`"text":"turn ` +
+			"two\"}]}\n\t\t" +
+			"]\n\t" +
+			`}`)
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
 	parts := gjson.GetBytes(result, "contents.1.parts").Array()
 	if len(parts) != 1 {
@@ -332,15 +367,26 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesUnmarkedTrailingSignatu
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"turn one"}]},
 			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"visible answer"}]},
-			{"id":"rs_client_rewritten","type":"reasoning","encrypted_content":"` + testResponsesGeminiThoughtSignature + `","summary":[]},
-			{"type":"message","role":"user","content":[{"type":"input_text","text":"turn two"}]}
-		]
-	}`
+			{"id":"rs_client_rewritten","type":"reasoning","encrypted_content":"` +
+		testResponsesGeminiThoughtSignature +
+		(`","summary":` +
+			"[]},\n\t\t\t" +
+			`{"type":` +
+			`"message",` +
+			`"role":"user",` +
+			`"content":` +
+			`[{"type":` +
+			`"input_text",` +
+			`"text":"turn ` +
+			"two\"}]}\n\t\t" +
+			"]\n\t" +
+			`}`)
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
 	parts := gjson.GetBytes(result, "contents.1.parts").Array()
 	if len(parts) != 1 {
 		t.Fatalf(
-			"model parts = %d, want one signed visible part after client rewrites carrier ID; result=%s", len(parts),
+			"model parts = %d, want one signed visible part after client rewrites carrier ID; result=%s",
+			len(parts),
 			result,
 		)
 	}
@@ -366,7 +412,11 @@ func TestConvertOpenAIResponsesRequestToGemini_UnmarkedReasoningBeforeFunctionCa
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
 	modelParts := gjson.GetBytes(result, "contents.1.parts").Array()
 	if len(modelParts) != 2 {
-		t.Fatalf("model parts = %d, want unsigned preamble plus signed call; result=%s", len(modelParts), result)
+		t.Fatalf(
+			"model parts = %d, want unsigned preamble plus signed call; result=%s",
+			len(modelParts),
+			result,
+		)
 	}
 	if signature := modelParts[0].Get("thoughtSignature"); signature.Exists() {
 		t.Fatalf("function-call signature was retargeted to preamble; result=%s", result)
@@ -382,10 +432,19 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesDetachedSignatureToFunc
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
 			{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{\"command\":\"true\"}"},
-			{"id":"rs_function_detached_after_1","type":"reasoning","encrypted_content":"` + testResponsesGeminiThoughtSignature + `","summary":[]},
-			{"type":"function_call_output","call_id":"call-1","output":"ok"}
-		]
-	}`
+			{"id":"rs_function_detached_after_1","type":"reasoning","encrypted_content":"` +
+		testResponsesGeminiThoughtSignature +
+		(`","summary":` +
+			"[]},\n\t\t\t" +
+			`{"type":` +
+			`"function_call` +
+			`_output",` +
+			`"call_id":` +
+			`"call-1",` +
+			`"output":` +
+			"\"ok\"}\n\t\t" +
+			"]\n\t" +
+			`}`)
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
 	functionParts := gjson.GetBytes(result, "contents.#(role==\"model\")#.parts").Array()
 	found := false
@@ -405,7 +464,9 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesDetachedSignatureToFunc
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToGemini_ReattachesUnmarkedPostCallSignatureWithMatchingOutput(t *testing.T) {
+func TestConvertOpenAIResponsesRequestToGemini_ReattachesUnmarkedPostCallSignatureWithMatchingOutput(
+	t *testing.T,
+) {
 	inputJSON := `{
 		"model":"gemini-3.6-flash-high",
 		"input":[
@@ -432,14 +493,26 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesDirectionalFunctionCarr
 			name:      "leading",
 			direction: geminiResponsesCarrierNext,
 			input: func(carrier string) string {
-				return `[{"type":"reasoning","encrypted_content":"` + carrier + `","summary":[]},{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{}"},{"type":"function_call_output","call_id":"call-1","output":"ok"}]`
+				return `[{"type":"reasoning","encrypted_content":"` +
+					carrier +
+					(`","summary":[]},{"type":"function_call","call_id":"call-1","name":"run` +
+						`_command","arguments":"{}"},{"type":"function_call_output","call_id":"` +
+						`call-1","output":"ok"}]`)
 			},
 		},
 		{
 			name:      "post-call",
 			direction: geminiResponsesCarrierPrevious,
 			input: func(carrier string) string {
-				return `[{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{}"},{"type":"reasoning","encrypted_content":"` + carrier + `","summary":[]},{"type":"function_call_output","call_id":"call-1","output":"ok"}]`
+				return (`[{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{}"},{"` +
+					`type":"reasoning","encrypted_content":"`) +
+					carrier +
+					(`","summary":[]},` +
+						`{"type":"function_` +
+						`call_output",` +
+						`"call_id":` +
+						`"call-1","output":` +
+						`"ok"}]`)
 			},
 		},
 	} {
@@ -453,7 +526,11 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesDirectionalFunctionCarr
 				if got := gjson.GetBytes(
 					result, "contents.0.parts.0.thoughtSignature",
 				).String(); got != testResponsesGeminiThoughtSignature {
-					t.Fatalf("directional function signature = %q, want native signature; result=%s", got, result)
+					t.Fatalf(
+						"directional function signature = %q, want native signature; result=%s",
+						got,
+						result,
+					)
 				}
 				if strings.Contains(string(result), geminiResponsesCarrierPrefix) {
 					t.Fatalf("directional function carrier leaked to Gemini wire: %s", result)
@@ -475,10 +552,32 @@ func TestConvertOpenAIResponsesRequestToGemini_DoesNotRetargetExtraPreviousCarri
 			name:       "text",
 			targetKind: geminiResponsesCarrierText,
 			input: func(first, extra string) string {
-				return `[{"type":"reasoning","encrypted_content":"` + first + `","summary":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"signed"}]},{"type":"reasoning","encrypted_content":"` + extra + `","summary":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"unsigned"}]}]`
+				return `[{"type":"reasoning","encrypted_content":"` +
+					first +
+					(`","summary":[]},{"type":"message","role":"assistant","content":[{"type` +
+						`":"output_text","text":"signed"}]},{"type":"reasoning","encrypted_cont` +
+						`ent":"`) +
+					extra +
+					(`","summary":[]},{"type":"message","role":"assistant","content":` +
+						`[{"type":"output_text","text":` +
+						`"unsigned"}]}]`)
 			},
 			assert: func(t *testing.T, parts []gjson.Result) {
-				if len(parts) != 3 || parts[0].Get("text").String() != "signed" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || !parts[1].Get("text").Exists() || parts[1].Get("text").String() != "" || parts[1].Get("thoughtSignature").String() != signature2 || parts[2].Get("text").String() != "unsigned" || parts[2].Get("thoughtSignature").String() != "" {
+				if len(parts) !=
+					3 ||
+					parts[0].Get("text").String() !=
+						"signed" ||
+					parts[0].Get("thoughtSignature").String() !=
+						testResponsesGeminiThoughtSignature ||
+					!parts[1].Get("text").Exists() ||
+					parts[1].Get("text").String() !=
+						"" ||
+					parts[1].Get("thoughtSignature").String() !=
+						signature2 ||
+					parts[2].Get("text").String() !=
+						"unsigned" ||
+					parts[2].Get("thoughtSignature").String() !=
+						"" {
 					t.Fatalf("extra previous text carrier retargeted: %v", parts)
 				}
 			},
@@ -487,10 +586,30 @@ func TestConvertOpenAIResponsesRequestToGemini_DoesNotRetargetExtraPreviousCarri
 			name:       "function",
 			targetKind: geminiResponsesCarrierFunction,
 			input: func(first, extra string) string {
-				return `[{"type":"reasoning","encrypted_content":"` + first + `","summary":[]},{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{}"},{"type":"reasoning","encrypted_content":"` + extra + `","summary":[]},{"type":"function_call","call_id":"call-2","name":"run_command","arguments":"{}"}]`
+				return `[{"type":"reasoning","encrypted_content":"` +
+					first +
+					(`","summary":[]},{"type":"function_call","call_id":"call-1","name":"run` +
+						`_command","arguments":"{}"},{"type":"reasoning","encrypted_content":"`) +
+					extra +
+					(`","summary":[]},{"type":"function_call","call_id":"call-2","name":"run_command","` +
+						`arguments":"{}"}]`)
 			},
 			assert: func(t *testing.T, parts []gjson.Result) {
-				if len(parts) != 3 || parts[0].Get("functionCall.id").String() != "call-1" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || !parts[1].Get("text").Exists() || parts[1].Get("text").String() != "" || parts[1].Get("thoughtSignature").String() != signature2 || parts[2].Get("functionCall.id").String() != "call-2" || parts[2].Get("thoughtSignature").String() != "" {
+				if len(parts) !=
+					3 ||
+					parts[0].Get("functionCall.id").String() !=
+						"call-1" ||
+					parts[0].Get("thoughtSignature").String() !=
+						testResponsesGeminiThoughtSignature ||
+					!parts[1].Get("text").Exists() ||
+					parts[1].Get("text").String() !=
+						"" ||
+					parts[1].Get("thoughtSignature").String() !=
+						signature2 ||
+					parts[2].Get("functionCall.id").String() !=
+						"call-2" ||
+					parts[2].Get("thoughtSignature").String() !=
+						"" {
 					t.Fatalf("extra previous function carrier retargeted: %v", parts)
 				}
 			},
@@ -501,8 +620,14 @@ func TestConvertOpenAIResponsesRequestToGemini_DoesNotRetargetExtraPreviousCarri
 				first := encodeGeminiResponsesCarrier(
 					testResponsesGeminiThoughtSignature, geminiResponsesCarrierNext, testCase.targetKind,
 				)
-				extra := encodeGeminiResponsesCarrier(signature2, geminiResponsesCarrierPrevious, testCase.targetKind)
-				request := []byte(`{"model":"gemini-3.6-flash-high","input":` + testCase.input(first, extra) + `}`)
+				extra := encodeGeminiResponsesCarrier(
+					signature2,
+					geminiResponsesCarrierPrevious,
+					testCase.targetKind,
+				)
+				request := []byte(
+					`{"model":"gemini-3.6-flash-high","input":` + testCase.input(first, extra) + `}`,
+				)
 				translated := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", request, false)
 				testCase.assert(t, gjson.GetBytes(translated, "contents.0.parts").Array())
 			},
@@ -514,10 +639,18 @@ func TestConvertOpenAIResponsesRequestToGemini_DoesNotBindStandaloneFunctionCarr
 	carrier := encodeGeminiResponsesCarrier(
 		testResponsesGeminiThoughtSignature, geminiResponsesCarrierStandalone, geminiResponsesCarrierFunction,
 	)
-	inputJSON := []byte(`{"model":"gemini-3.6-flash-high","input":[{"type":"reasoning","encrypted_content":"` + carrier + `","summary":[]},{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{}"}]}`)
+	inputJSON := []byte(
+		`{"model":"gemini-3.6-flash-high","input":[{"type":"reasoning",` +
+			`"encrypted_content":` +
+			`"` +
+			carrier +
+			(`","summary":[]},{"type":"function_call","call_id":"call-1","name":"run_command","arguments":"{}"` +
+				`}]}`),
+	)
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", inputJSON, false)
 	parts := gjson.GetBytes(result, "contents.0.parts").Array()
-	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || parts[1].Get("thoughtSignature").String() != geminiResponsesThoughtSignature {
+	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+		parts[1].Get("thoughtSignature").String() != geminiResponsesThoughtSignature {
 		t.Fatalf("standalone carrier was bound to function call: %s", result)
 	}
 }
@@ -535,7 +668,8 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesUnmarkedParallelPostCal
 	}`
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
 	parts := gjson.GetBytes(result, "contents.0.parts").Array()
-	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != geminiResponsesThoughtSignature || parts[1].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature {
+	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != geminiResponsesThoughtSignature ||
+		parts[1].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature {
 		t.Fatalf("parallel post-call signature was not attached to call-2: %s", result)
 	}
 }
@@ -555,7 +689,10 @@ func TestConvertOpenAIResponsesRequestToGemini_ReattachesAlternatingParallelPost
 	}`
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
 	parts := gjson.GetBytes(result, "contents.0.parts").Array()
-	if len(parts) != 2 || parts[0].Get("functionCall.id").String() != "call-1" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || parts[1].Get("functionCall.id").String() != "call-2" || parts[1].Get("thoughtSignature").String() != signature2 {
+	if len(parts) != 2 || parts[0].Get("functionCall.id").String() != "call-1" ||
+		parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+		parts[1].Get("functionCall.id").String() != "call-2" ||
+		parts[1].Get("thoughtSignature").String() != signature2 {
 		t.Fatalf("alternating parallel post-call signatures shifted: %s", result)
 	}
 }
@@ -573,12 +710,16 @@ func TestConvertOpenAIResponsesRequestToGemini_PreservesExtraConsecutivePostCall
 	}`
 	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
 	parts := gjson.GetBytes(result, "contents.0.parts").Array()
-	if len(parts) != 2 || parts[0].Get("functionCall.id").String() != "call-1" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || parts[1].Get("thoughtSignature").String() != signature2 {
+	if len(parts) != 2 || parts[0].Get("functionCall.id").String() != "call-1" ||
+		parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature ||
+		parts[1].Get("thoughtSignature").String() != signature2 {
 		t.Fatalf("consecutive post-call carriers malformed: %s", result)
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToGemini_DoesNotPairUnmarkedPostCallSignatureAcrossMismatch(t *testing.T) {
+func TestConvertOpenAIResponsesRequestToGemini_DoesNotPairUnmarkedPostCallSignatureAcrossMismatch(
+	t *testing.T,
+) {
 	inputJSON := `{
 		"model":"gemini-3.6-flash-high",
 		"input":[
@@ -595,7 +736,9 @@ func TestConvertOpenAIResponsesRequestToGemini_DoesNotPairUnmarkedPostCallSignat
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToGemini_DoesNotPairUnmarkedPostCallSignatureAcrossUserMessage(t *testing.T) {
+func TestConvertOpenAIResponsesRequestToGemini_DoesNotPairUnmarkedPostCallSignatureAcrossUserMessage(
+	t *testing.T,
+) {
 	inputJSON := `{
 		"model":"gemini-3.6-flash-high",
 		"input":[
@@ -698,7 +841,8 @@ func TestConvertOpenAIResponsesRequestToGemini_TextFormatJSONSchema(t *testing.T
 	if got := schema.Get("properties.cleanedContent.type").String(); got != "string" {
 		t.Fatalf("cleanedContent type = %q, want string. Output: %s", got, output)
 	}
-	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() || additionalProperties.Bool() {
+	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() ||
+		additionalProperties.Bool() {
 		t.Fatalf("additionalProperties = %s, want false. Output: %s", additionalProperties.Raw, output)
 	}
 	if got := genConfig.Get("temperature").Float(); got != 0.2 {
@@ -752,7 +896,10 @@ func TestConvertOpenAIResponsesRequestToGemini_PreservesReasoningOnlyHistory(t *
 	}
 	if got := parts[0].Get("thoughtSignature").String(); got != testResponsesGeminiThoughtSignature {
 		t.Fatalf(
-			"parts[0].thoughtSignature = %q, want %q. Output: %s", got, testResponsesGeminiThoughtSignature, output,
+			"parts[0].thoughtSignature = %q, want %q. Output: %s",
+			got,
+			testResponsesGeminiThoughtSignature,
+			output,
 		)
 	}
 	if got := parts[0].Get("text").String(); got != "reasoning summary" {
@@ -772,7 +919,9 @@ func TestConvertOpenAIResponsesRequestToGemini_DropsEmptyUnsignedReasoningCarrie
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToGemini_PreservesUnboundDetachedCarrierWithoutEmptyThought(t *testing.T) {
+func TestConvertOpenAIResponsesRequestToGemini_PreservesUnboundDetachedCarrierWithoutEmptyThought(
+	t *testing.T,
+) {
 	input := []byte(`{
 		"model": "gemini-3.6-flash-high",
 		"input": [{
@@ -792,7 +941,12 @@ func TestConvertOpenAIResponsesRequestToGemini_PreservesUnboundDetachedCarrierWi
 		t.Fatalf("unbound carrier emitted an empty thought part: %s", output)
 	}
 	if got := parts[0].Get("thoughtSignature").String(); got != testResponsesGeminiThoughtSignature {
-		t.Fatalf("unbound carrier signature = %q, want %q; output=%s", got, testResponsesGeminiThoughtSignature, output)
+		t.Fatalf(
+			"unbound carrier signature = %q, want %q; output=%s",
+			got,
+			testResponsesGeminiThoughtSignature,
+			output,
+		)
 	}
 }
 
@@ -1061,11 +1215,19 @@ func TestConvertOpenAIResponsesRequestToGemini_SystemAndDeveloperRoles(t *testin
 				}
 				if got := parts.Get("0.text").String(); got != "Be a helpful assistant" {
 					t.Fatalf(
-						"first systemInstruction part = %q, want %q. Output: %s", got, "Be a helpful assistant", output,
+						"first systemInstruction part = %q, want %q. Output: %s",
+						got,
+						"Be a helpful assistant",
+						output,
 					)
 				}
 				if got := parts.Get("1.text").String(); got != tt.wantText {
-					t.Fatalf("second systemInstruction part = %q, want %q. Output: %s", got, tt.wantText, output)
+					t.Fatalf(
+						"second systemInstruction part = %q, want %q. Output: %s",
+						got,
+						tt.wantText,
+						output,
+					)
 				}
 
 				result.Get("contents").ForEach(
@@ -1111,64 +1273,69 @@ func TestConvertOpenAIResponsesRequestToGeminiCleansToolSchemaRequiredFields(t *
 		t.Fatalf("schema title should be removed. Output: %s", output)
 	}
 	required := schema.Get("required").Array()
-	if len(required) != 2 {
-		t.Fatalf("required length = %d, want 2. Schema: %s", len(required), schema.Raw)
+	want := []string{"country", "industry", "stale_field", "another_stale"}
+	if len(required) != len(want) {
+		t.Fatalf("required length = %d, want %d. Schema: %s", len(required), len(want), schema.Raw)
 	}
-	if got := required[0].String(); got != "country" {
-		t.Fatalf("required[0] = %q, want country. Schema: %s", got, schema.Raw)
-	}
-	if got := required[1].String(); got != "industry" {
-		t.Fatalf("required[1] = %q, want industry. Schema: %s", got, schema.Raw)
+	for index, name := range want {
+		if got := required[index].String(); got != name {
+			t.Errorf("required[%d] = %q, want %q. Schema: %s", index, got, name, schema.Raw)
+		}
 	}
 }
 
 func TestConvertOpenAIResponsesRequestToGeminiConvertsNamespaceCustomTools(t *testing.T) {
-	input := []byte(`{
-		"tools":[{
-			"type":"namespace",
-			"name":"mcp__editor",
-			"tools":[{"type":"custom","name":"apply_patch","description":"Apply a patch"}]
-		}],
-		"tool_choice":{"type":"custom","name":"apply_patch","namespace":"mcp__editor"},
-		"input":[
-			{"type":"additional_tools","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]},
-			{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch","namespace":"mcp__editor","input":"*** Begin Patch"},
-			{"type":"custom_tool_call_output","call_id":"call-1","output":"applied"}
-		]
-	}`)
+	input := []byte(("{\n\t\t\"tools\":[{\n\t\t\t\"type\":\"namespace\",\n\t\t\t\"name\":\"mcp__editor\",\n\t" +
+		"\t\t\"tools\":[{\"type\":\"custom\",\"name\":\"apply_patch\",\"description\":\"Apply a patch\"}]\n\t" +
+		"\t}],\n\t\t\"tool_choice\":{\"type\":\"custom\",\"name\":\"apply_patch\",\"namespace\":\"" +
+		"mcp__editor\"},\n\t\t\"input\":[\n\t\t\t{\"type\":\"additional_tools\",\"tools\":[{\"type\":\"" +
+		"function\",\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}]},\n\t\t\t{\"type\":\"" +
+		"custom_tool_call\",\"call_id\":\"call-1\",\"name\":\"apply_patch\",\"namespace\":\"mcp__editor\",\"" +
+		"input\":\"*** Begin Patch\"},\n\t\t\t{\"type\":\"custom_tool_call_output\",\"call_id\":\"call-1\",\"" +
+		"output\":\"applied\"}\n\t\t]\n\t}"))
 
 	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", input, false)
 	if len(output) == 0 {
 		t.Fatal("translation was rejected")
 	}
-	if got := gjson.GetBytes(output, "tools.0.functionDeclarations.0.name").String(); got != "mcp__editor__apply_patch" {
+	if got := gjson.GetBytes(
+		output, "tools.0.functionDeclarations.0.name",
+	).String(); got != "mcp__editor__apply_patch" {
 		t.Fatalf("custom declaration name = %q; output=%s", got, output)
 	}
-	if got := gjson.GetBytes(output, "tools.0.functionDeclarations.0.parametersJsonSchema.required.0").String(); got != "input" {
+	if got := gjson.GetBytes(
+		output, "tools.0.functionDeclarations.0.parametersJsonSchema.required.0",
+	).String(); got != "input" {
 		t.Fatalf("custom declaration schema missing input wrapper: %s", output)
 	}
 	if got := gjson.GetBytes(output, "tools.0.functionDeclarations.1.name").String(); got != "lookup" {
 		t.Fatalf("additional tool declaration name = %q; output=%s", got, output)
 	}
-	if got := gjson.GetBytes(output, "toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != "mcp__editor__apply_patch" {
+	if got := gjson.GetBytes(
+		output, "toolConfig.functionCallingConfig.allowedFunctionNames.0",
+	).String(); got != "mcp__editor__apply_patch" {
 		t.Fatalf("tool choice = %q; output=%s", got, output)
 	}
-	if got := gjson.GetBytes(output, "contents.0.parts.0.functionCall.name").String(); got != "mcp__editor__apply_patch" {
+	if got := gjson.GetBytes(
+		output, "contents.0.parts.0.functionCall.name",
+	).String(); got != "mcp__editor__apply_patch" {
 		t.Fatalf("custom call name = %q; output=%s", got, output)
 	}
 	if got := gjson.GetBytes(output, "contents.0.parts.0.functionCall.args.input").String(); got != "*** Begin Patch" {
 		t.Fatalf("custom call input = %q; output=%s", got, output)
 	}
-	if got := gjson.GetBytes(output, "contents.1.parts.0.functionResponse.name").String(); got != "mcp__editor__apply_patch" {
+	if got := gjson.GetBytes(
+		output, "contents.1.parts.0.functionResponse.name",
+	).String(); got != "mcp__editor__apply_patch" {
 		t.Fatalf("custom response name = %q; output=%s", got, output)
 	}
 }
 
 func TestConvertOpenAIResponsesRequestToGeminiResolvesUniqueShortToolName(t *testing.T) {
-	input := []byte(`{
-		"tools":[{"type":"namespace","name":"first","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}],
-		"input":[{"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{}"}]
-	}`)
+	input := []byte("{\n\t\t\"tools\":[{\"type\":\"namespace\",\"name\":\"first\",\"tools\"" +
+		`:[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}` +
+		"],\n\t\t\"input\":[{\"type\":\"function_call\",\"call_id\":\"call-1\"," +
+		"\"name\":\"lookup\",\"arguments\":\"{}\"}]\n\t}")
 	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", input, false)
 	if got := gjson.GetBytes(output, "contents.0.parts.0.functionCall.name").String(); got != "first__lookup" {
 		t.Fatalf("resolved name = %q, want first__lookup; output=%s", got, output)
@@ -1213,7 +1380,8 @@ func TestConvertOpenAIResponsesRequestToGeminiPreservesStructuredAndMixedToolOut
 	}`)
 	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", input, false)
 	contents := gjson.GetBytes(output, "contents").Array()
-	if got := contents[1].Get("parts.0.functionResponse.response.result"); got.Type != gjson.String || got.String() != `{"value":1}` {
+	if got := contents[1].Get("parts.0.functionResponse.response.result"); got.Type != gjson.String ||
+		got.String() != `{"value":1}` {
 		t.Fatalf("raw string result changed type: %s; output=%s", got.Raw, output)
 	}
 	if got := contents[3].Get("parts.0.functionResponse.response.result.value").Int(); got != 1 {
@@ -1340,8 +1508,10 @@ func TestConvertOpenAIResponsesRequestToGeminiMapsTextFormats(t *testing.T) {
 		wantSchema bool
 	}{
 		{
-			name:       "json schema prefers canonical schema",
-			format:     `{"type":"json_schema","schema":{"type":"object","properties":{"canonical":{"type":"string"}}},"json_schema":{"schema":{"type":"object","properties":{"nested":{"type":"string"}}}}}`,
+			name: "json schema prefers canonical schema",
+			format: `{"type":"json_schema","schema":{"type":"object","properties":{"canonical":{"type":"` +
+				`string"}}},"json_schema":{"schema":{"type":"object","properties":{"nested":{"type":"string"}` +
+				`}}}}`,
 			wantSchema: true,
 		},
 		{
@@ -1375,7 +1545,8 @@ func TestConvertOpenAIResponsesRequestToGeminiMapsTextFormats(t *testing.T) {
 				}
 				if tt.wantSchema {
 					schema := config.Get("responseJsonSchema")
-					if !schema.Get("properties.canonical").Exists() || schema.Get("properties.nested").Exists() {
+					if !schema.Get("properties.canonical").Exists() ||
+						schema.Get("properties.nested").Exists() {
 						t.Fatalf("canonical schema was not preferred: %s", output)
 					}
 				} else if config.Get("responseJsonSchema").Exists() {
@@ -1397,7 +1568,9 @@ func TestConvertOpenAIResponsesRequestToGeminiIgnoresUnknownTextFormat(t *testin
 }
 
 func TestConvertOpenAIResponsesRequestToGeminiBuildsGenerationConfigWithoutIntermediateObject(t *testing.T) {
-	input := []byte(`{"input":"hello","temperature":0.5,"top_p":0.9,"stop_sequences":["done"],"text":{"format":{"type":"json_schema","schema":{"type":"object"}}}}`)
+	input := []byte(`{"input":"hello","temperature":0.5,"top_p":0.9,"stop_sequences":["done` +
+		`"],"text":{"format":{"type":"json_schema","schema":{"type":"object"}}}` +
+		`}`)
 
 	output := ConvertOpenAIResponsesRequestToGemini("gemini-test", input, false)
 

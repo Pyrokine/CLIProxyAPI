@@ -19,7 +19,7 @@ type GeminiUsage struct {
 	Seen            bool
 }
 
-// Update 保留各项有效计数，返回本帧是否提供完整且一致的输入、输出和总量
+// Update 保留各项有效计数，返回本帧的输入、输出和总量是否完整且一致
 func (usage *GeminiUsage) Update(metadata gjson.Result) bool {
 	if usage == nil || !metadata.IsObject() {
 		return false
@@ -40,7 +40,7 @@ func (usage *GeminiUsage) Update(metadata gjson.Result) bool {
 }
 
 // OutputTokens includes visible candidate tokens and hidden thought tokens.
-func (usage GeminiUsage) OutputTokens() int64 {
+func (usage *GeminiUsage) OutputTokens() int64 {
 	if usage.CandidateTokens > math.MaxInt64-usage.ThoughtTokens {
 		return 0
 	}

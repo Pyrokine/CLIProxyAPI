@@ -18,28 +18,48 @@ func TestRegisteredGeminiCLICacheUsagePreservesExplicitZero(t *testing.T) {
 		{name: "zero", field: `,"cachedContentTokenCount":0`, wantExists: true},
 		{name: "positive", field: `,"cachedContentTokenCount":2`, wantExists: true, want: 2},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var state any
-			response := []byte(`{"response":{"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5` + tc.field + `}}}`)
-			chunks := sdktranslator.TranslateStream(t.Context(), sdktranslator.FormatGeminiCLI, sdktranslator.FormatOpenAI,
-				"gemini-2.5-pro", nil, nil, response, &state)
-			if len(chunks) != 1 {
-				t.Fatalf("chunk count = %d, want 1", len(chunks))
-			}
-			cached := gjson.GetBytes(chunks[0], "usage.prompt_tokens_details.cached_tokens")
-			if cached.Exists() != tc.wantExists || cached.Int() != tc.want {
-				t.Fatalf("cache usage = %s, want present=%t value=%d: %s", cached.Raw, tc.wantExists, tc.want, chunks[0])
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				var state any
+				response := []byte(
+					(`{"response":{"usageMetadata":{"promptTokenCount":3,` +
+						`"candidatesTokenCount":2,"totalTokenCount":` +
+						`5`) +
+						tc.field +
+						`}}}`,
+				)
+				chunks := sdktranslator.TranslateStream(
+					t.Context(), sdktranslator.FormatGeminiCLI, sdktranslator.FormatOpenAI,
+					"gemini-2.5-pro", nil, nil, response, &state,
+				)
+				if len(chunks) != 1 {
+					t.Fatalf("chunk count = %d, want 1", len(chunks))
+				}
+				cached := gjson.GetBytes(chunks[0], "usage.prompt_tokens_details.cached_tokens")
+				if cached.Exists() != tc.wantExists || cached.Int() != tc.want {
+					t.Fatalf(
+						"cache usage = %s, want present=%t value=%d: %s",
+						cached.Raw,
+						tc.wantExists,
+						tc.want,
+						chunks[0],
+					)
+				}
+			},
+		)
 	}
 }
 
 func TestCliFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	var param any
 	first := convertCliResponseToOpenAI(
-		context.Background(), "gemini-2.5-pro", nil, nil, []byte(`{
-		"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"x"}}}]},"finishReason":"STOP"}]}
-	}`), &param,
+		context.Background(),
+		"gemini-2.5-pro",
+		nil,
+		nil,
+		[]byte(("{\n\t\t\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"" +
+			"lookup\",\"args\":{\"q\":\"x\"}}}]},\"finishReason\":\"STOP\"}]}\n\t}")),
+		&param,
 	)
 	if len(first) != 1 {
 		t.Fatalf("first chunks = %d, want 1", len(first))

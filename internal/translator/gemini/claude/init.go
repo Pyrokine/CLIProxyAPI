@@ -1,6 +1,8 @@
 package claude
 
 import (
+	"context"
+
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/translator"
@@ -18,7 +20,10 @@ func init() {
 			TokenCount: tokenCount,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatClaude, sdktranslator.FormatGemini, func(model string, body []byte, stream bool) ([]byte, error) {
-		return convertClaudeRequestToGeminiChecked(model, body, stream, false)
-	})
+	sdktranslator.RegisterRequestEnvelope(
+		sdktranslator.FormatClaude, sdktranslator.FormatGemini,
+		func(ctx context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
+			return ConvertClaudeRequestToGeminiEnvelope(ctx, req, false)
+		},
+	)
 }

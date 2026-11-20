@@ -17,8 +17,10 @@ func init() {
 			NonStream: ConvertGeminiResponseToOpenAIResponsesNonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatGemini,
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatOpenAIResponse, sdktranslator.FormatGemini,
 		func(model string, body []byte, stream bool) ([]byte, error) {
 			return ConvertOpenAIResponsesRequestToGeminiChecked(model, body, stream)
-		})
+		},
+	)
 }

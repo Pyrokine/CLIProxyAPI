@@ -17,5 +17,7 @@ func init() {
 			NonStream: convertCliResponseToOpenAINonStream,
 		},
 	)
-	sdktranslator.RegisterCheckedRequest(sdktranslator.FormatOpenAI, sdktranslator.FormatGeminiCLI, convertOpenAIRequestToGeminiCLIChecked)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatOpenAI, sdktranslator.FormatGeminiCLI, convertOpenAIRequestToGeminiCLIChecked,
+	)
 }

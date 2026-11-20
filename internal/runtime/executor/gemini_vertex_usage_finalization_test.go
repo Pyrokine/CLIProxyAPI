@@ -25,17 +25,25 @@ func (f vertexUsageRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, 
 func TestVertexExecuteUsesExplicitDynamicHeaderSource(t *testing.T) {
 	var upstreamHeaders http.Header
 	ctx := util.WithSessionID(context.Background(), "vertex-session")
-	ctx = util.WithRoundTripper(ctx, vertexUsageRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		upstreamHeaders = req.Header.Clone()
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body: io.NopCloser(strings.NewReader(
-				`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`,
-			)),
-			Request: req,
-		}, nil
-	}))
+	ctx = util.WithRoundTripper(
+		ctx, vertexUsageRoundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				upstreamHeaders = req.Header.Clone()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(
+						strings.NewReader(
+							`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"fi` +
+								`nishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidates` +
+								`TokenCount":1,"totalTokenCount":2}}`,
+						),
+					),
+					Request: req,
+				}, nil
+			},
+		),
+	)
 
 	exec := &GeminiVertexExecutor{}
 	_, err := exec.Execute(
@@ -80,16 +88,24 @@ func TestVertexStreamPreservesNonZeroUsageAfterZeroPlaceholder(t *testing.T) {
 	registerTestUsagePlugin(t, plugin)
 	ctx := usage.WithRequestedModelAlias(context.Background(), "vertex-nonzero-usage-finalizer")
 	reporter := newUsageReporter(ctx, "vertex", "gemini-test", nil)
-	client := &http.Client{Transport: vertexUsageRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body: io.NopCloser(strings.NewReader(
-				"data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":7,\"thoughtsTokenCount\":3,\"totalTokenCount\":15}}\n" +
-					"data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":0,\"candidatesTokenCount\":0,\"thoughtsTokenCount\":0,\"totalTokenCount\":0}}\n",
-			)),
-		}, nil
-	})}
+	client := &http.Client{
+		Transport: vertexUsageRoundTripFunc(
+			func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(
+						strings.NewReader(
+							"data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":5,\"" +
+								"candidatesTokenCount\":7,\"thoughtsTokenCount\":3,\"totalTokenCount\":15}}\n" +
+								"data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":0,\"" +
+								"candidatesTokenCount\":0,\"thoughtsTokenCount\":0,\"totalTokenCount\":0}}\n",
+						),
+					),
+				}, nil
+			},
+		),
+	}
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/stream", nil)
 	if errRequest != nil {
 		t.Fatal(errRequest)
@@ -139,15 +155,22 @@ func TestVertexStreamCancellationWinsOverBufferedUsage(t *testing.T) {
 	baseCtx := usage.WithRequestedModelAlias(context.Background(), "vertex-cancel-finalizer")
 	ctx, cancel := context.WithCancel(baseCtx)
 	reporter := newUsageReporter(ctx, "vertex", "gemini-test", nil)
-	client := &http.Client{Transport: vertexUsageRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body: io.NopCloser(strings.NewReader(
-				"data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":4,\"totalTokenCount\":7}}\n",
-			)),
-		}, nil
-	})}
+	client := &http.Client{
+		Transport: vertexUsageRoundTripFunc(
+			func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(
+						strings.NewReader(
+							"data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":3,\"" +
+								"candidatesTokenCount\":4,\"totalTokenCount\":7}}\n",
+						),
+					),
+				}, nil
+			},
+		),
+	}
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/stream", nil)
 	if errRequest != nil {
 		t.Fatal(errRequest)
@@ -180,8 +203,8 @@ func TestVertexStreamCancellationWinsOverBufferedUsage(t *testing.T) {
 		if !record.Failed || record.Fail.StatusCode != 499 {
 			t.Fatalf("usage record = %#v, want canceled failure", record)
 		}
-		if record.Detail.InputTokens != 0 || record.Detail.OutputTokens != 0 || record.Detail.TotalTokens != 0 {
-			t.Fatalf("failure usage detail = %+v, want zero", record.Detail)
+		if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 7 {
+			t.Fatalf("failure usage detail = %+v, want observed 3/4/7", record.Detail)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for canceled usage record")
@@ -202,49 +225,83 @@ func TestVertexStreamCanceledReadAfterTerminalPreservesUsage(t *testing.T) {
 		{"completed", "STOP"},
 		{"incomplete", "MAX_TOKENS"},
 	} {
-		t.Run(terminal.name, func(t *testing.T) {
-			plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
-			registerTestUsagePlugin(t, plugin)
-			ctx, cancel := context.WithCancel(usage.WithRequestedModelAlias(context.Background(), "vertex-"+terminal.name))
-			defer cancel()
-			reporter := newUsageReporter(ctx, "vertex", "gemini-test", nil)
-			payload := `data: {"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"` + terminal.reason + `"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"totalTokenCount":7}}` + "\n"
-			client := &http.Client{Transport: vertexUsageRoundTripFunc(func(*http.Request) (*http.Response, error) {
-				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
-					Body: io.NopCloser(&terminalErrorReader{data: []byte(payload), err: context.Canceled})}, nil
-			})}
-			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/stream", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			stream, err := (&GeminiVertexExecutor{}).handleVertexStreamResponse(ctx, client, httpReq,
-				sdktranslator.FormatGemini, sdktranslator.FormatGemini,
-				cliproxyexecutor.Request{Model: "gemini-test"}, cliproxyexecutor.Options{}, nil, reporter)
-			if err != nil {
-				t.Fatal(err)
-			}
-			terminalReceived := false
-			for chunk := range stream.Chunks {
-				if chunk.Err != nil {
-					t.Fatalf("stream error after terminal: %v", chunk.Err)
+		t.Run(
+			terminal.name, func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+				registerTestUsagePlugin(t, plugin)
+				ctx, cancel := context.WithCancel(
+					usage.WithRequestedModelAlias(
+						context.Background(), "vertex-"+terminal.name,
+					),
+				)
+				defer cancel()
+				reporter := newUsageReporter(ctx, "vertex", "gemini-test", nil)
+				payload := `data: {"candidates":[{"content":{"parts":[{"text":"hello"}]},` +
+					`"finishReason":` +
+					`"` +
+					terminal.reason +
+					(`"}],"usageMeta` +
+						`data":{"prompt` +
+						`TokenCount":3,` +
+						`"candidatesTok` +
+						`enCount":4,` +
+						`"totalTokenCou` +
+						`nt":` +
+						`7}}`) +
+					"\n"
+				client := &http.Client{
+					Transport: vertexUsageRoundTripFunc(
+						func(*http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusOK, Header: make(http.Header),
+								Body: io.NopCloser(
+									&terminalErrorReader{data: []byte(payload), err: context.Canceled},
+								),
+							}, nil
+						},
+					),
 				}
-				if isGeminiStreamTerminalChunk(chunk.Payload) {
-					terminalReceived = true
-					cancel()
+				httpReq, err := http.NewRequestWithContext(
+					ctx,
+					http.MethodPost,
+					"https://example.com/stream",
+					nil,
+				)
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			if !terminalReceived {
-				t.Fatal("terminal chunk was not delivered")
-			}
-			select {
-			case record := <-plugin.records:
-				if record.Failed || record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 7 {
-					t.Fatalf("usage after terminal cancellation = %+v", record)
+				stream, err := (&GeminiVertexExecutor{}).handleVertexStreamResponse(
+					ctx, client, httpReq,
+					sdktranslator.FormatGemini, sdktranslator.FormatGemini,
+					cliproxyexecutor.Request{Model: "gemini-test"}, cliproxyexecutor.Options{}, nil, reporter,
+				)
+				if err != nil {
+					t.Fatal(err)
 				}
-			case <-time.After(time.Second):
-				t.Fatal("timed out waiting for usage after terminal")
-			}
-		})
+				terminalReceived := false
+				for chunk := range stream.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream error after terminal: %v", chunk.Err)
+					}
+					if isGeminiStreamTerminalChunk(chunk.Payload) {
+						terminalReceived = true
+						cancel()
+					}
+				}
+				if !terminalReceived {
+					t.Fatal("terminal chunk was not delivered")
+				}
+				select {
+				case record := <-plugin.records:
+					if record.Failed || record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 ||
+						record.Detail.TotalTokens != 7 {
+						t.Fatalf("usage after terminal cancellation = %+v", record)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("timed out waiting for usage after terminal")
+				}
+			},
+		)
 	}
 }
 
@@ -253,16 +310,25 @@ func TestVertexStreamReadErrorWinsOverBufferedUsage(t *testing.T) {
 	registerTestUsagePlugin(t, plugin)
 	ctx := usage.WithRequestedModelAlias(context.Background(), "vertex-read-error-finalizer")
 	reporter := newUsageReporter(ctx, "vertex", "gemini-test", nil)
-	client := &http.Client{Transport: vertexUsageRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body: io.NopCloser(&terminalErrorReader{
-				data: []byte("data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":4,\"totalTokenCount\":7}}\n"),
-				err:  io.ErrUnexpectedEOF,
-			}),
-		}, nil
-	})}
+	client := &http.Client{
+		Transport: vertexUsageRoundTripFunc(
+			func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(
+						&terminalErrorReader{
+							data: []byte(
+								("data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":3,\"" +
+									"candidatesTokenCount\":4,\"totalTokenCount\":7}}\n"),
+							),
+							err: io.ErrUnexpectedEOF,
+						},
+					),
+				}, nil
+			},
+		),
+	}
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/stream", nil)
 	if errRequest != nil {
 		t.Fatal(errRequest)
@@ -303,7 +369,8 @@ func TestVertexStreamReadErrorWinsOverBufferedUsage(t *testing.T) {
 		if record.Alias != "vertex-read-error-finalizer" {
 			t.Fatalf("usage alias = %q", record.Alias)
 		}
-		if !record.Failed || !strings.Contains(record.Fail.Body, io.ErrUnexpectedEOF.Error()) {
+		if !record.Failed || !strings.Contains(record.Fail.Body, io.ErrUnexpectedEOF.Error()) ||
+			record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 7 {
 			t.Fatalf("usage record = %#v, want read failure", record)
 		}
 	case <-time.After(time.Second):
@@ -323,13 +390,17 @@ func TestVertexStreamPublishesSuccessfulZeroUsageOnce(t *testing.T) {
 	registerTestUsagePlugin(t, plugin)
 	ctx := usage.WithRequestedModelAlias(context.Background(), "vertex-zero-usage-finalizer")
 	reporter := newUsageReporter(ctx, "vertex", "gemini-test", nil)
-	client := &http.Client{Transport: vertexUsageRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader("data: {\"candidates\":[]}\n")),
-		}, nil
-	})}
+	client := &http.Client{
+		Transport: vertexUsageRoundTripFunc(
+			func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("data: {\"candidates\":[]}\n")),
+				}, nil
+			},
+		),
+	}
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/stream", nil)
 	if errRequest != nil {
 		t.Fatal(errRequest)

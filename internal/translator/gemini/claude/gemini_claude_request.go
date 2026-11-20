@@ -6,6 +6,7 @@
 package claude
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -15,6 +16,7 @@ import (
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -34,9 +36,9 @@ func convertClaudeRequestToGeminiDefault(modelName string, inputRawJSON []byte, 
 	return convertClaudeRequestToGemini(modelName, inputRawJSON, stream, false)
 }
 
-// ConvertClaudeRequestToGeminiWithCompat preserves assistant thinking blocks
+// convertClaudeRequestToGeminiWithCompat preserves assistant thinking blocks
 // with empty signatures for configured compatibility endpoints.
-func ConvertClaudeRequestToGeminiWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertClaudeRequestToGeminiWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
 	return convertClaudeRequestToGemini(modelName, inputRawJSON, stream, true)
 }
 
@@ -46,22 +48,39 @@ func convertClaudeRequestToGemini(
 	stream bool,
 	preserveEmptyThinkingBlocks bool,
 ) []byte {
-	body, _ := convertClaudeRequestToGeminiChecked(modelName, inputRawJSON, stream, preserveEmptyThinkingBlocks)
+	body, _ := convertClaudeRequestToGeminiChecked(
+		context.Background(), modelName, inputRawJSON, stream, preserveEmptyThinkingBlocks,
+	)
 	return body
 }
 
-// ConvertClaudeRequestToGeminiWithCompatReturningError reports unsupported user attachments.
-func ConvertClaudeRequestToGeminiWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	return convertClaudeRequestToGeminiChecked(modelName, inputRawJSON, stream, true)
+// convertClaudeRequestToGeminiWithCompatReturningError reports unsupported user attachments.
+func convertClaudeRequestToGeminiWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) (
+	[]byte,
+	error,
+) {
+	return convertClaudeRequestToGeminiChecked(context.Background(), modelName, inputRawJSON, stream, true)
+}
+
+// ConvertClaudeRequestToGeminiEnvelope 保留请求所属的缓存、取消和错误状态
+func ConvertClaudeRequestToGeminiEnvelope(
+	ctx context.Context, req sdktranslator.RequestEnvelope, preserveEmptyThinkingBlocks bool,
+) sdktranslator.RequestEnvelope {
+	req.Body, req.Err = convertClaudeRequestToGeminiChecked(
+		ctx, req.Model, req.Body, req.Stream, preserveEmptyThinkingBlocks,
+	)
+	return req
 }
 
 func convertClaudeRequestToGeminiChecked(
+	ctx context.Context,
 	modelName string,
 	inputRawJSON []byte,
 	_ bool,
 	preserveEmptyThinkingBlocks bool,
 ) ([]byte, error) {
 	var drops translatorcommon.UserTurnDrops
+	var signatureErr error
 	rawJSON := inputRawJSON
 
 	// Build output Gemini CLI request JSON
@@ -105,7 +124,9 @@ func convertClaudeRequestToGeminiChecked(
 		flushUserRun := func() {
 			merged := translatorcommon.MergeAdjacentGeminiContents(contentItems[userRunStart:])
 			if len(merged) > 0 {
-				parts := translatorcommon.AlignGeminiFunctionResponses(gjson.GetBytes(merged[0], "parts"), pendingToolUseIDs)
+				parts := translatorcommon.AlignGeminiFunctionResponses(
+					gjson.GetBytes(merged[0], "parts"), pendingToolUseIDs,
+				)
 				merged[0], _ = sjson.SetRawBytes(merged[0], "parts", []byte(parts.Raw))
 			}
 			contentItems = append(contentItems[:userRunStart], merged...)
@@ -161,11 +182,17 @@ func convertClaudeRequestToGeminiChecked(
 									return true
 								}
 								thinkingText := contentResult.Get("thinking").String()
+								rawSignature := contentResult.Get("signature").String()
+								if strings.TrimSpace(rawSignature) == "" && thinkingText != "" {
+									rawSignature, signatureErr = cache.GetCachedSignatureRequired(
+										ctx, modelName, thinkingText,
+									)
+									if signatureErr != nil {
+										return false
+									}
+								}
 								thoughtSignature, keep := resolveGeminiThinkingSignature(
-									modelName,
-									thinkingText,
-									contentResult.Get("signature").String(),
-									preserveEmptyThinkingBlocks,
+									modelName, "", rawSignature, preserveEmptyThinkingBlocks,
 								)
 								if !keep {
 									return true
@@ -214,13 +241,21 @@ func convertClaudeRequestToGeminiChecked(
 								result, images := translatorcommon.ClaudeToolResultContent(contentResult.Get("content"))
 								part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
 								part, _ = sjson.SetBytes(part, "functionResponse.id", toolCallID)
-								part, _ = sjson.SetBytes(part, "functionResponse.name", util.SanitizeFunctionName(funcName))
-								part = translatorcommon.SetGeminiFunctionResponseRaw(part, "functionResponse.response.result", result.Raw)
+								part, _ = sjson.SetBytes(
+									part, "functionResponse.name", util.SanitizeFunctionName(funcName),
+								)
+								part = translatorcommon.SetGeminiFunctionResponseRaw(
+									part, "functionResponse.response.result", result.Raw,
+								)
 								contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 								for _, source := range images {
 									imagePart := []byte(`{"inline_data":{"mime_type":"","data":""}}`)
-									imagePart, _ = sjson.SetBytes(imagePart, "inline_data.mime_type", source.Get("media_type").String())
-									imagePart, _ = sjson.SetBytes(imagePart, "inline_data.data", source.Get("data").String())
+									imagePart, _ = sjson.SetBytes(
+										imagePart, "inline_data.mime_type", source.Get("media_type").String(),
+									)
+									imagePart, _ = sjson.SetBytes(
+										imagePart, "inline_data.data", source.Get("data").String(),
+									)
 									contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", imagePart)
 								}
 
@@ -246,7 +281,10 @@ func convertClaudeRequestToGeminiChecked(
 						for _, part := range parts {
 							rawParts = append(rawParts, []byte(part.Raw))
 						}
-						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts", translatorcommon.JoinRawArray(translatorcommon.ReorderGeminiUserParts(rawParts)))
+						contentJSON, _ = sjson.SetRawBytes(
+							contentJSON, "parts",
+							translatorcommon.JoinRawArray(translatorcommon.ReorderGeminiUserParts(rawParts)),
+						)
 					}
 					if roleResult.String() == "user" {
 						sendable := 0
@@ -266,12 +304,18 @@ func convertClaudeRequestToGeminiChecked(
 					contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 					contentItems = append(contentItems, contentJSON)
 				}
+				if signatureErr != nil {
+					return false
+				}
 				if role != "user" {
 					userRunStart = len(contentItems)
 				}
 				return true
 			},
 		)
+		if signatureErr != nil {
+			return nil, signatureErr
+		}
 		flushUserRun()
 		out, _ = sjson.SetRawBytes(out, "contents", translatorcommon.JoinRawArray(contentItems))
 	}
