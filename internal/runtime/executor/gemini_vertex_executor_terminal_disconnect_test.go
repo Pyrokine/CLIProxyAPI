@@ -99,7 +99,6 @@ func TestGeminiVertexStream_ClientDisconnectAfterTerminalEventIsNotFailed(t *tes
 								}
 							} else {
 								serviceAccount := googleImagenServiceAccount(t)
-								serviceAccount["token_uri"] = server.URL + "/token"
 								credential.Metadata = map[string]any{
 									"project_id": "proxy-test", "location": "global", "service_account": serviceAccount,
 								}

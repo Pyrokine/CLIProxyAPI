@@ -33,7 +33,7 @@ func googleImagenServiceAccount(t *testing.T) map[string]any {
 	return map[string]any{
 		"type": "service_account", "project_id": "synthetic-project", "private_key_id": "synthetic-key-id",
 		"private_key":  string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
-		"client_email": "synthetic@synthetic.invalid", "token_uri": "https://imagen-token.invalid/token",
+		"client_email": "synthetic@synthetic.invalid", "token_uri": testVertexTokenURL,
 	}
 }
 
@@ -83,7 +83,7 @@ func TestVertexImagenPayloadRules(t *testing.T) {
 				ctx := util.WithRoundTripper(
 					t.Context(), googlePayloadTransport(
 						func(req *http.Request) (*http.Response, error) {
-							if req.URL.Host == "imagen-token.invalid" && req.URL.Path == "/token" {
+							if req.URL.String() == testVertexTokenURL {
 								tokenCalls++
 								resp := googlePayloadResponse(
 									req, `{"access_token":"synthetic-token","expires_in":3600,"token_type":"Bearer"}`,

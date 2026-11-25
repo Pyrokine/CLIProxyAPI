@@ -42,7 +42,7 @@ func DoVertexImport(cfg *config.Config, keyPath, prefix string) {
 		log.Errorf("vertex-import: invalid service account json: %v", errUnmarshal)
 		return
 	}
-	// Validate and normalize private_key before saving
+	// Validate the token endpoint and normalize the private key before saving.
 	normalizedSA, errFix := vertex.NormalizeServiceAccountMap(sa)
 	if errFix != nil {
 		log.Errorf("vertex-import: %v", errFix)
@@ -59,8 +59,8 @@ func DoVertexImport(cfg *config.Config, keyPath, prefix string) {
 		// Keep empty email but warn
 		log.Warn("vertex-import: client_email missing in service account json")
 	}
-	// Default location if not provided by user. Can be edited in the saved file later.
-	location := "us-central1"
+	// The region can be edited in the saved file.
+	location := vertex.DefaultLocation
 
 	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
 	if prefix != "" && strings.Contains(prefix, "/") {

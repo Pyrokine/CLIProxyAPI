@@ -384,9 +384,7 @@ func TestExecutorsTranslateFreeformApplyPatch(t *testing.T) {
 							var requests, tokenRequests atomic.Int32
 							transport := apiKeyCompatRoundTripper(
 								func(req *http.Request) (*http.Response, error) {
-									if tc.name == "vertex-service-account" &&
-										req.URL.Host == "offline-token.invalid" &&
-										req.URL.Path == "/token" {
+									if tc.name == "vertex-service-account" && req.URL.String() == testVertexTokenURL {
 										tokenRequests.Add(1)
 										return &http.Response{
 											StatusCode: http.StatusOK,
@@ -487,7 +485,7 @@ func TestExecutorsTranslateFreeformApplyPatch(t *testing.T) {
 								auth.Metadata["service_account"] = map[string]any{
 									"type": "service_account", "project_id": "synthetic-project",
 									"client_email": "synthetic@offline.invalid", "private_key": privateKey,
-									"token_uri": "https://offline-token.invalid/token",
+									"token_uri": testVertexTokenURL,
 								}
 							}
 							payload := []byte(translatedPatchRequest)

@@ -93,7 +93,7 @@ func TestAuditPublicStreamsRetainObservedUsageOnReadFailure(t *testing.T) {
 					ctx = util.WithRoundTripper(
 						ctx, devinTestRoundTripper(
 							func(request *http.Request) (*http.Response, error) {
-								if request.URL.Host == "imagen-token.invalid" {
+								if request.URL.String() == testVertexTokenURL {
 									return &http.Response{
 										StatusCode: http.StatusOK,
 										Header:     http.Header{"Content-Type": {"application/json"}},

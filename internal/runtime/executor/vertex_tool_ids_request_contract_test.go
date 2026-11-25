@@ -47,8 +47,7 @@ func TestVertexFinalRequestsNormalizeConfiguredToolIDs(t *testing.T) {
 						ctx := util.WithRoundTripper(
 							t.Context(), googlePayloadTransport(
 								func(request *http.Request) (*http.Response, error) {
-									if request.URL.Host == "imagen-token.invalid" &&
-										request.URL.Path == "/token" {
+									if request.URL.String() == testVertexTokenURL {
 										tokenCalls++
 										response := googlePayloadResponse(
 											request,

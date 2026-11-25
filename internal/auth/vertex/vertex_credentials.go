@@ -4,11 +4,32 @@ package vertex
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+// DefaultLocation is the region used when a Vertex credential omits its location.
+const DefaultLocation = "us-central1"
+
+var regionPattern = regexp.MustCompile(`^[a-z]+(-[a-z]+)+[0-9]+$`)
+
+// NormalizeLocation accepts global or a region identifier for the Vertex endpoint.
+func NormalizeLocation(location string) (string, error) {
+	location = strings.TrimSpace(location)
+	switch {
+	case location == "":
+		return DefaultLocation, nil
+	case location == "global":
+		return location, nil
+	case len(location)+len("-aiplatform") <= 63 && regionPattern.MatchString(location):
+		return location, nil
+	default:
+		return "", fmt.Errorf("location must be a Vertex region identifier or global")
+	}
+}
 
 // CredentialStorage stores the service account JSON for Vertex AI access.
 // The content is persisted verbatim under the "service_account" key, together with

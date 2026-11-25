@@ -359,7 +359,7 @@ func TestGeminiFamilyPayloadRulesReachTransport(t *testing.T) {
 										"service_account": map[string]any{
 											"type": "service_account", "project_id": "fixture-project",
 											"client_email": "fixture@example.invalid", "private_key": privateKey,
-											"token_uri": "https://token.fixture/oauth2/token",
+											"token_uri": testVertexTokenURL,
 										},
 									}
 								}
@@ -367,7 +367,7 @@ func TestGeminiFamilyPayloadRulesReachTransport(t *testing.T) {
 									ctx, vertexUsageRoundTripFunc(
 										func(httpReq *http.Request) (*http.Response, error) {
 											body := responseBody
-											if httpReq.URL.Host == "token.fixture" {
+											if httpReq.URL.String() == testVertexTokenURL {
 												if cliproxyexecutor.RequestProxyURL(httpReq.Context()) != "" {
 													t.Error("token exchange retained the execution-scoped proxy")
 												}
@@ -477,7 +477,7 @@ func TestVertexAccessTokenClearsExecutionProxy(t *testing.T) {
 					},
 				),
 			),
-			"token_uri": "https://token.fixture/oauth2/token",
+			"token_uri": testVertexTokenURL,
 		},
 	)
 	if err != nil {
@@ -489,7 +489,7 @@ func TestVertexAccessTokenClearsExecutionProxy(t *testing.T) {
 		ctx, vertexUsageRoundTripFunc(
 			func(req *http.Request) (*http.Response, error) {
 				requests++
-				if req.URL.Host != "token.fixture" || cliproxyexecutor.RequestProxyURL(req.Context()) != "" {
+				if req.URL.String() != testVertexTokenURL || cliproxyexecutor.RequestProxyURL(req.Context()) != "" {
 					t.Error("token exchange did not isolate the execution-scoped proxy")
 				}
 				return &http.Response{

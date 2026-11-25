@@ -4,8 +4,26 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestNormalizeLocation(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"", DefaultLocation},
+		{" global ", "global"},
+		{"asia-southeast1", "asia-southeast1"},
+		{"europe-west12", "europe-west12"},
+		{"northamerica-northeast2", "northamerica-northeast2"},
+		{"regional", ""},
+		{strings.Repeat("a", 53) + "-west1", ""},
+	} {
+		location, err := NormalizeLocation(tc.input)
+		if location != tc.want || (err != nil) != (tc.want == "") {
+			t.Errorf("NormalizeLocation(%q) = %q, %v; want %q", tc.input, location, err, tc.want)
+		}
+	}
+}
 
 func TestSaveTokenToFileSecuresExistingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth", "vertex.json")

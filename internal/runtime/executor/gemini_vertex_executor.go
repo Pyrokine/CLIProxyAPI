@@ -1096,10 +1096,13 @@ func vertexCreds(a *cliproxyauth.Auth) (projectID, location string, serviceAccou
 	if projectID == "" {
 		return "", "", nil, fmt.Errorf("vertex executor: missing project_id in credentials")
 	}
-	if v, ok := a.Metadata["location"].(string); ok && strings.TrimSpace(v) != "" {
-		location = strings.TrimSpace(v)
-	} else {
-		location = "us-central1"
+	location, ok := a.Metadata["location"].(string)
+	if !ok && a.Metadata["location"] != nil {
+		return "", "", nil, fmt.Errorf("vertex executor: location must be a string")
+	}
+	location, err = vertexauth.NormalizeLocation(location)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("vertex executor: %w", err)
 	}
 	var sa map[string]any
 	if raw, ok := a.Metadata["service_account"].(map[string]any); ok {
@@ -1137,34 +1140,30 @@ func vertexAPICreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func vertexBaseURL(location string) string {
-	loc := strings.TrimSpace(location)
-	if loc == "" {
-		loc = "us-central1"
-	} else if loc == "global" {
+	if location == "global" {
 		return "https://aiplatform.googleapis.com"
 	}
-	return fmt.Sprintf("https://%s-aiplatform.googleapis.com", loc)
+	return "https://" + location + "-aiplatform.googleapis.com"
 }
 
 func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, saJSON []byte) (
 	string,
 	error,
 ) {
-	ctx = cliproxyexecutor.WithoutRequestProxyURL(ctx)
-	if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
-		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
-	}
-	// Use cloud-platform scope for Vertex AI.
-	credentials, errCreds := google.CredentialsFromJSONWithType(
-		ctx,
-		saJSON,
-		google.ServiceAccount,
-		"https://www.googleapis.com/auth/cloud-platform",
-	)
+	credentials, errCreds := google.JWTConfigFromJSON(saJSON, "https://www.googleapis.com/auth/cloud-platform")
 	if errCreds != nil {
 		return "", fmt.Errorf("vertex executor: parse service account json failed: %w", errCreds)
 	}
-	tok, errTok := credentials.TokenSource.Token()
+	if err := vertexauth.ValidateServiceAccountTokenURL(credentials.TokenURL); err != nil {
+		return "", fmt.Errorf("vertex executor: %w", err)
+	}
+	credentials.Audience = credentials.TokenURL
+
+	ctx = cliproxyexecutor.WithoutRequestProxyURL(ctx)
+	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+	tok, errTok := credentials.TokenSource(ctx).Token()
 	if errTok != nil {
 		return "", fmt.Errorf("vertex executor: get access token failed: %w", errTok)
 	}

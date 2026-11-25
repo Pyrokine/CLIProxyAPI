@@ -48,7 +48,7 @@ func TestGeminiStreamEstimatesInitialClaudeInputTokens(t *testing.T) {
 						auth.Metadata["service_account"] = map[string]any{
 							"type": "service_account", "project_id": "synthetic-project",
 							"client_email": "stream@synthetic.invalid", "private_key": privateKey,
-							"token_uri": "https://stream-token.invalid/token",
+							"token_uri": testVertexTokenURL,
 						}
 					}
 					plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
@@ -56,7 +56,7 @@ func TestGeminiStreamEstimatesInitialClaudeInputTokens(t *testing.T) {
 					calls, tokenCalls := 0, 0
 					transport := &auditClaudeContractTransport{
 						respond: func(req *http.Request) (*http.Response, error) {
-							if req.URL.Host == "stream-token.invalid" {
+							if req.URL.String() == testVertexTokenURL {
 								tokenCalls++
 								return googlePayloadResponse(
 									req,

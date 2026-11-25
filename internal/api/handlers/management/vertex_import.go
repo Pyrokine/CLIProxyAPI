@@ -66,10 +66,12 @@ func (h *Handler) ImportVertexCredential(c *gin.Context) {
 
 	location := strings.TrimSpace(c.PostForm("location"))
 	if location == "" {
-		location = strings.TrimSpace(c.Query("location"))
+		location = c.Query("location")
 	}
-	if location == "" {
-		location = "us-central1"
+	location, err = vertex.NormalizeLocation(location)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid location", "message": err.Error()})
+		return
 	}
 
 	fileName := fmt.Sprintf("vertex-%s.json", vertex.SanitizeFilePart(projectID))

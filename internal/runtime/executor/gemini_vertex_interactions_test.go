@@ -203,7 +203,7 @@ func TestVertexNativeInteractionsServiceAccountAndResponseFormat(t *testing.T) {
 								response := `{"access_token":"synthetic-bearer","expires_in":3600,` +
 									`"token_type":` +
 									`"Bearer"}`
-								if req.URL.Host == "vertex-token.invalid" {
+								if req.URL.String() == testVertexTokenURL {
 									tokenCalls++
 								} else {
 									nativeCalls++
@@ -237,7 +237,7 @@ func TestVertexNativeInteractionsServiceAccountAndResponseFormat(t *testing.T) {
 							"service_account": map[string]any{
 								"type": "service_account", "project_id": "fixture-project",
 								"client_email": "fixture@fixture.invalid", "private_key": privateKey,
-								"token_uri": "https://vertex-token.invalid/token",
+								"token_uri": testVertexTokenURL,
 							},
 						},
 					}

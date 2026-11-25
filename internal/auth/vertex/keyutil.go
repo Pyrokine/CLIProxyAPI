@@ -8,13 +8,35 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+
+	"golang.org/x/oauth2/google"
 )
 
-// NormalizeServiceAccountMap returns a copy of the given service account map with
-// a sanitized private_key field that is guaranteed to contain a valid RSA PRIVATE KEY PEM block.
+// ValidateServiceAccountTokenURL accepts the Google JWT endpoint or an omitted token_uri.
+func ValidateServiceAccountTokenURL(tokenURL string) error {
+	if tokenURL != "" && tokenURL != google.JWTTokenURL {
+		return fmt.Errorf("service account token_uri must be %s", google.JWTTokenURL)
+	}
+	return nil
+}
+
+// NormalizeServiceAccountMap validates the token endpoint and returns a copy with
+// the private key encoded as an RSA PRIVATE KEY PEM block.
 func NormalizeServiceAccountMap(sa map[string]any) (map[string]any, error) {
 	if sa == nil {
 		return nil, fmt.Errorf("service account payload is empty")
+	}
+	for key, value := range sa {
+		if !strings.EqualFold(key, "token_uri") || value == nil {
+			continue
+		}
+		tokenURL, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("service account token_uri must be a string")
+		}
+		if err := ValidateServiceAccountTokenURL(tokenURL); err != nil {
+			return nil, err
+		}
 	}
 	pk, _ := sa["private_key"].(string)
 	if strings.TrimSpace(pk) == "" {
