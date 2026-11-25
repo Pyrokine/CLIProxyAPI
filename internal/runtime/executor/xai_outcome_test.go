@@ -257,6 +257,63 @@ func TestXAIVideoQueryPreservesRequestIDWithoutBody(t *testing.T) {
 	}
 }
 
+func TestXAIVideoMutationChecksTaskReferenceAfterPayloadRules(t *testing.T) {
+	for _, tc := range []struct {
+		name, field, value string
+		allowed            bool
+	}{
+		{"unrelated payload change", "prompt", "configured prompt", true},
+		{"task reference change", "request_id", "another fixture task", false},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				const model = "grok-imagine-video"
+				cfg := &config.Config{
+					Payload: config.PayloadConfig{
+						Override: []config.PayloadRule{
+							{
+								Models: []config.PayloadModelRule{{Name: model, Protocol: "openai"}},
+								Params: map[string]any{tc.field: tc.value},
+							},
+						},
+					},
+				}
+				ctx, finish := xaiOutcomeContext(t)
+				defer finish()
+				ctx = WithXAIVideoMutationReference(ctx, "selected fixture task")
+				calls := 0
+				ctx = util.WithRoundTripper(
+					ctx, xaiOutcomeTransport(
+						func(req *http.Request) (*http.Response, error) {
+							calls++
+							return xaiOutcomeHTTPResponse(req, `{"status":"pending"}`), nil
+						},
+					),
+				)
+				auth := &cliproxyauth.Auth{
+					Provider: "xai", Attributes: map[string]string{"base_url": "https://xai-fixture.invalid"},
+				}
+				_, err := newXAIExecutor(cfg).Execute(
+					ctx, auth, cliproxyexecutor.Request{
+						Model:   model,
+						Payload: []byte(`{"model":"grok-imagine-video","request_id":"selected fixture task"}`),
+					}, cliproxyexecutor.Options{
+						SourceFormat: sdktranslator.FromString(xaiVideoHandlerType),
+						Metadata:     map[string]any{cliproxyexecutor.RequestPathMetadataKey: "/v1/videos/edits"},
+					},
+				)
+				if tc.allowed {
+					if err != nil || calls != 1 {
+						t.Fatalf("allowed mutation: calls=%d err=%v", calls, err)
+					}
+				} else if err == nil || calls != 0 {
+					t.Fatalf("rejected mutation: calls=%d err=%v", calls, err)
+				}
+			},
+		)
+	}
+}
+
 func TestXAICompactUsageMatchesFinalOutcome(t *testing.T) {
 	const usageJSON = `,"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}`
 	for _, mode := range []string{"ordinary", "http-trigger", "ws-sse-trigger", "ws-raw-trigger"} {

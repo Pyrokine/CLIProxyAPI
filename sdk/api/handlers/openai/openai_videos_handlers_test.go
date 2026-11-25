@@ -14,6 +14,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	apihandlers "github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -87,12 +88,13 @@ func performVideosRouteRequest(
 }
 
 type videoAuthCaptureExecutor struct {
-	mu            sync.Mutex
-	requestID     string
-	contentURL    string
-	authIDs       []string
-	models        []string
-	payloadModels []string
+	mu             sync.Mutex
+	requestID      string
+	contentURL     string
+	authIDs        []string
+	models         []string
+	payloadModels  []string
+	captureRequest func(coreexecutor.Request, coreexecutor.Options)
 }
 
 func (e *videoAuthCaptureExecutor) Identifier() string { return "xai" }
@@ -101,7 +103,7 @@ func (e *videoAuthCaptureExecutor) Execute(
 	_ context.Context,
 	auth *coreauth.Auth,
 	req coreexecutor.Request,
-	_ coreexecutor.Options,
+	opts coreexecutor.Options,
 ) (coreexecutor.Response, error) {
 	authID := ""
 	if auth != nil {
@@ -112,9 +114,13 @@ func (e *videoAuthCaptureExecutor) Execute(
 	e.models = append(e.models, req.Model)
 	e.payloadModels = append(e.payloadModels, strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String()))
 	e.mu.Unlock()
+	if e.captureRequest != nil {
+		e.captureRequest(req, opts)
+	}
 
 	requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String())
-	if requestID == "" {
+	requestPath, _ := opts.Metadata[coreexecutor.RequestPathMetadataKey].(string)
+	if requestID == "" || requestPath == xaiVideosEditsAPI || requestPath == xaiVideosExtensionsAPI {
 		requestID = e.requestID
 	}
 	contentURL := strings.TrimSpace(e.contentURL)
@@ -476,6 +482,120 @@ func TestXAIVideosNativeRejectsUnsupportedModel(t *testing.T) {
 		"."
 	if message != expectedMessage {
 		t.Fatalf("error message = %q, want %q", message, expectedMessage)
+	}
+}
+
+func TestXAIVideosMutationsDispatchNormalizedSource(t *testing.T) {
+	const sourceID = "fixture-source"
+	const mediaURL = "https://media.example.test/clip.mp4"
+	for _, test := range []struct {
+		name, path, source string
+		fields             []string
+	}{
+		{"edit video ID", xaiVideosEditsAPI, `,"video_id":" fixture-source "`, []string{"video_id"}},
+		{"extension request ID", xaiVideosExtensionsAPI, `,"request_id":" fixture-source "`, []string{"request_id"}},
+		{"edit ID", xaiVideosEditsAPI, `,"id":" fixture-source "`, []string{"id"}},
+		{
+			"matching references", xaiVideosExtensionsAPI,
+			`,"request_id":" fixture-source ","video_id":"fixture-source","video_id":"fixture-source","id":null`,
+			[]string{"request_id", "video_id"},
+		},
+		{"external clip", xaiVideosExtensionsAPI, `,"video":{"url":"` + mediaURL + `"}`, nil},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				var payload []byte
+				executor := &videoAuthCaptureExecutor{
+					requestID: "fixture-mutation",
+					captureRequest: func(req coreexecutor.Request, opts coreexecutor.Options) {
+						payload = req.Payload
+						if string(req.Payload) != string(opts.OriginalRequest) {
+							t.Error("executor received different payload and original request")
+						}
+					},
+				}
+				handler := newVideoAuthBindingTestHandler(t, executor)
+				store := handler.VideoTaskStoreSnapshot()
+				authID := executor.requestID + "-auth-b"
+				owner := coreusage.HashAPIKeyIdentity("video-test-key")
+				if len(test.fields) > 0 {
+					if err := store.SaveVideoTask(
+						t.Context(), apihandlers.VideoTask{
+							ID: sourceID, Provider: "xai", OwnerIdentity: owner, AuthID: authID,
+							Model: defaultXAIVideosModel,
+						},
+					); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				endpoint := handler.XAIVideosEdits
+				if test.path == xaiVideosExtensionsAPI {
+					endpoint = handler.XAIVideosExtensions
+				}
+				body := strings.NewReader(`{"prompt":"make a new clip","duration":4` + test.source + `}`)
+				resp := performVideosEndpointRequest(t, http.MethodPost, test.path, "application/json", body, endpoint)
+				if resp.Code != http.StatusOK {
+					t.Fatalf("status = %d, want 200: %s", resp.Code, resp.Body.String())
+				}
+				authIDs := executor.AuthIDs()
+				if len(authIDs) != 1 || (len(test.fields) > 0 && authIDs[0] != authID) {
+					t.Fatalf("expected one dispatch using the source credential when present, got %v", authIDs)
+				}
+				created, found, err := store.LoadVideoTask(t.Context(), "xai", executor.requestID)
+				if err != nil || !found || created.OwnerIdentity != owner || created.AuthID != authIDs[0] {
+					t.Fatalf("new task binding = %+v, found = %t, err = %v", created, found, err)
+				}
+
+				seen := make(map[string]int)
+				gjson.ParseBytes(payload).ForEach(
+					func(key, value gjson.Result) bool {
+						switch field := key.String(); field {
+						case "request_id", "id", "video_id":
+							seen[field]++
+							if value.Type != gjson.String || value.String() != sourceID {
+								t.Errorf("forwarded %s = %s, want task %q", field, value.Raw, sourceID)
+							}
+						}
+						return true
+					},
+				)
+				if len(seen) != len(test.fields) {
+					t.Errorf("forwarded task fields = %v, want %v", seen, test.fields)
+				}
+				for _, field := range test.fields {
+					if seen[field] != 1 {
+						t.Errorf("forwarded %s %d times, want one", field, seen[field])
+					}
+				}
+				if gjson.GetBytes(payload, "prompt").String() != "make a new clip" ||
+					gjson.GetBytes(payload, "duration").Raw != "4" {
+					t.Error("forwarded payload changed prompt or duration")
+				}
+				if len(test.fields) == 0 && gjson.GetBytes(payload, "video.url").String() != mediaURL {
+					t.Error("forwarded payload lost the external clip URL")
+				}
+			},
+		)
+	}
+}
+
+func TestNormalizeXAIVideoMutationRejectsAmbiguousSource(t *testing.T) {
+	payload, videoID, err := runtimeexecutor.NormalizeXAIVideoMutation([]byte(`{"id":"draft label A","id":"draft label B"}`))
+	if err == nil || payload != nil || videoID != "" {
+		t.Fatal("ambiguous source must return an error without a payload or an ID")
+	}
+}
+
+func TestXAIVideosMutationRejectsInvalidSourceTypeBeforeDispatch(t *testing.T) {
+	executor := &videoAuthCaptureExecutor{requestID: "fixture-mutation"}
+	handler := newVideoAuthBindingTestHandler(t, executor)
+	resp := performVideosEndpointRequest(
+		t, http.MethodPost, xaiVideosEditsAPI, "application/json",
+		strings.NewReader(`{"prompt":"make a new clip","video_id":false}`), handler.XAIVideosEdits,
+	)
+	if resp.Code != http.StatusBadRequest || len(executor.AuthIDs()) != 0 {
+		t.Fatalf("status = %d, dispatches = %v, want 400 and no dispatch", resp.Code, executor.AuthIDs())
 	}
 }
 

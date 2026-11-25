@@ -742,6 +742,61 @@ func (e *XAIExecutor) executeImages(
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
 
+type xaiVideoMutationReferenceKey struct{}
+
+// WithXAIVideoMutationReference binds a video mutation to its task reference.
+// An empty reference allows only requests without an existing task.
+func WithXAIVideoMutationReference(ctx context.Context, reference string) context.Context {
+	return context.WithValue(ctx, xaiVideoMutationReferenceKey{}, reference)
+}
+
+// NormalizeXAIVideoMutation canonicalizes the payload and returns its single task reference.
+func NormalizeXAIVideoMutation(rawJSON []byte) ([]byte, string, error) {
+	if !json.Valid(rawJSON) {
+		return nil, "", fmt.Errorf("body must be valid JSON")
+	}
+	input := gjson.ParseBytes(rawJSON)
+	if !input.IsObject() {
+		return nil, "", fmt.Errorf("body must be a JSON object")
+	}
+
+	fields := make(map[string]any)
+	var videoID string
+	var validationErr error
+	// Inspect every task reference before rebuilding the payload, including repeated keys.
+	input.ForEach(
+		func(key, value gjson.Result) bool {
+			name := key.String()
+			switch name {
+			case "request_id", "id", "video_id":
+				var id string
+				if err := json.Unmarshal([]byte(value.Raw), &id); err != nil {
+					validationErr = fmt.Errorf("%s must be a string", name)
+					return false
+				}
+				id = strings.TrimSpace(id)
+				if id == "" {
+					return true
+				}
+				if videoID != "" && id != videoID {
+					validationErr = fmt.Errorf("video task references must identify the same video")
+					return false
+				}
+				videoID = id
+				fields[name] = videoID
+			default:
+				fields[name] = json.RawMessage(value.Raw)
+			}
+			return true
+		},
+	)
+	if validationErr != nil {
+		return nil, "", validationErr
+	}
+	payload, err := json.Marshal(fields)
+	return payload, videoID, err
+}
+
 func (e *XAIExecutor) executeVideos(
 	ctx context.Context,
 	auth *cliproxyauth.Auth,
@@ -773,6 +828,10 @@ func (e *XAIExecutor) executeVideos(
 			endpointPath = xaiVideosPath + "/" + url.PathEscape(requestID)
 		}
 	}
+	expectedReference, checkReference := ctx.Value(xaiVideoMutationReferenceKey{}).(string)
+	if checkReference && endpointPath != xaiVideosEditsPath && endpointPath != xaiVideosExtensionsPath {
+		return resp, statusErr{code: http.StatusBadRequest, msg: "video mutation operation changed"}
+	}
 	if method == http.MethodPost {
 		original := req.Payload
 		if len(opts.OriginalRequest) > 0 {
@@ -786,6 +845,13 @@ func (e *XAIExecutor) executeVideos(
 			return resp, err
 		}
 		payload = normalizeXAIImageRefs(payload)
+		if checkReference {
+			canonical, reference, normalizeErr := NormalizeXAIVideoMutation(payload)
+			if normalizeErr != nil || reference != expectedReference {
+				return resp, statusErr{code: http.StatusBadRequest, msg: "video task reference changed"}
+			}
+			payload = canonical
+		}
 		body = bytes.NewReader(payload)
 	}
 	requestURL := strings.TrimSuffix(baseURL, "/") + endpointPath

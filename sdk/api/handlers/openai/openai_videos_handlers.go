@@ -279,15 +279,22 @@ func readVideosCreateRequest(c *gin.Context) ([]byte, error) {
 	}
 }
 
-func readXAIVideosNativeRequest(c *gin.Context) ([]byte, error) {
+func readXAIVideosNativeRequest(c *gin.Context, mutation bool) ([]byte, string, error) {
 	rawJSON, err := handlers.ReadRequestBody(c)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	if mutation {
+		return runtimeexecutor.NormalizeXAIVideoMutation(rawJSON)
 	}
 	if !json.Valid(rawJSON) {
-		return nil, fmt.Errorf("body must be valid JSON")
+		return nil, "", fmt.Errorf("body must be valid JSON")
 	}
-	return rawJSON, nil
+	videoID := videoIDFromPayload(rawJSON)
+	if videoID == "" {
+		videoID = strings.TrimSpace(gjson.GetBytes(rawJSON, "video_id").String())
+	}
+	return rawJSON, videoID, nil
 }
 
 func videosCreateRequestFromForm(c *gin.Context) ([]byte, error) {
@@ -874,19 +881,19 @@ func (h *APIHandler) VideosCreate(c *gin.Context) {
 }
 
 func (h *APIHandler) XAIVideosGenerations(c *gin.Context) {
-	h.handleXAIVideosNativePost(c)
+	h.handleXAIVideosNativePost(c, false)
 }
 
 func (h *APIHandler) XAIVideosEdits(c *gin.Context) {
-	h.handleXAIVideosNativePost(c)
+	h.handleXAIVideosNativePost(c, true)
 }
 
 func (h *APIHandler) XAIVideosExtensions(c *gin.Context) {
-	h.handleXAIVideosNativePost(c)
+	h.handleXAIVideosNativePost(c, true)
 }
 
-func (h *APIHandler) handleXAIVideosNativePost(c *gin.Context) {
-	rawJSON, err := readXAIVideosNativeRequest(c)
+func (h *APIHandler) handleXAIVideosNativePost(c *gin.Context, mutation bool) {
+	rawJSON, videoID, err := readXAIVideosNativeRequest(c, mutation)
 	if err != nil {
 		c.JSON(
 			http.StatusBadRequest, handlers.ErrorResponse{
@@ -909,7 +916,10 @@ func (h *APIHandler) handleXAIVideosNativePost(c *gin.Context) {
 
 	routingModel := routingXAIVideosModel(videoModel)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "model", canonicalXAIVideosModel(videoModel))
-	h.collectXAIVideosNative(c, rawJSON, routingModel, true)
+	if mutation {
+		c.Request = c.Request.WithContext(runtimeexecutor.WithXAIVideoMutationReference(c.Request.Context(), videoID))
+	}
+	h.collectXAIVideosNative(c, rawJSON, routingModel, videoID, true)
 }
 
 //goland:noinspection GoUnnecessarilyExportedIdentifiers
@@ -932,7 +942,7 @@ func (h *APIHandler) XAIVideosRetrieve(c *gin.Context) {
 
 	payload := []byte(`{}`)
 	payload, _ = sjson.SetBytes(payload, "request_id", requestID)
-	h.collectXAIVideosNative(c, payload, defaultXAIVideosModel, false)
+	h.collectXAIVideosNative(c, payload, defaultXAIVideosModel, requestID, false)
 }
 
 func (h *APIHandler) VideosRetrieve(c *gin.Context) {
@@ -1162,7 +1172,9 @@ func copyVideoContentHeaders(dst http.Header, src http.Header) {
 	}
 }
 
-func (h *APIHandler) collectXAIVideosNative(c *gin.Context, rawJSON []byte, model string, bindCreatedVideoAuth bool) {
+func (h *APIHandler) collectXAIVideosNative(
+	c *gin.Context, rawJSON []byte, model, videoID string, bindCreatedVideoAuth bool,
+) {
 	c.Header("Content-Type", "application/json")
 
 	if _, _, ok := h.videoTaskStorage(c); !ok {
@@ -1171,10 +1183,6 @@ func (h *APIHandler) collectXAIVideosNative(c *gin.Context, rawJSON []byte, mode
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
 	defer cliCancel(nil)
 	selectedAuthID := ""
-	videoID := videoIDFromPayload(rawJSON)
-	if videoID == "" {
-		videoID = strings.TrimSpace(gjson.GetBytes(rawJSON, "video_id").String())
-	}
 	executionModel := model
 	if !bindCreatedVideoAuth || videoID != "" {
 		task, ok := h.loadVideoTask(c, videoID)
