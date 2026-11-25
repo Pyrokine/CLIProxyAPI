@@ -13,7 +13,7 @@ func TestPluginOAuthCancelAttachmentRejectsStaleWorkerWithoutCancellingReplaceme
 	sessions := newOAuthSessionStore(time.Minute)
 	const state, provider = "reused-state", "custom-sso"
 	var old oauthSession
-	if err := sessions.registerPlugin(state, provider, "old-nonce", t.TempDir(), nil, &old); err != nil {
+	if err := sessions.registerPlugin(state, provider, "old-nonce", t.TempDir(), nil, [32]byte{}, &old); err != nil {
 		t.Fatal(err)
 	}
 	oldCtx, oldCancel := context.WithCancel(context.Background())
@@ -21,7 +21,7 @@ func TestPluginOAuthCancelAttachmentRejectsStaleWorkerWithoutCancellingReplaceme
 	if !sessions.cancel(state) {
 		t.Fatal("old session was not cancelled before attaching its worker")
 	}
-	if err := sessions.registerPlugin(state, provider, "new-nonce", t.TempDir(), nil); err != nil {
+	if err := sessions.registerPlugin(state, provider, "new-nonce", t.TempDir(), nil, [32]byte{}); err != nil {
 		t.Fatal(err)
 	}
 	current, _ := sessions.get(state)
@@ -89,7 +89,7 @@ func TestPluginOAuthRegistrationReturnsOriginalGenerationSnapshot(t *testing.T) 
 	var registered oauthSession
 	if err := sessions.registerPlugin(
 		state, provider, "old-nonce", dir,
-		map[string]any{"nested": map[string]any{"generation": "old"}}, &registered,
+		map[string]any{"nested": map[string]any{"generation": "old"}}, [32]byte{}, &registered,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestPluginOAuthRegistrationReturnsOriginalGenerationSnapshot(t *testing.T) 
 	if !sessions.cancel(state) {
 		t.Fatal("original generation was not cancelled")
 	}
-	if err := sessions.registerPlugin(state, provider, "new-nonce", t.TempDir(), nil); err != nil {
+	if err := sessions.registerPlugin(state, provider, "new-nonce", t.TempDir(), nil, [32]byte{}); err != nil {
 		t.Fatal(err)
 	}
 	replacement, _ := sessions.get(state)

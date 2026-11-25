@@ -91,7 +91,7 @@ func TestMiddlewareTrustedProxyRateLimitIsolatesClients(t *testing.T) {
 	}
 
 	blocked := httptest.NewRecorder()
-	engine.ServeHTTP(blocked, proxiedManagementRequest("198.51.100.10", "correct"))
+	engine.ServeHTTP(blocked, proxiedManagementRequest("198.51.100.10", "unverified"))
 	if blocked.Code != http.StatusTooManyRequests {
 		t.Fatalf("blocked client status = %d, want 429", blocked.Code)
 	}
@@ -100,9 +100,9 @@ func TestMiddlewareTrustedProxyRateLimitIsolatesClients(t *testing.T) {
 	}
 
 	other := httptest.NewRecorder()
-	engine.ServeHTTP(other, proxiedManagementRequest("198.51.100.11", "correct"))
-	if other.Code != http.StatusOK {
-		t.Fatalf("other client status = %d, want 200: %s", other.Code, other.Body.String())
+	engine.ServeHTTP(other, proxiedManagementRequest("198.51.100.11", "unverified"))
+	if other.Code != http.StatusUnauthorized {
+		t.Fatalf("other client status = %d, want 401: %s", other.Code, other.Body.String())
 	}
 }
 
@@ -206,7 +206,7 @@ func TestMiddlewareInternalTokenBypassesTrustedPeerBan(t *testing.T) {
 	}
 
 	blocked := httptest.NewRecorder()
-	engine.ServeHTTP(blocked, directManagementRequest("correct"))
+	engine.ServeHTTP(blocked, directManagementRequest("unverified"))
 	if blocked.Code != http.StatusTooManyRequests {
 		t.Fatalf("trusted peer status = %d, want 429", blocked.Code)
 	}
@@ -218,7 +218,7 @@ func TestMiddlewareInternalTokenBypassesTrustedPeerBan(t *testing.T) {
 	}
 
 	stillBlocked := httptest.NewRecorder()
-	engine.ServeHTTP(stillBlocked, directManagementRequest("correct"))
+	engine.ServeHTTP(stillBlocked, directManagementRequest("unverified"))
 	if stillBlocked.Code != http.StatusTooManyRequests {
 		t.Fatalf("trusted peer status after internal request = %d, want 429", stillBlocked.Code)
 	}
@@ -257,7 +257,7 @@ func TestMiddlewareInternalTokenDoesNotResetTrustedPeerFailures(t *testing.T) {
 	}
 
 	blocked := httptest.NewRecorder()
-	engine.ServeHTTP(blocked, directManagementRequest("correct"))
+	engine.ServeHTTP(blocked, directManagementRequest("unverified"))
 	if blocked.Code != http.StatusTooManyRequests {
 		t.Fatalf("trusted peer status = %d, want 429", blocked.Code)
 	}

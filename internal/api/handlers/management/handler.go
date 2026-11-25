@@ -4,6 +4,7 @@ package management
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -47,6 +48,12 @@ type attemptInfo struct {
 	lastSuccessfulAuthAt   time.Time
 	lastFailureFingerprint string
 	lastCountedFailureAt   time.Time
+	bcryptRetryAfter       time.Time
+}
+
+type managementKeyProof struct {
+	secretHash  string
+	fingerprint []byte
 }
 
 const (
@@ -60,7 +67,19 @@ const (
 	maxManagementRateLimitClients              = 4096
 	maxManagementRateLimitStateBytes           = 8 << 20
 	managementRateLimitCapacityWarningInterval = time.Minute
+	managementSessionTTL                       = 30 * time.Minute
+	maxManagementSessions                      = 4096
+	ManagementSessionTokenHeader               = "X-CPA-Management-Session-Token"
 )
+
+type managementSession struct {
+	expiresAt time.Time
+	actor     string
+}
+
+type managementSessionContextKey struct{}
+
+const managementKeyGenerationContextKey = "management.key-auth-generation"
 
 // attemptCleanupInterval controls how often stale IP entries are purged
 const attemptCleanupInterval = 1 * time.Hour
@@ -141,6 +160,10 @@ type Handler struct {
 	mu                             sync.RWMutex
 	configGeneration               uint64
 	managementAuthGeneration       uint64
+	managementSessions             map[[sha256.Size]byte]managementSession
+	managementProofKey             string
+	managementProof                managementKeyProof
+	bcryptRetryMu                  sync.Mutex
 	configCommitted                ConfigCommittedFunc
 	configYAMLKeyMu                sync.Mutex
 	configYAMLKey                  [32]byte
@@ -282,6 +305,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:                     sdkAuth.GetTokenStore(),
 		envSecret:                      envSecret,
 		internalToken:                  generateInternalToken(),
+		managementProofKey:             generateInternalToken(),
 		pluginReleaseCache:             make(map[string]pluginReleaseCacheEntry),
 	}
 
@@ -430,8 +454,11 @@ func (h *Handler) startAttemptCleanup() {
 				select {
 				case <-ctx.Done():
 					return
-				case <-ticker.C:
+				case now := <-ticker.C:
 					h.purgeStaleAttempts()
+					h.mu.Lock()
+					h.purgeExpiredManagementSessionsLocked(now)
+					h.mu.Unlock()
 				}
 			}
 		},
@@ -551,6 +578,7 @@ func (h *Handler) recordFailedManagementAttempt(clientIP string, fingerprint str
 	if len(ai.failures) >= managementMaxFailures {
 		ai.banCount++
 		ai.blockedUntil = now.Add(managementBanDuration)
+		ai.bcryptRetryAfter = time.Time{}
 		ai.failures = ai.failures[:0]
 		h.appendRateLimitEventLocked(
 			rateLimitEventBanStarted,
@@ -728,6 +756,8 @@ func (h *Handler) setConfigLocked(cfg *config.Config) {
 	}
 	if previousSecret != nextSecret || previousRemote != nextRemote {
 		h.managementAuthGeneration++
+		clear(h.managementSessions)
+		h.managementProof = managementKeyProof{}
 	}
 	h.cfg = cfg
 	h.replaceAPIKeyAliasesSnapshot(configAPIKeyAliases(cfg))
@@ -746,6 +776,7 @@ func (h *Handler) SetLocalPassword(password string) {
 	if h.localPassword != password {
 		h.localPassword = password
 		h.managementAuthGeneration++
+		clear(h.managementSessions)
 	}
 }
 
@@ -827,75 +858,209 @@ func (h *Handler) AuthenticateManagementKey(
 	localClient bool,
 	provided string,
 ) (bool, int, string) {
-	cfg := h.configSnapshot()
-	localPassword := h.localPasswordSnapshot()
-	var (
-		allowRemote bool
-		secretHash  string
+	actor, retryAfter := h.authenticateManagementKey(
+		clientIP, localClient, provided, h.configSnapshot(), h.localPasswordSnapshot(), true,
 	)
+	if actor != "" {
+		return true, 0, ""
+	}
+	if retryAfter > 0 {
+		return false, http.StatusTooManyRequests, managementRateLimitMessage
+	}
+	return false, http.StatusUnauthorized, managementAuthFailureMessage
+}
+
+func (h *Handler) authenticateManagementKey(
+	clientIP string, localClient bool, provided string, cfg *config.Config, localPassword string, allowInternal bool,
+) (string, time.Duration) {
+	var allowRemote bool
+	var secretHash string
 	if cfg != nil {
 		allowRemote = cfg.RemoteManagement.AllowRemote
 		secretHash = cfg.RemoteManagement.SecretKey
 	}
-	envSecret := h.envSecret
-
 	now := time.Now()
-	if _, banned := h.currentRateLimitBan(clientIP, now); banned {
-		return false, http.StatusTooManyRequests, managementRateLimitMessage
+	remaining, banned := h.currentRateLimitBan(clientIP, now)
+	actor, failure := "", "invalid-credential"
+	switch {
+	case !localClient && !allowRemote:
+		failure = "remote-disabled"
+	case secretHash == "" && h.envSecret == "" && !(localClient && localPassword != ""):
+		failure = "management-secret-unavailable"
+	case provided == "":
+		failure = "missing-credential"
+	case localClient && localPassword != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(localPassword)) == 1:
+		actor = managementMutationActorLocal
+	case allowInternal && localClient && h.internalToken != "" && subtle.ConstantTimeCompare(
+		[]byte(provided), []byte(h.internalToken),
+	) == 1:
+		actor = managementMutationActorInternal
+	case h.envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(h.envSecret)) == 1:
+		actor = managementMutationActorKey
+	case secretHash != "" && h.verifyManagementBcryptKey(secretHash, provided, clientIP, now, banned):
+		actor = managementMutationActorKey
 	}
-
-	fail := func(reason string) {
-		h.recordFailedManagementAttempt(
-			clientIP,
-			managementFailureFingerprint(reason, provided),
-			time.Now(),
-		)
-	}
-	if !localClient && !allowRemote {
-		fail("remote-disabled")
-		return false, http.StatusUnauthorized, managementAuthFailureMessage
-	}
-
-	recordSuccess := func() {
+	if actor != "" {
 		h.recordManagementAuthSuccess(clientIP, time.Now())
+		return actor, 0
 	}
-	if secretHash == "" && envSecret == "" {
-		if !(localClient && localPassword != "") {
-			fail("management-secret-unavailable")
-			return false, http.StatusUnauthorized, managementAuthFailureMessage
-		}
+	if banned {
+		return "", remaining
 	}
-	if provided == "" {
-		fail("missing-credential")
-		return false, http.StatusUnauthorized, managementAuthFailureMessage
-	}
+	h.recordFailedManagementAttempt(clientIP, managementFailureFingerprint(failure, provided), time.Now())
+	return "", 0
+}
 
-	if localClient {
-		if lp := localPassword; lp != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
-			recordSuccess()
-			return true, 0, ""
+func (h *Handler) verifyManagementBcryptKey(secretHash, provided, clientIP string, now time.Time, banned bool) bool {
+	proof := managementKeyProof{secretHash: secretHash}
+	if h.managementProofKey != "" {
+		mac := hmac.New(sha256.New, []byte(h.managementProofKey))
+		_, _ = mac.Write([]byte(provided))
+		proof.fingerprint = mac.Sum(nil)
+	}
+	if banned {
+		h.mu.RLock()
+		remembered := h.managementProof
+		h.mu.RUnlock()
+		if h.managementProofKey != "" && remembered.secretHash == secretHash &&
+			subtle.ConstantTimeCompare(remembered.fingerprint[:], proof.fingerprint[:]) == 1 {
+			return true
 		}
-		if it := h.internalToken; it != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(it)) == 1 {
-			recordSuccess()
-			return true, 0, ""
-		}
-	}
-	if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
-		recordSuccess()
-		return true, 0, ""
-	}
-	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
-		fail("invalid-credential")
-		return false, http.StatusUnauthorized, managementAuthFailureMessage
-	}
 
-	recordSuccess()
-	return true, 0, ""
+		// Allow a paced recovery check while keeping expensive verifications bounded.
+		if !h.bcryptRetryMu.TryLock() {
+			return false
+		}
+		defer h.bcryptRetryMu.Unlock()
+		h.attemptsMu.Lock()
+		attempt := h.failedAttempts[clientIP]
+		canRetry := attempt != nil && now.Before(attempt.blockedUntil) && !now.Before(attempt.bcryptRetryAfter)
+		if canRetry {
+			attempt.bcryptRetryAfter = now.Add(managementFailureWindow / managementMaxFailures)
+		}
+		h.attemptsMu.Unlock()
+		if !canRetry {
+			return false
+		}
+	}
+	if bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
+		return false
+	}
+	if h.managementProofKey != "" {
+		h.mu.Lock()
+		if h.cfg != nil && h.cfg.RemoteManagement.SecretKey == secretHash {
+			h.managementProof = proof
+		}
+		h.mu.Unlock()
+	}
+	return true
+}
+
+// ManagementSessionID returns the ID of the browser session authenticating the request.
+func ManagementSessionID(ctx context.Context) [sha256.Size]byte {
+	id, _ := ctx.Value(managementSessionContextKey{}).([sha256.Size]byte)
+	return id
+}
+
+func (h *Handler) managementSessionActor(client managementClientAddress, id [sha256.Size]byte) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	session, ok := h.managementSessions[id]
+	if !ok || !time.Now().Before(session.expiresAt) {
+		return ""
+	}
+	if !client.local && (session.actor == managementMutationActorLocal || h.cfg == nil || !h.cfg.RemoteManagement.AllowRemote) {
+		return ""
+	}
+	return session.actor
+}
+
+// ManagementSessionActive checks the parent browser session of a resource cookie.
+func (h *Handler) ManagementSessionActive(c *gin.Context, cfg *config.Config, id [sha256.Size]byte) bool {
+	return h.managementSessionActor(resolveManagementClientAddress(c.Request, cfg), id) != ""
+}
+
+// ResourceSessionAuthorization retains the scope of the credential that issued a resource session.
+type ResourceSessionAuthorization struct{ actor string }
+
+func (h *Handler) ResourceSessionAuthorization(c *gin.Context) (ResourceSessionAuthorization, uint64, bool) {
+	actor := managementMutationActor(c)
+	authorization := ResourceSessionAuthorization{actor: actor}
+	if actor == managementMutationActorInternal || ManagementSessionID(c.Request.Context()) != ([sha256.Size]byte{}) {
+		return authorization, h.ManagementAuthenticationGeneration(), true
+	}
+	value, _ := c.Get(managementKeyGenerationContextKey)
+	generation, ok := value.(uint64)
+	return authorization, generation, ok
+}
+
+func (a ResourceSessionAuthorization) AllowsRequest(r *http.Request, cfg *config.Config) bool {
+	client := resolveManagementClientAddress(r, cfg)
+	switch a.actor {
+	case managementMutationActorKey:
+		return client.local || cfg != nil && cfg.RemoteManagement.AllowRemote
+	case managementMutationActorLocal:
+		return client.local
+	case managementMutationActorInternal:
+		return client.peerLocal
+	default:
+		return false
+	}
+}
+
+func (h *Handler) purgeExpiredManagementSessionsLocked(now time.Time) {
+	for id, session := range h.managementSessions {
+		if !now.Before(session.expiresAt) {
+			delete(h.managementSessions, id)
+		}
+	}
+}
+
+func (h *Handler) CreateManagementSession(c *gin.Context) {
+	generation, keyAuthenticated := c.Get(managementKeyGenerationContextKey)
+	if !keyAuthenticated {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
+		return
+	}
+	token := generateInternalToken()
+	id := sha256.Sum256([]byte(token))
+	now := time.Now()
+	h.mu.Lock()
+	if generation != h.managementAuthGeneration {
+		h.mu.Unlock()
+		c.JSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
+		return
+	}
+	h.purgeExpiredManagementSessionsLocked(now)
+	if len(h.managementSessions) >= maxManagementSessions {
+		h.mu.Unlock()
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "management session capacity reached"})
+		return
+	}
+	if h.managementSessions == nil {
+		h.managementSessions = make(map[[sha256.Size]byte]managementSession)
+	}
+	h.managementSessions[id] = managementSession{
+		expiresAt: now.Add(managementSessionTTL), actor: managementMutationActor(c),
+	}
+	h.mu.Unlock()
+	c.JSON(http.StatusCreated, gin.H{"session_token": token})
+}
+
+func (h *Handler) RevokeManagementSession(c *gin.Context) {
+	id := ManagementSessionID(c.Request.Context())
+	if id == ([sha256.Size]byte{}) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
+		return
+	}
+	h.mu.Lock()
+	delete(h.managementSessions, id)
+	h.mu.Unlock()
+	c.Status(http.StatusNoContent)
 }
 
 // middleware enforces access control for management endpoints.
-// All requests (local and remote) require a valid management key.
-// Additionally, remote access requires allow-remote-management=true.
+// Remote access requires allow-remote-management=true.
 func (h *Handler) middleware() gin.HandlerFunc {
 	return h.MiddlewareWithConfig(nil)
 }
@@ -911,9 +1076,15 @@ func setManagementResponseHeaders(c *gin.Context) {
 func (h *Handler) MiddlewareWithConfig(configSnapshot func(*gin.Context) *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
-		cfg := h.configSnapshot()
+		var cfg *config.Config
 		if configSnapshot != nil {
 			cfg = configSnapshot(c)
+		}
+		h.mu.RLock()
+		currentCfg, localPassword, authGeneration := h.cfg, h.localPassword, h.managementAuthGeneration
+		h.mu.RUnlock()
+		if configSnapshot == nil {
+			cfg = currentCfg
 		}
 		client := resolveManagementClientAddress(c.Request, cfg)
 		if c.Request != nil {
@@ -922,20 +1093,26 @@ func (h *Handler) MiddlewareWithConfig(configSnapshot func(*gin.Context) *config
 			)
 		}
 		c.Set(managementClientAddressContextKey, client)
-		clientIP := client.ip
-		localClient := client.local
-		provided := managementKeyFromRequest(c)
-		var (
-			allowRemote bool
-			secretHash  string
-		)
-		if cfg != nil {
-			allowRemote = cfg.RemoteManagement.AllowRemote
-			secretHash = cfg.RemoteManagement.SecretKey
+		if tokens := c.Request.Header.Values(ManagementSessionTokenHeader); len(tokens) != 0 {
+			if len(tokens) == 1 && len(tokens[0]) == 64 {
+				id := sha256.Sum256([]byte(tokens[0]))
+				if actor := h.managementSessionActor(client, id); actor != "" {
+					c.Request = c.Request.WithContext(
+						context.WithValue(
+							c.Request.Context(), managementSessionContextKey{}, id,
+						),
+					)
+					c.Request.Header.Del(ManagementSessionTokenHeader)
+					setManagementMutationActor(c, actor)
+					setManagementResponseHeaders(c)
+					c.Next()
+					return
+				}
+			}
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
+			return
 		}
-		envSecret := h.envSecret
-		localPassword := h.localPasswordSnapshot()
-
+		provided := managementKeyFromRequest(c)
 		if client.peerLocal {
 			if it := h.internalToken; it != "" &&
 				subtle.ConstantTimeCompare([]byte(provided), []byte(it)) == 1 {
@@ -946,65 +1123,19 @@ func (h *Handler) MiddlewareWithConfig(configSnapshot func(*gin.Context) *config
 			}
 		}
 
-		now := time.Now()
-		if remaining, banned := h.currentRateLimitBan(clientIP, now); banned {
-			abortManagementRateLimit(c, now, remaining)
-			return
-		}
-
-		fail := func(reason string) {
-			h.recordFailedManagementAttempt(
-				clientIP,
-				managementFailureFingerprint(reason, provided),
-				time.Now(),
-			)
-		}
-		if !localClient && !allowRemote {
-			fail("remote-disabled")
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
-			return
-		}
-
-		recordSuccess := func() {
-			h.recordManagementAuthSuccess(clientIP, time.Now())
-		}
-		if secretHash == "" && envSecret == "" {
-			if !(localClient && localPassword != "") {
-				fail("management-secret-unavailable")
+		actor, retryAfter := h.authenticateManagementKey(client.ip, client.local, provided, cfg, localPassword, false)
+		if actor == "" {
+			if retryAfter > 0 {
+				abortManagementRateLimit(c, time.Now(), retryAfter)
+			} else {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
-				return
 			}
-		}
-		if provided == "" {
-			fail("missing-credential")
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
 			return
 		}
-
-		if localClient {
-			if lp := localPassword; lp != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
-				recordSuccess()
-				setManagementMutationActor(c, managementMutationActorLocal)
-				setManagementResponseHeaders(c)
-				c.Next()
-				return
-			}
+		if cfg == currentCfg {
+			c.Set(managementKeyGenerationContextKey, authGeneration)
 		}
-		if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
-			recordSuccess()
-			setManagementMutationActor(c, managementMutationActorKey)
-			setManagementResponseHeaders(c)
-			c.Next()
-			return
-		}
-		if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
-			fail("invalid-credential")
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
-			return
-		}
-
-		recordSuccess()
-		setManagementMutationActor(c, managementMutationActorKey)
+		setManagementMutationActor(c, actor)
 		setManagementResponseHeaders(c)
 		c.Next()
 	}

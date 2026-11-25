@@ -1,6 +1,7 @@
 package management
 
 import (
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"net/url"
@@ -18,6 +19,36 @@ type oauthCallbackRequest struct {
 	Error       string `json:"error"`
 }
 
+type oauthCallbackInitiator struct {
+	sessionID [sha256.Size]byte
+	nonce     string
+}
+
+func oauthRequestNonce(c *gin.Context) string {
+	if header := c.GetHeader(oauthNonceHeader); header != "" || ManagementSessionID(c.Request.Context()) != ([sha256.Size]byte{}) {
+		return header
+	}
+	return c.Query("nonce")
+}
+
+func (session oauthSession) acceptsManualCallback(initiator oauthCallbackInitiator) bool {
+	return session.Initiator == ([sha256.Size]byte{}) ||
+		(session.Initiator == initiator.sessionID && session.verifyNonce(initiator.nonce))
+}
+
+func (session oauthSession) authorizeManagementRequest(c *gin.Context) (bool, int) {
+	initiator := oauthCallbackInitiator{
+		sessionID: ManagementSessionID(c.Request.Context()), nonce: oauthRequestNonce(c),
+	}
+	if session.Initiator != ([sha256.Size]byte{}) {
+		return session.acceptsManualCallback(initiator), http.StatusForbidden
+	}
+	if initiator.sessionID != ([sha256.Size]byte{}) {
+		return session.verifyNonce(initiator.nonce), http.StatusForbidden
+	}
+	return session.verifyNonce(initiator.nonce), http.StatusUnauthorized
+}
+
 func (h *Handler) GetOAuthCallback(c *gin.Context) {
 	req := oauthCallbackRequest{
 		Provider: strings.TrimSpace(c.Query("provider")),
@@ -33,7 +64,7 @@ func (h *Handler) GetOAuthCallback(c *gin.Context) {
 			req.Provider = session.Provider
 		}
 	}
-	h.handleOAuthCallback(c, req)
+	h.handleOAuthCallback(c, req, nil)
 }
 
 func (h *Handler) PostOAuthCallback(c *gin.Context) {
@@ -44,10 +75,13 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
 		return
 	}
-	h.handleOAuthCallback(c, req)
+	initiator := oauthCallbackInitiator{
+		sessionID: ManagementSessionID(c.Request.Context()), nonce: oauthRequestNonce(c),
+	}
+	h.handleOAuthCallback(c, req, &initiator)
 }
 
-func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) {
+func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest, manual *oauthCallbackInitiator) {
 	c.Header("Cache-Control", "no-store")
 	if h == nil || h.configSnapshot() == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "handler not initialized"})
@@ -96,13 +130,18 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 		return
 	}
 
-	sessionProvider, sessionStatus, _, ok := getOAuthSessionForCallback(state)
-	if !ok {
+	session, ok := oauthSessions.get(state)
+	if !ok || session.CallbackAccepted || session.Completed || session.Saving {
 		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "unknown or expired state"})
 		return
 	}
-	if sessionStatus != "" {
+	if manual != nil && !session.acceptsManualCallback(*manual) {
+		rejectMutation(c.Request.Context())
+		c.JSON(http.StatusForbidden, gin.H{"status": "error", "error": "oauth initiator does not match"})
+		return
+	}
+	if session.Status != "" {
 		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 		return
@@ -113,13 +152,13 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "unsupported provider"})
 		return
 	}
-	if !strings.EqualFold(sessionProvider, canonicalProvider) {
+	if !strings.EqualFold(session.Provider, canonicalProvider) {
 		rejectMutation(c.Request.Context())
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "provider does not match state"})
 		return
 	}
-	if _, errWrite := WriteOAuthCallbackFileForPendingSession(
-		canonicalProvider, state, code, errMsg,
+	if _, errWrite := writePendingOAuthCallback(
+		canonicalProvider, state, code, errMsg, manual,
 	); errWrite != nil {
 		if errors.Is(errWrite, errOAuthSessionNotPending) {
 			rejectMutation(c.Request.Context())

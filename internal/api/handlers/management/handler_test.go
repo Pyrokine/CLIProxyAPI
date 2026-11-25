@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -79,6 +80,34 @@ func TestMiddlewareSetsSupportPluginHeader(t *testing.T) {
 	if got := rec.Header().Get(pluginhost.SupportPluginHeader); got != pluginhost.SupportPluginHeaderValue() {
 		t.Fatalf("%s = %q, want %q", pluginhost.SupportPluginHeader, got, pluginhost.SupportPluginHeaderValue())
 	}
+}
+
+func TestManagementBrowserSessionExpires(t *testing.T) {
+	const token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	id := sha256.Sum256([]byte(token))
+	h := &Handler{
+		cfg: &config.Config{}, managementSessions: map[[sha256.Size]byte]managementSession{
+			id: {expiresAt: time.Now().Add(time.Minute), actor: managementMutationActorLocal},
+		},
+	}
+	engine := gin.New()
+	engine.GET("/v0/management/config", h.middleware(), func(c *gin.Context) { c.Status(http.StatusOK) })
+	request := func(want int) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set(ManagementSessionTokenHeader, token)
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("status=%d, want %d", rec.Code, want)
+		}
+	}
+	request(http.StatusOK)
+	expired := h.managementSessions[id]
+	expired.expiresAt = time.Now().Add(-time.Second)
+	h.managementSessions[id] = expired
+	request(http.StatusUnauthorized)
 }
 
 func TestGitHubGet_AllowsLargeResponseBody(t *testing.T) {
@@ -349,7 +378,7 @@ func TestMiddleware_UntrustedXRealIPDoesNotBypassRateLimit(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := newLoopbackRequest("GET", "/test", "Bearer env-pass")
+	req := newLoopbackRequest("GET", "/test", "Bearer unverified")
 	req.Header.Set("X-Real-IP", "20.0.0.99")
 	engine.ServeHTTP(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
@@ -492,11 +521,15 @@ func TestMiddleware_IPBanning(t *testing.T) {
 		engine.ServeHTTP(rec, req)
 	}
 
+	verified := httptest.NewRecorder()
+	engine.ServeHTTP(verified, newRemoteRequest("GET", "/test", "Bearer "+secret))
+	if verified.Code != http.StatusOK {
+		t.Fatalf("verified credential during source cooldown: status = %d, want 200", verified.Code)
+	}
 	rec := httptest.NewRecorder()
-	req := newRemoteRequest("GET", "/test", "Bearer "+secret)
-	engine.ServeHTTP(rec, req)
+	engine.ServeHTTP(rec, newRemoteRequest("GET", "/test", "Bearer unverified"))
 	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 after IP ban, got %d", rec.Code)
+		t.Fatalf("unverified credential during source cooldown: status = %d, want 429", rec.Code)
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, managementRateLimitMessage) {
@@ -593,7 +626,7 @@ func TestMiddlewareRateLimitResponseIncludesRetryContract(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	engine.ServeHTTP(rec, newRemoteRequest("GET", "/test", "Bearer correct"))
+	engine.ServeHTTP(rec, newRemoteRequest("GET", "/test", "Bearer unverified"))
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429", rec.Code)
 	}
@@ -1795,6 +1828,7 @@ func TestSaveTokenRecordUsesAuthFlowConfigGeneration(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/oauth", nil)
 	flowCfg, ok := h.authFlowConfig(c)
 	if !ok {
 		t.Fatalf("authFlowConfig failed with status %d", rec.Code)

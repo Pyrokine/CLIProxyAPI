@@ -68,6 +68,9 @@ func queryValuesToMetadata(values url.Values) map[string]any {
 	}
 	metadata := make(map[string]any, len(values))
 	for key, items := range values {
+		if strings.EqualFold(key, "nonce") {
+			continue
+		}
 		switch len(items) {
 		case 0:
 			continue
@@ -159,8 +162,10 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 				return
 			}
 			var session oauthSession
-			if errRegister := registerPluginOAuthSession(
-				state, provider, strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, response.Metadata, &session,
+			sessions := oauthSessions
+			if errRegister := sessions.registerPlugin(
+				state, provider, oauthRequestNonce(c), flowCfg.AuthDir, response.Metadata,
+				ManagementSessionID(c.Request.Context()), &session,
 			); errRegister != nil {
 				log.WithError(errRegister).WithField(
 					"provider", provider,
@@ -168,13 +173,8 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 				c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
 				return
 			}
-			sessions := oauthSessions
 			// The creation receipt confirms the task, not its later credential writes.
-			workerCtx := coreauth.WithRequestInfo(
-				context.Background(), &coreauth.RequestInfo{
-					Query: c.Request.URL.Query(), Headers: c.Request.Header.Clone(),
-				},
-			)
+			workerCtx := populateAuthContext(context.Background(), c)
 			workerCtx = withOAuthSessionContext(workerCtx, state, provider)
 			workerCtx, cancel := context.WithDeadline(workerCtx, session.ExpiresAt)
 			if sessions.attachCancel(state, provider, cancel, session.CreatedAt) {

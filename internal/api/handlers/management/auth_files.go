@@ -252,6 +252,14 @@ func (h *Handler) authDirSnapshot() string {
 }
 
 func (h *Handler) authFlowConfig(c *gin.Context) (*config.Config, bool) {
+	if c.Request.Method == http.MethodGet && ManagementSessionID(c.Request.Context()) != ([sha256.Size]byte{}) {
+		proofs := c.Request.Header.Values(oauthNonceHeader)
+		if len(proofs) != 1 || len(strings.TrimSpace(proofs[0])) == 0 || len(proofs[0]) > maxOAuthNonceLength {
+			rejectMutation(c.Request.Context())
+			c.JSON(http.StatusBadRequest, gin.H{"error": "oauth initiator credential is required"})
+			return nil, false
+		}
+	}
 	cfg := h.configSnapshot()
 	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "config unavailable"})
@@ -3574,7 +3582,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	}
 
 	registerOAuthSessionForAuthDir(
-		state, "anthropic", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, "anthropic", oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 
 	forwarder, ok := h.setupOAuthForwarder(
@@ -3716,7 +3724,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	authURL := conf.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 
 	registerOAuthSessionForAuthDir(
-		state, "gemini", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, "gemini", oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 
 	isWebUI := isWebUIRequest(c)
@@ -3987,7 +3995,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	}
 
 	registerOAuthSessionForAuthDir(
-		state, "codex", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, "codex", oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 
 	forwarder, ok := h.setupOAuthForwarder(c, flowCfg, "codex", codexCallbackPort, "/codex/callback")
@@ -4113,7 +4121,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	registerOAuthSessionForAuthDir(
-		state, "antigravity", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, "antigravity", oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 
 	forwarder, ok := h.setupOAuthForwarder(
@@ -4262,7 +4270,7 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 	authURL := deviceFlow.VerificationURIComplete
 
 	registerOAuthSessionForAuthDir(
-		state, "qwen", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, "qwen", oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 	pollCtx, cancelPoll := context.WithCancel(ctx)
 	if !setOAuthSessionCancel(state, "qwen", cancelPoll) {
@@ -4388,7 +4396,7 @@ func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 	}
 
 	registerOAuthSessionForAuthDir(
-		state, provider, strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, provider, oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -4463,7 +4471,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	authURL, redirectURI := authSvc.AuthorizationURL(state, iflowauth.CallbackPort)
 
 	registerOAuthSessionForAuthDir(
-		state, "iflow", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, "iflow", oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 
 	forwarder, ok := h.setupOAuthForwarder(c, flowCfg, "iflow", iflowauth.CallbackPort, "/iflow/callback")
@@ -4773,8 +4781,8 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "expired", "error": "unknown or expired state"})
 		return
 	}
-	if !verifyOAuthNonce(state, c.Query("nonce")) {
-		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "phase": "error", "error": "nonce mismatch"})
+	if ok, status := session.authorizeManagementRequest(c); !ok {
+		c.JSON(status, gin.H{"status": "error", "phase": "error", "error": "oauth initiator does not match"})
 		return
 	}
 	if session.Completed {
@@ -4804,12 +4812,15 @@ func (h *Handler) CancelAuthSession(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
 		return
 	}
-	if _, _, _, ok := getOAuthSessionDetails(state); ok && !verifyOAuthNonce(state, c.Query("nonce")) {
-		rejectMutation(c.Request.Context())
-		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "error": "nonce mismatch"})
-		return
+	cancelled := false
+	if session, exists := oauthSessions.get(state); exists {
+		if ok, status := session.authorizeManagementRequest(c); !ok {
+			rejectMutation(c.Request.Context())
+			c.JSON(status, gin.H{"status": "error", "error": "oauth initiator does not match"})
+			return
+		}
+		cancelled = oauthSessions.cancel(state, session.CreatedAt)
 	}
-	cancelled := cancelOAuthSession(state)
 	if cancelled {
 		RecordMutationEffect(c.Request.Context(), "task.runtime_applied", "task")
 		CompleteMutation(c.Request.Context())
@@ -4848,7 +4859,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 	}
 
 	registerOAuthSessionForAuthDir(
-		state, "xai", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, "xai", oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 
 	go func() {
@@ -4957,9 +4968,10 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 
 // populateAuthContext extracts request info and adds it to the context
 func populateAuthContext(ctx context.Context, c *gin.Context) context.Context {
-	info := &coreauth.RequestInfo{
-		Query:   c.Request.URL.Query(),
-		Headers: c.Request.Header,
-	}
+	query := c.Request.URL.Query()
+	query.Del("nonce")
+	headers := c.Request.Header.Clone()
+	headers.Del(oauthNonceHeader)
+	info := &coreauth.RequestInfo{Query: query, Headers: headers}
 	return coreauth.WithRequestInfo(ctx, info)
 }

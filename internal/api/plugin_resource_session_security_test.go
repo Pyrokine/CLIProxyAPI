@@ -6,19 +6,20 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 )
 
-func issueAuditResourceCookie(t *testing.T, server *Server) *http.Cookie {
+func issueAuditResourceCookie(t *testing.T, server *Server, key string) *http.Cookie {
 	t.Helper()
+	server.managementRoutesEnabled.store(true)
 	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/example", nil)
-	if !server.issuePluginResourceSession(ctx) {
-		t.Fatal("session issue failed")
-	}
+	request := httptest.NewRequest(http.MethodPost, pluginResourceSessionPath, nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("X-Management-Key", key)
+	server.engine.ServeHTTP(recorder, request)
 	cookies := recorder.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("cookies=%v", cookies)
+	if recorder.Code != http.StatusNoContent || len(cookies) != 1 {
+		t.Fatalf("resource session issuance failed: status=%d, cookies=%d", recorder.Code, len(cookies))
 	}
 	return cookies[0]
 }
@@ -27,14 +28,94 @@ func resourceCookieAuthenticated(server *Server, cookie *http.Cookie) bool {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/example", nil)
+	ctx.Request.RemoteAddr = "127.0.0.1:12345"
 	ctx.Request.AddCookie(cookie)
 	return server.pluginResourceSessionAuthenticated(ctx)
+}
+
+func TestPluginResourceSessionPreservesManagementAddressScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, credential string
+		allowRemote      bool
+		wantRemote       bool
+	}{
+		{name: "local password with remote management", credential: "local", allowRemote: true},
+		{name: "management key with local management", credential: "key"},
+		{name: "management key with remote management", credential: "key", allowRemote: true, wantRemote: true},
+		{name: "internal credential with remote management", credential: "internal", allowRemote: true},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				t.Setenv("MANAGEMENT_PASSWORD", "")
+				server := newTestServer(t)
+				cfg := *server.configSnapshot()
+				cfg.RemoteManagement.AllowRemote = tc.allowRemote
+				hash, err := bcrypt.GenerateFromPassword([]byte("fixture-management-key"), bcrypt.MinCost)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.RemoteManagement.SecretKey = string(hash)
+				server.mgmt.SetConfig(&cfg)
+				server.mgmt.SetLocalPassword("fixture-local-password")
+				keys := map[string]string{
+					"key":      "fixture-management-key",
+					"local":    "fixture-local-password",
+					"internal": server.mgmt.InternalToken(),
+				}
+				cookie := issueAuditResourceCookie(t, server, keys[tc.credential])
+				revoke := func(peer string, want int) {
+					t.Helper()
+					req := httptest.NewRequest(http.MethodDelete, "https://cpa.invalid"+pluginResourceSessionPath, nil)
+					req.RemoteAddr = peer
+					req.AddCookie(cookie)
+					rec := httptest.NewRecorder()
+					server.engine.ServeHTTP(rec, req)
+					if rec.Code != want {
+						t.Errorf("resource session response = %d, want %d", rec.Code, want)
+					}
+				}
+				if tc.wantRemote {
+					revoke("192.0.2.1:12345", http.StatusNoContent)
+				} else {
+					revoke("192.0.2.1:12345", http.StatusUnauthorized)
+					revoke("127.0.0.1:12345", http.StatusNoContent)
+				}
+			},
+		)
+	}
+}
+
+func TestPluginResourceSessionRejectsOlderAuthenticationGeneration(t *testing.T) {
+	server := newTestServer(t)
+	server.mgmt.SetLocalPassword("fixture-original-password")
+	var current *http.Cookie
+	router := gin.New()
+	router.POST(
+		"/session", server.mgmt.MiddlewareWithConfig(server.managementConfigSnapshot), func(c *gin.Context) {
+			server.mgmt.SetLocalPassword("fixture-replacement-password")
+			current = issueAuditResourceCookie(t, server, "fixture-replacement-password")
+			if server.issuePluginResourceSession(c) {
+				t.Error("an older authentication generation issued a resource session")
+			}
+		},
+	)
+	request := httptest.NewRequest(http.MethodPost, "/session", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("X-Management-Key", "fixture-original-password")
+	record := httptest.NewRecorder()
+	router.ServeHTTP(record, request)
+	if record.Code != http.StatusUnauthorized || len(record.Result().Cookies()) != 0 {
+		t.Fatal("older authentication generation must reject without setting a cookie")
+	}
+	if current == nil || !resourceCookieAuthenticated(server, current) {
+		t.Fatal("rejected issuance revoked a current resource session")
+	}
 }
 
 func TestPluginResourceSessionCredentialChangesRevokeOldCookies(t *testing.T) {
 	server := newTestServer(t)
 	server.mgmt.SetLocalPassword("first-password")
-	original := issueAuditResourceCookie(t, server)
+	original := issueAuditResourceCookie(t, server, "first-password")
 	updated := *server.configSnapshot()
 	updated.Debug = !updated.Debug
 	server.mgmt.SetConfig(&updated)
@@ -53,7 +134,7 @@ func TestPluginResourceSessionCredentialChangesRevokeOldCookies(t *testing.T) {
 	if resourceCookieAuthenticated(server, original) {
 		t.Fatal("rotating back revived old session")
 	}
-	current := issueAuditResourceCookie(t, server)
+	current := issueAuditResourceCookie(t, server, "first-password")
 	rotated := updated
 	rotated.RemoteManagement.SecretKey = "changed-management-key-hash"
 	server.mgmt.SetConfig(&rotated)
@@ -68,12 +149,11 @@ func TestPluginResourceSessionLoginRotatesSameCredentials(t *testing.T) {
 			map[bool]string{false: "management", true: "home"}[home], func(t *testing.T) {
 				server := newTestServer(t)
 				server.mgmt.SetLocalPassword("same-login-password")
-				server.managementRoutesEnabled.store(true)
 				cfg := *server.configSnapshot()
 				cfg.Home.Enabled = home
 				server.setConfig(&cfg)
-				original := issueAuditResourceCookie(t, server)
-				other := issueAuditResourceCookie(t, server)
+				original := issueAuditResourceCookie(t, server, "same-login-password")
+				other := issueAuditResourceCookie(t, server, "same-login-password")
 				request := func(key string) *httptest.ResponseRecorder {
 					req := httptest.NewRequest(http.MethodPost, pluginResourceSessionPath, nil)
 					req.RemoteAddr = "127.0.0.1:12345"
@@ -124,9 +204,8 @@ func TestPluginResourceSessionLoginRotatesSameCredentials(t *testing.T) {
 func TestPluginResourceLogoutRevokesOnlyCurrentCookie(t *testing.T) {
 	server := newTestServer(t)
 	server.mgmt.SetLocalPassword("logout-password")
-	server.managementRoutesEnabled.store(true)
-	first := issueAuditResourceCookie(t, server)
-	other := issueAuditResourceCookie(t, server)
+	first := issueAuditResourceCookie(t, server, "logout-password")
+	other := issueAuditResourceCookie(t, server, "logout-password")
 	request := func(cookie *http.Cookie, key string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodDelete, pluginResourceSessionPath, nil)
 		req.RemoteAddr = "127.0.0.1:12345"

@@ -102,16 +102,16 @@ func TestLegacyOAuthCallbackKeepsCapturedDirectoryAndBindsLegacyDirectory(t *tes
 func TestOAuthCallbackClaimRejectsTerminalSessions(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
 	const state = "sdk-compat-terminal"
-	store.register(state, "codex", "", t.TempDir())
-	if _, _, claimed := store.claimCallback(state, "codex"); !claimed {
+	store.register(state, "codex", "", t.TempDir(), [32]byte{})
+	if _, _, claimed := store.claimCallback(state, "codex", nil); !claimed {
 		t.Fatal("first callback was not claimed")
 	}
 	store.complete(state)
 	if store.callbackClaimActive(state, "codex") {
 		t.Fatal("completed session retained an active callback claim")
 	}
-	store.register(state, "codex", "", t.TempDir())
-	if _, _, claimed := store.claimCallback(state, "codex"); !claimed {
+	store.register(state, "codex", "", t.TempDir(), [32]byte{})
+	if _, _, claimed := store.claimCallback(state, "codex", nil); !claimed {
 		t.Fatal("second callback was not claimed")
 	}
 	store.setError(state, "synthetic failure")

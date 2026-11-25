@@ -117,9 +117,15 @@ removed only after a successful update. Failed recovery retains its backup and s
 update until recovery is verified. Legacy sessions can recover their original backup path, with incomplete identity
 evidence reported as requiring manual verification.
 
-Update compatibility declares whether the running backend supports client-supplied attempt IDs. Install the new
-management panel before updating an older backend. The first upgrade uses that backend's existing guard; the new update
-protections apply when the updated backend starts a later upgrade.
+Update compatibility declares whether the running backend supports client-supplied attempt IDs. If the backend does not
+provide `/v0/management/session`, use the old panel or your existing maintenance method to update the backend first,
+then install the new panel. The first upgrade uses the old backend's guard. The new protections apply to later upgrades.
+
+### Upstream redirects
+
+OpenAI-compatible, Claude, and Codex HTTP requests follow redirects within the same scheme, host, and port. If an
+upstream moves, set its Base URL to the final address. Explicitly configured private upstreams and proxies remain
+supported.
 
 ### Codex reset-credit checks (v8.0.23-aug.6)
 

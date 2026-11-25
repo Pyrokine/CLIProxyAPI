@@ -373,7 +373,9 @@ func TestPluginOAuthWorkerCancellationExpiryAndReusedState(t *testing.T) {
 					t.Fatal("pending worker was not cancellable")
 				}
 				if scenario == "reused_state" {
-					if err := sessions.registerPlugin("late-state", "custom-sso", "new-nonce", dir, nil); err != nil {
+					if err := sessions.registerPlugin(
+						"late-state", "custom-sso", "new-nonce", dir, nil, [32]byte{},
+					); err != nil {
 						t.Fatal(err)
 					}
 				}

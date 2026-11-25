@@ -37,7 +37,7 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 	}
 	state = "meta-" + state
 	registerOAuthSessionForAuthDir(
-		state, "meta", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, "meta", oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 	go func() {
 		pollCtx, cancel := context.WithCancel(ctx)

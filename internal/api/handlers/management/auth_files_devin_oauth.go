@@ -57,7 +57,7 @@ func (h *Handler) RequestDevinToken(c *gin.Context) {
 	service := newDevinOAuthService(flowCfg)
 	authURL := service.BuildAuthorizationURL(redirectURI, pkce.CodeChallenge, state)
 	registerOAuthSessionForAuthDir(
-		state, "devin", strings.TrimSpace(c.Query("nonce")), flowCfg.AuthDir, c.Request.Context(),
+		state, "devin", oauthRequestNonce(c), flowCfg.AuthDir, c.Request.Context(),
 	)
 
 	flowContext := populateAuthContext(context.Background(), c)

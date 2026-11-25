@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
@@ -200,6 +201,8 @@ type pluginResourceSession struct {
 	IdleExpiresAt     time.Time
 	AbsoluteExpiresAt time.Time
 	AuthGeneration    uint64
+	ManagementSession [sha256.Size]byte
+	Authorization     managementHandlers.ResourceSessionAuthorization
 }
 
 type ManagementConfigCommit = managementHandlers.ConfigCommit
@@ -1447,6 +1450,8 @@ func (s *Server) registerManagementRoutes() {
 		s.mgmt.MutationAuditMiddleware(),
 	)
 	{
+		mgmt.POST("/session", s.mgmt.CreateManagementSession)
+		mgmt.DELETE("/session", s.mgmt.RevokeManagementSession)
 		mgmt.GET("/mutations/:mutation_id", s.mgmt.GetMutationResult)
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
@@ -1839,20 +1844,32 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 	if c.IsAborted() {
 		return
 	}
-	sessionAuthenticated := !isSessionRotation && s.pluginResourceSessionAuthenticated(c)
+	hasBrowserCredential := len(c.Request.Header.Values(managementHandlers.ManagementSessionTokenHeader)) != 0
+	sessionAuthenticated := !isSessionRotation && !hasBrowserCredential && s.pluginResourceSessionAuthenticated(c)
 	if !sessionAuthenticated {
 		s.mgmt.MiddlewareWithConfig(s.managementConfigSnapshot)(c)
 		if c.IsAborted() {
 			return
 		}
+		if !isSessionRotation && hasBrowserCredential {
+			sessionAuthenticated = s.pluginResourceSessionAuthenticated(c)
+		}
 	}
 	if isSessionLogout {
+		clearCookie := true
 		if cookie, err := c.Request.Cookie(pluginResourceSessionCookie); err == nil {
+			id := managementHandlers.ManagementSessionID(c.Request.Context())
 			s.pluginResourceSessionMu.Lock()
-			delete(s.pluginResourceSessionTokens, cookie.Value)
+			if own := s.pluginResourceSessionTokens[cookie.Value].ManagementSession; id == ([sha256.Size]byte{}) || own == id {
+				delete(s.pluginResourceSessionTokens, cookie.Value)
+			} else {
+				clearCookie = false
+			}
 			s.pluginResourceSessionMu.Unlock()
 		}
-		s.setPluginResourceSessionCookie(c, "", -1)
+		if clearCookie {
+			s.setPluginResourceSessionCookie(c, "", -1)
+		}
 		c.AbortWithStatus(http.StatusNoContent)
 		return
 	}
@@ -1887,16 +1904,24 @@ func (s *Server) pluginResourceSessionAuthenticated(c *gin.Context) bool {
 	}
 	now := time.Now()
 	token := cookie.Value
-	authGeneration := s.mgmt.ManagementAuthenticationGeneration()
 	s.pluginResourceSessionMu.Lock()
 	session, ok := s.pluginResourceSessionTokens[token]
 	if !ok {
 		s.pluginResourceSessionMu.Unlock()
 		return false
 	}
-	if session.AuthGeneration != authGeneration || !session.IdleExpiresAt.After(now) ||
+	if session.AuthGeneration != s.mgmt.ManagementAuthenticationGeneration() || !session.IdleExpiresAt.After(now) ||
 		!session.AbsoluteExpiresAt.After(now) {
 		delete(s.pluginResourceSessionTokens, token)
+		s.pluginResourceSessionMu.Unlock()
+		return false
+	}
+	id := managementHandlers.ManagementSessionID(c.Request.Context())
+	cfg := s.managementConfigSnapshot(c)
+	if (id != ([sha256.Size]byte{}) && id != session.ManagementSession) ||
+		(session.ManagementSession != ([sha256.Size]byte{}) &&
+			!s.mgmt.ManagementSessionActive(c, cfg, session.ManagementSession)) ||
+		(session.ManagementSession == ([sha256.Size]byte{}) && !session.Authorization.AllowsRequest(c.Request, cfg)) {
 		s.pluginResourceSessionMu.Unlock()
 		return false
 	}
@@ -1937,6 +1962,11 @@ func (s *Server) issuePluginResourceSession(c *gin.Context) bool {
 	if s == nil || c == nil || c.Request == nil {
 		return false
 	}
+	authorization, authGeneration, valid := s.mgmt.ResourceSessionAuthorization(c)
+	if !valid {
+		c.AbortWithStatus(http.StatusUnauthorized)
+		return false
+	}
 	tokenBytes := make([]byte, 32)
 	if _, errRead := rand.Read(tokenBytes); errRead != nil {
 		log.WithError(errRead).Error("failed to generate plugin resource session token")
@@ -1944,9 +1974,13 @@ func (s *Server) issuePluginResourceSession(c *gin.Context) bool {
 		return false
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	authGeneration := s.mgmt.ManagementAuthenticationGeneration()
 	now := time.Now()
 	s.pluginResourceSessionMu.Lock()
+	if authGeneration != s.mgmt.ManagementAuthenticationGeneration() {
+		s.pluginResourceSessionMu.Unlock()
+		c.AbortWithStatus(http.StatusUnauthorized)
+		return false
+	}
 	if s.pluginResourceSessionTokens == nil {
 		s.pluginResourceSessionTokens = make(map[string]pluginResourceSession)
 	}
@@ -1956,13 +1990,19 @@ func (s *Server) issuePluginResourceSession(c *gin.Context) bool {
 			delete(s.pluginResourceSessionTokens, existing)
 		}
 	}
+	id := managementHandlers.ManagementSessionID(c.Request.Context())
 	if cookie, err := c.Request.Cookie(pluginResourceSessionCookie); err == nil {
-		delete(s.pluginResourceSessionTokens, cookie.Value)
+		owner := s.pluginResourceSessionTokens[cookie.Value].ManagementSession
+		if id == ([sha256.Size]byte{}) || owner == id || owner == ([sha256.Size]byte{}) {
+			delete(s.pluginResourceSessionTokens, cookie.Value)
+		}
 	}
 	s.pluginResourceSessionTokens[token] = pluginResourceSession{
 		IdleExpiresAt:     now.Add(pluginResourceSessionTTL),
 		AbsoluteExpiresAt: now.Add(pluginResourceSessionAbsoluteTTL),
 		AuthGeneration:    authGeneration,
+		ManagementSession: id,
+		Authorization:     authorization,
 	}
 	s.pluginResourceSessionMu.Unlock()
 	s.setPluginResourceSessionCookie(c, token, int(pluginResourceSessionTTL.Seconds()))

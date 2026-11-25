@@ -1353,25 +1353,14 @@ func TestPluginResourceSessionCookieSkipsManagementKey(t *testing.T) {
 	server := newTestServer(t)
 	server.pluginHost = pluginhost.New()
 	server.mgmt.SetLocalPassword("test-management-password")
-	server.managementRoutesEnabled.store(true)
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
-	if !server.issuePluginResourceSession(c) {
-		t.Fatal("issuePluginResourceSession() = false")
-	}
-	cookies := rec.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != pluginResourceSessionCookie {
-		t.Fatalf("cookies = %#v, want one plugin resource session cookie", cookies)
-	}
-	if cookies[0].Path != "/v0/resource/plugins/" || !cookies[0].HttpOnly {
-		t.Fatalf("cookie attributes = %#v, want resource path and HttpOnly", cookies[0])
+	cookie := issueAuditResourceCookie(t, server, "test-management-password")
+	if cookie.Name != pluginResourceSessionCookie || cookie.Path != "/v0/resource/plugins/" || !cookie.HttpOnly {
+		t.Fatal("resource session cookie is missing its name, path or HttpOnly restriction")
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
-	req.AddCookie(cookies[0])
+	req.AddCookie(cookie)
 	rr := httptest.NewRecorder()
 	server.engine.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
@@ -1434,18 +1423,16 @@ func TestPluginResourceExpiredSessionCookieRequiresManagementKey(t *testing.T) {
 	server := newTestServer(t)
 	server.pluginHost = pluginhost.New()
 	server.mgmt.SetLocalPassword("test-management-password")
-	server.managementRoutesEnabled.store(true)
-
+	cookie := issueAuditResourceCookie(t, server, "test-management-password")
 	server.pluginResourceSessionMu.Lock()
-	server.pluginResourceSessionTokens["expired"] = pluginResourceSession{
-		IdleExpiresAt:     time.Now().Add(-time.Minute),
-		AbsoluteExpiresAt: time.Now().Add(pluginResourceSessionAbsoluteTTL),
-	}
+	session := server.pluginResourceSessionTokens[cookie.Value]
+	session.IdleExpiresAt = time.Now().Add(-time.Minute)
+	server.pluginResourceSessionTokens[cookie.Value] = session
 	server.pluginResourceSessionMu.Unlock()
 
 	req := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
-	req.AddCookie(&http.Cookie{Name: pluginResourceSessionCookie, Value: "expired"})
+	req.AddCookie(cookie)
 	rr := httptest.NewRecorder()
 	server.engine.ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
@@ -1458,18 +1445,16 @@ func TestPluginResourceAbsoluteExpiredSessionCookieRequiresManagementKey(t *test
 	server := newTestServer(t)
 	server.pluginHost = pluginhost.New()
 	server.mgmt.SetLocalPassword("test-management-password")
-	server.managementRoutesEnabled.store(true)
-
+	cookie := issueAuditResourceCookie(t, server, "test-management-password")
 	server.pluginResourceSessionMu.Lock()
-	server.pluginResourceSessionTokens["absolute-expired"] = pluginResourceSession{
-		IdleExpiresAt:     time.Now().Add(pluginResourceSessionTTL),
-		AbsoluteExpiresAt: time.Now().Add(-time.Minute),
-	}
+	session := server.pluginResourceSessionTokens[cookie.Value]
+	session.AbsoluteExpiresAt = time.Now().Add(-time.Minute)
+	server.pluginResourceSessionTokens[cookie.Value] = session
 	server.pluginResourceSessionMu.Unlock()
 
 	req := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
-	req.AddCookie(&http.Cookie{Name: pluginResourceSessionCookie, Value: "absolute-expired"})
+	req.AddCookie(cookie)
 	rr := httptest.NewRecorder()
 	server.engine.ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
@@ -1480,25 +1465,26 @@ func TestPluginResourceAbsoluteExpiredSessionCookieRequiresManagementKey(t *test
 func TestPluginResourceSessionRenewalIsCappedByAbsoluteExpiry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	server := newTestServer(t)
-	now := time.Now()
-	absoluteExpiresAt := now.Add(time.Minute)
+	server.mgmt.SetLocalPassword("test-management-password")
+	cookie := issueAuditResourceCookie(t, server, "test-management-password")
+	absoluteExpiresAt := time.Now().Add(time.Minute)
 	server.pluginResourceSessionMu.Lock()
-	server.pluginResourceSessionTokens["near-absolute"] = pluginResourceSession{
-		IdleExpiresAt:     now.Add(pluginResourceSessionTTL),
-		AbsoluteExpiresAt: absoluteExpiresAt,
-	}
+	session := server.pluginResourceSessionTokens[cookie.Value]
+	session.AbsoluteExpiresAt = absoluteExpiresAt
+	server.pluginResourceSessionTokens[cookie.Value] = session
 	server.pluginResourceSessionMu.Unlock()
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
-	c.Request.AddCookie(&http.Cookie{Name: pluginResourceSessionCookie, Value: "near-absolute"})
+	c.Request.RemoteAddr = "127.0.0.1:12345"
+	c.Request.AddCookie(cookie)
 
 	if !server.pluginResourceSessionAuthenticated(c) {
 		t.Fatal("pluginResourceSessionAuthenticated() = false, want true")
 	}
 	server.pluginResourceSessionMu.Lock()
-	session := server.pluginResourceSessionTokens["near-absolute"]
+	session = server.pluginResourceSessionTokens[cookie.Value]
 	server.pluginResourceSessionMu.Unlock()
 	if session.IdleExpiresAt.After(absoluteExpiresAt) {
 		t.Fatalf(

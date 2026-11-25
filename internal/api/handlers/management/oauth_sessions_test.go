@@ -9,16 +9,19 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/gin-gonic/gin"
 )
 
 func TestOAuthSessionCompleteKeepsShortTombstone(t *testing.T) {
 	store := newOAuthSessionStore(5 * time.Minute)
-	store.register("state-1", "xai", "nonce-1")
+	store.register("state-1", "xai", "nonce-1", "", [32]byte{})
 	store.complete("state-1")
 
 	session, ok := store.get("state-1")
@@ -45,7 +48,7 @@ func TestOAuthSessionCompleteKeepsShortTombstone(t *testing.T) {
 
 func TestOAuthSessionCancelStopsPollingAndPreventsSave(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
-	store.register("state-1", "xai", "")
+	store.register("state-1", "xai", "", "", [32]byte{})
 	ctx, cancel := context.WithCancel(context.Background())
 	if !store.attachCancel("state-1", "xai", cancel) {
 		t.Fatal("attachCancel returned false")
@@ -69,7 +72,7 @@ func TestOAuthSessionCancelStopsPollingAndPreventsSave(t *testing.T) {
 
 func TestOAuthSessionSaveClaimMakesCancellationDeterministic(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
-	store.register("state-1", "xai", "")
+	store.register("state-1", "xai", "", "", [32]byte{})
 	ctx, cancel := context.WithCancel(context.Background())
 	if !store.attachCancel("state-1", "xai", cancel) {
 		t.Fatal("attachCancel returned false")
@@ -98,7 +101,7 @@ func TestOAuthSessionSaveClaimMakesCancellationDeterministic(t *testing.T) {
 
 func TestOAuthSessionSaveClaimRefreshesExpiry(t *testing.T) {
 	store := newOAuthSessionStore(time.Second)
-	store.register("state-1", "xai", "")
+	store.register("state-1", "xai", "", "", [32]byte{})
 
 	store.mu.Lock()
 	session := store.sessions["state-1"]
@@ -128,7 +131,7 @@ func TestOAuthSessionSaveClaimRefreshesExpiry(t *testing.T) {
 
 func TestOAuthSessionErrorStopsPollingAndRejectsSave(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
-	store.register("state-1", "xai", "")
+	store.register("state-1", "xai", "", "", [32]byte{})
 	ctx, cancel := context.WithCancel(context.Background())
 	if !store.attachCancel("state-1", "xai", cancel) {
 		t.Fatal("attachCancel returned false")
@@ -151,7 +154,7 @@ func TestOAuthSessionErrorStopsPollingAndRejectsSave(t *testing.T) {
 
 func TestOAuthSessionExpiryStopsPolling(t *testing.T) {
 	store := newOAuthSessionStore(20 * time.Millisecond)
-	store.register("state-1", "xai", "")
+	store.register("state-1", "xai", "", "", [32]byte{})
 	ctx, cancel := context.WithCancel(context.Background())
 	if !store.attachCancel("state-1", "xai", cancel) {
 		t.Fatal("attachCancel returned false")
@@ -312,6 +315,77 @@ func TestPostOAuthCallbackUsesSessionAuthDirectory(t *testing.T) {
 	if _, errStat := os.Stat(filepath.Join(currentAuthDir, fileName)); !errors.Is(errStat, os.ErrNotExist) {
 		t.Fatalf("callback file written to current auth directory: %v", errStat)
 	}
+}
+
+func TestBrowserOAuthSessionOwnsManualActions(t *testing.T) {
+	previous := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	t.Cleanup(func() { oauthSessions = previous })
+	const nonce = "synthetic-flow-nonce"
+	dir := t.TempDir()
+	h := &Handler{cfg: &config.Config{AuthDir: dir}}
+	owner, other := [32]byte{1}, [32]byte{2}
+	ctx := context.WithValue(context.Background(), managementSessionContextKey{}, owner)
+	registerOAuthSessionForAuthDir("browser-manual", "codex", nonce, dir, ctx)
+	registerOAuthSessionForAuthDir("browser-redirect", "codex", nonce, dir, ctx)
+	registerOAuthSessionForAuthDir("legacy-manual", "codex", "", dir)
+	gin.SetMode(gin.TestMode)
+	request := func(handler gin.HandlerFunc, method, path, body string, id [32]byte, proof string, want int) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(method, path, strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		if proof != "" {
+			c.Request.Header.Set(oauthNonceHeader, proof)
+		}
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), managementSessionContextKey{}, id))
+		handler(c)
+		if rec.Code != want {
+			t.Fatalf("%s: status=%d, want %d", method, rec.Code, want)
+		}
+		info := coreauth.GetRequestInfo(populateAuthContext(context.Background(), c))
+		if info == nil || info.Headers.Get(oauthNonceHeader) != "" || info.Query.Has("nonce") ||
+			queryValuesToMetadata(c.Request.URL.Query())["nonce"] != nil {
+			t.Fatal("initiating credential was retained in provider request metadata")
+		}
+	}
+	checkStart := func(c *gin.Context) {
+		if _, ok := h.authFlowConfig(c); ok {
+			c.Status(http.StatusOK)
+		}
+	}
+	request(checkStart, http.MethodGet, "/codex-auth-url", "", owner, "", http.StatusBadRequest)
+	request(checkStart, http.MethodGet, "/codex-auth-url", "", owner, nonce, http.StatusOK)
+	request(checkStart, http.MethodGet, "/codex-auth-url", "", [32]byte{}, "", http.StatusOK)
+	callback := `{"provider":"codex","state":"browser-manual","code":"synthetic-code"}`
+	request(h.GetAuthStatus, http.MethodGet, "/get-auth-status?state=browser-manual", "", owner, nonce, http.StatusOK)
+	request(
+		h.GetAuthStatus, http.MethodGet, "/get-auth-status?state=browser-manual&nonce="+nonce, "", owner, "",
+		http.StatusForbidden,
+	)
+	if strings.Contains(util.MaskSensitiveQuery("nonce="+nonce), nonce) {
+		t.Fatal("legacy URL nonce was retained in access log representation")
+	}
+	request(
+		h.GetAuthStatus, http.MethodGet, "/get-auth-status?state=browser-manual", "", other, nonce,
+		http.StatusForbidden,
+	)
+	request(
+		h.CancelAuthSession, http.MethodDelete, "/oauth-session?state=browser-manual", "", other, nonce,
+		http.StatusForbidden,
+	)
+	request(h.PostOAuthCallback, http.MethodPost, "/oauth-callback", callback, other, nonce, http.StatusForbidden)
+	request(h.PostOAuthCallback, http.MethodPost, "/oauth-callback", callback, owner, "", http.StatusForbidden)
+	request(h.PostOAuthCallback, http.MethodPost, "/oauth-callback", callback, owner, nonce, http.StatusOK)
+	request(
+		h.GetOAuthCallback, http.MethodGet, "/oauth-callback?state=browser-redirect&code=synthetic-code", "",
+		[32]byte{}, "", http.StatusOK,
+	)
+	request(
+		h.PostOAuthCallback, http.MethodPost, "/oauth-callback",
+		`{"provider":"codex","state":"legacy-manual","code":"synthetic-code"}`, [32]byte{}, "", http.StatusOK,
+	)
 }
 
 func TestNormalizeOAuthProviderIncludesDeviceProviders(t *testing.T) {

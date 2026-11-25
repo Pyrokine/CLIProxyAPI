@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/gin-gonic/gin"
@@ -93,21 +94,20 @@ func TestManagementAuthSuccessKeepsSharedIPFailures(t *testing.T) {
 								success()
 							}
 						}
+						if _, active := handler.currentRateLimitBan(ip, time.Now()); !active {
+							t.Fatal("expected shared IP failure state to remain active")
+						}
+						success()
 						if allowed, status, _ := handler.AuthenticateManagementKey(
-							ip, false, "correct",
+							ip, false, "unrecognized",
 						); allowed || status != http.StatusTooManyRequests {
-							t.Errorf(
-								"shared IP limit after interleaved successes: allowed=%t status=%d",
-								allowed,
-								status,
-							)
+							t.Errorf("unverified key: allowed=%t status=%d", allowed, status)
 						}
 						recorder := httptest.NewRecorder()
-						engine.ServeHTTP(recorder, newRemoteRequest(http.MethodGet, "/test", "Bearer correct"))
-						if recorder.Code != http.StatusTooManyRequests ||
-							recorder.Header().Get("Retry-After") == "" {
+						engine.ServeHTTP(recorder, newRemoteRequest(http.MethodGet, "/test", "Bearer unrecognized"))
+						if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") == "" {
 							t.Errorf(
-								"HTTP shared limit: status=%d Retry-After=%s", recorder.Code,
+								"HTTP failure cooldown: status=%d Retry-After=%s", recorder.Code,
 								recorder.Header().Get("Retry-After"),
 							)
 						}

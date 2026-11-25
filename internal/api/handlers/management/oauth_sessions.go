@@ -24,6 +24,7 @@ const (
 	maxOAuthNonceLength       = 128
 	oauthSessionSourceBuiltin = "builtin"
 	oauthSessionSourcePlugin  = "plugin"
+	oauthNonceHeader          = "X-CPA-OAuth-Token"
 )
 
 var (
@@ -41,6 +42,7 @@ type oauthSession struct {
 	Metadata         map[string]any
 	Message          string
 	NonceHash        string
+	Initiator        [sha256.Size]byte
 	CallbackAccepted bool
 	Phase            string
 	Polling          bool
@@ -81,13 +83,9 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 	}
 }
 
-func (s *oauthSessionStore) register(state, provider, nonce string, authDir ...string) {
+func (s *oauthSessionStore) register(state, provider, nonce, authDir string, initiator [sha256.Size]byte) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	capturedAuthDir := ""
-	if len(authDir) > 0 {
-		capturedAuthDir = strings.TrimSpace(authDir[0])
-	}
 	if state == "" || provider == "" {
 		return
 	}
@@ -102,9 +100,10 @@ func (s *oauthSessionStore) register(state, provider, nonce string, authDir ...s
 	}
 	s.sessions[state] = oauthSession{
 		Provider:  provider,
-		AuthDir:   capturedAuthDir,
+		AuthDir:   strings.TrimSpace(authDir),
 		Source:    oauthSessionSourceBuiltin,
 		NonceHash: hashOAuthNonce(nonce),
+		Initiator: initiator,
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
@@ -116,6 +115,7 @@ func (s *oauthSessionStore) registerPlugin(
 	nonce,
 	authDir string,
 	metadata map[string]any,
+	initiator [sha256.Size]byte,
 	registered ...*oauthSession,
 ) error {
 	state = strings.TrimSpace(state)
@@ -142,6 +142,7 @@ func (s *oauthSessionStore) registerPlugin(
 		Source:    oauthSessionSourcePlugin,
 		Metadata:  cloneOAuthSessionMetadata(metadata),
 		NonceHash: hashOAuthNonce(nonce),
+		Initiator: initiator,
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
@@ -353,7 +354,11 @@ func (s *oauthSessionStore) attachCancel(
 	return true
 }
 
-func (s *oauthSessionStore) claimCallback(state, provider string, authDir ...string) (string, bool, bool) {
+func (s *oauthSessionStore) claimCallback(
+	state, provider string,
+	manual *oauthCallbackInitiator,
+	authDir ...string,
+) (string, bool, bool) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	now := time.Now()
@@ -363,7 +368,8 @@ func (s *oauthSessionStore) claimCallback(state, provider string, authDir ...str
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
 	if !ok || session.CallbackAccepted || session.Completed || session.Saving || session.Status != "" ||
-		(provider != "" && !strings.EqualFold(session.Provider, provider)) {
+		(provider != "" && !strings.EqualFold(session.Provider, provider)) ||
+		(manual != nil && !session.acceptsManualCallback(*manual)) {
 		return "", false, false
 	}
 	directoryBound := false
@@ -450,7 +456,7 @@ func (s *oauthSessionStore) claimForSave(state, provider string, createdAt ...ti
 	return true
 }
 
-func (s *oauthSessionStore) cancel(state string) bool {
+func (s *oauthSessionStore) cancel(state string, createdAt ...time.Time) bool {
 	state = strings.TrimSpace(state)
 	if state == "" {
 		return false
@@ -460,7 +466,8 @@ func (s *oauthSessionStore) cancel(state string) bool {
 	s.mu.Lock()
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Saving || session.Status != "" {
+	if !ok || session.Completed || session.Saving || session.Status != "" ||
+		(len(createdAt) > 0 && !session.CreatedAt.Equal(createdAt[0])) {
 		s.mu.Unlock()
 		return false
 	}
@@ -513,11 +520,15 @@ func cloneOAuthSessionMetadataValue(value any) any {
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
 func registerOAuthSession(state, provider, nonce string) {
-	oauthSessions.register(state, provider, nonce)
+	oauthSessions.register(state, provider, nonce, "", [sha256.Size]byte{})
 }
 
 func registerOAuthSessionForAuthDir(state, provider, nonce, authDir string, mutationContext ...context.Context) {
-	oauthSessions.register(state, provider, nonce, authDir)
+	var initiator [sha256.Size]byte
+	if len(mutationContext) > 0 {
+		initiator = ManagementSessionID(mutationContext[0])
+	}
+	oauthSessions.register(state, provider, nonce, authDir, initiator)
 	if len(mutationContext) > 0 && isOAuthSessionPending(state, provider) {
 		RecordMutationEffect(mutationContext[0], "task.created", "task")
 	}
@@ -528,7 +539,7 @@ func registerPluginOAuthSession(
 	metadata map[string]any,
 	registered ...*oauthSession,
 ) error {
-	return oauthSessions.registerPlugin(state, provider, nonce, authDir, metadata, registered...)
+	return oauthSessions.registerPlugin(state, provider, nonce, authDir, metadata, [sha256.Size]byte{}, registered...)
 }
 
 func setOAuthSessionError(state, message string) { oauthSessions.setError(state, message) }
@@ -545,14 +556,6 @@ func getOAuthSession(state string) (provider string, status string, ok bool) {
 		return "", "", false
 	}
 	return session.Provider, session.Status, true
-}
-
-func getOAuthSessionForCallback(state string) (provider, status, authDir string, ok bool) {
-	session, ok := oauthSessions.get(state)
-	if !ok || session.CallbackAccepted || session.Completed || session.Saving {
-		return "", "", "", false
-	}
-	return session.Provider, session.Status, session.AuthDir, true
 }
 
 func getOAuthSessionDetails(state string) (provider string, status string, completed bool, ok bool) {
@@ -584,9 +587,10 @@ func oauthSessionPhase(session oauthSession) string {
 
 func verifyOAuthNonce(state, nonce string) bool {
 	session, ok := oauthSessions.get(state)
-	if !ok {
-		return false
-	}
+	return ok && session.verifyNonce(nonce)
+}
+
+func (session oauthSession) verifyNonce(nonce string) bool {
 	if session.NonceHash == "" {
 		return true
 	}
@@ -800,11 +804,19 @@ func WriteOAuthCallbackFileForPendingSession(
 	errorMessage string,
 	authDir ...string,
 ) (string, error) {
+	return writePendingOAuthCallback(provider, state, code, errorMessage, nil, authDir...)
+}
+
+func writePendingOAuthCallback(
+	provider, state, code, errorMessage string,
+	manual *oauthCallbackInitiator,
+	authDir ...string,
+) (string, error) {
 	canonicalProvider, err := normalizeOAuthCallbackProviderForPendingSession(provider, state)
 	if err != nil {
 		return "", err
 	}
-	sessionAuthDir, directoryBound, claimed := oauthSessions.claimCallback(state, canonicalProvider, authDir...)
+	sessionAuthDir, directoryBound, claimed := oauthSessions.claimCallback(state, canonicalProvider, manual, authDir...)
 	if !claimed {
 		return "", errOAuthSessionNotPending
 	}

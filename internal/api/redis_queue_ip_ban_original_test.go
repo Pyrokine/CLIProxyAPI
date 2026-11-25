@@ -14,11 +14,11 @@ func TestRedisProtocol_IPBan_MirrorsManagementPolicy(t *testing.T) {
 	testRedisOriginalIPBan(t, "missing-auth")
 }
 
-func TestRedisProtocol_AUTH_IPBan_BlocksCorrectPasswordDuringBan(t *testing.T) {
+func TestRedisProtocol_AUTH_IPBan_AcceptsVerifiedCredentialDuringCooldown(t *testing.T) {
 	testRedisOriginalIPBan(t, "auth")
 }
 
-func TestRedisProtocol_LOCALHOST_AUTH_IPBan_BlocksCorrectPasswordDuringBan(t *testing.T) {
+func TestRedisProtocol_LOCALHOST_AUTH_IPBan_AcceptsVerifiedCredentialDuringCooldown(t *testing.T) {
 	testRedisOriginalIPBan(t, "loopback")
 }
 
@@ -110,7 +110,10 @@ func testRedisOriginalIPBan(t *testing.T, mode string) {
 			t.Fatalf("missing AUTH after the adopted threshold: %q", line)
 		}
 	}
-	if line := exchange("AUTH", managementPassword); line != "-"+redisAuthRateLimitErrorMessage {
-		t.Fatalf("correct credential during IP ban: %q", line)
+	if line := exchange("AUTH", "unverified-credential"); line != "-"+redisAuthRateLimitErrorMessage {
+		t.Fatalf("unverified credential during source cooldown: %q", line)
+	}
+	if line := exchange("AUTH", managementPassword); line != "+OK" {
+		t.Fatalf("verified credential during source cooldown: %q", line)
 	}
 }

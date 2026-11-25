@@ -24,8 +24,8 @@ remote-management:
     # Leave empty when CPA is exposed directly. Full-network CIDRs are rejected.
     # Example for a local Nginx proxy: ["127.0.0.1/32", "::1/128"]
     trusted-proxies: [ ]
-    # Management key. If a plaintext value is provided here, it will be hashed on startup.
-    # All management requests (even from localhost) require this key.
+    # Management key for panel sign-in and direct API clients. CPA hashes plaintext on startup.
+    # The browser uses a 30-minute session after sign-in. Scripts and TUI can still send the key directly.
     # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
     secret-key: ""
     # Disable the bundled management control panel asset download and HTTP route when true.
