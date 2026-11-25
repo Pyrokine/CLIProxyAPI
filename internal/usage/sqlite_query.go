@@ -1788,6 +1788,7 @@ type eventsPageQuery struct {
 	whereArgs []any
 	orderCol  string
 	orderDir  string
+	hasSearch bool
 	total     int
 }
 
@@ -1843,42 +1844,58 @@ func prepareEventsPageQuery(
 	searchSQL := ""
 	var searchArgs []any
 	if query := strings.TrimSpace(filters.Search); query != "" {
-		searchSQL = " AND (" +
-			"events.model_id IN (SELECT id FROM dim_model WHERE name LIKE ?) " +
-			"OR events.credential_id IN (SELECT id FROM dim_credential WHERE name LIKE ?) " +
-			"OR events.source_id IN (SELECT id FROM dim_source WHERE name LIKE ?) " +
-			"OR events.auth_index_id IN (SELECT id FROM dim_auth_index WHERE name LIKE ?) " +
-			"OR events.api_key_id IN (SELECT id FROM dim_api_key WHERE name LIKE ?)"
 		pattern := "%" + query + "%"
-		searchArgs = []any{pattern, pattern, pattern, pattern, pattern}
+		// 沿用 SQLite LIKE 的通配与大小写规则
+		var dimensionMatches [5]bool
+		var searchSpeed bool
+		if err := queryer.QueryRowContext(
+			ctx,
+			"SELECT EXISTS(SELECT 1 FROM dim_model WHERE name LIKE ?), "+
+				"EXISTS(SELECT 1 FROM dim_credential WHERE name LIKE ?), "+
+				"EXISTS(SELECT 1 FROM dim_source WHERE name LIKE ?), "+
+				"EXISTS(SELECT 1 FROM dim_auth_index WHERE name LIKE ?), "+
+				"EXISTS(SELECT 1 FROM dim_api_key WHERE name LIKE ?), "+
+				"'standard' LIKE ? OR 'fast' LIKE ? OR 'ultrafast' LIKE ? OR "+
+				"'flex' LIKE ? OR 'batch' LIKE ? OR 'unknown' LIKE ?",
+			pattern, pattern, pattern, pattern, pattern,
+			pattern, pattern, pattern, pattern, pattern, pattern,
+		).Scan(
+			&dimensionMatches[0], &dimensionMatches[1], &dimensionMatches[2],
+			&dimensionMatches[3], &dimensionMatches[4], &searchSpeed,
+		); err != nil {
+			return eventsPageQuery{}, fmt.Errorf("resolve event search: %w", err)
+		}
+		var searchClauses []string
+		for i, dimension := range []string{"model", "credential", "source", "auth_index", "api_key"} {
+			if dimensionMatches[i] {
+				searchClauses = append(
+					searchClauses,
+					"events."+dimension+"_id IN (SELECT id FROM dim_"+dimension+" WHERE name LIKE ?)",
+				)
+				searchArgs = append(searchArgs, pattern)
+			}
+		}
 		if source == "event_fields" {
 			for _, field := range []string{
 				"service_tier", "request_service_tier", "response_service_tier", "request_speed", "response_speed",
 			} {
-				searchSQL += " OR events." + field + " LIKE ?"
+				searchClauses = append(searchClauses, "events."+field+" LIKE ?")
 				searchArgs = append(searchArgs, pattern)
 			}
 		} else {
-			searchSQL += " OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(events.metadata) THEN " +
-				"json_extract(events.metadata, '$.service_tier', '$.request_service_tier', " +
-				"'$.response_service_tier', '$.request_speed', '$.response_speed') END) WHERE value LIKE ?)"
+			searchClauses = append(
+				searchClauses,
+				"EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(events.metadata) THEN "+
+					"json_extract(events.metadata, '$.service_tier', '$.request_service_tier', "+
+					"'$.response_service_tier', '$.request_speed', '$.response_speed') END) WHERE value LIKE ?)",
+			)
 			searchArgs = append(searchArgs, pattern)
-		}
-		// Use SQLite LIKE for the same wildcard and case rules as the stored values.
-		var searchSpeed bool
-		if err := queryer.QueryRowContext(
-			ctx,
-			"SELECT 'standard' LIKE ? OR 'fast' LIKE ? OR 'ultrafast' LIKE ? OR "+
-				"'flex' LIKE ? OR 'batch' LIKE ? OR 'unknown' LIKE ?",
-			pattern, pattern, pattern, pattern, pattern, pattern,
-		).Scan(&searchSpeed); err != nil {
-			return eventsPageQuery{}, fmt.Errorf("resolve search speed: %w", err)
 		}
 		if searchSpeed {
-			searchSQL += " OR events.observed_speed LIKE ?"
+			searchClauses = append(searchClauses, "events.observed_speed LIKE ?")
 			searchArgs = append(searchArgs, pattern)
 		}
-		searchSQL += ")"
+		searchSQL = " AND (" + strings.Join(searchClauses, " OR ") + ")"
 	}
 
 	result := eventsPageQuery{
@@ -1887,6 +1904,7 @@ func prepareEventsPageQuery(
 		whereArgs: append(append([]any{fromNs, toNs}, filterArgs...), searchArgs...),
 		orderCol:  "events.ts_ns",
 		orderDir:  "ASC",
+		hasSearch: searchSQL != "",
 	}
 	switch sortField {
 	case "model":
@@ -1911,9 +1929,15 @@ func prepareEventsPageQuery(
 }
 
 func (query eventsPageQuery) pageSQL() string {
-	return "WITH event_page AS MATERIALIZED (SELECT events." + strings.Join(eventFieldsColumns(), ",events.") +
-		" FROM " + query.fromSQL + " " + query.whereSQL +
-		" ORDER BY " + query.orderCol + " " + query.orderDir + " LIMIT ? OFFSET ?) "
+	if !query.hasSearch {
+		return "WITH event_page AS MATERIALIZED (SELECT events." + strings.Join(eventFieldsColumns(), ",events.") +
+			" FROM " + query.fromSQL + " " + query.whereSQL +
+			" ORDER BY " + query.orderCol + " " + query.orderDir + " LIMIT ? OFFSET ?) "
+	}
+	return "WITH event_ids AS MATERIALIZED (SELECT events.id FROM " + query.fromSQL + " " + query.whereSQL +
+		" ORDER BY " + query.orderCol + " " + query.orderDir + " LIMIT ? OFFSET ?), " +
+		"event_page AS MATERIALIZED (SELECT events." + strings.Join(eventFieldsColumns(), ",events.") +
+		" FROM event_ids JOIN " + query.fromSQL + " ON events.id=event_ids.id) "
 }
 
 func (s *sqliteStore) queryCompactEvents(

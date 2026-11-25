@@ -279,6 +279,14 @@ func ensureEventFields(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
+	// 用覆盖索引筛选搜索条件，避免按时间匹配时逐行读取宽表字段
+	if _, err := tx.ExecContext(
+		ctx, "CREATE INDEX IF NOT EXISTS idx_event_fields_search_ts ON event_fields("+
+			"ts_ns,model_id,credential_id,source_id,auth_index_id,api_key_id,service_tier,request_service_tier,"+
+			"response_service_tier,request_speed,response_speed,observed_speed,failed,provider_id)",
+	); err != nil {
+		return fmt.Errorf("create event search index: %w", err)
+	}
 	insert := "INSERT INTO event_fields(" + strings.Join(
 		eventFieldsColumns(), ",",
 	) + ") SELECT " + eventFieldsSelectSQL("NEW.")
