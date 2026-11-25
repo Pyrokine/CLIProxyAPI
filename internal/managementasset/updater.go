@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,20 +22,20 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
 
 const (
-	defaultManagementReleaseURL = "https://api.github.com/repos/Pyrokine/Cli-Proxy-API-Management-Center/" +
-		"releases/" +
-		"latest"
 	managementAssetName        = "management.html"
 	httpUserAgent              = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval  = 30 * time.Second
 	defaultUpdateCheckInterval = 3 * time.Hour
 	minCheckIntervalMinutes    = 30
 	maxManagementAssetBytes    = 10 << 20
+	panelRequestTimeout        = 15 * time.Second
+	githubAPIHost              = "api.github.com"
 )
 
 // managementFileName exposes the control panel asset filename.
@@ -97,8 +99,9 @@ func runAutoUpdater(ctx context.Context) {
 		}
 
 		if !cfg.RemoteManagement.IsAutoUpdatePanel() {
-			releaseURL := resolveReleaseURL(cfg.RemoteManagement.PanelGitHubRepository, "")
-			if _, _, err := fetchReleaseAsset(ctx, newHTTPClient(cfg.ProxyURL), releaseURL); err != nil {
+			if _, _, err := getReleaseAsset(
+				ctx, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository, "",
+			); err != nil {
 				log.WithError(err).Warn("management asset update check failed")
 			}
 			return
@@ -150,13 +153,18 @@ func autoUpdateSkipReason(cfg *config.Config) (string, bool) {
 	return "", false
 }
 
-func newHTTPClient(proxyURL string) *http.Client {
-	client := &http.Client{Timeout: 15 * time.Second}
-
-	sdkCfg := &sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
-	util.SetProxy(sdkCfg, client)
-
-	return client
+// NewReleaseHTTPClient limits metadata redirects to the configured release API origin.
+func NewReleaseHTTPClient(proxyURL string, source *url.URL) *http.Client {
+	client := &http.Client{
+		Timeout: panelRequestTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 || !AllowsReleaseOrigin(source, req.URL) {
+				return errors.New("management release redirect rejected")
+			}
+			return nil
+		},
+	}
+	return util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}, client)
 }
 
 type releaseAsset struct {
@@ -166,7 +174,8 @@ type releaseAsset struct {
 }
 
 type releaseResponse struct {
-	Assets []releaseAsset `json:"assets"`
+	TagName string         `json:"tag_name"`
+	Assets  []releaseAsset `json:"assets"`
 }
 
 // StaticDir resolves the directory that stores the management control panel asset.
@@ -216,6 +225,40 @@ func FilePath(configFilePath string) string {
 	return filepath.Join(dir, managementFileName)
 }
 
+// PrepareManagementHTML installs a missing panel when automatic installation is enabled.
+// It runs independently of the periodic update check and never replaces an existing file.
+func PrepareManagementHTML(ctx context.Context, configFilePath string, cfg *config.Config) {
+	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel ||
+		!cfg.RemoteManagement.IsAutoUpdatePanel() {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	localPath := FilePath(configFilePath)
+	if localPath == "" {
+		return
+	}
+	if _, err := os.Lstat(localPath); err == nil {
+		return
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.WithError(err).Warn("failed to check for an existing management asset")
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*panelRequestTimeout)
+	defer cancel()
+	source, err := ResolveReleasesURL(cfg.RemoteManagement.PanelGitHubRepository)
+	if err == nil {
+		_, err = installManagementHTML(ctx, localPath, cfg.ProxyURL, "", source, true)
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.WithError(err).Warn("failed to prepare management asset")
+	}
+}
+
 // EnsureManagementHTML fetches a specific version (empty version means latest)
 // of the management.html asset and updates the local copy when needed. It coalesces
 // concurrent sync attempts and returns whether the asset exists after the sync
@@ -254,10 +297,9 @@ func UpdateManagementHTMLWithResult(ctx context.Context, staticDir, proxyURL, pa
 	return syncManagementHTML(ctx, staticDir, proxyURL, panelRepository, version, true)
 }
 
-func syncManagementHTML(ctx context.Context, staticDir, proxyURL, panelRepository, version string, force bool) (
-	bool,
-	error,
-) {
+func syncManagementHTML(
+	ctx context.Context, staticDir, proxyURL, panelRepository, version string, force bool,
+) (bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -270,7 +312,11 @@ func syncManagementHTML(ctx context.Context, staticDir, proxyURL, panelRepositor
 	}
 	localPath := filepath.Join(staticDir, managementAssetName)
 	version = strings.TrimSpace(version)
-	releaseURL := resolveReleaseURL(panelRepository, version)
+	source, err := ResolveReleasesURL(panelRepository)
+	if err != nil {
+		return false, err
+	}
+	releaseURL := releaseURLForVersion(source, version)
 	key := fmt.Sprintf("%q|%q|%q", localPath, releaseURL, strings.TrimSpace(proxyURL))
 	result := sfGroup.DoChan(
 		fmt.Sprintf("%s|%t", key, force), func() (any, error) {
@@ -291,45 +337,7 @@ func syncManagementHTML(ctx context.Context, staticDir, proxyURL, panelRepositor
 			lastUpdateChecks[key] = now
 			lastUpdateCheckMu.Unlock()
 
-			if err := os.MkdirAll(staticDir, 0o755); err != nil {
-				return false, fmt.Errorf("prepare management asset directory: %w", err)
-			}
-			client := newHTTPClient(proxyURL)
-			localHash, err := fileSHA256(localPath)
-			if err != nil {
-				if !errors.Is(err, os.ErrNotExist) {
-					log.WithError(err).Debug("failed to read local management asset hash")
-				}
-				localHash = ""
-			}
-			asset, remoteHash, err := fetchReleaseAsset(ctx, client, releaseURL)
-			if err != nil {
-				return false, fmt.Errorf("fetch management release: %w", err)
-			}
-			if remoteHash == "" {
-				return false, errors.New("management asset release has no digest")
-			}
-			if version == "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
-				log.Debug("management asset is already up to date")
-				return false, nil
-			}
-			data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
-			if err != nil {
-				return false, fmt.Errorf("download management asset: %w", err)
-			}
-			if !strings.EqualFold(remoteHash, downloadedHash) {
-				return false, fmt.Errorf(
-					"management asset digest mismatch: expected %s, got %s", remoteHash, downloadedHash,
-				)
-			}
-			if err := ctx.Err(); err != nil {
-				return false, err
-			}
-			if err := atomicWriteFile(localPath, data); err != nil {
-				return false, fmt.Errorf("publish management asset: %w", err)
-			}
-			log.Infof("management asset updated successfully (hash=%s)", downloadedHash)
-			return true, nil
+			return installManagementHTML(ctx, localPath, proxyURL, version, source, false)
 		},
 	)
 	select {
@@ -340,76 +348,206 @@ func syncManagementHTML(ctx context.Context, staticDir, proxyURL, panelRepositor
 	}
 }
 
-// resolveReleaseURL turns a repository reference into the GitHub releases API URL.
-// An empty version returns the "/releases/latest" endpoint; a non-empty version
-// returns "/releases/tags/{version}".
-func resolveReleaseURL(repo, version string) string {
-	repo = strings.TrimSpace(repo)
-	version = strings.TrimSpace(version)
-
-	suffix := "/releases/latest"
-	if version != "" {
-		suffix = "/releases/tags/" + url.PathEscape(version)
+func installManagementHTML(
+	ctx context.Context, localPath, proxyURL, version string, source *url.URL, onlyWhenMissing bool,
+) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
-
-	if repo == "" {
-		if version == "" {
-			return defaultManagementReleaseURL
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return false, fmt.Errorf("prepare management asset directory: %w", err)
+	}
+	client := NewReleaseHTTPClient(proxyURL, source)
+	asset, remoteHash, err := fetchReleaseAsset(ctx, client, releaseURLForVersion(source, version), version)
+	if err != nil {
+		return false, fmt.Errorf("fetch management release: %w", err)
+	}
+	if version == "" && !onlyWhenMissing {
+		localHash, err := fileSHA256(localPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.WithError(err).Debug("failed to read local management asset hash")
 		}
-		// Derive host-specific form from the default latest URL.
-		return strings.TrimSuffix(defaultManagementReleaseURL, "/releases/latest") + suffix
-	}
-
-	parsed, err := url.Parse(repo)
-	if err != nil || parsed.Host == "" {
-		return strings.TrimSuffix(defaultManagementReleaseURL, "/releases/latest") + suffix
-	}
-
-	host := strings.ToLower(parsed.Host)
-	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
-
-	if host == "api.github.com" {
-		// Strip any trailing /releases/... so we always land on the right endpoint.
-		parsed.Path = strings.TrimSuffix(parsed.Path, "/releases/latest")
-		parsed.Path = strings.TrimPrefix(parsed.Path, "/")
-		parsed.Path = "/" + parsed.Path + suffix
-		return parsed.String()
-	}
-
-	if host == "github.com" {
-		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
-			repoName := strings.TrimSuffix(parts[1], ".git")
-			return fmt.Sprintf("https://api.github.com/repos/%s/%s%s", parts[0], repoName, suffix)
+		if localHash == remoteHash {
+			log.Debug("management asset is already up to date")
+			return false, nil
 		}
 	}
-
-	return strings.TrimSuffix(defaultManagementReleaseURL, "/releases/latest") + suffix
+	data, downloadedHash, err := downloadAsset(ctx, client, source, asset.BrowserDownloadURL)
+	if err != nil {
+		return false, fmt.Errorf("download management asset: %w", err)
+	}
+	if remoteHash != downloadedHash {
+		return false, fmt.Errorf("management asset digest mismatch: expected %s, got %s", remoteHash, downloadedHash)
+	}
+	if err := atomicWriteFile(ctx, localPath, data, onlyWhenMissing); err != nil {
+		if onlyWhenMissing && errors.Is(err, os.ErrExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("publish management asset: %w", err)
+	}
+	log.Infof("management asset updated successfully (hash=%s)", downloadedHash)
+	return true, nil
 }
 
-func gitHubReleaseURL(releaseURL string) bool {
-	parsed, errParse := url.Parse(strings.TrimSpace(releaseURL))
-	return errParse == nil && parsed.User == nil && strings.EqualFold(parsed.Scheme, "https") &&
-		strings.EqualFold(parsed.Hostname(), "api.github.com") &&
-		(parsed.Port() == "" || parsed.Port() == "443")
+var repositoryPart = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// ResolveReleasesURL returns the releases collection shared by listing and installation.
+func ResolveReleasesURL(repository string) (*url.URL, error) {
+	repository = strings.TrimSpace(repository)
+	if repository == "" {
+		repository = config.DefaultPanelGitHubRepository
+	}
+	invalid := errors.New("invalid management panel repository")
+	parsed, err := url.Parse(repository)
+	if err != nil {
+		return nil, invalid
+	}
+	endpoint := &url.URL{Scheme: "https", Host: githubAPIHost}
+	prefix := "/repos/"
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if parsed.Host == "" {
+		if parsed.Scheme != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+			parsed.RawPath != "" || len(parts) != 2 {
+			return nil, invalid
+		}
+	} else {
+		if err := proxyutil.ValidateHTTPURL(repository); err != nil || parsed.Hostname() == "" {
+			return nil, invalid
+		}
+		host := strings.ToLower(parsed.Hostname())
+		web := host == "github.com" || host == "www.github.com"
+		if (web || host == githubAPIHost) && !defaultHTTPSPort(parsed) &&
+			!(parsed.Scheme == "http" && parsed.Port() == "80") {
+			return nil, invalid
+		}
+		if web && len(parts) >= 2 {
+			parts[1] = strings.TrimSuffix(parts[1], ".git")
+		}
+		if !web {
+			if parsed.Fragment != "" {
+				return nil, invalid
+			}
+			if host != githubAPIHost {
+				// A configured GitHub Enterprise or compatible API may use a private origin.
+				if !isHTTPSReleaseURL(parsed) {
+					return nil, invalid
+				}
+				endpoint.Host = parsed.Host
+				if strings.HasPrefix(parsed.Path, "/api/v3/repos/") {
+					prefix = "/api/v3/repos/"
+				}
+			}
+			repoPath, ok := strings.CutPrefix(parsed.Path, prefix)
+			if !ok {
+				return nil, invalid
+			}
+			parts = strings.Split(strings.TrimSuffix(repoPath, "/"), "/")
+			if len(parts) > 2 && parts[2] != "releases" {
+				return nil, invalid
+			}
+			if _, err := url.ParseQuery(parsed.RawQuery); err != nil {
+				return nil, invalid
+			}
+			endpoint.User, endpoint.RawQuery = parsed.User, parsed.RawQuery
+		}
+	}
+	if len(parts) < 2 {
+		return nil, invalid
+	}
+	owner, repo := parts[0], parts[1]
+	if !validRepositoryPart(owner) || !validRepositoryPart(repo) {
+		return nil, invalid
+	}
+	endpoint.Path = prefix + owner + "/" + repo + "/releases"
+	return endpoint, nil
+}
+
+func validRepositoryPart(part string) bool {
+	return part != "." && part != ".." && repositoryPart.MatchString(part)
+}
+
+func releaseURLForVersion(source *url.URL, version string) string {
+	target := *source
+	if version == "" {
+		target.Path += "/latest"
+	} else {
+		target.Path += "/tags/" + version
+		target.RawPath = source.EscapedPath() + "/tags/" + url.PathEscape(version)
+	}
+	return target.String()
+}
+
+func isHTTPSReleaseURL(target *url.URL) bool {
+	return target.Scheme == "https" && target.Opaque == "" && target.Hostname() != "" && target.Fragment == ""
+}
+
+func defaultHTTPSPort(target *url.URL) bool {
+	return target.Port() == "" || target.Port() == "443"
+}
+
+func githubAPIOrigin(target *url.URL) bool {
+	return isHTTPSReleaseURL(target) && strings.EqualFold(target.Hostname(), githubAPIHost) && defaultHTTPSPort(target)
+}
+
+// IsGitHubAPIRequestURL reports whether a URL may receive the GitHub API token.
+func IsGitHubAPIRequestURL(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	return err == nil && parsed.User == nil && githubAPIOrigin(parsed)
+}
+
+// AllowsReleaseOrigin checks the configured HTTPS origin for metadata redirects and continuations.
+func AllowsReleaseOrigin(source, target *url.URL) bool {
+	return isHTTPSReleaseURL(target) && strings.EqualFold(source.Hostname(), target.Hostname()) &&
+		(source.Port() == target.Port() || defaultHTTPSPort(source) && defaultHTTPSPort(target)) &&
+		(target.User == nil || source.User != nil && source.User.String() == target.User.String())
+}
+
+func allowsAssetTarget(source, target *url.URL) bool {
+	if !isHTTPSReleaseURL(target) || target.User != nil {
+		return false
+	}
+	if !githubAPIOrigin(source) {
+		return AllowsReleaseOrigin(source, target)
+	}
+	if !defaultHTTPSPort(target) {
+		return false
+	}
+	switch strings.ToLower(target.Hostname()) {
+	case "github.com":
+		parts := strings.Split(strings.TrimPrefix(target.EscapedPath(), "/"), "/")
+		return len(parts) == 6 && path.Clean(target.Path) == target.Path &&
+			validRepositoryPart(parts[0]) && validRepositoryPart(parts[1]) &&
+			parts[2] == "releases" && parts[3] == "download" && parts[4] != "" &&
+			strings.EqualFold(parts[5], managementAssetName)
+	case "release-assets.githubusercontent.com", "objects.githubusercontent.com":
+		return true
+	default:
+		return false
+	}
+}
+
+func getReleaseAsset(ctx context.Context, proxyURL, repository, version string) (*releaseAsset, string, error) {
+	source, err := ResolveReleasesURL(repository)
+	if err != nil {
+		return nil, "", err
+	}
+	return fetchReleaseAsset(
+		ctx, NewReleaseHTTPClient(proxyURL, source), releaseURLForVersion(source, version), version,
+	)
 }
 
 func fetchReleaseAsset(
 	ctx context.Context,
 	client *http.Client,
-	releaseURL string,
+	releaseURL, version string,
 ) (*releaseAsset, string, error) {
-	if strings.TrimSpace(releaseURL) == "" {
-		releaseURL = defaultManagementReleaseURL
-	}
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releaseURL, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("create release request: %w", err)
+		return nil, "", errors.New("invalid management release request")
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", httpUserAgent)
-	if gitHubReleaseURL(releaseURL) {
+	if IsGitHubAPIRequestURL(releaseURL) {
 		if token := util.GitHubToken(); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
@@ -417,61 +555,74 @@ func fetchReleaseAsset(
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("execute release request: %w", err)
+		return nil, "", fmt.Errorf("execute release request: %w", withoutRequestURL(err))
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, "", fmt.Errorf(
-			"unexpected release status %d: %s",
-			resp.StatusCode,
-			strings.TrimSpace(string(body)),
-		)
+		return nil, "", fmt.Errorf("unexpected release status %d", resp.StatusCode)
 	}
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManagementAssetBytes+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("read release response: %w", err)
+	}
+	if len(body) > maxManagementAssetBytes {
+		return nil, "", errors.New("management release response is too large")
+	}
 	var release releaseResponse
-	if err = json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, "", fmt.Errorf("decode release response: %w", err)
+	if err = json.Unmarshal(body, &release); err != nil {
+		return nil, "", errors.New("invalid management release response")
+	}
+	if version != "" && release.TagName != version {
+		return nil, "", errors.New("management release tag does not match the requested version")
 	}
 
 	for i := range release.Assets {
 		asset := &release.Assets[i]
 		if strings.EqualFold(asset.Name, managementAssetName) {
-			remoteHash := parseDigest(asset.Digest)
-			return asset, remoteHash, nil
+			remoteHash, err := parseDigest(asset.Digest)
+			return asset, remoteHash, err
 		}
 	}
 
-	return nil, "", fmt.Errorf("management asset %s not found in latest release", managementAssetName)
+	return nil, "", fmt.Errorf("management asset %s not found in release", managementAssetName)
 }
 
-func downloadAsset(ctx context.Context, client *http.Client, downloadURL string) ([]byte, string, error) {
-	if strings.TrimSpace(downloadURL) == "" {
-		return nil, "", fmt.Errorf("empty download url")
+func downloadAsset(ctx context.Context, client *http.Client, source *url.URL, downloadURL string) (
+	[]byte,
+	string,
+	error,
+) {
+	target, err := url.Parse(strings.TrimSpace(downloadURL))
+	if err != nil || !allowsAssetTarget(source, target) {
+		return nil, "", errors.New("management asset download target rejected")
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("create download request: %w", err)
+		return nil, "", errors.New("invalid management asset download request")
 	}
 	req.Header.Set("User-Agent", httpUserAgent)
 
-	resp, err := client.Do(req)
+	assetClient := *client
+	assetClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 || !allowsAssetTarget(source, req.URL) {
+			return errors.New("management asset redirect rejected")
+		}
+		return nil
+	}
+	resp, err := assetClient.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("execute download request: %w", err)
+		return nil, "", fmt.Errorf("execute download request: %w", withoutRequestURL(err))
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, "", fmt.Errorf(
-			"unexpected download status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)),
-		)
+		return nil, "", fmt.Errorf("unexpected download status %d", resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxManagementAssetBytes+1))
@@ -481,9 +632,19 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 	if len(data) > maxManagementAssetBytes {
 		return nil, "", fmt.Errorf("management asset download exceeds %d bytes", maxManagementAssetBytes)
 	}
+	if len(data) == 0 {
+		return nil, "", errors.New("management asset download is empty")
+	}
 
 	sum := sha256.Sum256(data)
 	return data, hex.EncodeToString(sum[:]), nil
+}
+
+func withoutRequestURL(err error) error {
+	if requestErr, ok := errors.AsType[*url.Error](err); ok {
+		return requestErr.Err
+	}
+	return err
 }
 
 func fileSHA256(path string) (string, error) {
@@ -503,7 +664,7 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func atomicWriteFile(path string, data []byte) error {
+func atomicWriteFile(ctx context.Context, path string, data []byte, onlyWhenMissing bool) error {
 	tmpFile, err := os.CreateTemp(filepath.Dir(path), "management-*.html")
 	if err != nil {
 		return err
@@ -527,22 +688,31 @@ func atomicWriteFile(path string, data []byte) error {
 		return err
 	}
 
-	if err = os.Rename(tmpName, path); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	return nil
+	if onlyWhenMissing {
+		return os.Link(tmpName, path)
+	}
+	return os.Rename(tmpName, path)
 }
 
-func parseDigest(digest string) string {
+func parseDigest(digest string) (string, error) {
 	digest = strings.TrimSpace(digest)
 	if digest == "" {
-		return ""
+		return "", errors.New("management asset release has no digest")
 	}
-
-	if idx := strings.Index(digest, ":"); idx >= 0 {
-		digest = digest[idx+1:]
+	if algorithm, hash, ok := strings.Cut(digest, ":"); ok {
+		if !strings.EqualFold(algorithm, "sha256") {
+			return "", errors.New("management asset release digest is not SHA-256")
+		}
+		digest = strings.TrimSpace(hash)
 	}
-
-	return strings.ToLower(strings.TrimSpace(digest))
+	if len(digest) != sha256.Size*2 {
+		return "", errors.New("invalid management asset SHA-256 digest length")
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return "", errors.New("invalid management asset SHA-256 digest")
+	}
+	return strings.ToLower(digest), nil
 }

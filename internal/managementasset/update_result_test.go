@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,10 +31,13 @@ func managementTestResponse(request *http.Request, status int, body string) *htt
 	}
 }
 
-func managementTestRelease(data, assetURL string) string {
+func managementTestRelease(data, assetURL, version string) string {
+	if version == "" {
+		version = "v1"
+	}
 	return fmt.Sprintf(
-		`{"assets":[{"name":"management.html","browser_download_url":%q,"digest":"sha256:%x"}]}`, assetURL,
-		sha256.Sum256([]byte(data)),
+		`{"tag_name":%q,"assets":[{"name":"management.html","browser_download_url":%q,"digest":"sha256:%x"}]}`,
+		version, assetURL, sha256.Sum256([]byte(data)),
 	)
 }
 
@@ -42,7 +46,13 @@ func TestUpdateManagementHTMLReportsFailureWhileEnsureKeepsAvailableAsset(t *tes
 		{"release", "unexpected release status 503"},
 		{"download", "unexpected download status 503"},
 		{"missing digest", "has no digest"},
+		{"invalid digest", "invalid management asset SHA-256 digest"},
+		{"wrong digest algorithm", "digest is not SHA-256"},
 		{"wrong digest", "digest mismatch"},
+		{"empty download", "download is empty"},
+		{"asset target", "download target rejected"},
+		{"asset redirect", "asset redirect rejected"},
+		{"metadata redirect", "release redirect rejected"},
 	} {
 		t.Run(
 			tc.name, func(t *testing.T) {
@@ -54,36 +64,49 @@ func TestUpdateManagementHTMLReportsFailureWhileEnsureKeepsAvailableAsset(t *tes
 				setManagementTestTransport(
 					t, roundTripFunc(
 						func(request *http.Request) (*http.Response, error) {
-							if request.URL.Hostname() == "api.github.com" {
-								if tc.name == "release" {
+							switch request.URL.Hostname() {
+							case "api.github.com":
+								body := managementTestRelease("new panel", managementTestAssetURL, "")
+								switch tc.name {
+								case "release":
 									return managementTestResponse(
 										request, http.StatusServiceUnavailable, "fixture release failure",
 									), nil
-								}
-								body := managementTestRelease(
-									"new panel",
-									"https://assets.example/management.html",
-								)
-								if tc.name == "missing digest" {
-									body = `{"assets":[{"name":"management.html","browser_download_url":` +
-										`"https://assets.example/` +
-										`management.html"}]}`
-								} else if tc.name == "wrong digest" {
+								case "metadata redirect":
+									resp := managementTestResponse(request, http.StatusFound, "")
+									resp.Header.Set("Location", "https://releases.example/fixture")
+									return resp, nil
+								case "missing digest":
+									body = `{"assets":[{"name":"management.html"}]}`
+								case "invalid digest":
+									body = `{"assets":[{"name":"management.html","digest":"sha256:short"}]}`
+								case "wrong digest algorithm":
+									body = strings.Replace(body, "sha256:", "sha512:", 1)
+								case "wrong digest":
+									body = managementTestRelease("different panel", managementTestAssetURL, "")
+								case "asset target":
 									body = managementTestRelease(
-										"different panel", "https://assets.example/management.html",
+										"new panel", "https://assets.example/management.html", "",
 									)
 								}
 								return managementTestResponse(request, http.StatusOK, body), nil
-							}
-							if request.URL.Hostname() != "assets.example" {
+							case "github.com":
+								switch tc.name {
+								case "download":
+									return managementTestResponse(
+										request, http.StatusServiceUnavailable, "fixture download failure",
+									), nil
+								case "asset redirect":
+									resp := managementTestResponse(request, http.StatusFound, "")
+									resp.Header.Set("Location", "https://assets.example/management.html")
+									return resp, nil
+								case "empty download":
+									return managementTestResponse(request, http.StatusOK, ""), nil
+								}
+								return managementTestResponse(request, http.StatusOK, "new panel"), nil
+							default:
 								return nil, fmt.Errorf("unexpected fixture host %q", request.URL.Hostname())
 							}
-							if tc.name == "download" {
-								return managementTestResponse(
-									request, http.StatusServiceUnavailable, "fixture download failure",
-								), nil
-							}
-							return managementTestResponse(request, http.StatusOK, "new panel"), nil
 						},
 					),
 				)
@@ -120,10 +143,10 @@ func TestUpdateManagementHTMLLatestBypassesAutomaticThrottle(t *testing.T) {
 					return managementTestResponse(
 						request,
 						http.StatusOK,
-						managementTestRelease(data, "https://assets.example/management.html"),
+						managementTestRelease(data, managementTestAssetURL, ""),
 					), nil
 				}
-				if request.URL.Hostname() != "assets.example" {
+				if request.URL.Hostname() != "github.com" && request.URL.Hostname() != "release-assets.githubusercontent.com" {
 					return nil, fmt.Errorf("unexpected fixture host %q", request.URL.Hostname())
 				}
 				return managementTestResponse(request, http.StatusOK, data), nil
@@ -169,12 +192,15 @@ func TestUpdateManagementHTMLSeparatesConcurrentTargets(t *testing.T) {
 										return nil, request.Context().Err()
 									}
 								}
-								assetURL := fmt.Sprintf("https://assets.example/%d.html", index)
+								assetURL := fmt.Sprintf(
+									"https://release-assets.githubusercontent.com/fixture/%d", index,
+								)
 								return managementTestResponse(
-									request, http.StatusOK, managementTestRelease(assetURL, assetURL),
+									request, http.StatusOK,
+									managementTestRelease(assetURL, assetURL, path.Base(request.URL.Path)),
 								), nil
 							}
-							if request.URL.Hostname() != "assets.example" {
+							if request.URL.Hostname() != "github.com" && request.URL.Hostname() != "release-assets.githubusercontent.com" {
 								return nil, fmt.Errorf("unexpected fixture host %q", request.URL.Hostname())
 							}
 							return managementTestResponse(request, http.StatusOK, request.URL.String()), nil
@@ -201,7 +227,7 @@ func TestUpdateManagementHTMLSeparatesConcurrentTargets(t *testing.T) {
 					filepath.Join(
 						dir, managementAssetName,
 					),
-				); err != nil || string(data) != "https://assets.example/2.html" {
+				); err != nil || string(data) != "https://release-assets.githubusercontent.com/fixture/2" {
 					t.Fatalf("second target was not independently published: data=%q err=%v", data, err)
 				}
 			},
@@ -237,10 +263,10 @@ func TestUpdateManagementHTMLCanceledWaiterKeepsSharedDownloadAlive(t *testing.T
 					return managementTestResponse(
 						request,
 						http.StatusOK,
-						managementTestRelease("panel", "https://assets.example/management.html"),
+						managementTestRelease("panel", managementTestAssetURL, ""),
 					), nil
 				}
-				if request.URL.Hostname() != "assets.example" {
+				if request.URL.Hostname() != "github.com" && request.URL.Hostname() != "release-assets.githubusercontent.com" {
 					return nil, fmt.Errorf("unexpected fixture host %q", request.URL.Hostname())
 				}
 				return managementTestResponse(request, http.StatusOK, "panel"), nil

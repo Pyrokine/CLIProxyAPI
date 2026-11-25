@@ -70,7 +70,7 @@ func TestReadManagementHTMLStateUsesDiskAndTargetWithoutPublishing(t *testing.T)
 									request, http.StatusServiceUnavailable, "fixture release error",
 								), nil
 							}
-							body := managementTestRelease("panel", "https://assets.example/management.html")
+							body := managementTestRelease("panel", managementTestAssetURL, scenario.version)
 							if scenario.missingDigest {
 								body = `{"assets":[{"name":"management.html","browser_download_url":"https://` +
 									`assets.example/management.html"}]}`

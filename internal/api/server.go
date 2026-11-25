@@ -419,7 +419,8 @@ type Server struct {
 	// server is the underlying HTTP server.
 	server *http.Server
 
-	listenerMu sync.Mutex
+	listenerMu             sync.Mutex
+	panelPreparationCancel context.CancelFunc
 
 	// muxBaseListener is the shared TCP listener used to serve both HTTP and Redis protocol traffic.
 	muxBaseListener net.Listener
@@ -2307,27 +2308,15 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 
-	if _, err := os.Stat(filePath); err != nil {
-		if os.IsNotExist(err) {
-			// Only attempt sync download if auto-update is enabled
-			if !cfg.RemoteManagement.IsAutoUpdatePanel() {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
-			// Synchronously ensure management.html is available with a detached context.
-			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureManagementHTML(
-				context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL,
-				cfg.RemoteManagement.PanelGitHubRepository, "",
-			) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
-		} else {
-			log.WithError(err).Error("failed to stat management control panel asset")
-			c.AbortWithStatus(http.StatusInternalServerError)
-			return
-		}
+	info, err := os.Stat(filePath)
+	if os.IsNotExist(err) || (err == nil && !info.Mode().IsRegular()) {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.WithError(err).Error("failed to stat management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
 	}
 
 	// CSP for the management panel SPA
@@ -2992,6 +2981,33 @@ func (s *Server) listeners() (net.Listener, *muxListener, *http.Server) {
 	return s.muxBaseListener, s.muxHTTPListener, s.redirectSrv
 }
 
+func (s *Server) cancelPanelPreparation() {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	if s.panelPreparationCancel != nil {
+		s.panelPreparationCancel()
+		s.panelPreparationCancel = nil
+	}
+}
+
+func (s *Server) prepareManagementPanel() {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	if s.muxBaseListener == nil || s.stopping.Load() {
+		return
+	}
+	if s.panelPreparationCancel != nil {
+		s.panelPreparationCancel()
+	}
+	cfg := s.configSnapshot()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.panelPreparationCancel = cancel
+	go func() {
+		defer cancel()
+		managementasset.PrepareManagementHTML(ctx, s.configFilePath, cfg)
+	}()
+}
+
 func httpsRedirectHandler(httpsAddr string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		host, port, err := net.SplitHostPort(httpsAddr)
@@ -3101,6 +3117,8 @@ func (s *Server) start(ready chan<- struct{}) error {
 		}
 		return http.ErrServerClosed
 	}
+	s.prepareManagementPanel()
+	defer s.cancelPanelPreparation()
 	if redirectSrv != nil {
 		go func() {
 			log.Debugf("Starting HTTP→HTTPS redirect on %s → %s", redirectSrv.Addr, s.server.Addr)
@@ -3226,6 +3244,7 @@ func (s *Server) BeginShutdown() {
 	s.configPublicationMu.Lock()
 	s.stopping.Store(true)
 	s.configPublicationMu.Unlock()
+	s.cancelPanelPreparation()
 	s.managementRoutesEnabled.close()
 	if s.usageQueue != nil {
 		s.usageQueue.Close()
@@ -3623,6 +3642,12 @@ func (s *Server) updateClients(ctx context.Context, cfg *config.Config, _ uint64
 		)
 	}
 	managementasset.SetCurrentConfig(cfg)
+	if oldCfg == nil || oldCfg.Home.Enabled != cfg.Home.Enabled || oldCfg.ProxyURL != cfg.ProxyURL ||
+		oldCfg.RemoteManagement.DisableControlPanel != cfg.RemoteManagement.DisableControlPanel ||
+		oldCfg.RemoteManagement.IsAutoUpdatePanel() != cfg.RemoteManagement.IsAutoUpdatePanel() ||
+		oldCfg.RemoteManagement.PanelGitHubRepository != cfg.RemoteManagement.PanelGitHubRepository {
+		s.prepareManagementPanel()
+	}
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 

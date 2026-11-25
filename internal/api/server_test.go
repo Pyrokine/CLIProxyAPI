@@ -74,6 +74,90 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 	return server
 }
 
+func TestManagementPanelServesOnlyPreparedLocalAsset(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MANAGEMENT_STATIC_PATH", dir)
+	server := newTestServer(t)
+	t.Cleanup(server.quotaScheduler.Stop)
+	request := func(scheme string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, scheme+"://panel.invalid/management.html", nil)
+		req.RemoteAddr = "192.0.2.20:12345"
+		rec := httptest.NewRecorder()
+		server.engine.ServeHTTP(rec, req)
+		return rec
+	}
+	if got := request("https").Code; got != http.StatusNotFound {
+		t.Fatalf("missing panel returned %d, want 404", got)
+	}
+	const content = "<html><p>Prepared management panel</p></html>"
+	if err := os.WriteFile(filepath.Join(dir, "management.html"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := *server.configSnapshot()
+	cfg.TLS.RequireForAuth = true
+	server.setConfig(&cfg)
+	if got := request("http").Code; got != http.StatusMisdirectedRequest {
+		t.Fatalf("plaintext remote panel returned %d, want TLS required", got)
+	}
+	rec := request("https")
+	if rec.Code != http.StatusOK || rec.Body.String() != content || rec.Header().Get("Content-Security-Policy") == "" {
+		t.Fatal("TLS request did not receive the prepared asset with its content policy")
+	}
+}
+
+func TestConfigCommitUpdatesCORSAndRedisTransport(t *testing.T) {
+	server := newTestServer(t)
+	t.Cleanup(server.quotaScheduler.Stop)
+	request := func(origin string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodOptions, "/v0/management/config", nil)
+		req.Header.Set("Origin", origin)
+		rec := httptest.NewRecorder()
+		server.engine.ServeHTTP(rec, req)
+		return rec.Header().Get("Access-Control-Allow-Origin")
+	}
+	const allowedOrigin = "https://panel.example.invalid"
+	const formerOrigin = "https://former.example.invalid"
+	if result := request(formerOrigin); result != "*" {
+		t.Fatalf("initial CORS origin = %q", result)
+	}
+	track := func(ip string) net.Conn {
+		t.Helper()
+		client, upstream := net.Pipe()
+		conn := &redisTestConn{Conn: upstream, remoteAddr: &net.TCPAddr{IP: net.ParseIP(ip)}}
+		if !server.trackRedisConnection(conn) {
+			t.Fatal("failed to track fixture connection")
+		}
+		t.Cleanup(
+			func() {
+				server.untrackRedisConnection(conn)
+				_ = upstream.Close()
+				_ = client.Close()
+			},
+		)
+		return client
+	}
+	remote := track("192.0.2.24")
+	local := track("127.0.0.1")
+	cfg := *server.configSnapshot()
+	cfg.CORSAllowedOrigins = []string{allowedOrigin}
+	cfg.TLS.RequireForAuth = true
+	server.UpdateClientsForConfigCommit(context.Background(), &cfg, 1)
+	if result := request(formerOrigin); result != "" {
+		t.Fatalf("omitted origin still allowed after config update: %q", result)
+	}
+	if result := request(allowedOrigin); result != allowedOrigin {
+		t.Fatalf("configured origin = %q, want %q", result, allowedOrigin)
+	}
+	if err := remote.SetDeadline(time.Now()); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("remote plaintext connection was not closed: %v", err)
+	}
+	if err := local.SetDeadline(time.Time{}); err != nil {
+		t.Fatalf("loopback connection was closed: %v", err)
+	}
+}
+
 func TestConfigCommitUpdatesQuotaScheduler(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	server := newTestServer(t)

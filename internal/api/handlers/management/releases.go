@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
-	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
 )
 
@@ -74,21 +74,33 @@ func (h *Handler) GetReleases(c *gin.Context) {
 
 	target := strings.ToLower(strings.TrimSpace(c.DefaultQuery("target", "cpa")))
 	cfg := h.configSnapshot()
-	var repo string
-	switch target {
-	case "panel":
-		repo = panelRepositoryFromConfig(cfg)
-	default:
-		repo = cpaRepositoryFromConfig(cfg)
-	}
-	proxyURL := ""
+	proxyURL, panelRepo := "", ""
 	if cfg != nil {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+		panelRepo = cfg.RemoteManagement.PanelGitHubRepository
 	}
-	releases, err := h.fetchAllReleases(c, repo, force, proxyURL)
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "fetch_failed", "message": err.Error()})
-		return
+	var releases []gitHubRelease
+	if target == "panel" {
+		source, err := managementasset.ResolveReleasesURL(panelRepo)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "fetch_failed", "message": err.Error()})
+			return
+		}
+		releases, err = h.fetchReleaseCollection(c, source, source.String(), force, proxyURL)
+		if err != nil {
+			c.JSON(
+				http.StatusBadGateway,
+				gin.H{"error": "fetch_failed", "message": "Failed to fetch management panel releases"},
+			)
+			return
+		}
+	} else {
+		var err error
+		releases, err = h.fetchAllReleases(c, cpaRepositoryFromConfig(cfg), force, proxyURL)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "fetch_failed", "message": err.Error()})
+			return
+		}
 	}
 
 	total := len(releases)
@@ -109,28 +121,6 @@ func (h *Handler) GetReleases(c *gin.Context) {
 	)
 }
 
-func panelRepositoryFromConfig(cfg *config.Config) string {
-	repo := "Pyrokine/Cli-Proxy-API-Management-Center"
-	if cfg != nil {
-		custom := strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
-		if custom != "" {
-			custom = strings.TrimPrefix(custom, "https://github.com/")
-			// noinspection HttpUrlsUsage
-			custom = strings.TrimPrefix(custom, "http://github.com/")
-			custom = strings.TrimPrefix(custom, "https://api.github.com/repos/")
-			custom = strings.TrimSuffix(custom, "/")
-			// Drop "/releases/..." suffix if present in the configured URL.
-			if idx := strings.Index(custom, "/releases"); idx > 0 {
-				custom = custom[:idx]
-			}
-			if strings.Count(custom, "/") == 1 {
-				repo = custom
-			}
-		}
-	}
-	return repo
-}
-
 func cpaRepositoryFromConfig(cfg *config.Config) string {
 	repo := "Pyrokine/CLIProxyAPI"
 	if cfg != nil {
@@ -148,15 +138,20 @@ func cpaRepositoryFromConfig(cfg *config.Config) string {
 	return repo
 }
 
-func (h *Handler) fetchAllReleases(
-	c *gin.Context,
-	repo string,
-	force bool,
-	proxyURL string,
+func (h *Handler) fetchAllReleases(c *gin.Context, repo string, force bool, proxyURL string) ([]gitHubRelease, error) {
+	source, err := url.Parse(fmt.Sprintf("https://api.github.com/repos/%s/releases", repo))
+	if err != nil {
+		return nil, fmt.Errorf("invalid releases URL: %w", err)
+	}
+	return h.fetchReleaseCollection(c, source, repo, force, proxyURL)
+}
+
+func (h *Handler) fetchReleaseCollection(
+	c *gin.Context, source *url.URL, cacheKey string, force bool, proxyURL string,
 ) ([]gitHubRelease, error) {
 	cachedReleases.mu.RLock()
 	if !force {
-		if entry, ok := cachedReleases.entries[repo]; ok &&
+		if entry, ok := cachedReleases.entries[cacheKey]; ok &&
 			time.Since(entry.fetchedAt) < releasesCacheTTL && entry.data != nil {
 			data := entry.data
 			cachedReleases.mu.RUnlock()
@@ -165,19 +160,12 @@ func (h *Handler) fetchAllReleases(
 	}
 	cachedReleases.mu.RUnlock()
 
-	requestURL := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100", repo)
-	client := &http.Client{Timeout: 15 * time.Second}
-
-	proxyURL = strings.TrimSpace(proxyURL)
-	if proxyURL != "" {
-		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
-		util.SetProxy(sdkCfg, client)
-	}
-
-	baseURL, err := url.Parse(requestURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid releases URL: %w", err)
-	}
+	first := *source
+	query := first.Query()
+	query.Set("per_page", strconv.Itoa(releasesMaxLimit))
+	first.RawQuery = query.Encode()
+	requestURL := first.String()
+	client := managementasset.NewReleaseHTTPClient(proxyURL, source)
 	seen := make(map[string]struct{})
 	releases := make([]gitHubRelease, 0)
 	for requestURL != "" {
@@ -195,20 +183,20 @@ func (h *Handler) fetchAllReleases(
 			return nil, fmt.Errorf("decode: %w", err)
 		}
 		releases = append(releases, page...)
-		requestURL, err = releasesNextURL(headers, requestURL, baseURL.Path)
+		requestURL, err = releasesNextURL(headers, requestURL, source)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	cachedReleases.mu.Lock()
-	cachedReleases.entries[repo] = releasesCacheEntry{data: releases, fetchedAt: time.Now()}
+	cachedReleases.entries[cacheKey] = releasesCacheEntry{data: releases, fetchedAt: time.Now()}
 	cachedReleases.mu.Unlock()
 
 	return releases, nil
 }
 
-func releasesNextURL(headers http.Header, currentURL, expectedPath string) (string, error) {
+func releasesNextURL(headers http.Header, currentURL string, source *url.URL) (string, error) {
 	current, err := url.Parse(currentURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid releases continuation")
@@ -240,14 +228,16 @@ func releasesNextURL(headers http.Header, currentURL, expectedPath string) (stri
 				return "", fmt.Errorf("invalid releases continuation")
 			}
 			candidate := current.ResolveReference(reference)
-			if !isGitHubAPIRequestURL(candidate.String()) || candidate.Path != expectedPath ||
-				candidate.Fragment != "" {
+			if !managementasset.AllowsReleaseOrigin(
+				source, candidate,
+			) || candidate.EscapedPath() != source.EscapedPath() {
 				return "", fmt.Errorf("invalid releases continuation")
 			}
 			query, err := url.ParseQuery(candidate.RawQuery)
 			if err != nil {
 				return "", fmt.Errorf("invalid releases continuation")
 			}
+			candidate.User = source.User
 			candidate.RawQuery = query.Encode()
 			next = candidate.String()
 		}
@@ -284,8 +274,5 @@ func githubGet(ctx context.Context, client *http.Client, url string, responseHea
 }
 
 func isGitHubAPIRequestURL(rawURL string) bool {
-	parsed, errParse := url.Parse(strings.TrimSpace(rawURL))
-	return errParse == nil && parsed.User == nil && strings.EqualFold(parsed.Scheme, "https") &&
-		strings.EqualFold(parsed.Hostname(), "api.github.com") &&
-		(parsed.Port() == "" || parsed.Port() == "443")
+	return managementasset.IsGitHubAPIRequestURL(rawURL)
 }

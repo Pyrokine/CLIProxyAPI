@@ -17,6 +17,7 @@ func TestUpdateManagementHTMLResultConfirmsActualPublication(t *testing.T) {
 		name           string
 		previous       string
 		version        string
+		wrongTag       bool
 		downloadStatus int
 		blockedTarget  bool
 		wantPublished  bool
@@ -31,6 +32,10 @@ func TestUpdateManagementHTMLResultConfirmsActualPublication(t *testing.T) {
 		{
 			name: "explicit version same digest", previous: "panel", version: "v2", downloadStatus: http.StatusOK,
 			wantPublished: true, wantDownloads: 1,
+		},
+		{
+			name: "metadata tag does not match", previous: "old panel", version: "v2", wrongTag: true,
+			wantError: "tag does not match",
 		},
 		{
 			name: "failed download preserves old panel", previous: "old panel",
@@ -58,11 +63,15 @@ func TestUpdateManagementHTMLResultConfirmsActualPublication(t *testing.T) {
 						func(request *http.Request) (*http.Response, error) {
 							switch request.URL.Hostname() {
 							case "api.github.com":
+								version := scenario.version
+								if scenario.wrongTag {
+									version = "v1"
+								}
 								return managementTestResponse(
 									request, http.StatusOK,
-									managementTestRelease("panel", "https://assets.example/management.html"),
+									managementTestRelease("panel", managementTestAssetURL, version),
 								), nil
-							case "assets.example":
+							case "github.com":
 								downloads.Add(1)
 								return managementTestResponse(request, scenario.downloadStatus, "panel"), nil
 							default:

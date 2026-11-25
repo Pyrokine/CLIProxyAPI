@@ -1193,6 +1193,16 @@ func (h *Handler) PostPanelUpdate(c *gin.Context) {
 		return
 	}
 
+	version, valid := panelUpdateVersion(c)
+	if !valid {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "Invalid panel update request"})
+		return
+	}
+	if version != "" && (!validVersion.MatchString(version) || version == "." || version == "..") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_version", "message": "Version format is invalid"})
+		return
+	}
+
 	staticDir := managementasset.StaticDir(h.configFilePath)
 	if staticDir == "" {
 		c.JSON(
@@ -1208,12 +1218,6 @@ func (h *Handler) PostPanelUpdate(c *gin.Context) {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 		panelRepo = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
 	}
-
-	var req struct {
-		Version string `json:"version"`
-	}
-	_ = c.ShouldBindJSON(&req)
-	version := strings.TrimSpace(req.Version)
 
 	published, errUpdate := managementasset.UpdateManagementHTMLWithResult(
 		c.Request.Context(), staticDir, proxyURL, panelRepo, version,
@@ -1231,4 +1235,29 @@ func (h *Handler) PostPanelUpdate(c *gin.Context) {
 		CompleteMutation(c.Request.Context())
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "Management panel updated"})
+}
+
+func panelUpdateVersion(c *gin.Context) (string, bool) {
+	if c.Request.Body == nil {
+		return "", true
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
+	start, err := decoder.Token()
+	if err == io.EOF {
+		return "", true
+	}
+	if err != nil || start != json.Delim('{') {
+		return "", false
+	}
+	var version string
+	if decoder.More() {
+		key, err := decoder.Token()
+		var value *string
+		if err != nil || key != "version" || decoder.Decode(&value) != nil || value == nil {
+			return "", false
+		}
+		version = strings.TrimSpace(*value)
+	}
+	end, err := decoder.Token()
+	return version, err == nil && end == json.Delim('}') && decoder.Decode(new(json.RawMessage)) == io.EOF
 }

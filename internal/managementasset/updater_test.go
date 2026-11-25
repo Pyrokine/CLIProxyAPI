@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -87,18 +86,23 @@ func TestAutoUpdateSkipReason(t *testing.T) {
 	}
 }
 
+const managementTestAssetURL = "https://github.com/fixture/panel/releases/download/v1/management.html"
+
 func TestDownloadAssetRejectsOversizedBody(t *testing.T) {
-	server := httptest.NewServer(
-		http.HandlerFunc(
-			func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(strings.Repeat("x", maxManagementAssetBytes+1)))
+	source, err := ResolveReleasesURL("fixture/panel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(request *http.Request) (*http.Response, error) {
+				return managementTestResponse(
+					request, http.StatusOK, strings.Repeat("x", maxManagementAssetBytes+1),
+				), nil
 			},
 		),
-	)
-	defer server.Close()
-
-	_, _, err := downloadAsset(context.Background(), server.Client(), server.URL)
+	}
+	_, _, err = downloadAsset(t.Context(), client, source, managementTestAssetURL)
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("downloadAsset() error = %v, want oversized error", err)
 	}
@@ -169,8 +173,7 @@ func TestFetchReleaseAssetUsesGitHubTokenOnlyForGitHubAPI(t *testing.T) {
 								Header:     make(http.Header),
 								Body: io.NopCloser(
 									strings.NewReader(
-										`{"assets":[{"name":"management.html","browser_download_url":"https://d` +
-											`ownloads.example/management.html","digest":"sha256:abc"}]}`,
+										managementTestRelease("panel", managementTestAssetURL, ""),
 									),
 								),
 								Request: request,
@@ -178,8 +181,125 @@ func TestFetchReleaseAssetUsesGitHubTokenOnlyForGitHubAPI(t *testing.T) {
 						},
 					),
 				}
-				if _, _, errFetch := fetchReleaseAsset(context.Background(), client, tt.url); errFetch != nil {
+				if _, _, errFetch := fetchReleaseAsset(context.Background(), client, tt.url, ""); errFetch != nil {
 					t.Fatalf("fetchReleaseAsset() error = %v", errFetch)
+				}
+			},
+		)
+	}
+}
+
+func TestResolveReleasesURL(t *testing.T) {
+	const public = "https://api.github.com/repos/fixture/panel/releases"
+	for _, tc := range []struct{ repo, want string }{
+		{"", "https://api.github.com/repos/Pyrokine/Cli-Proxy-API-Management-Center/releases"},
+		{" fixture/panel ", public},
+		{"https://github.com/fixture/panel.git", public},
+		{"http://www.github.com/fixture/panel/releases/latest", public},
+		{"https://api.github.com:443/repos/fixture/panel/releases", public},
+		{"https://api.github.com/repos/fixture/panel/releases/tags/v1.2.3/", public},
+		{
+			"https://panel.example:8443/api/v3/repos/fixture/panel/releases/latest?scope=fixture",
+			"https://panel.example:8443/api/v3/repos/fixture/panel/releases?scope=fixture",
+		},
+		{"not-a-repository", ""},
+		{"https://api.github.com:8443/repos/fixture/panel/releases", ""},
+		{"https://panel.example/other", ""},
+		{"http://panel.example/api/v3/repos/fixture/panel/releases", ""},
+	} {
+		t.Run(
+			tc.repo, func(t *testing.T) {
+				source, err := ResolveReleasesURL(tc.repo)
+				if tc.want == "" {
+					if err == nil {
+						t.Fatalf("resolved invalid reference to %s", source)
+					}
+					return
+				}
+				if err != nil || source.String() != tc.want {
+					t.Fatalf("release collection = %v, %v; want %s", source, err, tc.want)
+				}
+			},
+		)
+	}
+}
+
+func TestReleaseHTTPClientPreservesExplicitPrivateProxy(t *testing.T) {
+	source, err := ResolveReleasesURL("fixture/panel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const proxyURL = "http://127.0.0.1:12345"
+	client := NewReleaseHTTPClient(proxyURL, source)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy == nil {
+		t.Fatalf("release transport = %T, want configured HTTP proxy", client.Transport)
+	}
+	proxy, err := transport.Proxy(&http.Request{URL: source})
+	if err != nil || proxy.String() != proxyURL {
+		t.Fatalf("release proxy = %v, %v; want %s", proxy, err, proxyURL)
+	}
+}
+
+func TestAssetDownloadChecksEveryDestination(t *testing.T) {
+	const cdn = "https://release-assets.githubusercontent.com/github-production-release-asset/123/fixture?sig=example"
+	for _, tc := range []struct {
+		name, initial, redirect string
+		wantRequests            int
+		wantErr                 string
+	}{
+		{"GitHub release and CDN", managementTestAssetURL, cdn, 2, ""},
+		{"unsupported first origin", "https://assets.example/management.html", "", 0, "target rejected"},
+		{
+			"unrelated GitHub path", "https://github.com/fixture/panel/blob/main/management.html", "", 0,
+			"target rejected",
+		},
+		{
+			"unsupported redirect", managementTestAssetURL, "https://assets.example/management.html", 1,
+			"redirect rejected",
+		},
+		{
+			"HTTP redirect", managementTestAssetURL, "http://release-assets.githubusercontent.com/fixture", 1,
+			"redirect rejected",
+		},
+		{
+			"alternate port", managementTestAssetURL, "https://release-assets.githubusercontent.com:8443/fixture", 1,
+			"redirect rejected",
+		},
+	} {
+		t.Run(
+			tc.name, func(t *testing.T) {
+				source, err := ResolveReleasesURL("fixture/panel")
+				if err != nil {
+					t.Fatal(err)
+				}
+				calls := 0
+				client := &http.Client{
+					Transport: roundTripFunc(
+						func(req *http.Request) (*http.Response, error) {
+							calls++
+							if req.Header.Get("Authorization") != "" {
+								t.Errorf("asset request unexpectedly authenticated")
+							}
+							if calls == 1 && tc.redirect != "" {
+								resp := managementTestResponse(req, http.StatusFound, "")
+								resp.Header.Set("Location", tc.redirect)
+								return resp, nil
+							}
+							return managementTestResponse(req, http.StatusOK, "fixture panel"), nil
+						},
+					),
+				}
+				data, _, err := downloadAsset(t.Context(), client, source, tc.initial)
+				if tc.wantErr == "" {
+					if err != nil || string(data) != "fixture panel" {
+						t.Fatalf("download = %q, %v", data, err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v; want %q", err, tc.wantErr)
+				}
+				if calls != tc.wantRequests {
+					t.Fatalf("transport requests = %d, want %d", calls, tc.wantRequests)
 				}
 			},
 		)

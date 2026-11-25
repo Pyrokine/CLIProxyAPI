@@ -277,7 +277,7 @@ func TestMutationPanelUpdateEffectsTrackTheSpecificSynchronousPublication(t *tes
 		func(request *http.Request) (*http.Response, error) {
 			status, body := 200, "abc"
 			if request.URL.Host == "api.github.com" {
-				body = `{"assets":[{"name":"management.html","browser_download_url":"https://github.com/` +
+				body = `{"tag_name":"v1.2.3","assets":[{"name":"management.html","browser_download_url":"https://github.com/` +
 					`synthetic/panel/releases/download/v1.2.3/management.html","digest":"sha256:` +
 					`ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]}`
 			}

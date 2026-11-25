@@ -31,12 +31,9 @@ func ReadManagementHTMLState(
 	if staticDir == "" {
 		return ManagementHTMLState{}, errors.New("management asset static directory is empty")
 	}
-	_, targetHash, err := fetchReleaseAsset(ctx, newHTTPClient(proxyURL), resolveReleaseURL(panelRepository, version))
+	_, targetHash, err := getReleaseAsset(ctx, proxyURL, panelRepository, strings.TrimSpace(version))
 	if err != nil {
 		return ManagementHTMLState{}, fmt.Errorf("fetch management release: %w", err)
-	}
-	if targetHash == "" {
-		return ManagementHTMLState{}, errors.New("management asset release has no digest")
 	}
 	state := ManagementHTMLState{TargetDigest: "sha256:" + targetHash}
 	localHash, err := fileSHA256(filepath.Join(staticDir, managementAssetName))
