@@ -817,6 +817,7 @@ func (s *Service) ensureWebsocketGateway() {
 	}
 	opts := wsrelay.Options{
 		Path:           "/v1/ws",
+		OwnerIdentity:  usage.APIKeyIdentityFromContext,
 		OnConnected:    s.wsOnConnected,
 		OnDisconnected: s.wsOnDisconnected,
 		LogDebugf:      log.Debugf,
@@ -827,10 +828,11 @@ func (s *Service) ensureWebsocketGateway() {
 }
 
 func (s *Service) wsOnConnected(channelID string) {
-	if s == nil || channelID == "" {
+	if s == nil || s.wsGateway == nil || channelID == "" {
 		return
 	}
-	if !strings.HasPrefix(strings.ToLower(channelID), "aistudio-") {
+	owner := s.wsGateway.SessionOwner(channelID)
+	if owner == "" || !strings.HasPrefix(strings.ToLower(channelID), "aistudio-") {
 		return
 	}
 	if s.coreManager != nil {
@@ -848,6 +850,7 @@ func (s *Service) wsOnConnected(channelID string) {
 		Status:     coreauth.StatusActive,
 		CreatedAt:  now,
 		UpdatedAt:  now,
+		RelayOwner: owner,
 		Attributes: map[string]string{"runtime_only": "true"},
 		Metadata:   map[string]any{"email": channelID}, // metadata drives logging and usage tracking
 	}

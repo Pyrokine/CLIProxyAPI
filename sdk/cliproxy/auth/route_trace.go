@@ -783,7 +783,7 @@ func newRouteDecisionDraft(
 	return draft
 }
 
-func (d *routeDecisionDraft) mergeShard(shard *modelScheduler, model string) {
+func (d *routeDecisionDraft) mergeShard(shard *modelScheduler, model, clientIdentity string) {
 	if d == nil || shard == nil {
 		return
 	}
@@ -794,7 +794,7 @@ func (d *routeDecisionDraft) mergeShard(shard *modelScheduler, model string) {
 	sort.Strings(authIDs)
 	for _, authID := range authIDs {
 		entry := shard.entries[authID]
-		if entry == nil || entry.auth == nil {
+		if entry == nil || !entry.auth.allowsRelayOwner(clientIdentity) {
 			continue
 		}
 		d.mergeAuth(entry.auth, model, entry.meta)

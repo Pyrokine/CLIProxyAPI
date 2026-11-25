@@ -1280,6 +1280,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 		}()
 	}
 	newCtx = util.WithGinContext(newCtx, c)
+	if identity := coreusage.APIKeyIdentityFromContext(requestCtx); identity != "" {
+		newCtx = coreusage.WithAPIKeyIdentity(newCtx, identity)
+	}
 	newCtx = coreusage.WithManager(newCtx, h.UsageManager)
 	newCtx = sdktranslator.WithPluginHooks(newCtx, h.TranslatorPluginHooks)
 	newCtx = context.WithValue(newCtx, handlerContextKey{}, handler)

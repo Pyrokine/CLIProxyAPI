@@ -165,6 +165,7 @@ type session struct {
 	conn       *websocket.Conn
 	manager    *Manager
 	provider   string
+	owner      string
 	id         string
 	closed     chan struct{}
 	closeOnce  sync.Once

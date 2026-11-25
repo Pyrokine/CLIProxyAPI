@@ -25,6 +25,7 @@ type Manager struct {
 	maxSessions int // hard cap on concurrent sessions
 
 	providerFactory func(*http.Request) (string, error)
+	ownerIdentity   func(context.Context) string
 	onConnected     func(string)
 	onDisconnected  func(string, error)
 
@@ -38,11 +39,13 @@ type Options struct {
 	Path            string
 	MaxSessions     int // hard cap on concurrent sessions; 0 = 256 default
 	ProviderFactory func(*http.Request) (string, error)
-	OnConnected     func(string)
-	OnDisconnected  func(string, error)
-	LogDebugf       func(string, ...any)
-	LogInfof        func(string, ...any)
-	LogWarnf        func(string, ...any)
+	// OwnerIdentity binds upgrades and sends to an identity set by authentication.
+	OwnerIdentity  func(context.Context) string
+	OnConnected    func(string)
+	OnDisconnected func(string, error)
+	LogDebugf      func(string, ...any)
+	LogInfof       func(string, ...any)
+	LogWarnf       func(string, ...any)
 }
 
 // NewManager builds a websocket relay manager with the supplied options.
@@ -76,6 +79,7 @@ func NewManager(opts Options) *Manager {
 			},
 		},
 		providerFactory: opts.ProviderFactory,
+		ownerIdentity:   opts.OwnerIdentity,
 		onConnected:     opts.OnConnected,
 		onDisconnected:  opts.OnDisconnected,
 		logDebugf:       opts.LogDebugf,
@@ -140,6 +144,14 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	var owner string
+	if m.ownerIdentity != nil {
+		owner = m.ownerIdentity(r.Context())
+		if owner == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
 	provider := randomProviderName()
 	if m.providerFactory != nil {
 		name, err := m.providerFactory(r)
@@ -151,15 +163,16 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			provider = strings.ToLower(strings.TrimSpace(name))
 		}
 	}
-	if provider == "" {
-		provider = strings.ToLower(randomProviderName())
-	}
 	m.sessMutex.RLock()
-	_, providerExists := m.sessions[provider]
+	existing := m.sessions[provider]
 	currentCount := len(m.sessions)
 	m.sessMutex.RUnlock()
-	if !providerExists && currentCount >= m.maxSessions {
+	if existing == nil && currentCount >= m.maxSessions {
 		http.Error(w, "too many websocket sessions", http.StatusServiceUnavailable)
+		return
+	}
+	if existing != nil && existing.owner != owner {
+		http.Error(w, "websocket session unavailable", http.StatusForbidden)
 		return
 	}
 	conn, err := m.upgrader.Upgrade(w, r, nil)
@@ -169,19 +182,17 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	}
 	s := newSession(conn, m, provider)
 	s.provider = provider
+	s.owner = owner
 	m.sessMutex.Lock()
-	if _, exists := m.sessions[s.provider]; !exists && len(m.sessions) >= m.maxSessions {
+	replaced := m.sessions[provider]
+	if (replaced == nil && len(m.sessions) >= m.maxSessions) || (replaced != nil && replaced.owner != owner) {
 		m.sessMutex.Unlock()
-		// Session was never registered into the manager; avoid firing onDisconnected side effects.
+		// An unregistered session must not remove a credential from the manager.
 		s.manager = nil
-		s.cleanup(errors.New("wsrelay: too many websocket sessions"))
+		s.cleanup(errors.New("wsrelay: session unavailable"))
 		return
 	}
-	var replaced *session
-	if existing, ok := m.sessions[s.provider]; ok {
-		replaced = existing
-	}
-	m.sessions[s.provider] = s
+	m.sessions[provider] = s
 	m.sessMutex.Unlock()
 
 	if replaced != nil {
@@ -194,10 +205,18 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	go s.run(context.Background())
 }
 
+// SessionOwner returns the authenticated owner of the active relay session.
+func (m *Manager) SessionOwner(provider string) string {
+	if s := m.session(provider); s != nil {
+		return s.owner
+	}
+	return ""
+}
+
 // send forwards the message to the specific provider connection and returns its pending response.
 func (m *Manager) send(ctx context.Context, provider string, msg message) (*pendingRequest, error) {
 	s := m.session(provider)
-	if s == nil {
+	if s == nil || m.ownerIdentity != nil && (s.owner == "" || s.owner != m.ownerIdentity(ctx)) {
 		return nil, fmt.Errorf("wsrelay: provider %s not connected", provider)
 	}
 	return s.request(ctx, msg)

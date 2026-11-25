@@ -65,6 +65,10 @@ func GetRequestInfo(ctx context.Context) *RequestInfo {
 	return nil
 }
 
+func (a *Auth) allowsRelayOwner(identity string) bool {
+	return a != nil && (a.RelayOwner == "" || a.RelayOwner == identity)
+}
+
 // Auth encapsulates the runtime state and metadata associated with a single credential.
 type Auth struct {
 	// ID uniquely identifies the auth record across restarts.
@@ -124,6 +128,8 @@ type Auth struct {
 
 	// Runtime carries non-serializable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+	// RelayOwner scopes a WebSocket relay credential to its authenticated client.
+	RelayOwner string `json:"-"`
 	// Generation identifies the manager-published credential version used by a request.
 	Generation uint64 `json:"-"`
 	// RefreshCommit guards provider-owned refresh publication against owner replacement.

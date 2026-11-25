@@ -12,6 +12,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 // schedulerStrategy identifies which built-in routing semantics the scheduler should apply.
@@ -405,15 +406,14 @@ func appendScheduledStateExclusions(
 	events *[]cliproxyexecutor.RouteTraceEvent,
 	opts cliproxyexecutor.Options,
 	shard *modelScheduler,
-	provider,
-	model string,
+	provider, model, clientIdentity string,
 ) {
 	if routeTraceCallback(opts.Metadata) == nil || shard == nil {
 		return
 	}
 	now := time.Now()
 	for _, entry := range shard.entries {
-		if entry == nil || entry.auth == nil || entry.state == scheduledStateReady {
+		if entry == nil || !entry.auth.allowsRelayOwner(clientIdentity) || entry.state == scheduledStateReady {
 			continue
 		}
 		reason := "unavailable"
@@ -480,6 +480,7 @@ func (s *authScheduler) pickSingleWithPredicate(
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	clientIdentity := coreusage.APIKeyIdentityFromContext(ctx)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) &&
 		providerPrefersWebsocketTransport(providerKey) &&
 		pinnedAuthID == ""
@@ -527,11 +528,11 @@ func (s *authScheduler) pickSingleWithPredicate(
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	shard.promoteExpiredLocked(time.Now())
-	decision.mergeShard(shard, model)
-	appendScheduledStateExclusions(&traceEvents, opts, shard, providerKey, model)
+	decision.mergeShard(shard, model, clientIdentity)
+	appendScheduledStateExclusions(&traceEvents, opts, shard, providerKey, model, clientIdentity)
 	tracedExclusions := make(map[string]struct{})
 	traceExclusion := func(entry *scheduledAuth, reason string) {
-		if routeTraceCallback(opts.Metadata) == nil || entry == nil || entry.auth == nil {
+		if routeTraceCallback(opts.Metadata) == nil || entry == nil || !entry.auth.allowsRelayOwner(clientIdentity) {
 			return
 		}
 		decision.exclude(entry.auth, model, reason)
@@ -550,7 +551,7 @@ func (s *authScheduler) pickSingleWithPredicate(
 		)
 	}
 	predicate := func(entry *scheduledAuth) bool {
-		if entry == nil || entry.auth == nil {
+		if entry == nil || !entry.auth.allowsRelayOwner(clientIdentity) {
 			return false
 		}
 		if schedulerStrategyUsesWeights(strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
@@ -650,6 +651,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 		return picked, normalized[0], errPick
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	clientIdentity := coreusage.APIKeyIdentityFromContext(ctx)
 	modelKey := canonicalModelKey(model)
 
 	var traceEvents []cliproxyexecutor.RouteTraceEvent
@@ -697,11 +699,11 @@ func (s *authScheduler) pickMixedWithPredicate(
 		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		shard.promoteExpiredLocked(time.Now())
-		decision.mergeShard(shard, model)
-		appendScheduledStateExclusions(&traceEvents, opts, shard, providerKey, model)
+		decision.mergeShard(shard, model, clientIdentity)
+		appendScheduledStateExclusions(&traceEvents, opts, shard, providerKey, model, clientIdentity)
 		tracedExclusions := make(map[string]struct{})
 		traceExclusion := func(entry *scheduledAuth, reason string) {
-			if routeTraceCallback(opts.Metadata) == nil || entry == nil || entry.auth == nil {
+			if routeTraceCallback(opts.Metadata) == nil || entry == nil || !entry.auth.allowsRelayOwner(clientIdentity) {
 				return
 			}
 			key := entry.auth.ID + "\x00" + reason
@@ -719,7 +721,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 			)
 		}
 		predicate := func(entry *scheduledAuth) bool {
-			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
+			if entry == nil || !entry.auth.allowsRelayOwner(clientIdentity) || entry.auth.ID != pinnedAuthID {
 				return false
 			}
 			if schedulerStrategyUsesWeights(strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
@@ -784,7 +786,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 
 	tracedExclusions := make(map[string]struct{})
 	traceExclusion := func(entry *scheduledAuth, reason string) {
-		if routeTraceCallback(opts.Metadata) == nil || entry == nil || entry.auth == nil {
+		if routeTraceCallback(opts.Metadata) == nil || entry == nil || !entry.auth.allowsRelayOwner(clientIdentity) {
 			return
 		}
 		decision.exclude(entry.auth, model, reason)
@@ -807,7 +809,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 		)
 	}
 	predicate := func(entry *scheduledAuth) bool {
-		if entry == nil || entry.auth == nil {
+		if entry == nil || !entry.auth.allowsRelayOwner(clientIdentity) {
 			return false
 		}
 		if schedulerStrategyUsesWeights(strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
@@ -857,8 +859,8 @@ func (s *authScheduler) pickMixedWithPredicate(
 			continue
 		}
 		shard.promoteExpiredLocked(now)
-		decision.mergeShard(shard, model)
-		appendScheduledStateExclusions(&traceEvents, opts, shard, providerKey, model)
+		decision.mergeShard(shard, model, clientIdentity)
+		appendScheduledStateExclusions(&traceEvents, opts, shard, providerKey, model, clientIdentity)
 		priorityReady, okPriority := shard.highestReadyPriorityLocked(preferWebsocket, predicate)
 		if !okPriority {
 			continue

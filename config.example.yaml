@@ -180,8 +180,8 @@ routing:
 # Set to restrict browser access: ["http://localhost:5173", "http://127.0.0.1:5173"]
 # cors-allowed-origins: []
 
-# When true (default), enable authentication for the WebSocket API (/v1/ws).
-# Set false to disable (NOT RECOMMENDED — unauthenticated WebSocket access allows anonymous AI proxy usage).
+# With ws-auth enabled, an AI Studio relay serves only requests authenticated with the same client key.
+# With ws-auth disabled, registration and use of unauthenticated relays are limited to direct loopback clients.
 ws-auth: true
 # Allow API key authentication via URL query parameters (?key= / ?auth_token=).
 # Disabled by default — query parameters leak credentials to server logs, Referer headers, and browser history.

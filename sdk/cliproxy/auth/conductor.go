@@ -7137,10 +7137,11 @@ func isFreeCodexAuth(auth *Auth) bool {
 
 func selectionPredicate(ctx context.Context, opts cliproxyexecutor.Options) func(*Auth) bool {
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
-	if eligibility.unrestricted() {
-		return nil
+	identity := coreusage.APIKeyIdentityFromContext(ctx)
+	unrestricted := eligibility.unrestricted()
+	return func(auth *Auth) bool {
+		return auth.allowsRelayOwner(identity) && (unrestricted || eligibility.allows(auth))
 	}
-	return eligibility.allows
 }
 
 func inferredSessionID(headers http.Header, body []byte, metadata map[string]any) string {
@@ -10035,6 +10036,7 @@ func (m *Manager) PickNext(
 	m.applyAuthAffinity(&opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	requestPredicate := selectionPredicate(ctx, opts)
+	clientIdentity := coreusage.APIKeyIdentityFromContext(ctx)
 	schedulerPredicate := combineSelectionPredicates(requestPredicate, m.context1MSelectionPredicate(model))
 
 	var traceEvents []cliproxyexecutor.RouteTraceEvent
@@ -10069,7 +10071,7 @@ func (m *Manager) PickNext(
 	context1MUnsupported := false
 	for _, authID := range sortedAuthIDs(m.auths) {
 		candidate := m.auths[authID]
-		if candidate == nil || executorKeyFromAuth(candidate) != provider {
+		if !candidate.allowsRelayOwner(clientIdentity) || executorKeyFromAuth(candidate) != provider {
 			continue
 		}
 		m.recordRouteDecisionCandidate(opts, candidate, model)
@@ -10315,6 +10317,7 @@ func (m *Manager) pickNextMixed(
 	m.applyAuthAffinity(&opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	requestPredicate := selectionPredicate(ctx, opts)
+	clientIdentity := coreusage.APIKeyIdentityFromContext(ctx)
 	schedulerPredicate := combineSelectionPredicates(requestPredicate, m.context1MSelectionPredicate(model))
 
 	providerSet := make(map[string]struct{}, len(providers))
@@ -10344,7 +10347,7 @@ func (m *Manager) pickNextMixed(
 	context1MUnsupported := false
 	for _, authID := range sortedAuthIDs(m.auths) {
 		candidate := m.auths[authID]
-		if candidate == nil {
+		if !candidate.allowsRelayOwner(clientIdentity) {
 			continue
 		}
 		m.recordRouteDecisionCandidate(opts, candidate, model)
