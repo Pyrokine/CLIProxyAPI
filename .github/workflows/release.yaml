@@ -9,13 +9,19 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    uses: ./.github/workflows/release-preflight.yml
+    permissions:
+      contents: read
+
   deep-quality:
+    needs: preflight
     uses: ./.github/workflows/deep-quality.yml
     permissions:
       contents: read
 
   native-artifacts:
-    needs: deep-quality
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -84,7 +90,7 @@ jobs:
             dist/checksums_*.txt
 
   publish:
-    needs: native-artifacts
+    needs: [deep-quality, native-artifacts]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -114,19 +120,16 @@ jobs:
           from pathlib import Path
 
           root = Path('dist')
+          tag = os.environ['RELEASE_TAG']
+          version = tag[1:] if tag.startswith('v') else tag
           archives = sorted([*root.glob('*.tar.gz'), *root.glob('*.zip')])
-          expected = {(system, arch) for system in ('linux', 'darwin', 'windows') for arch in ('amd64', 'arm64')}
-          actual = []
-          for archive in archives:
-              match = re.search(r'_(linux|darwin|windows)_(amd64|arm64)\.(tar\.gz|zip)$', archive.name)
-              if not match:
-                  raise SystemExit(f'Unexpected release archive: {archive.name}')
-              system, arch, extension = match.groups()
-              if extension != ('zip' if system == 'windows' else 'tar.gz'):
-                  raise SystemExit(f'Unexpected archive format: {archive.name}')
-              actual.append((system, arch))
-          if len(actual) != len(expected) or set(actual) != expected:
-              raise SystemExit(f'Incomplete release targets: {actual}')
+          expected = {
+              f'CLIProxyAPI_{version}_{system}_{arch}.{"zip" if system == "windows" else "tar.gz"}'
+              for system in ('linux', 'darwin', 'windows') for arch in ('amd64', 'arm64')
+          }
+          actual = {archive.name for archive in archives}
+          if actual != expected:
+              raise SystemExit(f'Incomplete release targets: missing {sorted(expected - actual)}, unexpected {sorted(actual - expected)}')
           checksums = {}
           for manifest in sorted(root.glob('checksums_*.txt')):
               for line in manifest.read_text(encoding='utf-8').splitlines():
@@ -135,14 +138,13 @@ jobs:
                   if not re.fullmatch(r'[0-9a-f]{64}', digest) or name in checksums or Path(name).name != name:
                       raise SystemExit(f'Invalid or duplicate checksum entry in {manifest.name}')
                   checksums[name] = digest
-          if set(checksums) != {archive.name for archive in archives}:
+          if set(checksums) != actual:
               raise SystemExit('Release archives and checksums differ')
           (root / 'checksums.txt').write_text(
               ''.join(f'{checksums[name]}  {name}\n' for name in sorted(checksums)), encoding='utf-8'
           )
-          tag = os.environ['RELEASE_TAG']
           changelog = Path('CHANGELOG.md').read_text(encoding='utf-8')
-          match = re.search(rf'^##\s+{re.escape(tag)}\b.*?(?=^##\s+v|\Z)', changelog, re.M | re.S)
+          match = re.search(rf'^##[ \t]+{re.escape(tag)}(?=\s|$).*?(?=^##[ \t]|\Z)', changelog, re.M | re.S)
           if not match:
               raise SystemExit(f'CHANGELOG.md has no entry for {tag}')
           Path('release-notes.md').write_text(match.group(0).strip() + '\n', encoding='utf-8')

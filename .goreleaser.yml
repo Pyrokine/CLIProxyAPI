@@ -1,4 +1,5 @@
 version: 2
+project_name: CLIProxyAPI
 
 builds:
     - &native_unix
@@ -44,6 +45,7 @@ builds:
 
 archives:
     -   id: cli-proxy-api
+        name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
         formats:
             - tar.gz
         format_overrides:

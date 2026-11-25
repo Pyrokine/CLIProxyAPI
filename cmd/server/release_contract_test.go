@@ -111,6 +111,37 @@ func TestNativeReleaseTargetsKeepUnixPluginLoader(t *testing.T) {
 	}
 }
 
+func TestNativeReleaseArchiveNamesMatchUpdaterContract(t *testing.T) {
+	var cfg struct {
+		ProjectName string `yaml:"project_name"`
+		Archives    []struct {
+			NameTemplate    string   `yaml:"name_template"`
+			Formats         []string `yaml:"formats"`
+			FormatOverrides []struct {
+				Goos    string   `yaml:"goos"`
+				Formats []string `yaml:"formats"`
+			} `yaml:"format_overrides"`
+		} `yaml:"archives"`
+	}
+	if err := yaml.Unmarshal(readReleaseSource(t, ".goreleaser.yml"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProjectName != "CLIProxyAPI" {
+		t.Errorf("release project_name = %q, want CLIProxyAPI", cfg.ProjectName)
+	}
+	if len(cfg.Archives) != 1 {
+		t.Fatalf("release defines %d archive sets, want 1", len(cfg.Archives))
+	}
+	archive := cfg.Archives[0]
+	if archive.NameTemplate != "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}" {
+		t.Errorf("archive name_template = %q, want the updater's versioned archive name", archive.NameTemplate)
+	}
+	if strings.Join(archive.Formats, ",") != "tar.gz" || len(archive.FormatOverrides) != 1 ||
+		archive.FormatOverrides[0].Goos != "windows" || strings.Join(archive.FormatOverrides[0].Formats, ",") != "zip" {
+		t.Fatalf("archive formats do not match the updater: %+v", archive)
+	}
+}
+
 func TestContainerDefaultsMatchPublishedImageAndLocalPorts(t *testing.T) {
 	for _, name := range []string{"docker-compose.yml", "docker-compose.cluster.yml"} {
 		var cfg struct {
@@ -149,6 +180,108 @@ func TestContainerDefaultsMatchPublishedImageAndLocalPorts(t *testing.T) {
 	}
 }
 
+func TestReleaseWorkflowsKeepPreflightAndPublicationGates(t *testing.T) {
+	toolVersions := make(map[string]string)
+	for _, tc := range []struct {
+		file, event, tag string
+		needs            map[string][]string
+	}{
+		{
+			"release.yaml", "push", "*", map[string][]string{
+				"deep-quality": {"preflight"}, "native-artifacts": {"preflight"},
+				"publish": {"deep-quality", "native-artifacts"},
+			},
+		},
+		{
+			"docker-image.yml", "push", "v*", map[string][]string{
+				"deep-quality": {"preflight"}, "docker_amd64": {"deep-quality"}, "docker_arm64": {"deep-quality"},
+				"docker_manifest": {"docker_amd64", "docker_arm64"},
+			},
+		},
+		{"pr-test-build.yml", "pull_request", "", map[string][]string{"build": {"preflight"}}},
+		{"release-preflight.yml", "workflow_call", "", nil},
+		{"deep-quality.yml", "workflow_call", "", nil},
+	} {
+		t.Run(
+			tc.file, func(t *testing.T) {
+				var workflow struct {
+					On   map[string]yaml.Node `yaml:"on"`
+					Jobs map[string]struct {
+						Needs yaml.Node `yaml:"needs"`
+						Uses  string    `yaml:"uses"`
+						Steps []struct {
+							Run  string            `yaml:"run"`
+							Uses string            `yaml:"uses"`
+							With map[string]string `yaml:"with"`
+						} `yaml:"steps"`
+					} `yaml:"jobs"`
+				}
+				if err := yaml.Unmarshal(readReleaseSource(t, ".github/workflows/"+tc.file), &workflow); err != nil {
+					t.Fatal(err)
+				}
+				trigger, ok := workflow.On[tc.event]
+				if !ok {
+					t.Fatalf("workflow lost its %s entry point", tc.event)
+				}
+				if tc.tag != "" {
+					var push struct {
+						Tags []string `yaml:"tags"`
+					}
+					if err := trigger.Decode(&push); err != nil || strings.Join(push.Tags, ",") != tc.tag {
+						t.Fatalf("tag trigger = %v, error %v; want %s", push.Tags, err, tc.tag)
+					}
+				}
+				for id, want := range tc.needs {
+					job, ok := workflow.Jobs[id]
+					if !ok {
+						t.Fatalf("missing job %s", id)
+					}
+					var got []string
+					if job.Needs.Kind == yaml.ScalarNode {
+						got = []string{job.Needs.Value}
+					} else if err := job.Needs.Decode(&got); err != nil {
+						t.Fatal(err)
+					}
+					sort.Strings(got)
+					sort.Strings(want)
+					if strings.Join(got, ",") != strings.Join(want, ",") {
+						t.Errorf("%s needs %v, want %v", id, got, want)
+					}
+				}
+				if len(tc.needs) != 0 && workflow.Jobs["preflight"].Uses != "./.github/workflows/release-preflight.yml" {
+					t.Error("workflow bypasses the shared release preflight")
+				}
+				var contractCheck, configCheck bool
+				for _, job := range workflow.Jobs {
+					for _, step := range job.Steps {
+						contractCheck = contractCheck || step.Run == "go -C cmd/server test -count=1 release_contract_test.go"
+						if strings.HasPrefix(step.Uses, "goreleaser/goreleaser-action@") {
+							toolVersions[tc.file] = step.With["version"]
+							configCheck = configCheck || step.With["args"] == "check"
+						}
+					}
+				}
+				if tc.file == "release-preflight.yml" && (!contractCheck || !configCheck) {
+					t.Error("preflight must check standalone release contracts and the actual GoReleaser configuration")
+				}
+				if tc.file == "deep-quality.yml" {
+					for _, event := range []string{"workflow_dispatch", "schedule"} {
+						if _, ok := workflow.On[event]; !ok {
+							t.Errorf("quality workflow lost its %s entry point", event)
+						}
+					}
+				}
+			},
+		)
+	}
+	if version := toolVersions["release-preflight.yml"]; version == "" || version != toolVersions["release.yaml"] {
+		t.Fatalf(
+			"GoReleaser preflight version %q differs from native release version %q",
+			version, toolVersions["release.yaml"],
+		)
+	}
+}
+
 func TestReleaseWorkflowValidatesCompleteArchiveInventory(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the release publisher runs on Linux")
@@ -173,23 +306,54 @@ func TestReleaseWorkflowValidatesCompleteArchiveInventory(t *testing.T) {
 	if recipe == "" {
 		t.Fatal("release publisher does not validate its archive inventory")
 	}
-	for _, scenario := range []string{"complete", "missing target", "damaged archive"} {
+	for _, scenario := range []struct {
+		name, wantError string
+	}{
+		{"complete", ""},
+		{"prerelease", ""},
+		{"unprefixed tag", ""},
+		{"wrong prefix", "Incomplete release targets"},
+		{"wrong version", "Incomplete release targets"},
+		{"missing target", "Incomplete release targets"},
+		{"wrong format", "Incomplete release targets"},
+		{"extra archive", "Incomplete release targets"},
+		{"duplicate checksum", "Invalid or duplicate checksum entry"},
+		{"invalid checksum", "Invalid or duplicate checksum entry"},
+		{"checksum path", "Invalid or duplicate checksum entry"},
+		{"missing checksum", "Release archives and checksums differ"},
+		{"extra checksum", "Release archives and checksums differ"},
+		{"damaged archive", "FAILED"},
+		{"missing notes", "CHANGELOG.md has no entry"},
+		{"notes for different prerelease", "CHANGELOG.md has no entry"},
+		{"notes stop at next release", ""},
+	} {
 		t.Run(
-			scenario, func(t *testing.T) {
+			scenario.name, func(t *testing.T) {
 				root := t.TempDir()
 				dist := filepath.Join(root, "dist")
 				if err := os.Mkdir(dist, 0o700); err != nil {
 					t.Fatal(err)
+				}
+				tag, version, prefix := "v1.2.3", "1.2.3", "CLIProxyAPI"
+				switch scenario.name {
+				case "prerelease":
+					tag, version = "v1.2.3-aug.6", "1.2.3-aug.6"
+				case "unprefixed tag":
+					tag = "1.2.3"
+				case "wrong prefix":
+					prefix = "v6"
+				case "wrong version":
+					version = "1.2.4"
 				}
 				var manifest strings.Builder
 				var first string
 				for _, system := range []string{"linux", "darwin", "windows"} {
 					for _, arch := range []string{"amd64", "arm64"} {
 						ext := ".tar.gz"
-						if system == "windows" {
+						if system == "windows" || scenario.name == "wrong format" && system == "linux" {
 							ext = ".zip"
 						}
-						name := "CLIProxyAPI_1.2.3_" + system + "_" + arch + ext
+						name := prefix + "_" + version + "_" + system + "_" + arch + ext
 						path := filepath.Join(dist, name)
 						data := []byte("synthetic archive " + system + "/" + arch)
 						if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -202,17 +366,38 @@ func TestReleaseWorkflowValidatesCompleteArchiveInventory(t *testing.T) {
 						_, _ = fmt.Fprintf(&manifest, "%x  %s\n", sha256.Sum256(data), name)
 					}
 				}
+				checksums := manifest.String()
+				switch scenario.name {
+				case "duplicate checksum":
+					checksums += checksums
+				case "invalid checksum":
+					checksums = "invalid" + checksums[64:]
+				case "checksum path":
+					checksums = strings.Replace(checksums, filepath.Base(first), "../"+filepath.Base(first), 1)
+				case "missing checksum":
+					_, checksums, _ = strings.Cut(checksums, "\n")
+				case "extra checksum":
+					checksums += fmt.Sprintf("%x  unexpected.tar.gz\n", sha256.Sum256(nil))
+				}
 				if err := os.WriteFile(
-					filepath.Join(dist, "checksums_fixture.txt"), []byte(manifest.String()), 0o600,
+					filepath.Join(dist, "checksums_fixture.txt"), []byte(checksums), 0o600,
 				); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(
-					filepath.Join(root, "CHANGELOG.md"), []byte("## v1.2.3\n\nFixture release\n"), 0o600,
-				); err != nil {
+				notes := "## " + tag + "\n\nFixture release\n"
+				changelog := notes
+				switch scenario.name {
+				case "missing notes":
+					changelog = "## v1.2.4\n\nOther release\n"
+				case "notes for different prerelease":
+					changelog = "## v1.2.3-aug.6\n\nOther release\n"
+				case "notes stop at next release":
+					changelog += "\n## 1.2.2\n\nPrevious release\n"
+				}
+				if err := os.WriteFile(filepath.Join(root, "CHANGELOG.md"), []byte(changelog), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				switch scenario {
+				switch scenario.name {
 				case "missing target":
 					if err := os.Remove(first); err != nil {
 						t.Fatal(err)
@@ -221,23 +406,35 @@ func TestReleaseWorkflowValidatesCompleteArchiveInventory(t *testing.T) {
 					if err := os.WriteFile(first, []byte("changed fixture"), 0o600); err != nil {
 						t.Fatal(err)
 					}
+				case "extra archive":
+					if err := os.WriteFile(filepath.Join(dist, "extra_linux_amd64.tar.gz"), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
 				}
 				command := exec.CommandContext(t.Context(), "bash", "-e", "-o", "pipefail", "-c", recipe)
 				command.Dir = root
-				command.Env = []string{"PATH=/usr/bin:/bin", "RELEASE_TAG=v1.2.3", "HOME=" + root}
+				command.Env = []string{"PATH=/usr/bin:/bin", "RELEASE_TAG=" + tag, "HOME=" + root}
 				output, err := command.CombinedOutput()
-				if scenario == "complete" {
+				if scenario.wantError == "" {
 					if err != nil {
 						t.Fatalf("complete release inventory rejected: %v\n%s", err, output)
 					}
+					lines := strings.Split(strings.TrimSpace(checksums), "\n")
+					sort.Slice(
+						lines, func(i, j int) bool { return strings.Fields(lines[i])[1] < strings.Fields(lines[j])[1] },
+					)
+					for name, want := range map[string]string{
+						"dist/checksums.txt": strings.Join(lines, "\n") + "\n", "release-notes.md": notes,
+					} {
+						got, err := os.ReadFile(filepath.Join(root, name))
+						if err != nil || string(got) != want {
+							t.Fatalf("%s = %q, error %v; want %q", name, got, err, want)
+						}
+					}
 					return
 				}
-				if err == nil {
-					t.Fatalf("invalid release inventory accepted for %s: %s", scenario, output)
-				}
-				if scenario == "missing target" && !strings.Contains(string(output), "Incomplete release targets") ||
-					scenario == "damaged archive" && !strings.Contains(string(output), "FAILED") {
-					t.Fatalf("unexpected rejection for %s: %v\n%s", scenario, err, output)
+				if err == nil || !strings.Contains(string(output), scenario.wantError) {
+					t.Fatalf("release inventory rejection = %v\n%s; want %q", err, output, scenario.wantError)
 				}
 			},
 		)

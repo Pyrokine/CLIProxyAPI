@@ -10,7 +10,13 @@ env:
   DOCKERHUB_REPO: pyrokine/cli-proxy-api
 
 jobs:
+  preflight:
+    uses: ./.github/workflows/release-preflight.yml
+    permissions:
+      contents: read
+
   deep-quality:
+    needs: preflight
     uses: ./.github/workflows/deep-quality.yml
     permissions:
       contents: read
