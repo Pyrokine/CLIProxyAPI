@@ -136,6 +136,101 @@ func TestConfigYAMLConditionalWriteAcceptsCurrentETag(t *testing.T) {
 	}
 }
 
+func TestConfigYAMLTypedSettingsSurviveRedactedRoundTrip(t *testing.T) {
+	const clientKey = "sk-synthetic-client-secret-for-limits"
+	const providerKey = "sk-synthetic-upstream-secret-for-model"
+	const original = `port: 8317
+credential-in-flight:
+  snapshot-interval: 3s # Monitor interval
+  stale-after: 12s
+  max-part-bytes: 524288
+  max-part-count: 48
+  max-revision-bytes: 8388608
+  max-aggregate-groups: 80000
+  max-details: 5000
+  max-string-bytes: 224
+  staging-retention: 2m
+  extension-private-field: monitor-private-value
+extensions:
+  credential-in-flight:
+    snapshot-interval: 17s
+api-keys: [` + clientKey + `]
+api-key-rules:
+  ` + clientKey + `:
+    limits:
+      - window: 24h
+        tokens: 100 # Token budget
+openai-compatibility:
+  - name: fixture
+    base-url: https://fixture.invalid/v1
+    api-key-entries:
+      - api-key: ` + providerKey + `
+    models:
+      - name: fixture-model
+        alias: fixture-model
+        use-max-completion-tokens: true
+`
+	handler := newConfigBasicTestHandler(t, &config.Config{Port: 8317})
+	if err := os.WriteFile(handler.configFilePath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	get := httptest.NewRecorder()
+	getContext, _ := gin.CreateTestContext(get)
+	getContext.Request = httptest.NewRequest(http.MethodGet, "/config.yaml", nil)
+	handler.GetConfigYAML(getContext)
+	yaml := get.Body.String()
+	if get.Code != http.StatusOK || strings.Contains(yaml, clientKey) || strings.Contains(yaml, providerKey) {
+		t.Fatalf("redacted config response status = %d or exposed a credential", get.Code)
+	}
+	for _, visible := range []string{
+		"tokens: 100 # Token budget", "use-max-completion-tokens: true",
+		"snapshot-interval: 3s # Monitor interval", "stale-after: 12s", "max-part-bytes: 524288",
+		"max-part-count: 48", "max-revision-bytes: 8388608", "max-aggregate-groups: 80000",
+		"max-details: 5000", "max-string-bytes: 224", "staging-retention: 2m",
+	} {
+		if !strings.Contains(yaml, visible) {
+			t.Fatalf("redacted config omitted declared setting %q", visible)
+		}
+	}
+	for _, hidden := range []string{"extension-private-field", "monitor-private-value", "snapshot-interval: 17s"} {
+		if strings.Contains(yaml, hidden) {
+			t.Fatal("redacted config exposed a value outside the declared monitor settings")
+		}
+	}
+	updated := strings.NewReplacer(
+		"tokens: 100", "tokens: 250", "use-max-completion-tokens: true", "use-max-completion-tokens: false",
+		"snapshot-interval: 3s", "snapshot-interval: 4s", "max-details: 5000", "max-details: 6000",
+	).Replace(yaml)
+	put := httptest.NewRecorder()
+	putContext, _ := gin.CreateTestContext(put)
+	putContext.Request = httptest.NewRequest(http.MethodPut, "/config.yaml", strings.NewReader(updated))
+	putContext.Request.Header.Set("Content-Type", "application/yaml")
+	putContext.Request.Header.Set("If-Match", get.Header().Get("ETag"))
+	handler.PutConfigYAML(putContext)
+	if put.Code != http.StatusOK {
+		t.Fatalf("save typed settings: status = %d, body = %s", put.Code, put.Body.String())
+	}
+	cfg := handler.configSnapshot()
+	rule, ok := cfg.APIKeyRule(clientKey)
+	if !ok || len(rule.Limits) != 1 || rule.Limits[0].Tokens != 250 {
+		t.Fatal("saved client token budget was not applied")
+	}
+	providers := cfg.OpenAICompatibility
+	if len(providers) != 1 || len(providers[0].APIKeyEntries) != 1 ||
+		providers[0].APIKeyEntries[0].APIKey != providerKey || len(providers[0].Models) != 1 ||
+		providers[0].Models[0].UseMaxCompletionTokens {
+		t.Fatal("save did not preserve the provider key and apply the capability flag")
+	}
+	if cfg.CredentialInFlight.SnapshotInterval != "4s" || cfg.CredentialInFlight.MaxDetails != 6000 {
+		t.Fatal("saved credential observation settings were not applied")
+	}
+	persisted, errRead := os.ReadFile(handler.configFilePath)
+	if errRead != nil || !strings.Contains(string(persisted), "extension-private-field: monitor-private-value") ||
+		!strings.Contains(string(persisted), "snapshot-interval: 17s") {
+		t.Fatal("save did not preserve unknown settings")
+	}
+}
+
 func TestConfigYAMLRedactionKeyPersistsAcrossHandlers(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	configPath := filepath.Join(t.TempDir(), "config.yaml")

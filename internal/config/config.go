@@ -42,7 +42,7 @@ type Config struct {
 	// Host is the network host/interface on which the API server will bind.
 	// Default is "127.0.0.1" (loopback only). Set to "0.0.0.0" to expose on all interfaces.
 	Host string `yaml:"host" json:"-"`
-	// Port is the network port on which the API server will listen.
+	// Port is the network port on which the API server will listen. The default 0 lets the OS choose a port.
 	Port int `yaml:"port" json:"-"`
 
 	// TLS config controls HTTPS server settings.
@@ -64,6 +64,7 @@ type Config struct {
 	Plugins PluginsConfig `yaml:"plugins" json:"plugins"`
 
 	// AuthDir is the directory where authentication token files are stored.
+	// Leave empty to use ~/.cli-proxy-api with the local file store.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
 	// Debug enables or disables debug-level logging and other debug features.
@@ -123,7 +124,7 @@ type Config struct {
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
 
-	// RequestRetry defines the retry times when the request failed.
+	// RequestRetry is the number of additional attempts after a failed request. The default is 0.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
 	// Set to 0 or a negative value to keep trying all available credentials (legacy behavior).
@@ -143,7 +144,7 @@ type Config struct {
 	// CORSAllowedOrigins is a list of allowed origins for CORS.
 	// When empty, allows all origins (*) for CLI tool compatibility.
 	// Set to specific origins (e.g., ["http://localhost:5173"]) to restrict browser access.
-	CORSAllowedOrigins []string `yaml:"cors-allowed-origins,omitempty" json:"cors-allowed-origins,omitempty"`
+	CORSAllowedOrigins []string `yaml:"cors-allowed-origins" json:"cors-allowed-origins,omitempty"`
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
@@ -230,9 +231,9 @@ type PluginsConfig struct {
 	// Dir is the plugin discovery directory.
 	Dir string `yaml:"dir" json:"dir"`
 	// StoreSources appends third-party plugin store registries to the built-in official source.
-	StoreSources []string `yaml:"store-sources,omitempty" json:"store-sources,omitempty"`
+	StoreSources []string `yaml:"store-sources" json:"store-sources,omitempty"`
 	// StoreAuth defines optional auth rules for plugin store registry, metadata, and artifact requests.
-	StoreAuth []sdkpluginstore.AuthConfig `yaml:"store-auth,omitempty" json:"store-auth,omitempty"`
+	StoreAuth []sdkpluginstore.AuthConfig `yaml:"store-auth" json:"store-auth,omitempty"`
 	// AuthRevision changes when Home-managed plugin credentials change.
 	AuthRevision int64 `yaml:"auth-revision,omitempty" json:"auth-revision,omitempty"`
 	// Configs stores per-plugin instance configuration by plugin ID.
@@ -392,7 +393,7 @@ type TLSConfig struct {
 	// Key is the path to the TLS private key file.
 	Key string `yaml:"key" json:"key"`
 	// HTTPRedirectPort starts an HTTP listener on this port that redirects to HTTPS.
-	// Only effective when Enable is true. Set to 0 to disable redirect. Default: 80.
+	// Default: 0 (disabled). Set a port explicitly when Enable is true to enable redirects.
 	HTTPRedirectPort int `yaml:"http-redirect-port" json:"http-redirect-port"`
 	// RequireForAuth, when true, rejects plaintext requests to authenticated HTTP
 	// endpoints and the Redis usage-output protocol. Loopback addresses
@@ -446,8 +447,8 @@ type RemoteManagement struct {
 	// AllowRemote toggles remote (non-localhost) access to management API.
 	AllowRemote bool `yaml:"allow-remote"`
 	// TrustedProxies lists direct reverse-proxy IP addresses or CIDR ranges whose
-	// forwarded client address headers may identify clients for HTTP authentication.
-	TrustedProxies []string `yaml:"trusted-proxies,omitempty"`
+	// forwarded client address headers may identify clients for HTTP authentication. Empty trusts none.
+	TrustedProxies []string `yaml:"trusted-proxies"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
@@ -467,7 +468,7 @@ type RemoteManagement struct {
 	AutoCheckUpdate bool `yaml:"auto-check-update"`
 	// AutoUpdateCPA controls whether the backend binary is automatically installed
 	// after a periodic version check finds a newer release. Defaults to false.
-	AutoUpdateCPA bool `yaml:"auto-update-cpa,omitempty"`
+	AutoUpdateCPA bool `yaml:"auto-update-cpa"`
 	// CheckInterval is the interval (in minutes) between automatic version checks.
 	// Only effective when AutoCheckUpdate is true. Default: 180 (3 hours). Minimum: 30.
 	CheckInterval int `yaml:"check-interval,omitempty"`
@@ -824,8 +825,7 @@ func (m ClaudeModel) GetThinking() *registry.ThinkingSupport {
 	return m.Thinking
 }
 
-// CodexKey represents the configuration for a Codex API key,
-// including the API key itself and an optional base URL for the API endpoint.
+// CodexKey represents the configuration for a Codex API key.
 //
 //goland:noinspection LongLine
 type CodexKey struct {
@@ -843,8 +843,7 @@ type CodexKey struct {
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gpt-5-codex").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
-	// BaseURL is the base URL for the Codex API endpoint.
-	// If empty, the default Codex API URL will be used.
+	// BaseURL selects the upstream endpoint. Codex API keys require an explicit URL.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
 	// Websockets enables the Responses API WebSocket transport for this credential.
@@ -1100,7 +1099,7 @@ type OpenAICompatibilityModel struct {
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 
 	// UseMaxCompletionTokens selects max_completion_tokens for this upstream model.
-	UseMaxCompletionTokens bool `yaml:"use-max-completion-tokens,omitempty" json:"use-max-completion-tokens,omitempty"`
+	UseMaxCompletionTokens bool `yaml:"use-max-completion-tokens" json:"use-max-completion-tokens,omitempty"`
 
 	// Image marks this model as callable through /v1/images/generations and /v1/images/edits.
 	Image bool `yaml:"image,omitempty" json:"image,omitempty"`

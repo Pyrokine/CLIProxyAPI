@@ -30,11 +30,11 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.Host = "127.0.0.1"
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
-	cfg.ErrorLogsMaxFiles = 10
+	cfg.ErrorLogsMaxFiles = defaultErrorLogsMaxFiles
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
-	cfg.ImageArtifactCache.RetentionDays = 7
-	cfg.ImageArtifactCache.MaxTotalSizeMB = 10240
+	cfg.ImageArtifactCache.RetentionDays = defaultImageArtifactRetentionDays
+	cfg.ImageArtifactCache.MaxTotalSizeMB = defaultImageArtifactCacheSizeMB
 	cfg.DisableCooling = false
 	cfg.SaveCooldownStatus = false
 	cfg.Pprof.Enable = false
@@ -46,8 +46,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.QuotaRefresh.Enabled = false
 	cfg.QuotaRefresh.Interval = 600
 	cfg.QuotaRefresh.MaxInterval = 1800
-	cfg.AutoRefreshInterval = 3
-	cfg.ModelRefreshInterval = 3
+	cfg.AutoRefreshInterval = defaultAutoRefreshInterval
+	cfg.ModelRefreshInterval = defaultModelRefreshInterval
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
@@ -106,7 +106,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.LogsMaxTotalSizeMB = 0
 	}
 	if cfg.ErrorLogsMaxFiles < 0 {
-		cfg.ErrorLogsMaxFiles = 10
+		cfg.ErrorLogsMaxFiles = defaultErrorLogsMaxFiles
 	}
 	if cfg.RedisUsageQueueRetentionSeconds <= 0 {
 		cfg.RedisUsageQueueRetentionSeconds = 60

@@ -2,85 +2,134 @@ package config
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.
+// NormalizeCommentIndentation aligns standalone comments when the YAML tree stays unchanged.
 func NormalizeCommentIndentation(data []byte) []byte {
 	lines := bytes.Split(data, []byte("\n"))
 	changed := false
 	for i, line := range lines {
 		trimmed := bytes.TrimLeft(line, " \t")
-		if len(trimmed) == 0 || trimmed[0] != '#' {
-			continue
+		if len(trimmed) > 0 && trimmed[0] == '#' && len(trimmed) < len(line) {
+			lines[i] = trimmed
+			changed = true
 		}
-		if len(trimmed) == len(line) {
-			continue
-		}
-		lines[i] = append([]byte(nil), trimmed...)
-		changed = true
 	}
 	if !changed {
 		return data
 	}
-	return bytes.Join(lines, []byte("\n"))
+	// A hash at the start of an indented line can be part of a scalar value.
+	candidate := bytes.Join(lines, []byte("\n"))
+	original := yaml.NewDecoder(bytes.NewReader(data))
+	normalized := yaml.NewDecoder(bytes.NewReader(candidate))
+	for {
+		var before, after yaml.Node
+		beforeErr, afterErr := original.Decode(&before), normalized.Decode(&after)
+		if beforeErr == io.EOF && afterErr == io.EOF {
+			return candidate
+		}
+		if beforeErr != nil || afterErr != nil {
+			return data
+		}
+		clearYAMLPositions(&before)
+		clearYAMLPositions(&after)
+		if !reflect.DeepEqual(before, after) {
+			return data
+		}
+	}
 }
 
-// mergeMappingPreserve merges keys from src into dst mapping node while preserving
-// key order and comments of existing keys in dst. New keys are only added if their
-// value is non-zero and not a known default to avoid polluting the config with defaults.
-func mergeMappingPreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]string) {
+func clearYAMLPositions(node *yaml.Node) {
+	node.Line, node.Column = 0, 0
+	for _, child := range node.Content {
+		clearYAMLPositions(child)
+	}
+}
+
+// mergeMappingPreserve merges src into dst, preserving existing key order and comments.
+func mergeMappingPreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]string) error {
 	var currentPath []string
 	if len(path) > 0 {
 		currentPath = path[0]
 	}
 
 	if dst == nil || src == nil {
-		return
+		return nil
 	}
 	if dst.Kind != yaml.MappingNode || src.Kind != yaml.MappingNode {
-		// If kinds do not match, prefer replacing dst with src semantics in-place
-		// but keep dst node object to preserve any attached comments at the parent level.
 		copyNodeShallow(dst, src)
-		return
+		return nil
 	}
+	hasMerge := yamlMappingValue(dst, "<<") != nil
 	for i := 0; i+1 < len(src.Content); i += 2 {
 		sk := src.Content[i]
 		sv := src.Content[i+1]
+		if sk.Value == "disable-private-remote-ips" && slices.Equal(
+			currentPath, []string{"codex", "live-media-relay"},
+		) {
+			if legacy := findMapKeyIndex(dst, "allow-private-remote-ips"); legacy >= 0 {
+				// Keep the source spelling and polarity; loading both spellings is invalid.
+				sk = dst.Content[legacy]
+				sv = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: strconv.FormatBool(sv.Value == "false")}
+			}
+		}
 		idx := findMapKeyIndex(dst, sk.Value)
 		childPath := appendPath(currentPath, sk.Value)
 		if idx >= 0 {
-			// Merge into existing value node (always update, even to zero values)
-			dv := dst.Content[idx+1]
-			mergeNodePreserve(dv, sv, includeDefaults, childPath)
-		} else {
-			// New key: only add if value is non-zero and not a known default
-			candidate := deepCopyNode(sv)
-			if !includeDefaults {
-				pruneKnownDefaultsInNewNode(childPath, candidate)
-				if isKnownDefaultValue(childPath, candidate) {
+			if err := mergeNodePreserve(dst.Content[idx+1], sv, includeDefaults, childPath); err != nil {
+				return err
+			}
+			continue
+		}
+		var inherited *yaml.Node
+		if hasMerge && (sv.Kind == yaml.ScalarNode || sv.Kind == yaml.SequenceNode) {
+			var err error
+			inherited, _, err = configYAMLEffectiveMappingValue(dst, sk.Value, nil)
+			if err != nil {
+				return err
+			}
+			if inherited != nil {
+				var previous, next any
+				if err := errors.Join(inherited.Decode(&previous), sv.Decode(&next)); err != nil {
+					return err
+				}
+				if reflect.DeepEqual(previous, next) {
 					continue
 				}
 			}
-			dst.Content = append(dst.Content, deepCopyNode(sk), candidate)
 		}
+		candidate := deepCopyNode(sv)
+		// A change from an inherited value must also persist when the new value is zero.
+		if !includeDefaults && inherited == nil {
+			pruneKnownDefaultsInNewNode(childPath, candidate)
+			if isKnownDefaultValue(childPath, candidate) {
+				continue
+			}
+		}
+		dst.Content = append(dst.Content, deepCopyNode(sk), candidate)
 	}
+	return nil
 }
 
 // mergeNodePreserve merges src into dst for scalars, mappings and sequences while
 // reusing destination nodes to keep comments and anchors. For sequences, it updates
 // in-place by index.
-func mergeNodePreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]string) {
+func mergeNodePreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]string) error {
 	var currentPath []string
 	if len(path) > 0 {
 		currentPath = path[0]
 	}
 
 	if dst == nil || src == nil {
-		return
+		return nil
 	}
 	if dst.Kind == yaml.AliasNode && dst.Alias != nil {
 		resolved := deepCopyNode(dst.Alias)
@@ -92,21 +141,45 @@ func mergeNodePreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]stri
 		if dst.Kind != yaml.MappingNode {
 			copyNodeShallow(dst, src)
 		}
-		mergeMappingPreserve(dst, src, includeDefaults, currentPath)
+		if err := mergeMappingPreserve(dst, src, includeDefaults, currentPath); err != nil {
+			return err
+		}
 		if len(currentPath) > 0 && currentPath[len(currentPath)-1] == "headers" ||
-			len(currentPath) == 2 && currentPath[0] == "claude-api-key" && currentPath[1] == "cloak" {
+			len(currentPath) == 2 && currentPath[0] == "claude-api-key" && currentPath[1] == "cloak" ||
+			len(currentPath) == 3 && currentPath[0] == "api-key-rules" && currentPath[2] == "model-mappings" {
 			pruneMissingMapKeys(dst, src)
 		}
+		if len(currentPath) == 2 && currentPath[0] == "api-key-rules" {
+			return pruneMissingConfigMapKeys(dst, src, currentPath)
+		}
 	case yaml.SequenceNode:
-		// Preserve explicit null style if dst was null and src is empty sequence
+		// Preserve an explicit null when the typed sequence is empty.
 		if dst.Kind == yaml.ScalarNode && dst.Tag == "!!null" && len(src.Content) == 0 {
-			// Keep as null to preserve original style
-			return
+			return nil
 		}
 		if dst.Kind != yaml.SequenceNode {
 			dst.Kind = yaml.SequenceNode
 			dst.Tag = "!!seq"
 			dst.Content = nil
+		}
+		type inactiveRow struct {
+			index int
+			node  *yaml.Node
+		}
+		var inactiveRows []inactiveRow
+		if inactive := inactiveConfigYAMLRow(currentPath); inactive != nil && !slices.ContainsFunc(
+			src.Content, inactive,
+		) {
+			// Rows ignored by the loader remain editable in the source file.
+			active := dst.Content[:0]
+			for index, row := range dst.Content {
+				if inactive(row) {
+					inactiveRows = append(inactiveRows, inactiveRow{index, row})
+				} else {
+					active = append(active, row)
+				}
+			}
+			dst.Content = active
 		}
 		reorderSequenceForMerge(dst, src)
 		// Update elements in place
@@ -116,10 +189,14 @@ func mergeNodePreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]stri
 				dst.Content[i] = deepCopyNode(src.Content[i])
 				continue
 			}
-			mergeNodePreserve(dst.Content[i], src.Content[i], includeDefaults, currentPath)
+			if err := mergeNodePreserve(dst.Content[i], src.Content[i], includeDefaults, currentPath); err != nil {
+				return err
+			}
 			if dst.Content[i] != nil && src.Content[i] != nil &&
 				dst.Content[i].Kind == yaml.MappingNode && src.Content[i].Kind == yaml.MappingNode {
-				pruneMissingConfigMapKeys(dst.Content[i], src.Content[i], currentPath)
+				if err := pruneMissingConfigMapKeys(dst.Content[i], src.Content[i], currentPath); err != nil {
+					return err
+				}
 			}
 		}
 		// Append any extra items from src
@@ -130,6 +207,9 @@ func mergeNodePreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]stri
 		if len(src.Content) < len(dst.Content) {
 			dst.Content = dst.Content[:len(src.Content)]
 		}
+		for _, row := range inactiveRows {
+			dst.Content = slices.Insert(dst.Content, min(row.index, len(dst.Content)), row.node)
+		}
 	case yaml.ScalarNode, yaml.AliasNode:
 		// For scalars, update Tag and Value but keep Style from dst to preserve quoting
 		dst.Kind = src.Kind
@@ -139,9 +219,50 @@ func mergeNodePreserve(dst, src *yaml.Node, includeDefaults bool, path ...[]stri
 	case 0:
 		// Unknown/empty kind; do nothing
 	default:
-		// Fallback: replace shallowly
 		copyNodeShallow(dst, src)
 	}
+	return nil
+}
+
+func inactiveConfigYAMLRow(path []string) func(*yaml.Node) bool {
+	if len(path) == 1 && path[0] == "codex-api-key" {
+		return isInactiveCodexYAMLRow
+	}
+	if len(path) != 2 {
+		return nil
+	}
+	if path[0] == "payload" && (path[1] == "default-raw" || path[1] == "override-raw") {
+		return func(node *yaml.Node) bool {
+			var row PayloadRule
+			if node.Decode(&row) != nil {
+				return false
+			}
+			_, invalid := InvalidRawPayloadParam(row)
+			return invalid
+		}
+	}
+	if path[0] == "plugins" && path[1] == "store-auth" {
+		return func(node *yaml.Node) bool {
+			if node.Kind != yaml.MappingNode && node.Kind != yaml.AliasNode {
+				return false
+			}
+			var row struct {
+				Match string `yaml:"match"`
+			}
+			return node.Decode(&row) == nil && strings.TrimSpace(row.Match) == ""
+		}
+	}
+	return nil
+}
+
+func isInactiveCodexYAMLRow(node *yaml.Node) bool {
+	if node.Kind != yaml.MappingNode && node.Kind != yaml.AliasNode {
+		return false
+	}
+	var row struct {
+		BaseURL string `yaml:"base-url"`
+	}
+	return node.Decode(&row) == nil && strings.TrimSpace(row.BaseURL) == ""
 }
 
 func reorderSequenceForMerge(dst, src *yaml.Node) {
@@ -603,6 +724,12 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		}
 	}
 
+	// OpenAI 兼容模型在源文件中显式声明请求 token 上限字段的选择
+	if len(path) == 3 && path[0] == "openai-compatibility" && path[1] == "models" &&
+		path[2] == "use-max-completion-tokens" && node != nil && node.Tag == "!!bool" {
+		return false
+	}
+
 	// Weight is pointer-backed, so an explicit zero is meaningful and must be preserved.
 	if len(path) > 0 && path[len(path)-1] == "weight" && node != nil && node.Kind == yaml.ScalarNode &&
 		node.Tag == "!!int" {
@@ -635,17 +762,37 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		}
 	}
 
-	// First check if it's a zero value
+	// Some omitted fields reload to a non-zero default. Preserve explicit zero or false values there.
+	if node == nil {
+		return true
+	}
+	fullPath := strings.Join(path, ".")
+	switch fullPath {
+	case "ws-auth":
+		return node.Tag == "!!bool" && node.Value == "true"
+	case "remote-management", "routing", "image-artifact-cache", "claude-header-defaults":
+		return node.Kind == yaml.MappingNode && len(node.Content) == 0
+	case "remote-management.disable-auto-update-panel", "remote-management.auto-update-panel",
+		"routing.session-affinity-subagents", "claude-header-defaults.stabilize-device-profile":
+		return false // These values are emitted only when set, including false.
+	case "credential-in-flight.max-details":
+		return node.Tag == "!!int" && node.Value == strconv.Itoa(DefaultInFlightMaxDetails)
+	case "auto-refresh-interval":
+		return node.Tag == "!!int" && node.Value == strconv.Itoa(defaultAutoRefreshInterval)
+	case "model-refresh-interval":
+		return node.Tag == "!!int" && node.Value == strconv.Itoa(defaultModelRefreshInterval)
+	case "error-logs-max-files":
+		return node.Tag == "!!int" && node.Value == strconv.Itoa(defaultErrorLogsMaxFiles)
+	case "image-artifact-cache.retention-days":
+		return node.Tag == "!!int" && node.Value == strconv.Itoa(defaultImageArtifactRetentionDays)
+	case "image-artifact-cache.max-total-size-mb":
+		return node.Tag == "!!int" && node.Value == strconv.Itoa(defaultImageArtifactCacheSizeMB)
+	}
 	if isZeroValueNode(node) {
 		return true
 	}
 
 	// Match known non-zero defaults by exact dotted path.
-	if len(path) == 0 {
-		return false
-	}
-
-	fullPath := strings.Join(path, ".")
 
 	// Check string defaults
 	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
@@ -658,14 +805,6 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == defaultCPAGitHubRepository
 		case "routing.strategy":
 			return node.Value == "round-robin"
-		}
-	}
-
-	// Check integer defaults
-	if node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
-		switch fullPath {
-		case "error-logs-max-files":
-			return node.Value == "10"
 		}
 	}
 
@@ -740,34 +879,38 @@ func mappingScalarValue(node *yaml.Node, key string) string {
 }
 
 // Only typed fields are removed when omitted; extensions remain on their original entry.
-func pruneMissingConfigMapKeys(dst, src *yaml.Node, path []string) {
-	if len(path) > 0 && path[0] == "plugins" {
+func pruneMissingConfigMapKeys(dst, src *yaml.Node, path []string) error {
+	if len(path) >= 2 && path[0] == "plugins" && path[1] == "configs" {
 		pruneMissingMapKeys(dst, src)
-		return
+		return nil
 	}
 	t := reflect.TypeFor[Config]()
 	for _, key := range path {
 		t = configYAMLFieldType(t, key)
 	}
+	defaults := yamlRecordDefaults(path)
 	for i := 0; i+1 < len(dst.Content); {
-		key, value := dst.Content[i], dst.Content[i+1]
-		if findMapKeyIndex(src, key.Value) < 0 && configYAMLFieldType(
-			t, key.Value,
-		) !=
-			nil &&
-			value.Tag !=
-				"!!null" &&
-			!((value.Kind ==
-				yaml.MappingNode ||
-				value.Kind ==
-					yaml.SequenceNode) &&
-				len(value.Content) ==
-					0) {
-			dst.Content = append(dst.Content[:i], dst.Content[i+2:]...)
-			continue
+		key, value := dst.Content[i].Value, dst.Content[i+1]
+		emptyCollection := (value.Kind == yaml.MappingNode || value.Kind == yaml.SequenceNode) && len(value.Content) == 0
+		if findMapKeyIndex(src, key) < 0 && configYAMLFieldType(t, key) != nil &&
+			value.Tag != "!!null" && !emptyCollection {
+			if index := slices.IndexFunc(
+				defaults, func(field yamlDefault) bool { return field.key == key },
+			); index >= 0 {
+				field := defaults[index]
+				if err := mergeNodePreserve(
+					value, &yaml.Node{Kind: yaml.ScalarNode, Tag: field.tag, Value: field.value}, false,
+				); err != nil {
+					return err
+				}
+			} else {
+				dst.Content = append(dst.Content[:i], dst.Content[i+2:]...)
+				continue
+			}
 		}
 		i += 2
 	}
+	return nil
 }
 
 func configYAMLFieldType(t reflect.Type, key string) reflect.Type {

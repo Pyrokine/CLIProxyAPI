@@ -1,13 +1,15 @@
 # Server host/interface to bind to. Default is "127.0.0.1" for local-only access.
 # Use "0.0.0.0" to bind all IPv4 interfaces if remote access is needed.
 host: "127.0.0.1"
-# Server port
+# Use a fixed port for the server and management clients. Omission loads 0 (OS-assigned port in local mode).
 port: 8317
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
     enable: false
     cert: ""
     key: ""
+    # Optional HTTP listener for HTTPS redirects. Set to 80 for the standard HTTP port.
+    http-redirect-port: 0
     # Reject plaintext requests to authenticated HTTP endpoints and Redis usage output.
     # Direct loopback clients that are not configured as proxies remain allowed.
     require-for-auth: false
@@ -41,30 +43,45 @@ remote-management:
     auto-check-update: false
     # Automatically install the CPA backend when auto-check-update finds a newer release.
     auto-update-cpa: false
-    # Automatic update check interval in minutes.
+    # Automatic update checks use 180 minutes by default; values below 30 also use 180.
     check-interval: 180
 # Override management panel static directory with MANAGEMENT_STATIC_PATH environment variable.
 # If set, the server will look for management.html in the specified path instead of the default location.
 # Example: MANAGEMENT_STATIC_PATH=/opt/cpa/static
-# Authentication directory (supports ~ for home directory)
+# Local auth directory. Empty uses ~/.cli-proxy-api, resolved under the running user's home directory.
 auth-dir: "~/.cli-proxy-api"
-# API keys for authentication
+# Client authentication keys. These template values keep local CPA in setup mode with proxy requests disabled.
+# Replace them with your own client keys before sending proxy requests.
 api-keys:
     - "your-api-key-1"
     - "your-api-key-2"
     - "your-api-key-3"
-# Per-client API key model denylist. Omit a key to allow all models.
-api-key-rules:
-    "your-api-key-2":
-        blocked-models:
-            - "claude-opus-*"
-            - "gpt-5.5"
+# Use an existing client key as the map key. Empty maps set no display aliases or access/usage rules.
+api-key-aliases: { }
+api-key-rules: { }
+# api-key-aliases:
+#   "<client-key>": "Team name" # Omission leaves the key unnamed.
+# api-key-rules:
+#   "<client-key>":
+#     blocked-models: []         # Empty blocks no model patterns.
+#     providers: []              # Empty allows all providers.
+#     canonical-models: []       # Empty allows all models not otherwise blocked.
+#     model-mappings: {}         # Client model ID -> routed model ID; empty leaves names unchanged.
+#     policy-profile: "default"  # Optional name for persistent usage limits.
+#     reservation-ttl: "24h"     # Optional lifetime of a usage reservation.
+#     limits:                    # Omit to apply no persistent usage limits.
+#       - window: "1h"           # Required positive duration, unique within this key's limits.
+#         requests: 500          # At least one of requests, tokens and cost-micro must be positive.
+#         tokens: 0              # 0 applies no limit to this dimension.
+#         cost-micro: 0          # Cost in millionths of a US dollar; 0 applies no cost limit.
 # Codex 客户端工具能力，关闭时模型目录不声明 apply_patch
 client:
     codex:
         enable-apply-patch: false
-# Enable debug logging
+# Enable debug logging.
 debug: false
+# Write per-request logs. Keep false unless you need request traces.
+request-log: false
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
     enable: false
@@ -80,23 +97,28 @@ pprof:
 plugins:
     enabled: false
     dir: "plugins"
-    # Additional plugin store registry URLs are appended after the built-in official source.
-    # store-sources:
-    #     - "https://example.com/cpa-plugin-registry.json"
-    # Optional auth rules for private registry, metadata, and artifact URLs. Values are read from environment variables.
+    # Additional registry URLs (for example, https://registry.example.invalid/plugins.json) follow the official source.
+    store-sources: [ ]
+    # No authenticated store requests by default. Each rule requires a matching URL prefix.
+    # Set environment variable names here; keep their secret values in the environment.
+    store-auth: [ ]
     # store-auth:
-    #     - match: "https://api.github.com/repos/example/private-plugin/"
-    #       apply-to: ["metadata"]
-    #       type: "github-token"
-    #       token-env: "CPA_PLUGIN_STORE_GITHUB_TOKEN"
-    configs:
-        example:
-            enabled: true
-            priority: 1
-            config1: true
-            config2: "string"
-            config3: 3
-            mode: "safe" # enum example: safe, fast
+    #   - match: "https://registry.example.invalid/private/"
+    #     apply-to: [] # Omit or leave empty for registry, metadata, and artifact requests.
+    #     type: "none" # Default. Also accepts bearer, github-token, basic, and header.
+    #     token-env: "" # Required for bearer and github-token.
+    #     username-env: "" # Required for basic.
+    #     password-env: "" # Required for basic.
+    #     header-name: "" # Required for header.
+    #     header-value-env: "" # Required for header.
+    #     allow-insecure: false # Keep false to send configured credentials only over HTTPS.
+    # Home supplies auth-revision when it manages plugin credentials.
+    configs: { }
+    # configs:
+    #   "<installed-plugin-id>": # Use the ID shown on the Plugins page.
+    #     enabled: false         # Enable this plugin only when plugins.enabled is true.
+    #     priority: 0            # Default startup and routing priority.
+    # Add other settings under that ID using the installed plugin's field list.
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 # When true, disable Claude Code cloak mode globally for all Claude credentials.
@@ -117,17 +139,21 @@ logs-max-total-size-mb: 0
 error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
-# 用量数据目录，未设置时依次采用 WRITABLE_PATH/usage-data 和配置目录下的 usage-data
-# usage-data-dir: ""
-# 兼容旧配置的持久化开关，disabled 禁止持久化，其他值不再用于选择文件路径
+# Empty uses WRITABLE_PATH/usage-data, then usage-data beside config.yaml.
+usage-data-dir: ""
+# Legacy flag: "disabled" prevents persistence. Other values leave the path selection unchanged.
 # usage-statistics-file: ""
 
-# SQLite 用量留存，删除过期事件并在同一事务中重建聚合统计
-# usage-retention:
-#   days: 30                    # 保留天数，0 使用默认值 -1，-1 禁用清理
-#   # Stop new writes after the observed events.db + WAL + SHM size reaches this value. Set to 0 to disable.
-#   max-db-size-mb: 1024
-#   warning-threshold-pct: 80   # Show warnings when the DB reaches this percentage of max-db-size-mb.
+# Usage retention deletes old events and rebuilds aggregate statistics in the same transaction.
+usage-retention:
+    days: 0                  # 0 uses the default (-1, keep history). Set a positive number of days to expire events.
+    max-db-size-mb: 0         # 0 disables the SQLite write cap (events.db + WAL + SHM).
+    warning-threshold-pct: 0 # 0 uses 80%. Applies only when max-db-size-mb is positive.
+
+# Disk cleanup for generated image artifacts. Either limit can be disabled with 0.
+image-artifact-cache:
+    retention-days: 7
+    max-total-size-mb: 10240
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
@@ -139,28 +165,55 @@ enable-gemini-cli-endpoint: false
 # When true, forward filtered upstream response headers to downstream clients.
 # Default is false (disabled).
 passthrough-headers: false
-# Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
-# Individual API-key entries can override this via request-retry. OAuth/token JSON files use request_retry.
-# Example OAuth/token JSON: {"type":"codex","access_token":"...","request_retry":0}
-# 0 disables retries for that credential; omit the field or set a negative value to keep this global setting.
+# Extra attempts after a failed request. Omission defaults to 0; this sample opts into 3 retries.
+# Provider API-key rows can override it with request-retry; auth files use request_retry.
+# A credential value of 0 disables extra attempts. Omit it or set a negative value to inherit this global count.
 request-retry: 3
-# Maximum number of different credentials to try for one failed request.
-# Set to 0 to keep legacy behavior (try all available credentials).
+# Maximum number of credentials to try for one failed request. 0 lets CPA try all available credentials.
 max-retry-credentials: 0
-# Maximum wait time in seconds for a cooled-down credential before triggering a retry.
+# Maximum cooldown wait before a retry, in seconds. Omission defaults to 0 (no wait).
 max-retry-interval: 30
+# When true, disable cooldown scheduling globally. An omitted per-credential setting inherits this value.
+disable-cooling: false
 # When true, persist runtime cooldown status independently of auth credentials.
 # PostgreSQL-backed auth stores use their cooldown table; file stores use per-auth .cds files.
 save-cooldown-status: false
 # 临时上游错误的冷却时长，单位为秒，0 使用默认 60 秒，负数停用
 # 启用时优先使用供应商有效的 Retry-After，正值最多为 9223372036 秒
 transient-error-cooldown-seconds: 0
-# Number of concurrent OAuth auth refresh workers. When <= 0, the default is 16.
-# auth-auto-refresh-workers: 16
+# Concurrent OAuth refresh workers. 0 or a negative value uses 16 workers.
+auth-auto-refresh-workers: 0
+
+# Home supplies authoritative credential lifecycle values. Leave the revisions to Home.
+# credential-concurrency:
+#   lifecycle-config-revision:   # Assigned by Home; present revisions must be positive.
+#   observation-barrier-revision: 0 # Unset/0 means no barrier.
+#   cpa-heartbeat-timeout: 3s
+#   cpa-cancel-bound: 5s
+#   reclaim-grace: 5s
+#   cleanup-interval: 5s
+#   release-flush-interval: 250ms
+#   release-max-backoff: 2s
+#   busy-retry-min: 250ms
+#   busy-retry-max: 1s
+#   max-limit: 1000000
+# Default bounds for publishing credential observation to Home.
+# credential-in-flight:
+#   snapshot-interval: 2s
+#   stale-after: 10s
+#   max-part-bytes: 262144
+#   max-part-count: 64
+#   max-revision-bytes: 16777216
+#   max-aggregate-groups: 100000
+#   max-details: 10000 # Set 0 to publish aggregate groups without details.
+#   max-string-bytes: 256
+#   staging-retention: 1m
+
 # Quota exceeded behavior
 quota-exceeded:
-    switch-project: true # Whether to automatically switch to another project when a quota is exceeded
-    switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
+    # Legacy settings retained for compatibility. Current routing ignores both values.
+    switch-project: true
+    switch-preview-model: true
     # Whether to retry Claude Antigravity requests with Google One AI credits when quota is exceeded
     antigravity-credits: false
 # Routing strategy for selecting credentials when multiple match.
@@ -176,16 +229,15 @@ routing:
     # Set false to distribute subagents through the configured fallback strategy.
     # Ignored when session-affinity is false.
     session-affinity-subagents: true
-# CORS allowed origins. Empty = allow all (*) for CLI tool compatibility.
-# Set to restrict browser access: ["http://localhost:5173", "http://127.0.0.1:5173"]
-# cors-allowed-origins: []
+# CORS allowed origins. Empty allows all origins (*). To restrict access, list origins such as http://localhost:5173.
+cors-allowed-origins: [ ]
 
 # With ws-auth enabled, an AI Studio relay serves only requests authenticated with the same client key.
 # With ws-auth disabled, registration and use of unauthenticated relays are limited to direct loopback clients.
 ws-auth: true
-# Allow API key authentication via URL query parameters (?key= / ?auth_token=).
-# Disabled by default — query parameters leak credentials to server logs, Referer headers, and browser history.
-# allow-query-auth: false
+# Allow API key authentication via URL query parameters (?key= or ?auth_token=).
+# Keep false to keep credentials out of request URLs, logs, and browser history.
+allow-query-auth: false
 
 # Auto-refresh interval (seconds) for the management panel when the browser window regains focus.
 # Set to 0 to disable auto-refresh. Default: 3.
@@ -197,11 +249,12 @@ model-refresh-interval: 3
 nonstream-keepalive-interval: 0
 # Base model used by the legacy hosted image_generation tool path for GPT Image 2 and 2.5 requests
 # that are not proxied directly through the Images API. Defaults to the model ID "gpt-5.4-mini".
-# gpt-image-2-base-model: "gpt-5.4-mini"
-# How long video IDs stay pinned to the credential that created them.
-# Accepts duration strings like "30m" or "3h". Defaults to 3h.
-# video-result-auth-cache-ttl: "3h"
+gpt-image-2-base-model: "gpt-5.4-mini"
+# How long video IDs stay pinned to the credential that created them. Empty or invalid uses 3h.
+video-result-auth-cache-ttl: "3h"
+# Optional periodic quota polling; limits below are in seconds.
 quota-refresh:
+    enabled: false
     interval: 600
     max-interval: 1800
 # Claude provider behavior.
@@ -225,10 +278,10 @@ codex:
     # Optional in-process WebRTC gateway for Codex Live audio and oai-events.
     live-media-relay:
         enabled: false
-        # Maximum concurrent media sessions. Values <= 0 use the default of 32.
+        # Maximum concurrent media sessions. 0 uses 32; enabled relays require a nonnegative value.
         max-sessions: 32
         # Reject private, loopback, link-local, multicast, and unspecified downstream candidates.
-        # Leave false for local or LAN Codex Desktop clients.
+        # Leave false for local or LAN clients. Use only this key or the legacy inverse allow-private-remote-ips.
         disable-private-remote-ips: false
         # Public address announced by host candidates when CPA is behind NAT.
         public-ip: ""
@@ -242,31 +295,44 @@ codex:
         ice-servers: [ ]
         # Example TURN server:
         # ice-servers:
-        #     - urls: ["turn:turn.example.com:3478?transport=udp"]
-        #       username: "relay-user"
-        #       credential: "relay-secret"
-auth:
-    providers:
-        config-api-key:
-            api-key-entries:
-                -   api-key: your-api-key-1
-                -   api-key: your-api-key-2
-                -   api-key: your-api-key-3
+        #     - urls: ["turn:turn.example.invalid:3478?transport=udp"]
+        #       username: ""    # Fill for authenticated TURN.
+        #       credential: ""  # Fill for authenticated TURN.
+# Structured form for client keys. Use an existing key, and keep provider API keys in their own sections.
+# auth:
+#   providers:
+#     config-api-key:
+#       api-key-entries:
+#         - api-key: "<client-key>"
 # off/all/chat/passthrough
 disable-image-generation: "off"
 redis-usage-queue-retention-seconds: 60
 
-# Streaming behavior (SSE keep-alives + safe bootstrap retries).
-# streaming:
-#   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
-#   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+# Streaming defaults: no SSE heartbeats and no retries before the first response byte.
+streaming:
+    keepalive-seconds: 0
+    bootstrap-retries: 0
+
+# Provider examples stay inactive until you add a credential or an endpoint that supports anonymous access.
+# Each provider row has priority (default 0; higher is preferred). Put weight on the credential itself
+# (on api-key-entries for OpenAI providers). Omission uses weight 1; 0 excludes it from weighted selection.
+# Omit proxy-url to inherit the global proxy, or use "direct" for no proxy.
+# Omit disable-cooling and request-retry to inherit the global values; false and 0 are explicit overrides.
+# Under models, use name for the upstream ID and alias for the client name. Omit display-name and
+# max-context-length to retain model metadata where those options are supported. force-mapping and
+# is-compat default to false where supported. Omit thinking to retain the model's own capabilities.
+# An explicit thinking override uses levels, or min/max token budgets with zero-allowed and dynamic-allowed.
+# Omitted flags in a thinking override default to false.
 
 # Gemini API keys
 # gemini-api-key:
-#   - api-key: "AIzaSy...01"
+#   - api-key: "<provider-api-key>"
+#     priority: 0
+#     weight: null # Use the default weight of 1 without setting an override.
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
-#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
-#     base-url: "https://generativelanguage.googleapis.com"
+#     request-retry: null # Inherit the global retry count.
+#     disable-cooling: null # Inherit global cooldown scheduling.
+#     base-url: "" # Empty uses https://generativelanguage.googleapis.com.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080"
@@ -278,24 +344,29 @@ redis-usage-queue-retention-seconds: 60
 #     models:
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
-#         max-context-length: 1048576 # optional: override Codex client context window metadata
-#         is-compat: false            # optional: preserve compatibility-only thinking fields for compatible upstreams
-#         thinking:                   # optional: exact thinking capability for this configured model
-#           levels: ["high", "medium", "low", "none", "auto"]
+#         display-name: ""       # Keep the model's display name when unset.
+#         force-mapping: false    # Set true to rewrite response model fields to the alias.
+#         max-context-length: 0   # 0 keeps the model's context window metadata.
+#         is-compat: false        # Preserve compatibility-only thinking fields when true.
+#         thinking:               # Optional override for budget-based models.
+#           min: 0
+#           max: 32768
+#           zero-allowed: true
+#           dynamic-allowed: true
 #     excluded-models:
 #       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
 #       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
 #       - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
-#   - api-key: "AIzaSy...02"
 
 # Native Interactions API keys
 # These keys use the direct /v1beta/interactions endpoint.
 # interactions-api-key:
-#   - api-key: "AIzaSy...03"
+#   - api-key: "<provider-api-key>"
 #     prefix: "native" # optional: require calls like "native/gemini-2.5-flash" to target this credential
-#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
-#     base-url: "https://generativelanguage.googleapis.com"
+#     request-retry: null # Inherit the global retry count.
+#     disable-cooling: null # Inherit global cooldown scheduling.
+#     base-url: "" # Empty uses https://generativelanguage.googleapis.com.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080"
@@ -315,10 +386,13 @@ redis-usage-queue-retention-seconds: 60
 
 # Codex API keys
 # codex-api-key:
-#   - api-key: "sk-atSM..."
+#   - api-key: "<provider-api-key>"
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
-#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
-#     base-url: "https://www.example.com" # use the custom codex API endpoint
+#     request-retry: null # Inherit the global retry count.
+#     disable-cooling: null # Inherit global cooldown scheduling.
+#     base-url: "https://codex.example.invalid" # Required for Codex API keys.
+#     websockets: false # Enable upstream Responses WebSockets explicitly.
+#     disable-codex-cloaking: null # Inherit codex.disable-codex-cloaking.
 #     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -350,10 +424,10 @@ redis-usage-queue-retention-seconds: 60
 #   sensitive-words: # optional: words to obfuscate with zero-width characters in system instructions
 #     - "API"
 #     - "proxy"
-#   connection-pool:             # optional: upstream HTTP connection pool settings
-#     enabled: false             # whether to enable connection pooling (default: false)
-#     idle-conn-timeout: "30s"   # idle keep-alive timeout (default: 30s, capped at 210s)
-#     max-idle-conns-per-host: 2 # max idle connections per host per credential (default: 2)
+#   connection-pool:
+#     enabled: false            # Omission also uses short-lived connections.
+#     idle-conn-timeout: ""    # Keep a custom transport timeout; the standard default is 30s. Cap: 210s.
+#     max-idle-conns-per-host: 2 # Default when enabled. 0 keeps the transport/Go default; a negative value disables pooling.
 
 # Devin request behavior
 # devin:
@@ -368,12 +442,12 @@ redis-usage-queue-retention-seconds: 60
 # Uses the native xAI executor. API-key credentials route to the configured xAI API endpoint,
 # while existing xAI OAuth credentials continue to use the Grok CLI proxy flow.
 # xai-api-key:
-#   - api-key: "xai-..."
+#   - api-key: "<provider-api-key>"
 #     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
-#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
-#     base-url: "https://api.x.ai/v1"
-#     websockets: true # optional: enable upstream WebSocket transport for downstream WebSocket requests
-#     disable-cooling: false # optional: disable auth/model cooldown scheduling for this credential
+#     request-retry: null # Inherit the global retry count.
+#     disable-cooling: null # Inherit global cooldown scheduling.
+#     base-url: "https://api.x.ai/v1" # Required for xAI API keys.
+#     websockets: false # Set true to enable upstream WebSocket transport for WebSocket requests.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
@@ -395,21 +469,31 @@ redis-usage-queue-retention-seconds: 60
 
 # Meta Muse API keys. DCA OAuth tokens belong in auth files, not this setting.
 # meta-api-key:
-#   - api-key: "your-meta-api-key"
+#   - api-key: "<provider-api-key>"
+#     base-url: "" # Empty uses https://api.meta.ai/v1.
 #     prefix: "meta"
+#     proxy-url: "" # Inherit the global proxy.
+#     request-retry: null # Inherit the global retry count.
+#     disable-cooling: null # Inherit global cooldown scheduling.
+#     headers: {}
+#     request-scoped-errors: [] # Optional status/body rules, described under oauth-request-scoped-errors.
 #     models:
 #       - name: "muse-spark-1.3"
 #         alias: "muse-latest"
+#         display-name: ""
+#         max-context-length: 0
+#         is-compat: false
+#         force-mapping: false
 #     excluded-models:
 #       - "muse-spark-1.1"
 
 # Claude API keys
 # claude-api-key:
-#   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
-#   - api-key: "sk-atSM..."
+#   - api-key: "<provider-api-key>"
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
-#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
-#     base-url: "https://www.example.com" # use the custom claude API endpoint
+#     request-retry: null # Inherit the global retry count.
+#     disable-cooling: null # Inherit global cooldown scheduling.
+#     base-url: "" # Empty uses the official Anthropic endpoint.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
@@ -446,47 +530,47 @@ redis-usage-queue-retention-seconds: 60
 #     fingerprint-profile: ""       # 默认为空，API key 保留调用方身份
 #                                    # claude-code-cli 启用 CLI 请求身份，oauth-cli 为兼容名称
 #                                    # 不改变真实 OAuth 行为或增加账号权限
-#     OAuth/token JSON uses the canonical "fingerprint_profile" key; legacy "fingerprint-profile" remains readable.
-#     Example: {"type":"kimi","access_token":"...","refresh_token":"...","fingerprint_profile":"claude-code-cli"}
+#     # OAuth/token JSON uses fingerprint_profile; the legacy fingerprint-profile spelling remains readable.
+#     # Set fingerprint_profile only for a profile supported by the credential.
 #     experimental-cch-signing: false # 仅兼容旧配置，不能开启签名
 
-# Claude 请求身份默认值用于 CLI profile 和真实 OAuth
-# 不覆盖默认模式下的调用方身份
-# stabilize-device-profile 为 false 或未配置时，保留请求的 OS/arch，缺省值取当前运行环境
-# true 时，CLI/OAuth profile 的 OS/arch 使用下方基线；CLI 身份继续由 fingerprint-profile 选择
+# Optional CLI/OAuth profile overrides. Empty values keep the built-in profile or the caller's headers.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.258 (external, cli)"
-#   package-version: "0.112.1"
-#   runtime-version: "v26.3.0"
-#   os: "MacOS"
-#   arch: "arm64"
-#   timeout: "600"
-#   timezone: "Asia/Singapore"
-#   stabilize-device-profile: false
+#   user-agent: ""      # CLI baseline: claude-cli/2.1.280 (external, cli).
+#   package-version: "" # CLI baseline: 0.112.1.
+#   runtime-version: "" # CLI baseline: v26.3.0.
+#   os: ""             # Stabilized baseline: MacOS. Otherwise keep the caller or host OS.
+#   arch: ""           # Stabilized baseline: arm64. Otherwise keep the caller or host architecture.
+#   timeout: ""        # CLI request header fallback: "600".
+#   timezone: ""       # Use the server's timezone unless the credential supplies a timezone.
+#   stabilize-device-profile: false # Optional. Omission also leaves the caller's platform unstabilized.
 
-# Default headers for Codex OAuth requests. Update when Codex CLI releases new versions.
+# Optional Codex OAuth header overrides. Empty uses the normal client or built-in headers.
 # codex-header-defaults:
-#   user-agent: "codex_cli_rs/0.130.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
-#   beta-features: ""
+#   user-agent: ""
+#   beta-features: "" # WebSocket beta feature header; empty adds no configured features.
 
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
-#     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests with session identity
-#     disable-cooling: false # optional: disable auth/model cooldown scheduling for this provider
-#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
+#     support-prompt-cache-key: false # Derive prompt_cache_key for requests with session identity when true.
+#     disabled: false # When true, exclude this provider from routing.
+#     priority: 0
+#     request-retry: null # Inherit the global retry count.
+#     disable-cooling: null # Inherit global cooldown scheduling.
 #     request-scoped-errors:
 #       - status: 422
 #         match: ["invalid_prompt"]
 #         action: "continue"
 #     headers:
 #       X-Custom-Header: "custom-value"
-#     api-key-entries:
-#       - api-key: "sk-or-v1-...b780"
-#         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
-#       - api-key: "sk-or-v1-...b781" # without proxy-url
+#     api-key-entries: # Omit for an endpoint that accepts requests without a key.
+#       - api-key: "<provider-api-key>"
+#         disabled: false # When true, exclude this credential without changing its routing weight.
+#         weight: null    # Uses 1 in weighted routing; 0 excludes this credential from weighted selection.
+#         proxy-url: "" # Inherit the global proxy.
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.

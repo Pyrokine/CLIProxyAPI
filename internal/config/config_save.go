@@ -10,13 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
 
-// SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
-// and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func setConfigAPIKeyProviderEntries(root *yaml.Node, keys []string) {
 	if root == nil || root.Kind != yaml.MappingNode {
 		return
@@ -71,6 +70,7 @@ func setConfigAPIKeyProviderEntries(root *yaml.Node, keys []string) {
 	}
 }
 
+// SaveConfigPreserveComments updates the YAML file while keeping its comments and key order.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	_, err := SaveConfigPreserveCommentsWithDigest(configFile, cfg)
 	return err
@@ -110,6 +110,10 @@ func saveConfigPreserveComments(configFile string, cfg *Config, includeDefaults 
 	if generated.Content[0].Kind != yaml.MappingNode {
 		return "", fmt.Errorf("expected generated root mapping node")
 	}
+	if persistCfg.CredentialConcurrency.LifecycleConfigRevision == 0 {
+		// A lifecycle revision is assigned by Home and must be positive when supplied.
+		removeMapKey(yamlMappingValue(generated.Content[0], "credential-concurrency"), "lifecycle-config-revision")
+	}
 
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
@@ -119,8 +123,7 @@ func saveConfigPreserveComments(configFile string, cfg *Config, includeDefaults 
 			removeMapKey(generated.Content[0], "oauth-model-alias")
 			removeMapKey(generated.Content[0], "model-catalog")
 		}
-		normalizeCollectionNodeStyles(generated.Content[0])
-		return writeYAMLNodeWithDigest(configFile, &generated)
+		return writeConfigYAML(configFile, &generated, persistCfg, includeDefaults)
 	}
 	if err != nil {
 		return "", err
@@ -160,17 +163,204 @@ func saveConfigPreserveComments(configFile string, cfg *Config, includeDefaults 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-rules")
 	setConfigAPIKeyProviderEntries(original.Content[0], persistCfg.APIKeys)
 
-	// Merge generated into original in-place, preserving comments/order of existing nodes.
-	mergeMappingPreserve(original.Content[0], generated.Content[0], includeDefaults)
+	// Merge generated into original in-place, preserving comments and order.
+	if err := mergeMappingPreserve(original.Content[0], generated.Content[0], includeDefaults); err != nil {
+		return "", err
+	}
 	prunePluginConfigMappings(original.Content[0], generated.Content[0])
 	if modelsExternal {
 		removeMapKey(original.Content[0], "oauth-model-alias")
 		removeMapKey(original.Content[0], "model-catalog")
 	}
-	normalizeCollectionNodeStyles(original.Content[0])
+	return writeConfigYAML(configFile, &original, persistCfg, includeDefaults)
+}
 
-	// Write back.
-	return writeYAMLNodeWithDigest(configFile, &original)
+type yamlDefault struct {
+	key, tag, value string
+}
+
+func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if idx := findMapKeyIndex(mapping, key); idx >= 0 {
+		return mapping.Content[idx+1]
+	}
+	return nil
+}
+
+func yamlSequenceItems(node *yaml.Node) []*yaml.Node {
+	if node != nil && node.Kind == yaml.SequenceNode {
+		return node.Content
+	}
+	return nil
+}
+
+func addMissingYAMLDefaults(mapping *yaml.Node, defaults ...yamlDefault) error {
+	// An anchor can be shared with another section. Defaults belong in the local mapping.
+	if mapping == nil || mapping.Kind != yaml.MappingNode || mapping.Anchor != "" {
+		return nil
+	}
+	for _, field := range defaults {
+		existing, _, err := configYAMLEffectiveMappingValue(mapping, field.key, nil)
+		if err != nil {
+			return err
+		}
+		if existing == nil {
+			*getOrCreateMapValue(mapping, field.key) = yaml.Node{
+				Kind: yaml.ScalarNode, Tag: field.tag, Value: field.value,
+			}
+		}
+	}
+	return nil
+}
+
+func writeConfigYAML(file string, document *yaml.Node, cfg *Config, includeDefaults bool) (string, error) {
+	root := document.Content[0]
+	if err := materializeYAMLDefaults(root, cfg, includeDefaults); err != nil {
+		return "", err
+	}
+	normalizeCollectionNodeStyles(root)
+	return writeYAMLNodeWithDigest(file, document)
+}
+
+func materializeYAMLDefaults(root *yaml.Node, cfg *Config, includeDefaults bool) error {
+	routing := yamlMappingValue(root, "routing")
+	if includeDefaults {
+		if err := errors.Join(
+			addMissingYAMLDefaults(routing, yamlDefault{"strategy", "!!str", "round-robin"}),
+			addMissingYAMLDefaults(
+				root,
+				yamlDefault{"video-result-auth-cache-ttl", "!!str", "3h"},
+				yamlDefault{"gpt-image-2-base-model", "!!str", "gpt-5.4-mini"},
+			),
+		); err != nil {
+			return err
+		}
+	}
+	if cfg.Routing.SessionAffinity {
+		if err := addMissingYAMLDefaults(
+			routing,
+			yamlDefault{"session-affinity-ttl", "!!str", "1h"},
+			yamlDefault{"session-affinity-subagents", "!!bool", "true"},
+		); err != nil {
+			return err
+		}
+	}
+	if cfg.RemoteManagement.AutoCheckUpdate {
+		if err := addMissingYAMLDefaults(
+			yamlMappingValue(root, "remote-management"),
+			yamlDefault{"check-interval", "!!int", "180"},
+		); err != nil {
+			return err
+		}
+	}
+	if enabled := cfg.Antigravity.ConnectionPool.Enabled; enabled != nil && *enabled {
+		pool := yamlMappingValue(yamlMappingValue(root, "antigravity"), "connection-pool")
+		if err := addMissingYAMLDefaults(pool, yamlDefault{"max-idle-conns-per-host", "!!int", "2"}); err != nil {
+			return err
+		}
+	}
+	return materializeYAMLRecordDefaults(root)
+}
+
+// yamlRecordDefaults covers fixed values on existing records, not inherited overrides.
+func yamlRecordDefaults(path []string) []yamlDefault {
+	if len(path) == 3 && path[0] == "api-key-rules" && path[2] == "limits" {
+		return []yamlDefault{{"requests", "!!int", "0"}, {"tokens", "!!int", "0"}, {"cost-micro", "!!int", "0"}}
+	}
+	priority := yamlDefault{"priority", "!!int", "0"}
+	websockets := yamlDefault{"websockets", "!!bool", "false"}
+	forceMapping := yamlDefault{"force-mapping", "!!bool", "false"}
+	compatibility := yamlDefault{"is-compat", "!!bool", "false"}
+	switch strings.Join(path, ".") {
+	case "gemini-api-key", "interactions-api-key", "meta-api-key", "vertex-api-key":
+		return []yamlDefault{priority}
+	case "claude-api-key":
+		return []yamlDefault{priority, {"rebuild-mid-system-message", "!!bool", "false"}}
+	case "xai-api-key":
+		return []yamlDefault{priority, websockets}
+	case "codex-api-key":
+		return []yamlDefault{priority, websockets, {"alpha-search", "!!bool", "false"}}
+	case "openai-compatibility":
+		return []yamlDefault{priority, {"disabled", "!!bool", "false"}, {"support-prompt-cache-key", "!!bool", "false"}}
+	case "openai-compatibility.api-key-entries":
+		return []yamlDefault{{"disabled", "!!bool", "false"}}
+	case "gemini-api-key.models", "interactions-api-key.models", "claude-api-key.models", "xai-api-key.models", "meta-api-key.models":
+		return []yamlDefault{forceMapping, compatibility}
+	case "vertex-api-key.models":
+		return []yamlDefault{forceMapping}
+	case "codex-api-key.models":
+		return []yamlDefault{forceMapping, compatibility, {"support-configuration-update", "!!bool", "false"}}
+	case "openai-compatibility.models":
+		return []yamlDefault{forceMapping, compatibility, {"image", "!!bool", "false"}}
+	case "plugins.store-auth":
+		return []yamlDefault{{"allow-insecure", "!!bool", "false"}}
+	}
+	return nil
+}
+
+func materializeYAMLRecordDefaults(root *yaml.Node) error {
+	for _, family := range []string{
+		"gemini-api-key", "interactions-api-key", "codex-api-key", "xai-api-key", "meta-api-key",
+		"claude-api-key", "vertex-api-key", "openai-compatibility",
+	} {
+		providerDefaults := yamlRecordDefaults([]string{family})
+		modelDefaults := yamlRecordDefaults([]string{family, "models"})
+		keyDefaults := yamlRecordDefaults([]string{family, "api-key-entries"})
+		for _, entry := range yamlSequenceItems(yamlMappingValue(root, family)) {
+			if family == "codex-api-key" && isInactiveCodexYAMLRow(entry) ||
+				family == "claude-api-key" && mappingScalarValue(entry, "api-key") == "" && mappingScalarValue(
+					entry, "base-url",
+				) == "" {
+				continue
+			}
+			if err := addMissingYAMLDefaults(entry, providerDefaults...); err != nil {
+				return err
+			}
+			for _, model := range yamlSequenceItems(yamlMappingValue(entry, "models")) {
+				if err := addMissingYAMLDefaults(model, modelDefaults...); err != nil {
+					return err
+				}
+			}
+			for _, key := range yamlSequenceItems(yamlMappingValue(entry, "api-key-entries")) {
+				if err := addMissingYAMLDefaults(key, keyDefaults...); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	storeAuthPath := []string{"plugins", "store-auth"}
+	inactiveStoreRule := inactiveConfigYAMLRow(storeAuthPath)
+	storeAuthDefaults := yamlRecordDefaults(storeAuthPath)
+	for _, rule := range yamlSequenceItems(yamlMappingValue(yamlMappingValue(root, "plugins"), "store-auth")) {
+		if !inactiveStoreRule(rule) {
+			if err := addMissingYAMLDefaults(rule, storeAuthDefaults...); err != nil {
+				return err
+			}
+		}
+	}
+	if rules := yamlMappingValue(root, "api-key-rules"); rules != nil && rules.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(rules.Content); i += 2 {
+			rule := rules.Content[i+1]
+			limits := yamlSequenceItems(yamlMappingValue(rule, "limits"))
+			if len(limits) == 0 {
+				continue
+			}
+			if err := addMissingYAMLDefaults(
+				rule,
+				yamlDefault{"policy-profile", "!!str", "default"},
+				yamlDefault{"reservation-ttl", "!!str", "24h"},
+			); err != nil {
+				return err
+			}
+			for _, limit := range limits {
+				if err := addMissingYAMLDefaults(
+					limit, yamlRecordDefaults([]string{"api-key-rules", rules.Content[i].Value, "limits"})...,
+				); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
@@ -207,7 +397,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	return writeYAMLNode(configFile, &root)
 }
 
-// writeYAMLNode encodes a yaml.Node to the given file with normalized comment indentation.
+// writeYAMLNode encodes a yaml.Node to the given file.
 func writeYAMLNode(filePath string, node *yaml.Node) error {
 	_, err := writeYAMLNodeWithDigest(filePath, node)
 	return err
@@ -224,7 +414,7 @@ func writeYAMLNodeWithDigest(filePath string, node *yaml.Node) (string, error) {
 	if err := enc.Close(); err != nil {
 		return "", err
 	}
-	data := NormalizeCommentIndentation(buf.Bytes())
+	data := buf.Bytes()
 	digest := sha256.Sum256(data)
 	if err := writeFileAtomically(filePath, data); err != nil {
 		return "", err
@@ -312,9 +502,8 @@ func resolveAtomicWriteTarget(filePath string) (string, error) {
 	}
 }
 
-// EnsureDefaultsInFile re-saves the config to the YAML file, ensuring all known fields
-// (including those with default/zero values) are written out. This is called once at startup
-// so the source file always contains every configurable field.
+// EnsureDefaultsInFile writes applicable local defaults during startup.
+// Inherited or externally managed values keep their existing source.
 func EnsureDefaultsInFile(configFile string, cfg *Config) {
 	if configFile == "" || cfg == nil {
 		return

@@ -89,6 +89,12 @@ func normalizeStringSlice(values []string) []string {
 const (
 	MaxImageArtifactRetentionDays = int(math.MaxInt64 / int64(24*time.Hour))
 	MaxImageArtifactCacheSizeMB   = MaxStorageSizeMB
+
+	defaultErrorLogsMaxFiles          = 10
+	defaultImageArtifactRetentionDays = 7
+	defaultImageArtifactCacheSizeMB   = 10240
+	defaultAutoRefreshInterval        = 3 // seconds
+	defaultModelRefreshInterval       = 3 // hours
 )
 
 func validateImageArtifactCacheConfig(cfg ImageArtifactCache) error {
@@ -189,11 +195,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Host = "127.0.0.1" // Default to loopback only; explicit config required for network exposure
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
-	cfg.ErrorLogsMaxFiles = 10
+	cfg.ErrorLogsMaxFiles = defaultErrorLogsMaxFiles
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
-	cfg.ImageArtifactCache.RetentionDays = 7
-	cfg.ImageArtifactCache.MaxTotalSizeMB = 10240
+	cfg.ImageArtifactCache.RetentionDays = defaultImageArtifactRetentionDays
+	cfg.ImageArtifactCache.MaxTotalSizeMB = defaultImageArtifactCacheSizeMB
 	cfg.DisableCooling = false
 	cfg.SaveCooldownStatus = false
 	cfg.Pprof.Enable = false
@@ -211,8 +217,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// NOTE: UsageRetention zero-values are handled by persister.NewPersister (0 → default, -1 → disabled).
 	// AutoRefreshInterval (default 3) and ModelRefreshInterval (default 3) use 0 as "disabled",
 	// so their defaults must be set here rather than relying on zero-value semantics.
-	cfg.AutoRefreshInterval = 3  // 3 seconds
-	cfg.ModelRefreshInterval = 3 // 3 hours
+	cfg.AutoRefreshInterval = defaultAutoRefreshInterval
+	cfg.ModelRefreshInterval = defaultModelRefreshInterval
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -297,7 +303,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	if cfg.ErrorLogsMaxFiles < 0 {
-		cfg.ErrorLogsMaxFiles = 10
+		cfg.ErrorLogsMaxFiles = defaultErrorLogsMaxFiles
 	}
 
 	if cfg.RedisUsageQueueRetentionSeconds <= 0 {

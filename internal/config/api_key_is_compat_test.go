@@ -2,6 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -49,6 +52,64 @@ func TestOpenAICompatibilityUseMaxCompletionTokensDecoding(t *testing.T) {
 							t.Fatalf("model %d capability = %+v, want %t", i, model, want)
 						}
 					}
+				}
+			},
+		)
+	}
+}
+
+func TestOpenAICompatibilityTokenLimitYAMLWriteback(t *testing.T) {
+	const initial = `openai-compatibility:
+  - name: fixture
+    base-url: https://provider.fixture.invalid/v1
+    models:
+      - name: explicit
+        alias: explicit
+        use-max-completion-tokens: true # Retain model comment
+      - name: default-model
+        alias: default-model
+`
+	for _, name := range []string{"startup defaults", "provider save"} {
+		t.Run(
+			name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := LoadConfig(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if name == "startup defaults" {
+					EnsureDefaultsInFile(path, cfg)
+				} else if err := SaveConfigPreserveComments(path, cfg); err != nil {
+					t.Fatal(err)
+				}
+				checkYAML := func(wantTrue, wantFalse int) {
+					t.Helper()
+					raw, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					text := string(raw)
+					if strings.Count(text, "use-max-completion-tokens: true") != wantTrue ||
+						strings.Count(text, "use-max-completion-tokens: false") != wantFalse ||
+						!strings.Contains(text, "# Retain model comment") {
+						t.Fatalf("unexpected token-limit flags in YAML:\n%s", text)
+					}
+				}
+				checkYAML(1, 1)
+				cfg.OpenAICompatibility[0].Models[0].UseMaxCompletionTokens = false
+				if err := SaveConfigPreserveComments(path, cfg); err != nil {
+					t.Fatal(err)
+				}
+				checkYAML(0, 2)
+				current, err := LoadConfig(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if current.OpenAICompatibility[0].Models[0].UseMaxCompletionTokens {
+					t.Fatal("disabled token-limit flag was not read back")
 				}
 			},
 		)

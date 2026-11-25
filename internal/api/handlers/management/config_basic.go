@@ -721,7 +721,7 @@ func (h *Handler) commitConfigYAMLLocked(
 		return ConfigCommit{}, nil, false
 	}
 
-	newCfg, _, errValidate := h.validateConfigBody(body)
+	newCfg, _, errValidate := h.validateConfigBody(body, current)
 	if errValidate != nil {
 		if internalError, ok := errors.AsType[*configValidationInternalError](errValidate); ok {
 			log.WithError(internalError.Unwrap()).Error("failed to validate config YAML")
@@ -731,10 +731,10 @@ func (h *Handler) commitConfigYAMLLocked(
 			return ConfigCommit{}, nil, false
 		}
 		rejectMutation(mutationRequestContext(c))
+		issue := configYAMLValidationDetail(errValidate)
 		c.JSON(
 			http.StatusUnprocessableEntity, gin.H{
-				"error": "invalid_config", "message": errValidate.Error(),
-				"field": inferConfigValidationField(errValidate.Error()),
+				"error": "invalid_config", "message": issue.Message, "field": issue.Field,
 			},
 		)
 		return ConfigCommit{}, nil, false
@@ -1008,7 +1008,7 @@ func (h *Handler) ValidateConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": "cannot read request body"})
 		return
 	}
-	_, warnings, errValidate := h.validateConfigBody(body)
+	warnings, errValidate := h.previewConfigYAML(body)
 	if errValidate != nil {
 		if internalError, ok := errors.AsType[*configValidationInternalError](errValidate); ok {
 			log.WithError(internalError.Unwrap()).Error("failed to validate config YAML")
@@ -1018,16 +1018,9 @@ func (h *Handler) ValidateConfigYAML(c *gin.Context) {
 			return
 		}
 		rejectMutation(mutationRequestContext(c))
-		message := errValidate.Error()
 		c.JSON(
 			http.StatusOK, gin.H{
-				"valid": false,
-				"errors": []configValidationError{
-					{
-						Field:   inferConfigValidationField(message),
-						Message: message,
-					},
-				},
+				"valid": false, "errors": []configValidationError{configYAMLValidationDetail(errValidate)},
 				"warnings": warnings,
 			},
 		)
@@ -1043,10 +1036,18 @@ func (h *Handler) ValidateConfigYAML(c *gin.Context) {
 }
 
 // validateConfigBody validates a YAML config body and returns the parsed config, warnings, and any error.
-func (h *Handler) validateConfigBody(body []byte) (*config.Config, []string, error) {
+func (h *Handler) validateConfigBody(body []byte, baseline ...[]byte) (*config.Config, []string, error) {
 	var cfg config.Config
 	if err := yaml.Unmarshal(body, &cfg); err != nil {
 		return nil, nil, fmt.Errorf("YAML parse error: %w", err)
+	}
+	var warnings []string
+	if len(baseline) > 0 {
+		var err error
+		warnings, err = validateConfigYAMLRules(&cfg, baseline[0])
+		if err != nil {
+			return nil, warnings, err
+		}
 	}
 
 	// Write to temp file for LoadConfigOptional validation
@@ -1072,7 +1073,7 @@ func (h *Handler) validateConfigBody(body []byte) (*config.Config, []string, err
 		return nil, nil, err
 	}
 
-	warnings := config.ValidateConfig(loaded)
+	warnings = append(warnings, config.ValidateConfig(loaded)...)
 	return loaded, warnings, nil
 }
 

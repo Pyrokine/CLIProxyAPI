@@ -110,7 +110,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	return internalconfig.SaveConfigPreserveCommentsUpdateNestedScalar(configFile, path, value)
 }
 
-// NormalizeCommentIndentation fixes indentation of YAML comments.
+// NormalizeCommentIndentation aligns standalone comments when the YAML tree stays unchanged.
 //
 //goland:noinspection GoUnnecessarilyExportedIdentifiers,GoUnusedExportedFunction
 func NormalizeCommentIndentation(data []byte) []byte {

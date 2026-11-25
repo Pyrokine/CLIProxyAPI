@@ -321,10 +321,11 @@ type SDKConfig struct {
 	// Disabled by default because query parameters leak credentials to logs, Referer headers, and browser history.
 	AllowQueryAuth bool `yaml:"allow-query-auth" json:"allow-query-auth"`
 
-	// APIKeyAliases maps API keys to human-readable aliases for display purposes.
-	APIKeyAliases map[string]string `yaml:"api-key-aliases,omitempty" json:"api-key-aliases,omitempty"`
+	// APIKeyAliases maps API keys to optional display names.
+	APIKeyAliases map[string]string `yaml:"api-key-aliases" json:"api-key-aliases,omitempty"`
 
-	APIKeyRules map[string]APIKeyRule `yaml:"api-key-rules,omitempty" json:"api-key-rules,omitempty"`
+	// APIKeyRules configures per-key restrictions and usage limits. An empty map adds no rules.
+	APIKeyRules map[string]APIKeyRule `yaml:"api-key-rules" json:"api-key-rules,omitempty"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
@@ -335,8 +336,8 @@ type SDKConfig struct {
 	// only; "passthrough" keeps client-supplied tools untouched.
 	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
-	// GPTImage2BaseModel sets the base model used by the legacy hosted image_generation tool path
-	// when a Codex image request is not proxied directly through the Image API.
+	// GPTImage2BaseModel sets the base model for the legacy hosted image_generation tool.
+	// When empty, that path uses gpt-5.4-mini. The direct Images API does not use this setting.
 	GPTImage2BaseModel string `yaml:"gpt-image-2-base-model,omitempty" json:"gpt-image-2-base-model,omitempty"`
 
 	// VideoResultAuthCacheTTL controls how long video IDs stay pinned to the credential
@@ -349,7 +350,7 @@ type SDKConfig struct {
 
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
-	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval" json:"nonstream-keepalive-interval,omitempty"`
 }
 
 type ClientConfig struct {
@@ -371,10 +372,10 @@ type ClaudeCodeConfig struct {
 type StreamingConfig struct {
 	// KeepAliveSeconds controls how often the server emits SSE heartbeats (": keep-alive\n\n").
 	// <= 0 disables keep-alives. Default is 0.
-	KeepAliveSeconds int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
+	KeepAliveSeconds int `yaml:"keepalive-seconds" json:"keepalive-seconds,omitempty"`
 
 	// BootstrapRetries controls how many times the server may retry a streaming request before any bytes are sent,
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
-	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+	BootstrapRetries int `yaml:"bootstrap-retries" json:"bootstrap-retries,omitempty"`
 }

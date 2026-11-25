@@ -58,31 +58,29 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		if len(rule.Params) == 0 {
 			continue
 		}
-		invalid := false
-		for path, value := range rule.Params {
-			raw, ok := payloadRawString(value)
-			if !ok {
-				continue
-			}
-			trimmed := bytes.TrimSpace(raw)
-			if len(trimmed) == 0 || !json.Valid(trimmed) {
-				log.WithFields(
-					log.Fields{
-						"section":    section,
-						"rule_index": i + 1,
-						"param":      path,
-					},
-				).Warn("payload rule dropped: invalid raw JSON")
-				invalid = true
-				break
-			}
-		}
-		if invalid {
+		if path, invalid := InvalidRawPayloadParam(rule); invalid {
+			log.WithFields(
+				log.Fields{
+					"section": section, "rule_index": i + 1, "param": path,
+				},
+			).Warn("payload rule dropped: invalid raw JSON")
 			continue
 		}
 		out = append(out, rule)
 	}
 	return out
+}
+
+// InvalidRawPayloadParam identifies an invalid JSON fragment without returning its content.
+func InvalidRawPayloadParam(rule PayloadRule) (string, bool) {
+	var first string
+	var invalid bool
+	for path, value := range rule.Params {
+		if raw, ok := payloadRawString(value); ok && !json.Valid(bytes.TrimSpace(raw)) && (!invalid || path < first) {
+			first, invalid = path, true
+		}
+	}
+	return first, invalid
 }
 
 func payloadRawString(value any) ([]byte, bool) {
@@ -309,6 +307,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
+			log.Warnf("codex-api-key[%d].base-url is required; credential is inactive", i)
 			continue
 		}
 		out = append(out, e)

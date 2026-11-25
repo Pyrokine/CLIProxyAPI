@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
@@ -745,6 +747,8 @@ type configYAMLContextVisitState struct {
 	fieldName          string
 	parentFieldName    string
 	inheritedSensitive bool
+	valueSensitive     bool
+	typedSchema        bool
 }
 
 func visitConfigYAMLSecrets(document *yaml.Node, visit func(*yaml.Node, string) error) error {
@@ -820,23 +824,27 @@ func visitConfigYAMLContextNode(
 	if node == nil {
 		return nil
 	}
+	valueSensitive := inheritedSensitive || isCodexLiveICEServerSecretField(parentFieldName, fieldName) ||
+		(isValueSensitiveConfigField(fieldName) && !isPublicTypedConfigValue(node, fieldName, semanticPath))
+	if node.Kind == yaml.ScalarNode && fieldName == "api-key-entries" &&
+		configYAMLClientKeyLocation(semanticPath) == "api-keys" {
+		valueSensitive = true
+	}
 	state := configYAMLContextVisitState{
 		node:               node,
 		fieldName:          fieldName,
 		parentFieldName:    parentFieldName,
 		inheritedSensitive: inheritedSensitive,
+		valueSensitive:     valueSensitive,
+		typedSchema: strings.HasPrefix(semanticPath, configYAMLConcurrencyPath) ||
+			strings.HasPrefix(semanticPath, configYAMLPluginsPath) || strings.HasPrefix(
+			semanticPath, configYAMLPayloadPath,
+		),
 	}
 	if _, ok := seen[state]; ok {
 		return nil
 	}
 	seen[state] = struct{}{}
-
-	valueSensitive := inheritedSensitive || isValueSensitiveConfigField(fieldName) ||
-		isCodexLiveICEServerSecretField(parentFieldName, fieldName)
-	if node.Kind == yaml.ScalarNode && fieldName == "api-key-entries" &&
-		configYAMLClientKeyLocation(semanticPath) == "api-keys" {
-		valueSensitive = true
-	}
 	if err := visit(node, ordinalPath, semanticPath, valueSensitive); err != nil {
 		return err
 	}
@@ -862,6 +870,8 @@ func visitConfigYAMLContextNode(
 		redactMapKeys := shouldRedactMapKey(fieldName)
 		redactKeys := valueSensitive || redactMapKeys
 		providerSchema := isConfigAPIKeyProviderSchema(fieldName, parentFieldName, semanticPath)
+		inFlightSchema := fieldName == "credential-in-flight" && semanticPath == configYAMLInFlightPath
+		concurrencySchema := fieldName == "credential-concurrency" && semanticPath == configYAMLConcurrencyPath
 		for index := 0; index+1 < len(node.Content); index += 2 {
 			entryOrdinalPath := fmt.Sprintf("%s/mapping%d", ordinalPath, index/2)
 			keyNode := node.Content[index]
@@ -869,9 +879,14 @@ func visitConfigYAMLContextNode(
 			_, childFieldName, hasFieldName := yamlSemanticScalar(keyNode)
 			structuredKey := providerSchema && valueNode.Kind == yaml.SequenceNode &&
 				(childFieldName == "api-key-entries" || childFieldName == "api-keys")
-			entrySemanticPath := semanticPath + "/mapping@" + configYAMLSemanticMapKey(
-				keyNode, redactKeys && !structuredKey,
-			)
+			publicKey, publicValue := false, false
+			if inFlightSchema && hasFieldName {
+				publicKey, publicValue = publicInFlightConfigField(childFieldName, valueNode)
+			} else if concurrencySchema && hasFieldName {
+				publicKey, publicValue = publicConcurrencyConfigField(childFieldName, valueNode)
+			}
+			keySensitive := redactKeys && !structuredKey && !publicKey
+			entrySemanticPath := semanticPath + "/mapping@" + configYAMLSemanticMapKey(keyNode, keySensitive)
 			if !hasFieldName || redactMapKeys {
 				childFieldName = ""
 			}
@@ -881,7 +896,7 @@ func visitConfigYAMLContextNode(
 				fieldName,
 				entryOrdinalPath+"/key",
 				entrySemanticPath+"/key",
-				redactKeys && !structuredKey,
+				keySensitive,
 				seen,
 				visit,
 			); err != nil {
@@ -893,7 +908,7 @@ func visitConfigYAMLContextNode(
 				fieldName,
 				entryOrdinalPath+"/value",
 				entrySemanticPath+"/value",
-				valueSensitive && !structuredKey,
+				valueSensitive && !structuredKey && !publicValue,
 				seen,
 				visit,
 			); err != nil {
@@ -1037,6 +1052,151 @@ func configYAMLNodeSignature(
 	default:
 		return fmt.Sprintf("kind(%d)", node.Kind)
 	}
+}
+
+func configYAMLFieldPath(field string) string {
+	return "/mapping@" + configYAMLSemanticMapKey(&yaml.Node{Kind: yaml.ScalarNode, Value: field}, false) + "/value"
+}
+
+var (
+	configYAMLInFlightPath     = "$/document" + configYAMLFieldPath("credential-in-flight")
+	configYAMLConcurrencyPath  = "$/document" + configYAMLFieldPath("credential-concurrency")
+	configYAMLPluginsPath      = "$/document" + configYAMLFieldPath("plugins")
+	configYAMLStoreAuthPath    = configYAMLPluginsPath + configYAMLFieldPath("store-auth")
+	configYAMLPayloadPath      = "$/document" + configYAMLFieldPath("payload")
+	configYAMLParamsPath       = configYAMLFieldPath("params")
+	configYAMLStoreTokenPath   = configYAMLFieldPath("token-env")
+	configYAMLEnvName          = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	configYAMLPolicyLimitsPath = "$/document" + configYAMLFieldPath("api-key-rules") + "/mapping@secret/value" +
+		configYAMLFieldPath("limits")
+	configYAMLPolicyTokensPath         = configYAMLFieldPath("tokens")
+	configYAMLCompatibilityPath        = "$/document" + configYAMLFieldPath("openai-compatibility")
+	configYAMLModelsPath               = configYAMLFieldPath("models")
+	configYAMLCompletionTokensFlagPath = configYAMLFieldPath("use-max-completion-tokens")
+)
+
+func configYAMLAfterSequenceItem(path string) (string, bool) {
+	item, rest, found := strings.Cut(strings.TrimPrefix(path, "/"), "/")
+	return "/" + rest, found && (item == "sequence" || strings.HasPrefix(item, "sequence@"))
+}
+
+func publicInFlightConfigField(field string, node *yaml.Node) (known, public bool) {
+	switch field {
+	case "snapshot-interval", "stale-after", "staging-retention":
+		scalar, value, ok := yamlSemanticScalar(node)
+		if !ok || scalar.Tag != "!!str" {
+			return true, false
+		}
+		_, err := time.ParseDuration(value)
+		return true, err == nil
+	case "max-part-bytes", "max-part-count", "max-revision-bytes", "max-aggregate-groups", "max-details", "max-string-bytes":
+		scalar, _, ok := yamlSemanticScalar(node)
+		var value int
+		return true, ok && scalar.Tag == "!!int" && scalar.Decode(&value) == nil
+	default:
+		return false, false
+	}
+}
+
+func publicConcurrencyConfigField(field string, node *yaml.Node) (known, public bool) {
+	scalar, value, ok := yamlSemanticScalar(node)
+	switch field {
+	case "lifecycle-config-revision", "observation-barrier-revision", "max-limit":
+		var limit int64
+		return true, ok && scalar.Tag == "!!int" && scalar.Decode(&limit) == nil
+	case "cpa-heartbeat-timeout", "cpa-cancel-bound", "reclaim-grace", "cleanup-interval",
+		"release-flush-interval", "release-max-backoff", "busy-retry-min", "busy-retry-max":
+		if !ok || scalar.Tag != "!!str" {
+			return true, false
+		}
+		_, err := time.ParseDuration(value)
+		return true, err == nil
+	default:
+		return false, false
+	}
+}
+
+// These fields describe budgets or capabilities only at their declared schema paths.
+func isPublicTypedConfigValue(node *yaml.Node, field, path string) bool {
+	switch field {
+	case "token-env":
+		rest, ok := strings.CutPrefix(path, configYAMLStoreAuthPath)
+		if !ok {
+			return false
+		}
+		setting, ok := configYAMLAfterSequenceItem(rest)
+		if !ok || strings.TrimSuffix(setting, "/alias") != configYAMLStoreTokenPath {
+			return false
+		}
+		scalar, value, ok := yamlSemanticScalar(node)
+		return ok && scalar.Tag == "!!str" && configYAMLEnvName.MatchString(strings.TrimSpace(value))
+	case "max_tokens", "max_completion_tokens", "max_output_tokens", "generationConfig.maxOutputTokens", "thinking.budget_tokens":
+		return isPublicPayloadTokenBudget(node, field, path)
+	case "tokens":
+		rest, ok := strings.CutPrefix(path, configYAMLPolicyLimitsPath)
+		if !ok {
+			return false
+		}
+		setting, ok := configYAMLAfterSequenceItem(rest)
+		if !ok || strings.TrimSuffix(setting, "/alias") != configYAMLPolicyTokensPath {
+			return false
+		}
+		scalar, _, ok := yamlSemanticScalar(node)
+		var value int64
+		return ok && scalar.Tag == "!!int" && scalar.Decode(&value) == nil
+	case "use-max-completion-tokens":
+		rest, ok := strings.CutPrefix(path, configYAMLCompatibilityPath)
+		if !ok {
+			return false
+		}
+		provider, ok := configYAMLAfterSequenceItem(rest)
+		if !ok {
+			return false
+		}
+		models, ok := strings.CutPrefix(provider, configYAMLModelsPath)
+		if !ok {
+			return false
+		}
+		setting, ok := configYAMLAfterSequenceItem(models)
+		if !ok || strings.TrimSuffix(setting, "/alias") != configYAMLCompletionTokensFlagPath {
+			return false
+		}
+		scalar, _, ok := yamlSemanticScalar(node)
+		return ok && scalar.Tag == "!!bool"
+	default:
+		return false
+	}
+}
+
+func isPublicPayloadTokenBudget(node *yaml.Node, field, path string) bool {
+	rest, ok := strings.CutPrefix(path, configYAMLPayloadPath)
+	if !ok {
+		return false
+	}
+	for _, section := range []string{"default", "override", "default-raw", "override-raw"} {
+		rows, ok := strings.CutPrefix(rest, configYAMLFieldPath(section))
+		if !ok {
+			continue
+		}
+		setting, ok := configYAMLAfterSequenceItem(rows)
+		if !ok || strings.TrimSuffix(setting, "/alias") != configYAMLParamsPath+configYAMLFieldPath(field) {
+			return false
+		}
+		scalar, value, ok := yamlSemanticScalar(node)
+		if !ok {
+			return false
+		}
+		var budget int64
+		if scalar.Tag == "!!int" {
+			return scalar.Decode(&budget) == nil
+		}
+		if scalar.Tag == "!!str" && strings.HasSuffix(section, "-raw") {
+			raw := strings.TrimSpace(value)
+			return raw != "null" && json.Unmarshal([]byte(raw), &budget) == nil
+		}
+		return false
+	}
+	return false
 }
 
 func isValueSensitiveConfigField(fieldName string) bool {

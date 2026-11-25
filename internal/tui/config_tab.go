@@ -384,13 +384,13 @@ func (m *configTabModel) parseConfig(cfg map[string]any) []configField {
 	// Quota exceeded
 	fields = append(
 		fields, configField{
-			"Switch Project on Quota", "quota-exceeded/switch-project", "bool",
+			"Switch Project on Quota (legacy, inactive)", "quota-exceeded/switch-project", "readonly",
 			fmt.Sprintf("%v", getBoolNested(cfg, "quota-exceeded", "switch-project")), nil,
 		},
 	)
 	fields = append(
 		fields, configField{
-			"Switch Preview Model", "quota-exceeded/switch-preview-model", "bool",
+			"Switch Preview Model (legacy, inactive)", "quota-exceeded/switch-preview-model", "readonly",
 			fmt.Sprintf("%v", getBoolNested(cfg, "quota-exceeded", "switch-preview-model")), nil,
 		},
 	)
