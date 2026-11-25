@@ -324,7 +324,7 @@ func validateAPIKeyRules(cfg *Config) []string {
 		}
 		for index, provider := range rule.Providers {
 			if strings.TrimSpace(provider) == "" {
-				warnings = append(warnings, fmt.Sprintf("api-key-rules[%q].providers[%d] is empty", apiKey, index))
+				warnings = append(warnings, fmt.Sprintf("api-key-rules.providers[%d] is empty", index))
 			}
 		}
 		mappingKeys := make(map[string]string, len(rule.ModelMappings))
@@ -332,7 +332,7 @@ func validateAPIKeyRules(cfg *Config) []string {
 			normalizedSource := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(source, "models/")))
 			if normalizedSource == "" || strings.TrimSpace(target) == "" {
 				warnings = append(
-					warnings, fmt.Sprintf("api-key-rules[%q].model-mappings contains an empty model", apiKey),
+					warnings, "api-key-rules.model-mappings contains an empty model",
 				)
 				continue
 			}
@@ -340,8 +340,7 @@ func validateAPIKeyRules(cfg *Config) []string {
 				warnings = append(
 					warnings,
 					fmt.Sprintf(
-						"api-key-rules[%q].model-mappings contains duplicate sources %q and %q",
-						apiKey,
+						"api-key-rules.model-mappings contains duplicate sources %q and %q",
 						previous,
 						source,
 					),
@@ -352,7 +351,7 @@ func validateAPIKeyRules(cfg *Config) []string {
 		profile := strings.TrimSpace(rule.PolicyProfile)
 		if profile != "" && !validAPIKeyPolicyProfile(profile) {
 			warnings = append(
-				warnings, fmt.Sprintf("api-key-rules[%q].policy-profile %q is invalid", apiKey, rule.PolicyProfile),
+				warnings, fmt.Sprintf("api-key-rules.policy-profile %q is invalid", rule.PolicyProfile),
 			)
 		}
 		if ttl := strings.TrimSpace(rule.ReservationTTL); ttl != "" {
@@ -360,7 +359,7 @@ func validateAPIKeyRules(cfg *Config) []string {
 			if err != nil || parsedTTL <= 0 {
 				warnings = append(
 					warnings, fmt.Sprintf(
-						"api-key-rules[%q].reservation-ttl %q is not a positive duration", apiKey, rule.ReservationTTL,
+						"api-key-rules.reservation-ttl %q is not a positive duration", rule.ReservationTTL,
 					),
 				)
 			}
@@ -371,26 +370,26 @@ func validateAPIKeyRules(cfg *Config) []string {
 			if err != nil || window <= 0 {
 				warnings = append(
 					warnings, fmt.Sprintf(
-						"api-key-rules[%q].limits[%d].window %q is not a positive duration", apiKey, index,
+						"api-key-rules.limits[%d].window %q is not a positive duration", index,
 						limit.Window,
 					),
 				)
 			} else if _, duplicate := windows[window]; duplicate {
 				warnings = append(
 					warnings,
-					fmt.Sprintf("api-key-rules[%q].limits contains duplicate window %q", apiKey, limit.Window),
+					fmt.Sprintf("api-key-rules.limits contains duplicate window %q", limit.Window),
 				)
 			} else {
 				windows[window] = struct{}{}
 			}
 			if limit.Requests < 0 || limit.Tokens < 0 || limit.CostMicro < 0 {
 				warnings = append(
-					warnings, fmt.Sprintf("api-key-rules[%q].limits[%d] contains a negative limit", apiKey, index),
+					warnings, fmt.Sprintf("api-key-rules.limits[%d] contains a negative limit", index),
 				)
 			}
 			if limit.Requests == 0 && limit.Tokens == 0 && limit.CostMicro == 0 {
 				warnings = append(
-					warnings, fmt.Sprintf("api-key-rules[%q].limits[%d] has no enabled dimension", apiKey, index),
+					warnings, fmt.Sprintf("api-key-rules.limits[%d] has no enabled dimension", index),
 				)
 			}
 		}

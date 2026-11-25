@@ -12,9 +12,15 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
-func TestGetAPIKeysSearchReturnsOnlyExistingMaskedReferences(t *testing.T) {
+func TestGetAPIKeysSearchMatchesOnlyVisibleFields(t *testing.T) {
 	keys := []string{"abcd-first-wxyz", "abcd-second-wxyz", "other-CASE-3333"}
-	h := &Handler{cfg: &config.Config{APIKeys: keys, APIKeyAliases: map[string]string{keys[1]: "Alpha_Search"}}}
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				APIKeys: keys, APIKeyAliases: map[string]string{keys[1]: "Alpha_Search"},
+			},
+		},
+	}
 	before := maskAPIKeyList(keys)
 	for _, entry := range []struct {
 		name, query string
@@ -22,10 +28,11 @@ func TestGetAPIKeysSearchReturnsOnlyExistingMaskedReferences(t *testing.T) {
 		indexes     []int
 	}{
 		{"legacy", "", false, nil},
-		{"full", keys[0], true, []int{0}},
-		{"fragment", "SECOND", true, []int{1}},
-		{"saved_alias_does_not_match", "alpha_search", true, nil},
-		{"trimmed_fragment", "  second  ", true, []int{1}},
+		{"hidden_value", keys[0], true, nil},
+		{"hidden_fragment", "SECOND", true, nil},
+		{"visible_fragment", "  WXYZ  ", true, []int{0, 1}},
+		{"visible_reference", before[1], true, []int{1}},
+		{"saved_alias", "alpha_search", true, []int{1}},
 		{"empty", "", true, []int{0, 1, 2}},
 		{"none", "no-matching-synthetic-key", true, nil},
 	} {
@@ -72,9 +79,10 @@ func TestGetAPIKeysSearchReturnsOnlyExistingMaskedReferences(t *testing.T) {
 	}
 }
 
-func TestAPIKeySearchParameterUsesExistingQueryRedaction(t *testing.T) {
+func TestAPIKeySearchParameterConcealsEntireValue(t *testing.T) {
 	masked := util.MaskSensitiveQuery("api_key_search=synthetic-secret-fragment&keep=visible")
-	if strings.Contains(masked, "synthetic-secret-fragment") || !strings.Contains(masked, "keep=visible") {
-		t.Fatalf("search query was not safely redacted: %q", masked)
+	want := "api_key_search=" + url.QueryEscape("***") + "&keep=visible"
+	if masked != want {
+		t.Fatal("search query must fully redact the search term and preserve unrelated parameters")
 	}
 }

@@ -515,11 +515,10 @@ func (h *Handler) GetAPIKeys(c *gin.Context) {
 			query = strings.ToLower(strings.TrimSpace(queries[0]))
 		}
 		matches := make([]string, 0, len(keys))
-		if cfg != nil {
-			for index, key := range cfg.APIKeys {
-				if strings.Contains(strings.ToLower(key), query) {
-					matches = append(matches, keys[index])
-				}
+		for index, masked := range keys {
+			alias := cfg.APIKeyAliases[strings.TrimSpace(cfg.APIKeys[index])]
+			if strings.Contains(strings.ToLower(masked), query) || strings.Contains(strings.ToLower(alias), query) {
+				matches = append(matches, masked)
 			}
 		}
 		response["api-key-matches"] = matches

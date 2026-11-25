@@ -212,11 +212,12 @@ func MaskSensitiveQuery(raw string) string {
 			decodedKey = keyPart
 		}
 		secret := strings.ToLower(strings.TrimSpace(decodedKey))
-		if secret != "code" && secret != "state" && !IsSensitiveFieldName(decodedKey) {
+		fullMask := secret == "code" || secret == "state" || secret == "nonce" || secret == "api_key_search"
+		if !fullMask && !IsSensitiveFieldName(decodedKey) {
 			continue
 		}
 		masked := "***"
-		if secret != "code" && secret != "state" {
+		if !fullMask {
 			decodedValue, err := url.QueryUnescape(valuePart)
 			if err != nil {
 				decodedValue = valuePart
