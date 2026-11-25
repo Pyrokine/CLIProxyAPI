@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -124,6 +125,94 @@ func googlePayloadCall(
 		t.Fatalf("calls=%d, caller payload unchanged=%t", calls, bytes.Equal(snapshot, payload))
 	}
 	return captured
+}
+
+func TestGeminiExecutorsEncodeAlt(t *testing.T) {
+	const model = "gemini-2.5-flash"
+	const alt = "json + profile"
+	cfg := &config.Config{}
+	serviceAccount := &cliproxyauth.Auth{
+		Provider: "vertex", Metadata: map[string]any{
+			"project_id": "fixture-project", "location": "europe-west12",
+			"service_account": googleImagenServiceAccount(t),
+		},
+	}
+	observed := errors.New("offline upstream request captured")
+	for _, provider := range []struct {
+		name, host, path string
+		exec             cliproxyauth.ProviderExecutor
+	}{
+		{"gemini", "payload-contract.invalid", "/v1beta/models/" + model, NewGeminiExecutor(cfg)},
+		{
+			"vertex-api-key", "payload-contract.invalid", "/v1/publishers/google/models/" + model,
+			NewGeminiVertexExecutor(cfg),
+		},
+		{
+			"vertex-service-account", "europe-west12-aiplatform.googleapis.com",
+			"/v1/projects/fixture-project/locations/europe-west12/publishers/google/models/" + model,
+			NewGeminiVertexExecutor(cfg),
+		},
+		{"gemini-cli", "cloudcode-pa.googleapis.com", "/v1internal", NewGeminiCLIExecutor(cfg)},
+	} {
+		for _, tc := range []struct{ name, action, alt, key, value string }{
+			{"generate", "generateContent", alt, "$alt", alt},
+			{"stream-default", "streamGenerateContent", "", "alt", "sse"},
+			{"stream-explicit", "streamGenerateContent", alt, "$alt", alt},
+			{"count", "countTokens", alt, "$alt", alt},
+		} {
+			t.Run(
+				provider.name+"/"+tc.name, func(t *testing.T) {
+					credential := googlePayloadAuth(provider.exec.Identifier())
+					if provider.name == "vertex-service-account" {
+						credential = serviceAccount
+					}
+					ctx := util.WithRoundTripper(
+						t.Context(), googlePayloadTransport(
+							func(req *http.Request) (*http.Response, error) {
+								if provider.name == "vertex-service-account" && req.URL.String() == testVertexTokenURL {
+									return googlePayloadResponse(
+										req, `{"access_token":"fixture-token","expires_in":3600}`,
+									), nil
+								}
+								if req.URL.Host != provider.host || req.URL.Path != provider.path+":"+tc.action {
+									t.Fatalf(
+										"upstream URL = %s, want %s%s:%s", req.URL, provider.host, provider.path,
+										tc.action,
+									)
+								}
+								query := req.URL.Query()
+								if tc.action == "countTokens" && provider.name != "gemini-cli" {
+									if len(query) != 0 {
+										t.Fatalf("unexpected countTokens query: %v", query)
+									}
+								} else if len(query) != 1 || len(query[tc.key]) != 1 || query.Get(tc.key) != tc.value {
+									t.Fatalf("query = %v, want exactly %s=%q", query, tc.key, tc.value)
+								}
+								return nil, observed
+							},
+						),
+					)
+					req := cliproxyexecutor.Request{
+						Model: model, Payload: []byte(`{"contents":[{"parts":[{"text":"hello"}]}]}`),
+					}
+					opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, Alt: tc.alt}
+					var err error
+					switch tc.action {
+					case "generateContent":
+						_, err = provider.exec.Execute(ctx, credential, req, opts)
+					case "streamGenerateContent":
+						opts.Stream = true
+						_, err = provider.exec.ExecuteStream(ctx, credential, req, opts)
+					case "countTokens":
+						_, err = provider.exec.CountTokens(ctx, credential, req, opts)
+					}
+					if !errors.Is(err, observed) {
+						t.Fatalf("executor did not reach offline upstream: %v", err)
+					}
+				},
+			)
+		}
+	}
 }
 
 func TestGeminiStringifiedToolMediaReachesEveryExecutionEntry(t *testing.T) {

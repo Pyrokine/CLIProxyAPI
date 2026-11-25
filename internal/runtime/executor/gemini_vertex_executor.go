@@ -515,8 +515,8 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 		"%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location,
 		baseModel, action,
 	)
-	if opts.Alt != "" && action != "countTokens" {
-		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
+	if action != "countTokens" {
+		url += geminiAltQuery(opts.Alt, false)
 	}
 	reporter.setTranslatedReasoningEffort(body, to.String())
 
@@ -620,8 +620,8 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 		baseURL = "https://aiplatform.googleapis.com"
 	}
 	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
-	if opts.Alt != "" && action != "countTokens" {
-		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
+	if action != "countTokens" {
+		url += geminiAltQuery(opts.Alt, false)
 	}
 	reporter.setTranslatedReasoningEffort(body, to.String())
 
@@ -711,11 +711,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(
 	)
 	// Imagen models don't support streaming, skip SSE params
 	if !isImagenModel(baseModel) {
-		if opts.Alt == "" {
-			url = url + "?alt=sse"
-		} else {
-			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
-		}
+		url += geminiAltQuery(opts.Alt, true)
 	}
 	reporter.setTranslatedReasoningEffort(body, to.String())
 
@@ -767,11 +763,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
 	// Imagen models don't support streaming, skip SSE params
 	if !isImagenModel(baseModel) {
-		if opts.Alt == "" {
-			url = url + "?alt=sse"
-		} else {
-			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
-		}
+		url += geminiAltQuery(opts.Alt, true)
 	}
 	reporter.setTranslatedReasoningEffort(body, to.String())
 

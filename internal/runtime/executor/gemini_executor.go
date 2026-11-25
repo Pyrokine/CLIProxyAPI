@@ -151,6 +151,16 @@ func (e *GeminiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	return httpClient.Do(httpReq)
 }
 
+func geminiAltQuery(alt string, stream bool) string {
+	if alt != "" {
+		return "?$alt=" + url.QueryEscape(alt)
+	}
+	if stream {
+		return "?alt=sse"
+	}
+	return ""
+}
+
 // prepareGeminiRequest builds the translated, config-applied HTTP request shared by Execute and ExecuteStream.
 func (e *GeminiExecutor) prepareGeminiRequest(
 	ctx context.Context,
@@ -212,14 +222,8 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 	}
 	baseURL := resolveGeminiBaseURL(auth)
 	endpointURL := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
-	if isStream {
-		if opts.Alt == "" {
-			endpointURL = endpointURL + "?alt=sse"
-		} else {
-			endpointURL = endpointURL + fmt.Sprintf("?$alt=%s", opts.Alt)
-		}
-	} else if opts.Alt != "" && action != "countTokens" {
-		endpointURL = endpointURL + fmt.Sprintf("?$alt=%s", opts.Alt)
+	if isStream || action != "countTokens" {
+		endpointURL += geminiAltQuery(opts.Alt, isStream)
 	}
 
 	body, _ = sjson.DeleteBytes(body, "session_id")

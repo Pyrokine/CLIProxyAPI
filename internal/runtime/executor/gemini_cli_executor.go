@@ -246,8 +246,8 @@ func (e *GeminiCLIExecutor) Execute(
 		updateGeminiCLITokenMetadata(auth, prepared.baseTokenData, tok)
 
 		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, action)
-		if opts.Alt != "" && action != "countTokens" {
-			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
+		if action != "countTokens" {
+			url += geminiAltQuery(opts.Alt, false)
 		}
 
 		reqHTTP, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
@@ -370,12 +370,8 @@ func (e *GeminiCLIExecutor) ExecuteStream(
 		}
 		updateGeminiCLITokenMetadata(auth, prepared.baseTokenData, tok)
 
-		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, "streamGenerateContent")
-		if opts.Alt == "" {
-			url = url + "?alt=sse"
-		} else {
-			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
-		}
+		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, "streamGenerateContent") +
+			geminiAltQuery(opts.Alt, true)
 
 		reqHTTP, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 		if errReq != nil {
@@ -613,10 +609,8 @@ func (e *GeminiCLIExecutor) CountTokens(
 		}
 		updateGeminiCLITokenMetadata(auth, baseTokenData, tok)
 
-		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, "countTokens")
-		if opts.Alt != "" {
-			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
-		}
+		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, "countTokens") +
+			geminiAltQuery(opts.Alt, false)
 
 		reqHTTP, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 		if errReq != nil {
