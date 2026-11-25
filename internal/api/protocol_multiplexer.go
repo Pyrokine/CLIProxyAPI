@@ -67,19 +67,21 @@ func (s *Server) untrackRedisConnection(conn net.Conn) {
 	}
 }
 
-func (s *Server) closeRedisConnections() {
+func (s *Server) closeRedisConnections(match func(net.Conn) bool) {
 	if s == nil {
 		return
 	}
 	s.redisConnectionsMu.Lock()
 	connections := make([]net.Conn, 0, len(s.redisConnections))
 	for conn := range s.redisConnections {
-		connections = append(connections, conn)
+		if match == nil || match(conn) {
+			connections = append(connections, conn)
+		}
 	}
 	s.redisConnectionsMu.Unlock()
 	for _, conn := range connections {
 		if errClose := conn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
-			log.Debugf("failed to close Redis connection during shutdown: %v", errClose)
+			log.Debugf("failed to close Redis connection: %v", errClose)
 		}
 	}
 }
@@ -169,7 +171,12 @@ func (s *Server) routeMuxConnection(conn net.Conn, httpListener *muxListener) {
 		return
 	}
 
-	if errPut := httpListener.put(&bufferedConn{Conn: conn, reader: reader}); errPut != nil {
+	buffered := &bufferedConn{Conn: conn, reader: reader}
+	var httpConn net.Conn = buffered
+	if ok {
+		httpConn = &bufferedTLSConn{bufferedConn: buffered, tlsConn: tlsConn}
+	}
+	if errPut := httpListener.put(httpConn); errPut != nil {
 		if errClose := conn.Close(); errClose != nil {
 			log.Errorf("failed to close connection after HTTP routing failure: %v", errClose)
 		}

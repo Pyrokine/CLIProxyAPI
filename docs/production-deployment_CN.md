@@ -51,18 +51,64 @@ C 库一致
 本机构建可使用 `goreleaser build --single-target`，Unix 环境需要原生 C 编译器，本机 `goreleaser release`
 准备宿主平台族的产物，完整版本由流水线统一发布
 
+## 分离公网业务与管理入口
+
+管理员已有管理网或 VPN 通道时，可选用下方双入口方案。需要从公网登录时，保留面板及所需的管理和插件路由，使用公网 HTTPS、CPA
+管理鉴权和登录限流；两种方案下，CPA 后端监听端口都保持私有
+
+采用双入口方案时，公网 HTTPS 域名只转发实际使用的业务路由，其他路径由 Nginx 返回 404
+
+管理面板 `/management.html`、管理 API `/v0/management/` 和插件资源 `/v0/resource/plugins/` 由管理网或 VPN 内的 HTTPS
+域名提供；CPA 的 8317 端口保持私有，RESP 客户端也通过私网连接
+
+Nginx 与 CPA 原生进程位于同一台 Linux 主机时，CPA 绑定 `127.0.0.1:8317`，两个 HTTPS `server` 使用 `proxy_bind 127.0.0.2;`
+，CPA 的 `remote-management.trusted-proxies` 只配置 `["127.0.0.2/32"]`，本机 TUI 仍直连 `127.0.0.1`
+
+在 CPA 启用 `tls.require-for-auth` 和 `tls.trust-forwarded-proto`；授权客户端通过私网入口远程管理时，开启
+`remote-management.allow-remote`，保留管理 Key 鉴权及登录限流
+
+在公网 HTTPS 的 `server` 中配置默认 404，并按下文示例显式放行业务路径：
+
+```nginx
+proxy_bind 127.0.0.2;
+location / { return 404; }
+```
+
+管理 HTTPS 的 `server` 绑定私网网卡，将示例地址段换成实际管理网或 VPN 子网：
+
+```nginx
+allow 192.0.2.0/24;
+deny all;
+proxy_bind 127.0.0.2;
+
+location / {
+    proxy_pass http://127.0.0.1:8317;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_cache off;
+}
+```
+
+Nginx 前还有反代或 CDN 时，只从可信代理恢复客户端地址，再用 `$remote_addr` 判断访问权限并传给 CPA；使用 Docker 或独立反代主机时，以
+CPA 实际收到的 Nginx 源地址配置可信代理，后端保持私有
+
+OAuth Provider 确需公网回调时，放行该 Provider 的精确 GET 路径并验证回调，其余管理 API 继续走私网
+
 ## Nginx 精确路径模板
 
-把以下 location 放入现有 TLS `server` 块；timeout 和正文大小只是示例值，需要根据部署环境调整，且不能超过应用限制
+把以下 SSE location 放入公网 TLS 的 `server` 块；使用同一路径的 Responses WebSocket 时，保留 Upgrade 转发；按应用限制和主机容量调整示例中的
+timeout 和正文大小
 
 ```nginx
 location = /v1/messages {
-    proxy_pass http://127.0.0.1:8317;
+    proxy_pass http://127.0.0.1:8317/v1/messages;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
 
     client_max_body_size 32m;
@@ -80,12 +126,12 @@ location = /v1/messages {
 }
 
 location = /v1/responses {
-    proxy_pass http://127.0.0.1:8317;
+    proxy_pass http://127.0.0.1:8317/v1/responses;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
 
     client_max_body_size 32m;
@@ -188,6 +234,12 @@ Cloudflare 文档将 `Full` 定义为完整缓冲请求体后再向 Origin 发�
 3. 确认两个精确路径都能通过公网 host 到达 CLIProxyAPI
 4. 确认管理路由和其他 host 没有继承流式 location
 5. 在 Cloudflare 中确认规则只匹配目标 proxied host 和两个 POST 路径，唯一动作是 Request Body Buffering `Full`
+
+### 管理访问
+
+1. 从公网检查管理面板、管理 API 和插件资源均由 Nginx 返回 404，不转发至 CPA，同时确认后端 HTTP 和 RESP 端口无法从公网直连
+2. 从管理网通过 HTTPS 登录并打开插件资源，确认 CPA 记录正确的客户端地址；在本机用 TUI 确认回环直连可用
+3. 通过已配置的回调地址完成各项已启用的 OAuth 流程；访问日志只记路径，省略回调查询参数
 
 ### 慢请求体
 

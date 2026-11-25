@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -591,7 +592,17 @@ func NewServer(
 		}
 	}
 
-	engine.Use(corsMiddleware(cfg.CORSAllowedOrigins))
+	var s *Server
+	engine.Use(
+		corsMiddleware(
+			func() []string {
+				if current := s.configSnapshot(); current != nil {
+					return current.CORSAllowedOrigins
+				}
+				return cfg.CORSAllowedOrigins
+			},
+		),
+	)
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = configFilePath
@@ -648,7 +659,7 @@ func NewServer(
 		baseHandlers.SetTranslatorPluginHooks(optionState.pluginHost)
 		optionState.pluginHost.SetModelExecutor(baseHandlers)
 	}
-	s := &Server{
+	s = &Server{
 		engine:                       engine,
 		handlers:                     baseHandlers,
 		imageArtifacts:               imageArtifactStore,
@@ -1128,7 +1139,7 @@ func (s *Server) oauthCallbackRateLimitMiddleware() gin.HandlerFunc {
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
-	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/management.html", requireTLSForAuth(s.configSnapshot), s.serveManagementControlPanel)
 	openaiHandlers := openai.NewAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewCLIAPIHandler(s.handlers)
@@ -3187,7 +3198,7 @@ func (s *Server) BeginShutdown() {
 			log.Debugf("failed to close shared listener: %v", errClose)
 		}
 	}
-	s.closeRedisConnections()
+	s.closeRedisConnections(nil)
 }
 
 func (s *Server) waitForRedisConnections(ctx context.Context) error {
@@ -3294,22 +3305,20 @@ func (s *Server) Stop(ctx context.Context) error {
 //
 // Returns:
 //   - gin.HandlerFunc: The CORS middleware handler
-func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
-	// Build a set for O(1) lookup when the allowlist is configured.
-	originSet := make(map[string]struct{}, len(allowedOrigins))
-	for _, o := range allowedOrigins {
-		originSet[o] = struct{}{}
-	}
-
+func corsMiddleware(allowedOrigins func() []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		var origins []string
+		if allowedOrigins != nil {
+			origins = allowedOrigins()
+		}
 		origin := c.GetHeader("Origin")
 		pluginResourceRequest := c.Request != nil && c.Request.URL != nil && strings.HasPrefix(
 			c.Request.URL.Path, "/v0/resource/plugins/",
 		)
-		if len(originSet) == 0 {
+		if len(origins) == 0 {
 			c.Header("Access-Control-Allow-Origin", "*")
 		} else {
-			if _, ok := originSet[origin]; ok {
+			if slices.Contains(origins, origin) {
 				c.Header("Access-Control-Allow-Origin", origin)
 				if pluginResourceRequest {
 					c.Header("Access-Control-Allow-Credentials", "true")
@@ -3557,6 +3566,9 @@ func (s *Server) updateClients(ctx context.Context, cfg *config.Config, _ uint64
 	s.setConfig(cfg)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.authPolicyMu.Unlock()
+	if cfg.TLS.RequireForAuth && (oldCfg == nil || !oldCfg.TLS.RequireForAuth) {
+		s.closeRedisConnections(func(conn net.Conn) bool { return redisConnectionRequiresTLS(s, conn) })
+	}
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}

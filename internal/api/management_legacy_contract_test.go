@@ -85,7 +85,9 @@ func TestManagementV0RoutesShareAccessControl(t *testing.T) {
 				}
 				if tc.home {
 					response := httptest.NewRecorder()
-					server.engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/management.html", nil))
+					server.engine.ServeHTTP(
+						response, httptest.NewRequest(http.MethodGet, "https://cpa.invalid/management.html", nil),
+					)
 					if response.Code != http.StatusNotFound {
 						t.Fatalf("Home control panel status=%d, want 404", response.Code)
 					}

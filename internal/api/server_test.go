@@ -1687,7 +1687,7 @@ func TestPluginResourceCORSRequiresAllowlistForCredentials(t *testing.T) {
 func TestPluginResourceCORSAllowsCredentialsForAllowlistedOrigin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(corsMiddleware([]string{"https://panel.example.com"}))
+	engine.Use(corsMiddleware(func() []string { return []string{"https://panel.example.com"} }))
 	engine.GET("/v0/resource/plugins/demo/status", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	engine.GET("/v0/management/config", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 

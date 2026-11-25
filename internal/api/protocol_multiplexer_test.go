@@ -19,7 +19,10 @@ func TestAcceptMuxNotBlockedByIdleConnection(t *testing.T) {
 
 	var routed atomic.Int32
 	handler := http.HandlerFunc(
-		func(w http.ResponseWriter, _ *http.Request) {
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.TLS != nil {
+				t.Error("plain HTTP connection reported TLS state")
+			}
 			routed.Add(1)
 			w.WriteHeader(http.StatusOK)
 		},

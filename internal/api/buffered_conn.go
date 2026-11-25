@@ -21,12 +21,12 @@ func (c *bufferedConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
-func (c *bufferedConn) ConnectionState() tls.ConnectionState {
-	if c == nil || c.Conn == nil {
-		return tls.ConnectionState{}
-	}
-	if stater, ok := c.Conn.(interface{ ConnectionState() tls.ConnectionState }); ok {
-		return stater.ConnectionState()
-	}
-	return tls.ConnectionState{}
+// net/http 根据 ConnectionState 是否存在决定是否填充 Request.TLS
+type bufferedTLSConn struct {
+	*bufferedConn
+	tlsConn *tls.Conn
+}
+
+func (c *bufferedTLSConn) ConnectionState() tls.ConnectionState {
+	return c.tlsConn.ConnectionState()
 }

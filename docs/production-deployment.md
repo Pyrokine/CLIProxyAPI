@@ -58,19 +58,66 @@ checksums before creating the release; a missing target or checksum mismatch sto
 For a local binary, use `goreleaser build --single-target` with the installed native C compiler on Unix. A local
 `goreleaser release` prepares artifacts for the host platform family; the workflow publishes the complete release
 
+## Separate public API and management access
+
+Use this optional layout when administrators already use a management network or VPN. When admins need public
+access, keep the panel and its management and plugin routes on public HTTPS with CPA management authentication and
+login rate limits. Keep the CPA listener private in either layout
+
+For the separate layout, list the business routes on the public TLS host and return 404 for other paths. Keep the panel
+(`/management.html`), management API (`/v0/management/`) and plugin resources (`/v0/resource/plugins/`) on an HTTPS host
+reachable only through the management network or VPN. Keep port 8317 private, including for RESP clients
+
+For Nginx and a native CPA process on the same Linux host, bind CPA to `127.0.0.1:8317`. Use `proxy_bind 127.0.0.2;`
+in both TLS server blocks and set `remote-management.trusted-proxies` to `["127.0.0.2/32"]` in CPA. Keep `127.0.0.1`
+for direct TUI access. Enable `tls.require-for-auth` and `tls.trust-forwarded-proto` in CPA. Enable
+`remote-management.allow-remote` when authorized management clients use the private HTTPS host. Leave the existing
+management key and login rate limits in place
+
+In the public TLS server block, use a default 404 alongside explicit locations such as the examples below:
+
+```nginx
+proxy_bind 127.0.0.2;
+location / { return 404; }
+```
+
+In the private TLS server block, scope access to the management network. Replace the example range with the actual
+VPN or management subnet and bind this server to the private interface:
+
+```nginx
+allow 192.0.2.0/24;
+deny all;
+proxy_bind 127.0.0.2;
+
+location / {
+    proxy_pass http://127.0.0.1:8317;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_cache off;
+}
+```
+
+If a proxy or CDN sits in front of Nginx, restore the client address from trusted peers before using `$remote_addr` in
+ACLs or forwarding it to CPA. With Docker or a separate proxy host, trust the immediate Nginx address CPA sees and
+keep backend access private. When an OAuth provider requires a public callback, allow its exact GET path and verify
+that flow; keep the rest of the management API on the private host
+
 ## Nginx exact-path template
 
-Place the following locations inside the existing TLS `server` block. The timeout and body-size values are examples;
-adjust them without exceeding the application limit or the capacity of the host
+Place the following SSE locations inside the public TLS `server` block. If you serve Responses WebSocket on the same
+path, preserve its Upgrade forwarding. Adjust the example timeout and body-size values to the application limit and
+host capacity
 
 ```nginx
 location = /v1/messages {
-    proxy_pass http://127.0.0.1:8317;
+    proxy_pass http://127.0.0.1:8317/v1/messages;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
 
     client_max_body_size 32m;
@@ -88,12 +135,12 @@ location = /v1/messages {
 }
 
 location = /v1/responses {
-    proxy_pass http://127.0.0.1:8317;
+    proxy_pass http://127.0.0.1:8317/v1/responses;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
 
     client_max_body_size 32m;
@@ -208,6 +255,15 @@ paths, other hosts, GET requests, and endpoint aliases
 4. Confirm management routes and other hosts do not inherit the streaming locations
 5. In Cloudflare, confirm the rule matches only the intended proxied host and two POST paths, and that its only action
    is Request Body Buffering `Full`
+
+### Management access
+
+1. From the public network, confirm the panel, management API, and plugin resources return 404 without forwarding to
+   CPA. Confirm clients cannot connect directly to the backend HTTP or RESP port
+2. From the management network, sign in over HTTPS, open a plugin resource and confirm that CPA records the intended
+   client address. Check direct loopback access with the local TUI
+3. Complete the enabled OAuth flows through their configured callback URLs. Keep callback query strings out of access
+   logs
 
 ### Slow request body
 
