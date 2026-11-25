@@ -170,7 +170,7 @@ func TestContainerDefaultsMatchPublishedImageAndLocalPorts(t *testing.T) {
 	}
 	for _, name := range []string{"scripts/prepare-management-panel.sh", "scripts/prepare-management-panel.ps1"} {
 		data := string(readReleaseSource(t, name))
-		if !strings.Contains(data, "v1.26.0-aug.6") || strings.Contains(data, "v1.23.1-aug.1") {
+		if !strings.Contains(data, "v1.26.0-aug.7") || strings.Contains(data, "v1.23.1-aug.1") {
 			t.Fatalf("%s does not select the current management panel by default", name)
 		}
 	}

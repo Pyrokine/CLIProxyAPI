@@ -1,5 +1,34 @@
 # Changelog
 
+## v8.0.23-aug.7 - 2026-11-25
+
+### Release basis
+
+- Upstream release: v8.0.23 (`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`)
+- Fork point: `09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- Previous fork release: v8.0.23-aug.6
+- Paired management panel: CPAM v1.26.0-aug.7
+
+The changes below belong to this fork and follow the previous fork release
+
+### English
+
+- Upgrade CPA before installing CPAM v1.26.0-aug.7, which signs in through the new management session API. Existing management key clients remain supported. The Docker image bundles the paired panel.
+- Issue revocable management sessions for the panel. Check authorization for OAuth operations, plugin resources, AI Studio relays, and xAI video tasks. Keep verified keys usable during the corresponding authentication cooldowns.
+- Validate Vertex service account settings, encode Gemini query values, and restrict authenticated upstream redirects to the configured origin. Update Gorilla WebSocket for GO-2026-6278.
+- Use a covering index for usage event searches while keeping exact counts and pagination. Return the time granularity used and distinguish missing metrics from zero values.
+- Target edits by credential identity, preserve model aliases, pricing, and unedited YAML, and report saved and applied outcomes for plugin changes, maintenance tasks, and data imports and exports.
+- Update SQLite, Redis, WebRTC, and the affected Go plugin modules. Run a shared release preflight and verify all native archives before publishing.
+
+### 简体中文
+
+- 先升级 CPA，再安装 CPAM v1.26.0-aug.7，新版面板使用管理会话接口登录，原有管理密钥客户端仍可使用，Docker 镜像包含配套面板
+- 管理面板使用可撤销的会话，OAuth 操作和插件资源按会话权限校验；AI Studio 中继和 xAI 视频任务校验归属，正确凭证在对应认证冷却期间仍可使用
+- 校验 Vertex 服务账号配置，编码 Gemini 查询参数，并将携带凭证的上游重定向限制在已配置的来源；升级 Gorilla WebSocket，修复 GO-2026-6278
+- 用量事件搜索使用覆盖索引，保留精确计数和分页；返回实际使用的时间粒度，区分零值和缺失值
+- 按凭证身份修改选中项，保留模型别名、价格和未改动的 YAML 值；插件、维护任务和数据导入导出返回实际保存或生效的结果
+- 更新 SQLite、Redis、WebRTC 和相关 Go 插件模块；发布流水线共用预检，核对完整的原生归档后再发布
+
 ## v8.0.23-aug.6 - 2026-11-21
 
 ### Release basis
