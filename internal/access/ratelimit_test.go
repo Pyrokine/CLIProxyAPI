@@ -264,7 +264,7 @@ func TestHashAccountKeyUsesFullSHA256(t *testing.T) {
 	if len(got) != 64 {
 		t.Fatalf("hash length = %d, want 64", len(got))
 	}
-	if got != HashAccountKey("account-secret") {
-		t.Fatal("account hash did not normalize surrounding whitespace")
+	if got == HashAccountKey("account-secret") {
+		t.Fatal("different credential values have the same account hash")
 	}
 }

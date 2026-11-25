@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
+	configaccess "github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access"
 	managementHandlers "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/artifact"
@@ -3697,37 +3698,6 @@ func (s *Server) ManagementHandler() *managementHandlers.Handler {
 
 // (management handlers moved to internal/api/handlers/management)
 
-// extractAuthCandidate returns the first non-empty credential found on the request.
-// It mirrors the detection order of the config-access provider so the rate limiter
-// can attribute failures to the credential the client actually offered.
-// readQuery must match the current allow-query-auth config: otherwise an attacker could
-// poison the per-account accountHash by forging ?key=<victim> and lock out victim's header-authed requests.
-func extractAuthCandidate(r *http.Request, readQuery bool) string {
-	if v := strings.TrimSpace(r.Header.Get("Authorization")); v != "" {
-		if lower := strings.ToLower(v); strings.HasPrefix(lower, "bearer ") {
-			return strings.TrimSpace(v[len("Bearer "):])
-		}
-		return v
-	}
-	if v := strings.TrimSpace(r.Header.Get("X-Goog-Api-Key")); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(r.Header.Get("X-Api-Key")); v != "" {
-		return v
-	}
-	if !readQuery {
-		return ""
-	}
-	q := r.URL.Query()
-	if v := strings.TrimSpace(q.Get("key")); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(q.Get("auth_token")); v != "" {
-		return v
-	}
-	return ""
-}
-
 // authMiddleware creates an HTTP middleware that authenticates requests using
 // the access manager. When no auth providers are registered (api-keys empty),
 // only direct loopback clients are allowed (prevents open-proxy exposure).
@@ -3812,20 +3782,6 @@ func authMiddlewareWithErrorStyle(
 				authRequest = request.WithContext(c.Request.Context())
 			}
 		}
-		// Derive an account identifier from the raw credential candidate so repeated failures
-		// against a single account can be locked out even when the attacker rotates source IPs.
-		queryAuthAllowed := cfg != nil && cfg.AllowQueryAuth
-		accountHash := access.HashAccountKey(extractAuthCandidate(authRequest, queryAuthAllowed))
-		if rateLimiter != nil && rateLimiter.IsAccountLimited(accountHash) {
-			abortAuthentication(
-				c,
-				http.StatusTooManyRequests,
-				"too many authentication failures for this credential, please try again later",
-				realtimeError,
-			)
-			return
-		}
-
 		result, generation, err := manager.AuthenticateWithGeneration(authRequest.Context(), authRequest)
 		if err == nil {
 			if result == nil {
@@ -3845,7 +3801,7 @@ func authMiddlewareWithErrorStyle(
 				c.Set("accessMetadata", result.Metadata)
 			}
 			if rateLimiter != nil {
-				rateLimiter.RecordAccountSuccess(accountHash)
+				rateLimiter.RecordAccountSuccess(access.HashAccountKey(result.Principal))
 			}
 			c.Next()
 			return
@@ -3854,6 +3810,18 @@ func authMiddlewareWithErrorStyle(
 		if rateLimiter != nil && (sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeNoCredentials) ||
 			sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeInvalidCredential)) {
 			rateLimiter.RecordFailure(clientKey)
+			queryAuthAllowed := cfg != nil && cfg.AllowQueryAuth
+			accountHash := access.HashAccountKey(configaccess.FirstCredentialCandidate(authRequest, queryAuthAllowed))
+			// Unverified credential history must not deny an authenticated principal.
+			if rateLimiter.IsAccountLimited(accountHash) {
+				abortAuthentication(
+					c,
+					http.StatusTooManyRequests,
+					"too many authentication failures for this credential, please try again later",
+					realtimeError,
+				)
+				return
+			}
 			rateLimiter.RecordAccountFailure(accountHash)
 		}
 

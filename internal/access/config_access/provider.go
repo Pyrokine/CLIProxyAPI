@@ -70,40 +70,13 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	if len(p.keys) == 0 {
 		return nil, sdkaccess.NewNotHandledError()
 	}
-	authHeader := r.Header.Get("Authorization")
-	authHeaderGoogle := r.Header.Get("X-Goog-Api-Key")
-	authHeaderAnthropic := r.Header.Get("X-Api-Key")
-
-	queryKey := ""
-	queryAuthToken := ""
-	if p.allowQueryAuth {
-		queryKey = r.URL.Query().Get("key")
-		queryAuthToken = r.URL.Query().Get("auth_token")
-	}
-
-	if authHeader == "" && authHeaderGoogle == "" && authHeaderAnthropic == "" && queryKey == "" &&
-		queryAuthToken == "" {
-		return nil, sdkaccess.NewNoCredentialsError()
-	}
-
-	apiKey := extractBearerToken(authHeader)
-
-	candidates := []struct {
-		value  string
-		source string
-	}{
-		{apiKey, "authorization"},
-		{authHeaderGoogle, "x-goog-api-key"},
-		{authHeaderAnthropic, "x-api-key"},
-		{queryKey, "query-key"},
-		{queryAuthToken, "query-auth-token"},
-	}
-
+	offered := r.Header.Get("Authorization") != ""
 	// Use constant-time comparison and always iterate all keys to avoid timing leaks.
-	for _, candidate := range candidates {
+	for _, candidate := range requestCredentialCandidates(r, p.allowQueryAuth) {
 		if candidate.value == "" {
 			continue
 		}
+		offered = true
 		candidateBytes := []byte(candidate.value)
 		matched := false
 		for storedKey := range p.keys {
@@ -122,7 +95,41 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		}
 	}
 
+	if !offered {
+		return nil, sdkaccess.NewNoCredentialsError()
+	}
 	return nil, sdkaccess.NewInvalidCredentialError()
+}
+
+type credentialCandidate struct {
+	value  string
+	source string
+}
+
+func requestCredentialCandidates(r *http.Request, allowQuery bool) [5]credentialCandidate {
+	candidates := [5]credentialCandidate{
+		{extractBearerToken(r.Header.Get("Authorization")), "authorization"},
+		{r.Header.Get("X-Goog-Api-Key"), "x-goog-api-key"},
+		{r.Header.Get("X-Api-Key"), "x-api-key"},
+		{"", "query-key"},
+		{"", "query-auth-token"},
+	}
+	if allowQuery {
+		query := r.URL.Query()
+		candidates[3].value = query.Get("key")
+		candidates[4].value = query.Get("auth_token")
+	}
+	return candidates
+}
+
+// FirstCredentialCandidate returns the first offered credential for failure accounting.
+func FirstCredentialCandidate(r *http.Request, allowQuery bool) string {
+	for _, candidate := range requestCredentialCandidates(r, allowQuery) {
+		if candidate.value != "" {
+			return candidate.value
+		}
+	}
+	return ""
 }
 
 func extractBearerToken(header string) string {

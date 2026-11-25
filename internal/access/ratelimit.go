@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
-	"strings"
 	"sync"
 	"time"
 
@@ -300,14 +299,13 @@ func (rl *AuthRateLimiter) RecordAccountSuccess(accountHash string) {
 	}
 }
 
-// HashAccountKey derives a non-reversible identifier for a credential candidate.
+// HashAccountKey derives an identifier from the exact credential used for authentication.
 // Returns empty string for empty input so callers can short-circuit safely.
-func HashAccountKey(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
+func HashAccountKey(credential string) string {
+	if credential == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(trimmed))
+	sum := sha256.Sum256([]byte(credential))
 	return hex.EncodeToString(sum[:])
 }
 
