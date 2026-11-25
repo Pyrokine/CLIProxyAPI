@@ -59,6 +59,9 @@ func (s *RequestStatistics) queryDetails(ctx context.Context, from, to time.Time
 		if detail.Timestamp.Before(from) || detail.Timestamp.After(to) {
 			continue
 		}
+		if filters.RequestID != "" && detail.RequestID != filters.RequestID {
+			continue
+		}
 		if strings.TrimSpace(filters.Model) != "" && !slices.ContainsFunc(
 			models, func(value string) bool { return strings.TrimSpace(value) == detail.Model },
 		) {
@@ -147,7 +150,7 @@ func (s *RequestStatistics) QueryEventsContext(
 		pageSize = 50
 	}
 	pageSize = min(pageSize, MaxEventsPageSize)
-	if page-1 > maxEventsOffset/pageSize {
+	if page > MaxEventsPage(pageSize) {
 		return nil, 0, ErrEventsPageTooDeep
 	}
 	details, err := s.queryDetails(ctx, from, to, filters)
@@ -235,6 +238,7 @@ func (s *RequestStatistics) QuerySummary(
 	includeGroups, includeAuthIndex bool,
 ) (QueryResult, error) {
 	result := emptyQueryResult()
+	result.Granularity = effectiveSummaryGranularity(from, to, granularity)
 	if !from.Before(to) {
 		return result, nil
 	}
@@ -245,7 +249,7 @@ func (s *RequestStatistics) QuerySummary(
 		return result, err
 	}
 	step := nsPerHour
-	if granularity == "daily" || to.Sub(from) > dayBucketThreshold {
+	if result.Granularity == "daily" {
 		step = nsPerDay
 	}
 	authStep := step

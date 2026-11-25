@@ -150,8 +150,9 @@ type summaryResponse struct {
 }
 
 type summaryPeriod struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	Granularity string `json:"granularity,omitempty"`
 }
 
 // GetUsageSummary returns aggregated usage data for dashboard rendering.
@@ -288,8 +289,9 @@ func buildSummaryResponse(
 	)
 	resp := summaryResponse{
 		Period: summaryPeriod{
-			From: from.Format(time.RFC3339),
-			To:   to.Format(time.RFC3339),
+			From:        from.Format(time.RFC3339),
+			To:          to.Format(time.RFC3339),
+			Granularity: qr.Granularity,
 		},
 		Totals: summaryTotals{
 			Requests: qr.Totals.Requests,

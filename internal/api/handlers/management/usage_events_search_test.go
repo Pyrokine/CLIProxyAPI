@@ -293,8 +293,7 @@ func TestGetUsageEventsSearchSQLiteCompactAndFull(t *testing.T) {
 										want.RequestID ||
 									actual.Failed !=
 										want.Failed ||
-									actual.LatencyMs !=
-										want.LatencyMs ||
+									!reflect.DeepEqual(actual.LatencyMs, want.RecordedLatencyMs()) ||
 									actual.TimeToFirstByteMs !=
 										want.TimeToFirstByteMs ||
 									actual.TotalDurationMs != want.TotalDurationMs || !actual.Completed ||

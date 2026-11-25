@@ -68,14 +68,20 @@ func (r *usageEventResponse) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type eventsPagination struct {
+	Total           int    `json:"total"`
+	Page            int    `json:"page"`
+	PageSize        int    `json:"page_size"`
+	TotalPages      int    `json:"total_pages"`
+	AccessiblePages int    `json:"accessible_pages"`
+	RequestIDFilter string `json:"request_id_filter,omitempty"`
+	SpeedFilter     string `json:"speed_filter,omitempty"`
+}
+
 // eventsResponse is the paginated response for GET /usage/events.
 type eventsResponse struct {
-	Events      []usageEventResponse `json:"events"`
-	Total       int                  `json:"total"`
-	Page        int                  `json:"page"`
-	PageSize    int                  `json:"page_size"`
-	TotalPages  int                  `json:"total_pages"`
-	SpeedFilter string               `json:"speed_filter,omitempty"`
+	Events []usageEventResponse `json:"events"`
+	eventsPagination
 }
 
 type compactUsageEventTokens struct {
@@ -96,7 +102,7 @@ type compactUsageEventResponse struct {
 	APIKey                 string                     `json:"api_key"`
 	APIKeyAlias            string                     `json:"api_key_alias"`
 	Provider               string                     `json:"provider"`
-	LatencyMs              int64                      `json:"latency_ms,omitempty"`
+	LatencyMs              *int64                     `json:"latency_ms,omitempty"`
 	RequestID              string                     `json:"request_id,omitempty"`
 	RequestLogState        string                     `json:"request_log_state,omitempty"`
 	RequestLogHomeIP       string                     `json:"request_log_home_ip,omitempty"`
@@ -135,18 +141,14 @@ type compactUsageEventResponse struct {
 }
 
 type compactEventsResponse struct {
-	Events      []compactUsageEventResponse `json:"events"`
-	Total       int                         `json:"total"`
-	Page        int                         `json:"page"`
-	PageSize    int                         `json:"page_size"`
-	TotalPages  int                         `json:"total_pages"`
-	SpeedFilter string                      `json:"speed_filter,omitempty"`
+	Events []compactUsageEventResponse `json:"events"`
+	eventsPagination
 }
 
 // GetUsageEvents returns paginated usage event details.
 //
 //	GET /v0/management/usage/events?from=...&to=...&page=1&page_size=50
-//	    &model=...&source=...&speed=...&search=...&sort=timestamp&order=desc
+//	    &model=...&source=...&speed=...&search=...&request_id=...&sort=timestamp&order=desc
 //
 // export=true includes sealed canonical data for re-import using the same
 // authenticated management credential or an explicit X-Usage-Backup-Key.
@@ -221,6 +223,7 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 		Status:           c.Query("status"),
 		Speed:            speed,
 		Search:           c.Query("search"),
+		RequestID:        c.Query("request_id"),
 	}
 
 	queryEvents := h.usageStats.QueryEventsContext
@@ -274,15 +277,20 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 		events = []usage.FlatDetail{}
 	}
 	totalPages := (total + pageSize - 1) / pageSize
+	pagination := eventsPagination{
+		Total:           total,
+		Page:            page,
+		PageSize:        pageSize,
+		TotalPages:      totalPages,
+		AccessiblePages: min(totalPages, usage.MaxEventsPage(pageSize)),
+		RequestIDFilter: filters.RequestID,
+		SpeedFilter:     speed,
+	}
 	credentialMasker := newUsageCredentialMasker(h.configSnapshot())
 	if compact {
 		response := compactEventsResponse{
-			Events:      compactUsageEventResponses(events, apiKeyPresenter, credentialMasker),
-			Total:       total,
-			Page:        page,
-			PageSize:    pageSize,
-			TotalPages:  totalPages,
-			SpeedFilter: speed,
+			Events:           compactUsageEventResponses(events, apiKeyPresenter, credentialMasker),
+			eventsPagination: pagination,
 		}
 		startedAt := time.Now()
 		payload, errMarshal := json.Marshal(response)
@@ -304,12 +312,8 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	}
 	c.JSON(
 		http.StatusOK, eventsResponse{
-			Events:      maskUsageEventsWithPresenter(events, apiKeyPresenter, credentialMasker),
-			Total:       total,
-			Page:        page,
-			PageSize:    pageSize,
-			TotalPages:  totalPages,
-			SpeedFilter: speed,
+			Events:           maskUsageEventsWithPresenter(events, apiKeyPresenter, credentialMasker),
+			eventsPagination: pagination,
 		},
 	)
 }
@@ -334,7 +338,7 @@ func compactUsageEventResponses(
 			APIKey:                 apiKey,
 			APIKeyAlias:            apiKeyAlias,
 			Provider:               event.Provider,
-			LatencyMs:              event.LatencyMs,
+			LatencyMs:              event.RecordedLatencyMs(),
 			RequestID:              event.RequestID,
 			RequestLogState:        string(event.RequestLogState),
 			RequestLogHomeIP:       event.RequestLogHomeIP,

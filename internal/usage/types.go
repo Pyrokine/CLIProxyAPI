@@ -123,10 +123,15 @@ func (d FlatDetail) MarshalJSON() ([]byte, error) {
 			Speed     string `json:"speed"`
 		}{
 			detailAlias: (*detailAlias)(&d),
-			LatencyMs:   recordedLatencyValue(d.LatencyMs, d.latencyRecorded),
+			LatencyMs:   d.RecordedLatencyMs(),
 			Speed:       speed,
 		},
 	)
+}
+
+// RecordedLatencyMs is nil for unknown latency and non-nil for measured values, including zero.
+func (d *FlatDetail) RecordedLatencyMs() *int64 {
+	return recordedLatencyValue(d.LatencyMs, d.latencyRecorded)
 }
 
 // UnmarshalJSON preserves generation for legacy events that predate the field.
@@ -183,13 +188,15 @@ type EventFilters struct {
 	Status           string // "success", "failure", or "" (all)
 	Speed            string // actual upstream speed, or "" (all)
 	Search           string
-	CanonicalAPIKeys bool // (none) selects only requests without an API key
+	RequestID        string // exact match, or "" (all)
+	CanonicalAPIKeys bool   // (none) selects only requests without an API key
 }
 
 // QueryResult is the read-side payload Query produces and the management
 // handler converts into JSON. It mirrors what summary.go used to expose so
 // /usage/summary's response shape doesn't change with the SQLite swap.
 type QueryResult struct {
+	Granularity            string
 	Totals                 summaryTotals
 	ByModel                map[string]*summaryModelStats
 	ByCredential           map[string]*summaryCredentialStats

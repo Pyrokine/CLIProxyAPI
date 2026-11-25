@@ -617,6 +617,13 @@ func (s *sqliteStore) queryWithAuthIndexGranularity(
 	return s.query(ctx, from, to, filters, granularity, includeGroups, true, authIndexGranularity)
 }
 
+func effectiveSummaryGranularity(from, to time.Time, requested string) string {
+	if requested == "daily" || to.Sub(from) > dayBucketThreshold {
+		return "daily"
+	}
+	return "hourly"
+}
+
 func (s *sqliteStore) query(
 	ctx context.Context,
 	from, to time.Time,
@@ -629,8 +636,10 @@ func (s *sqliteStore) query(
 	if s == nil || s.db == nil {
 		return QueryResult{}, fmt.Errorf("usage: query on nil store")
 	}
+	result := emptyQueryResult()
+	result.Granularity = effectiveSummaryGranularity(from, to, granularity)
 	if !from.Before(to) {
-		return emptyQueryResult(), nil
+		return result, nil
 	}
 
 	fromRawNs, err := unixNanoUTC(from)
@@ -642,7 +651,7 @@ func (s *sqliteStore) query(
 		return QueryResult{}, fmt.Errorf("usage: invalid query end: %w", err)
 	}
 
-	useDayBucket := to.Sub(from) > dayBucketThreshold || granularity == "daily"
+	useDayBucket := result.Granularity == "daily"
 	var table string
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -676,7 +685,7 @@ func (s *sqliteStore) query(
 	if (modelF.active && !modelF.matchedAny) ||
 		(credF.active && !credF.matchedAny) ||
 		(apiKeyF.active && !apiKeyF.matchedAny) {
-		return emptyQueryResult(), nil
+		return result, nil
 	}
 
 	// Padding uses the display grain; aggregate inputs retain exact inclusive boundaries.
@@ -788,7 +797,6 @@ func (s *sqliteStore) query(
 		}
 	}
 
-	result := emptyQueryResult()
 	if err := s.queryTotals(ctx, tx, sources["all"], fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
 		return QueryResult{}, err
 	}
@@ -1708,6 +1716,11 @@ func (s *sqliteStore) queryCompactEventDetails(
 	return s.queryEventsPage(ctx, from, to, filters, page, pageSize, sortField, desc, true)
 }
 
+// MaxEventsPage returns the last page under the offset limit for a normalized page size.
+func MaxEventsPage(pageSize int) int {
+	return maxEventsOffset/pageSize + 1
+}
+
 func (s *sqliteStore) queryEventsPage(
 	ctx context.Context,
 	from, to time.Time,
@@ -1731,13 +1744,10 @@ func (s *sqliteStore) queryEventsPage(
 	if page < 1 {
 		page = 1
 	}
-	if page-1 > maxEventsOffset/pageSize {
+	if page > MaxEventsPage(pageSize) {
 		return nil, 0, ErrEventsPageTooDeep
 	}
 	offset := (page - 1) * pageSize
-	if offset > maxEventsOffset {
-		return nil, 0, ErrEventsPageTooDeep
-	}
 	fromNs, err := unixNanoUTC(from)
 	if err != nil {
 		return nil, 0, fmt.Errorf("usage: invalid events start: %w", err)
@@ -1839,6 +1849,10 @@ func prepareEventsPageQuery(
 	if speedFilter != "" {
 		filterSQL += " AND events.observed_speed = ?"
 		filterArgs = append(filterArgs, speedFilter)
+	}
+	if filters.RequestID != "" {
+		filterSQL += " AND events.request_id = ?"
+		filterArgs = append(filterArgs, filters.RequestID)
 	}
 
 	searchSQL := ""
