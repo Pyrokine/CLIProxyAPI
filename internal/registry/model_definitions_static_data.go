@@ -80,6 +80,35 @@ func GetCodexProModels() []*ModelInfo {
 	return getEmbeddedOpenAIModels()
 }
 
+// GetCodexModelsForPlan returns the runtime models for a Codex credential.
+func GetCodexModelsForPlan(plan string, apiKey bool) []*ModelInfo {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "free":
+		return GetCodexFreeModels()
+	case "team", "business", "go":
+		return GetCodexTeamModels()
+	case "plus":
+		return GetCodexPlusModels()
+	case "pro":
+		return GetCodexProModels()
+	case "promax":
+		if !apiKey {
+			// Preserve the baseline and add the Sol models verified for this plan.
+			var sol []*ModelInfo
+			for _, model := range GetCodexProModels() {
+				if model != nil && (model.ID == "gpt-6.1-sol" || model.ID == "gpt-6.2-sol") {
+					sol = append(sol, model)
+				}
+			}
+			return upsertModelInfos(GetCodexFreeModels(), sol...)
+		}
+	}
+	if apiKey {
+		return GetCodexProModels()
+	}
+	return GetCodexFreeModels()
+}
+
 // GetClaudeModels returns the standard Claude model definitions
 func GetClaudeModels() []*ModelInfo {
 	if models := getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Claude }); len(

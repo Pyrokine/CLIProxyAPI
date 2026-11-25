@@ -19,18 +19,21 @@ func TestRegisterModelsForAuth_CodexPlanControlsFrontierModels(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		plan      string
-		authKind  string
-		wantSol   bool
-		wantAstra bool
+		name       string
+		plan       string
+		authKind   string
+		wantSol    bool
+		wantAstra  bool
+		wantNewSol bool
 	}{
-		{name: "missing-oauth", wantSol: false, wantAstra: false},
-		{name: "missing-api-key", authKind: "apikey", wantSol: true, wantAstra: true},
-		{name: "free", plan: "free", wantSol: false, wantAstra: false},
-		{name: "plus", plan: "plus", wantSol: true, wantAstra: true},
-		{name: "team", plan: "team", wantSol: true, wantAstra: true},
-		{name: "pro", plan: "pro", wantSol: true, wantAstra: true},
+		{name: "missing-oauth"},
+		{name: "unknown-oauth", plan: "future-plan"},
+		{name: "missing-api-key", authKind: "apikey", wantSol: true, wantAstra: true, wantNewSol: true},
+		{name: "free", plan: "free"},
+		{name: "plus", plan: "plus", wantSol: true, wantAstra: true, wantNewSol: true},
+		{name: "team", plan: "team", wantSol: true, wantAstra: true, wantNewSol: true},
+		{name: "pro", plan: "pro", wantSol: true, wantAstra: true, wantNewSol: true},
+		{name: "promax", plan: " ProMax ", authKind: "oauth", wantNewSol: true},
 	}
 	for _, test := range tests {
 		t.Run(
@@ -48,6 +51,11 @@ func TestRegisterModelsForAuth_CodexPlanControlsFrontierModels(t *testing.T) {
 				}
 				if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra"); got != test.wantAstra {
 					t.Fatalf("gpt-6-astra support = %t, want %t", got, test.wantAstra)
+				}
+				for _, model := range []string{"gpt-6.1-sol", "gpt-6.2-sol"} {
+					if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, model); got != test.wantNewSol {
+						t.Fatalf("%s support = %t, want %t", model, got, test.wantNewSol)
+					}
 				}
 				if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-5.6-luna") {
 					t.Fatal("Codex auth should support gpt-5.6-luna")

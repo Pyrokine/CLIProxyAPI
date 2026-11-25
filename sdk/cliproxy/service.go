@@ -4297,26 +4297,7 @@ func (s *Service) registerModelsForAuthWithConfig(a *coreauth.Auth, cfg *config.
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
-		codexPlanType := ""
-		if a.Attributes != nil {
-			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
-		}
-		switch strings.ToLower(codexPlanType) {
-		case "free":
-			models = fromRegistryModelInfos(registry.GetCodexFreeModels())
-		case "team", "business", "go":
-			models = fromRegistryModelInfos(registry.GetCodexTeamModels())
-		case "plus":
-			models = fromRegistryModelInfos(registry.GetCodexPlusModels())
-		case "pro":
-			models = fromRegistryModelInfos(registry.GetCodexProModels())
-		default:
-			if authKind == "apikey" {
-				models = fromRegistryModelInfos(registry.GetCodexProModels())
-			} else {
-				models = fromRegistryModelInfos(registry.GetCodexFreeModels())
-			}
-		}
+		models = fromRegistryModelInfos(registry.GetCodexModelsForPlan(a.Attributes["plan_type"], authKind == "apikey"))
 		if authKind == "apikey" {
 			models = append(models, fromRegistryModelInfos(registry.GetOpenAIAPIImageModels())...)
 			for _, model := range models {

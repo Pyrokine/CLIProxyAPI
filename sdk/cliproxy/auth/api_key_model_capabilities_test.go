@@ -356,6 +356,9 @@ func TestCodexOAuthModelInfoUsesSelectedPlanAndUpstream(t *testing.T) {
 		{name: "free", plan: "free", upstream: "gpt-6-luna", wantBound: true},
 		{name: "free excludes pro model", plan: "free", upstream: "gpt-6-astra"},
 		{name: "pro", plan: "pro", upstream: "gpt-6-astra(high)", wantBound: true},
+		{name: "promax sol", plan: " ProMax ", upstream: "gpt-6.2-sol(high)", wantBound: true},
+		{name: "promax preserves baseline", plan: "promax", upstream: "gpt-6-luna", wantBound: true},
+		{name: "promax is not pro", plan: "promax", upstream: "gpt-6-astra"},
 		{name: "default is free", upstream: "gpt-6-astra"},
 		{name: "unknown upstream", plan: "pro", upstream: "unlisted-model"},
 	} {

@@ -385,17 +385,7 @@ func lookupCodexOAuthModelInfo(auth *Auth, upstreamModel string) (*registry.Mode
 	) {
 		return nil, false
 	}
-	var models []*registry.ModelInfo
-	switch strings.ToLower(strings.TrimSpace(auth.Attributes["plan_type"])) {
-	case "plus":
-		models = registry.GetCodexPlusModels()
-	case "team", "business", "go":
-		models = registry.GetCodexTeamModels()
-	case "pro":
-		models = registry.GetCodexProModels()
-	default:
-		models = registry.GetCodexFreeModels()
-	}
+	models := registry.GetCodexModelsForPlan(auth.Attributes["plan_type"], false)
 	selected := strings.TrimSpace(thinking.ParseSuffix(upstreamModel).ModelName)
 	for _, model := range models {
 		if model != nil && strings.EqualFold(model.ID, selected) {

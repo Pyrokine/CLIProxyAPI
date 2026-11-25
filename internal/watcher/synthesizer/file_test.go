@@ -557,6 +557,14 @@ func TestFileSynthesizerCodexPlanTypeMetadataThenJWT(t *testing.T) {
 			want: "plus",
 		},
 		{
+			name: "JWT fallback preserves Promax",
+			metadata: map[string]any{
+				"type":     "codex",
+				"id_token": codexPlanJWT(t, "promax"),
+			},
+			want: "promax",
+		},
+		{
 			name: "invalid JWT defaults to free",
 			metadata: map[string]any{
 				"type":     "codex",

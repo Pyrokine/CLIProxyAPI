@@ -98,11 +98,14 @@ func (e *codexPlanRefreshFixtureExecutor) Refresh(_ context.Context, auth *corea
 
 func TestCodexRefreshReprojectsPlanEligibleModels(t *testing.T) {
 	for _, tc := range []struct {
-		name, from, to      string
-		wasAstra, wantAstra bool
+		name, from, to, model string
+		before, after         bool
 	}{
-		{name: "downgrade", from: "pro", to: "free", wasAstra: true},
-		{name: "upgrade", from: "free", to: "team", wantAstra: true},
+		{name: "downgrade", from: "pro", to: "free", model: "gpt-6-astra", before: true},
+		{name: "upgrade", from: "free", to: "team", model: "gpt-6-astra", after: true},
+		{name: "upgrade to promax", from: "free", to: "promax", model: "gpt-6.2-sol", after: true},
+		{name: "stored pro correction", from: "pro", to: "promax", model: "gpt-6.1-sol", before: true, after: true},
+		{name: "promax does not inherit pro", from: "pro", to: "promax", model: "gpt-6-astra", before: true},
 	} {
 		t.Run(
 			tc.name, func(t *testing.T) {
@@ -131,18 +134,18 @@ func TestCodexRefreshReprojectsPlanEligibleModels(t *testing.T) {
 				}
 				t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
 				service.registerModelsForAuthWithConfig(auth, cfg)
-				if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra"); got != tc.wasAstra {
-					t.Fatalf("before refresh, Astra support = %t, want %t", got, tc.wasAstra)
+				if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, tc.model); got != tc.before {
+					t.Fatalf("before refresh, %s support = %t, want %t", tc.model, got, tc.before)
 				}
 				if _, err := manager.ForceRefreshAuth(context.Background(), auth.ID); err != nil {
 					t.Fatalf("fixture credential refresh: %v", err)
 				}
-				if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra"); got != tc.wantAstra {
-					t.Fatalf("after refresh, Astra support = %t, want %t", got, tc.wantAstra)
+				if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, tc.model); got != tc.after {
+					t.Fatalf("after refresh, %s support = %t, want %t", tc.model, got, tc.after)
 				}
 				current, exists := manager.GetByID(auth.ID)
-				if !exists || current.Attributes["plan_type"] != tc.to {
-					t.Fatalf("refreshed credential plan: %+v", current)
+				if !exists || current.Attributes["plan_type"] != tc.to || current.Metadata["plan_type"] != tc.to {
+					t.Fatalf("refreshed credential does not preserve plan %q", tc.to)
 				}
 			},
 		)
