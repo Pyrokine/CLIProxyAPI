@@ -29,7 +29,7 @@ require (
 	github.com/refraction-networking/utls v1.8.2
 	github.com/sirupsen/logrus v1.10.2
 	github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966
-	github.com/tidwall/gjson v1.20.5
+	github.com/tidwall/gjson v1.20.6
 	github.com/tidwall/sjson v1.2.11
 	github.com/tiktoken-go/tokenizer v0.10.0
 	golang.org/x/crypto v0.59.0
@@ -117,7 +117,7 @@ require (
 	github.com/sergi/go-diff v1.4.5 // indirect
 	github.com/skeema/knownhosts v1.3.3 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
-	github.com/tidwall/pretty v1.3.0 // indirect
+	github.com/tidwall/pretty v1.3.1 // indirect
 	github.com/tinylib/msgp v1.6.5 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.2 // indirect
