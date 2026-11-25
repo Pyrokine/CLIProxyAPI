@@ -90,7 +90,7 @@ func (e *OpenAICompatExecutor) HttpRequest(
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newOriginBoundHTTPClient(ctx, e.cfg, auth)
 	return httpClient.Do(httpReq)
 }
 
@@ -218,7 +218,7 @@ func (e *OpenAICompatExecutor) Execute(
 	}
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translated, e.Identifier(), auth)
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newOriginBoundHTTPClient(ctx, e.cfg, auth)
 	if clineNonstream {
 		httpClient = reporter.trackHTTPClient(httpClient)
 	}
@@ -362,7 +362,7 @@ func (e *OpenAICompatExecutor) executeImages(
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), payload, e.Identifier(), auth)
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newOriginBoundHTTPClient(ctx, e.cfg, auth)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err, httpResp)
@@ -503,7 +503,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translated, e.Identifier(), auth)
 
-	httpClient := reporter.trackHTTPClient(newProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+	httpClient := reporter.trackHTTPClient(newOriginBoundHTTPClient(ctx, e.cfg, auth))
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err, httpResp)
@@ -787,7 +787,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), payload, e.Identifier(), auth)
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newOriginBoundHTTPClient(ctx, e.cfg, auth)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err, httpResp)

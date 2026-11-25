@@ -338,7 +338,8 @@ func TestRequestObservationsResetOnRetryAndIsolateRoutes(t *testing.T) {
 		[]byte(`{"model":"two-stale","provider":"stale","service_tier":"priority","usage":{"speed":"fast"}}`),
 	)
 	recordUpstreamRequest(
-		secondCtx, nil, "https://retry.example.test/v1/responses", nil, []byte(`{"model":"retry-model"}`), "openai", nil,
+		secondCtx, nil, "https://retry.example.test/v1/responses", nil, []byte(`{"model":"retry-model"}`), "openai",
+		nil,
 	)
 	second.publishFailure(secondCtx, errors.New("synthetic transport failure"))
 	two := requestObservationRecord(t, records)
@@ -704,7 +705,7 @@ func TestRequestObservationsHTTPResponseAddress(t *testing.T) {
 								response.StatusCode = http.StatusTemporaryRedirect
 								response.Header.Set(
 									"Location",
-									"https://final.example.test/result?api_key=synthetic-secret&stage="+map[bool]string{
+									"https://initial.example.test/result?api_key=synthetic-secret&stage="+map[bool]string{
 										true: "one", false: "two",
 									}[calls == 1],
 								)
@@ -743,12 +744,12 @@ func TestRequestObservationsHTTPResponseAddress(t *testing.T) {
 				wantURL, wantStatus := initialURL, "observed"
 				switch outcome {
 				case "redirects":
-					wantURL = util.SanitizeUpstreamURL("https://final.example.test/result?api_key=synthetic-secret&stage=two")
+					wantURL = util.SanitizeUpstreamURL("https://initial.example.test/result?api_key=synthetic-secret&stage=two")
 					if calls != 3 {
 						t.Fatalf("redirect calls = %d", calls)
 					}
 				case "redirect-limit":
-					wantURL = util.SanitizeUpstreamURL("https://final.example.test/result?api_key=synthetic-secret&stage=two")
+					wantURL = util.SanitizeUpstreamURL("https://initial.example.test/result?api_key=synthetic-secret&stage=two")
 					if calls != 10 {
 						t.Fatalf("default redirect limit changed: %d requests", calls)
 					}

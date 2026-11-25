@@ -33,6 +33,66 @@ func unwrapPublicHostTransport(rt http.RoundTripper) http.RoundTripper {
 	return rt
 }
 
+func TestProviderHTTPClientsKeepRedirectsOnConfiguredOrigin(t *testing.T) {
+	clients := map[string]func(context.Context) *http.Client{
+		"openai-compatible": func(ctx context.Context) *http.Client {
+			return newOriginBoundHTTPClient(ctx, &config.Config{}, nil)
+		},
+		"claude-codex": func(ctx context.Context) *http.Client {
+			return newProtectedUtlsHTTPClient(ctx, &config.Config{}, nil, 0)
+		},
+	}
+	for name, newClient := range clients {
+		for _, scenario := range []struct {
+			name, location string
+			allowed        bool
+		}{
+			{"relative", "/inference", true},
+			{"explicit-default-port", "https://provider.fixture.invalid:443/inference", true},
+			{"different-host", "https://other.fixture.invalid/inference", false},
+			{"different-port", "https://provider.fixture.invalid:8443/inference", false},
+			{"different-scheme", "http://provider.fixture.invalid/inference", false},
+		} {
+			t.Run(
+				name+"/"+scenario.name, func(t *testing.T) {
+					requests := 0
+					ctx := util.WithRoundTripper(
+						t.Context(), proxyTestRoundTripper(
+							func(req *http.Request) (*http.Response, error) {
+								requests++
+								response := &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}
+								if requests == 1 {
+									response.StatusCode = http.StatusTemporaryRedirect
+									response.Header = http.Header{"Location": {scenario.location}}
+								}
+								return response, nil
+							},
+						),
+					)
+					request, err := http.NewRequestWithContext(
+						ctx, http.MethodPost, "https://provider.fixture.invalid/configured",
+						strings.NewReader("fixture"),
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+					response, err := newClient(ctx).Do(request)
+					if err == nil {
+						defer func() { _ = response.Body.Close() }()
+					}
+					if scenario.allowed {
+						if err != nil || response.StatusCode != http.StatusOK || requests != 2 {
+							t.Fatalf("configured origin redirect: requests=%d, error=%v", requests, err)
+						}
+					} else if err == nil || requests != 1 {
+						t.Fatalf("unexpected redirect dispatch: requests=%d, error=%v", requests, err)
+					}
+				},
+			)
+		}
+	}
+}
+
 func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 

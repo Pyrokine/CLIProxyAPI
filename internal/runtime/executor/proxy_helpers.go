@@ -2,7 +2,9 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -35,6 +37,41 @@ func newProxyAwareHTTPClient(
 	timeout time.Duration,
 ) *http.Client {
 	return NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+}
+
+func newOriginBoundHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) *http.Client {
+	client := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	client.CheckRedirect = checkUpstreamRedirect
+	return client
+}
+
+func checkUpstreamRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 upstream redirects")
+	}
+	if !sameHTTPOrigin(req.URL, via[0].URL) {
+		return errors.New("upstream redirected outside the configured origin; use its final Base URL")
+	}
+	return nil
+}
+
+func sameHTTPOrigin(left, right *url.URL) bool {
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Hostname(), right.Hostname()) && effectiveHTTPPort(left) == effectiveHTTPPort(right)
+}
+
+func effectiveHTTPPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 type proxyErrorTransport struct {

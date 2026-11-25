@@ -1678,37 +1678,12 @@ func xaiIsCLIChatProxyRequestURL(requestURL *url.URL) bool {
 		return false
 	}
 	baseURL, errParse := url.Parse(xaiauth.CLIChatProxyBaseURL)
-	if errParse != nil || !xaiSameURLAuthority(requestURL, baseURL) {
+	if errParse != nil || !sameHTTPOrigin(requestURL, baseURL) {
 		return false
 	}
 	requestPath := strings.TrimRight(requestURL.EscapedPath(), "/")
 	basePath := strings.TrimRight(baseURL.EscapedPath(), "/")
 	return requestPath == basePath || strings.HasPrefix(requestPath, basePath+"/")
-}
-
-func xaiSameURLAuthority(left *url.URL, right *url.URL) bool {
-	if left == nil || right == nil || !strings.EqualFold(left.Scheme, right.Scheme) ||
-		!strings.EqualFold(left.Hostname(), right.Hostname()) {
-		return false
-	}
-	return xaiEffectiveURLPort(left) == xaiEffectiveURLPort(right)
-}
-
-func xaiEffectiveURLPort(value *url.URL) string {
-	if value == nil {
-		return ""
-	}
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "http":
-		return "80"
-	case "https":
-		return "443"
-	default:
-		return ""
-	}
 }
 
 func applyXAIHeaders(

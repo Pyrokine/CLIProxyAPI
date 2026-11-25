@@ -302,6 +302,7 @@ func newProtectedUtlsHTTPClient(
 	}
 
 	client := &http.Client{
+		CheckRedirect: checkUpstreamRedirect,
 		Transport: &claudeFallbackRoundTripper{
 			anthropic: anthropicTransport,
 			chrome:    chromeTransport,
