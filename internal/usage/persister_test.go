@@ -1529,10 +1529,12 @@ func TestStartRecalculateCostsQueuesLatestPrices(t *testing.T) {
 
 	persister := &Persister{store: store, pricesFn: oldPriceFn}
 	releasePricing := sync.OnceFunc(func() { close(release) })
-	t.Cleanup(func() {
-		releasePricing()
-		waitForCostRecalculation(persister)
-	})
+	t.Cleanup(
+		func() {
+			releasePricing()
+			waitForCostRecalculation(persister)
+		},
+	)
 	if !persister.StartRecalculateCosts() {
 		t.Fatal("first recalculation did not start")
 	}
@@ -2112,10 +2114,12 @@ func TestTrimBeforeWaitsForPricingMaintenanceGate(t *testing.T) {
 	persister.pricingMu.Lock()
 	unlockPricing := sync.OnceFunc(persister.pricingMu.Unlock)
 	done := make(chan error, 1)
-	t.Cleanup(func() {
-		unlockPricing()
-		<-done
-	})
+	t.Cleanup(
+		func() {
+			unlockPricing()
+			<-done
+		},
+	)
 	go func() {
 		defer close(done)
 		done <- persister.trimBefore(timestamp.Add(time.Minute))
@@ -2300,11 +2304,13 @@ func TestPersisterStopWaitsForConcurrentStartCleanup(t *testing.T) {
 
 	startDone := make(chan struct{})
 	releasePricing := sync.OnceFunc(func() { close(provider.release) })
-	t.Cleanup(func() {
-		releasePricing()
-		<-startDone
-		persister.Stop()
-	})
+	t.Cleanup(
+		func() {
+			releasePricing()
+			<-startDone
+			persister.Stop()
+		},
+	)
 	go func() {
 		persister.Start(context.Background())
 		close(startDone)

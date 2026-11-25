@@ -103,7 +103,8 @@ This release collects the cumulative changes in the Pyrokine fork since v8.0.23-
 - 通过现有模型目录控制启用状态和各渠道的标准速度、Fast、Ultrafast，保留显式 Payload 覆盖，分别记录申请与上游确认的处理模式
 - 支持按上下文长度、地区、生效时间、缓存写入 TTL、处理速度和模态维护价格，以及独立的媒体或工具收费；默认更新沿用预览与确认，保留自定义价格
 - 同时保留不可变的请求时计价凭据与当前目录费用，记录采用的条件、价格来源、Token 分项、额外收费及具体缺失的用量或价格
-- Payload 与 Header 覆盖后记录初始和最终转发地址、选用与上游自报的模型和渠道，以及缓存用量是否明确返回，区分未返回与明确为 0
+- Payload 与 Header 覆盖后记录初始和最终转发地址、选用与上游自报的模型和渠道，以及缓存用量是否明确返回，区分未返回与明确为
+  0
 - 历史用量字段按页升级并支持继续处理，维护筛选汇总和历史重算进度，备份、导入和导出保留请求时计价凭据
 - 管理写入持久记录成功、拒绝、部分变更与结果待确认，结合已确认的实际效果和资源读回报告保存结果
 
@@ -132,7 +133,8 @@ This release collects the cumulative changes in the Pyrokine fork since v8.0.23-
 #### 交付与兼容性
 
 - 使用 Go 1.27.4、稳定版 go-git 依赖和新版终端界面包，保留 `/v6` Go module、`/v0/management` API 与扁平配置格式
-- Linux、macOS、Windows 的 AMD64／ARM64 安装包由原生 runner 构建，完整制品与合并校验文件一起发布，保留 Linux AMD64／ARM64 Docker 镜像
+- Linux、macOS、Windows 的 AMD64／ARM64 安装包由原生 runner 构建，完整制品与合并校验文件一起发布，保留 Linux AMD64／ARM64
+  Docker 镜像
 - 本地管理面板准备脚本默认选择 CPAM v1.26.0-aug.6
 - 更新完成前核实制品身份、数据库读写兼容、等待推理结束、独立守护程序恢复和面板实际发布结果
 - 需要迁移：管理数据库为持久写入结果从 schema 4 升级至 5，usage schema 保持 9，PostgreSQL 格式保持 1，历史用量字段另行按页升级

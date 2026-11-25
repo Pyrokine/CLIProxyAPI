@@ -163,49 +163,53 @@ func TestWrapStreamResultAcknowledgesDiscardedChunksAfterDeliveryFailure(t *test
 		{name: "source"},
 		{name: "bootstrap", buffered: true},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				failure := errors.New("downstream write failed")
-				acknowledged := make(chan error, 2)
-				payload := coreexecutor.StreamChunk{Payload: []byte("payload")}
-				source := make(chan coreexecutor.StreamChunk, 3)
-				var initial []coreexecutor.StreamChunk
-				if test.buffered {
-					initial = []coreexecutor.StreamChunk{payload}
-				} else {
-					source <- payload
-				}
-				for _, chunk := range []coreexecutor.StreamChunk{
-					{Payload: []byte("discarded")}, {Terminal: true},
-				} {
-					chunk.Acknowledge = func(err error) { acknowledged <- err }
-					source <- chunk
-				}
-				close(source)
-				manager := NewManager(nil, nil, nil)
-				stream := manager.wrapStreamResult(
-					coreexecutor.WithStreamDeliveryAcknowledgement(t.Context()),
-					&Auth{ID: t.Name(), Provider: "codex"}, "codex", "gpt-5",
-					nil, initial, source, OAuthModelAliasResult{},
-				)
-				first := <-stream.Chunks
-				first.Acknowledge(failure)
-				for chunk := range stream.Chunks {
-					t.Fatalf("chunk forwarded after delivery failure: %#v", chunk)
-				}
-				synctest.Wait()
-				for range 2 {
-					select {
-					case err := <-acknowledged:
-						if !errors.Is(err, failure) {
-							t.Fatalf("discard acknowledgement = %v, want %v", err, failure)
+		t.Run(
+			test.name, func(t *testing.T) {
+				synctest.Test(
+					t, func(t *testing.T) {
+						failure := errors.New("downstream write failed")
+						acknowledged := make(chan error, 2)
+						payload := coreexecutor.StreamChunk{Payload: []byte("payload")}
+						source := make(chan coreexecutor.StreamChunk, 3)
+						var initial []coreexecutor.StreamChunk
+						if test.buffered {
+							initial = []coreexecutor.StreamChunk{payload}
+						} else {
+							source <- payload
 						}
-					default:
-						t.Fatal("discarded chunk was not acknowledged")
-					}
-				}
-			})
-		})
+						for _, chunk := range []coreexecutor.StreamChunk{
+							{Payload: []byte("discarded")}, {Terminal: true},
+						} {
+							chunk.Acknowledge = func(err error) { acknowledged <- err }
+							source <- chunk
+						}
+						close(source)
+						manager := NewManager(nil, nil, nil)
+						stream := manager.wrapStreamResult(
+							coreexecutor.WithStreamDeliveryAcknowledgement(t.Context()),
+							&Auth{ID: t.Name(), Provider: "codex"}, "codex", "gpt-5",
+							nil, initial, source, OAuthModelAliasResult{},
+						)
+						first := <-stream.Chunks
+						first.Acknowledge(failure)
+						for chunk := range stream.Chunks {
+							t.Fatalf("chunk forwarded after delivery failure: %#v", chunk)
+						}
+						synctest.Wait()
+						for range 2 {
+							select {
+							case err := <-acknowledged:
+								if !errors.Is(err, failure) {
+									t.Fatalf("discard acknowledgement = %v, want %v", err, failure)
+								}
+							default:
+								t.Fatal("discarded chunk was not acknowledged")
+							}
+						}
+					},
+				)
+			},
+		)
 	}
 }
 
@@ -490,34 +494,36 @@ func TestWrapStreamResultCancellationWhileWaitingForSourceReleasesQuotaLease(t *
 }
 
 func TestHomeOwnedStreamAcknowledgesChunkCanceledBeforeForwarding(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancelCause(t.Context())
-		defer cancel(nil)
-		failure := errors.New("downstream disconnected")
-		acknowledged := make(chan error, 1)
-		source := make(chan coreexecutor.StreamChunk)
-		stream := wrapHomeOwnedStream(
-			ctx, &coreexecutor.StreamResult{Chunks: source}, nil, nil, false,
-		)
-		source <- coreexecutor.StreamChunk{
-			Terminal:    true,
-			Acknowledge: func(err error) { acknowledged <- err },
-		}
-		close(source)
-		cancel(failure)
-		synctest.Wait()
-		select {
-		case err := <-acknowledged:
-			if !errors.Is(err, failure) {
-				t.Fatalf("undelivered chunk acknowledgement = %v, want %v", err, failure)
+	synctest.Test(
+		t, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			failure := errors.New("downstream disconnected")
+			acknowledged := make(chan error, 1)
+			source := make(chan coreexecutor.StreamChunk)
+			stream := wrapHomeOwnedStream(
+				ctx, &coreexecutor.StreamResult{Chunks: source}, nil, nil, false,
+			)
+			source <- coreexecutor.StreamChunk{
+				Terminal:    true,
+				Acknowledge: func(err error) { acknowledged <- err },
 			}
-		default:
-			t.Fatal("chunk held during cancellation was not acknowledged")
-		}
-		for chunk := range stream.Chunks {
-			t.Fatalf("chunk forwarded after cancellation: %#v", chunk)
-		}
-	})
+			close(source)
+			cancel(failure)
+			synctest.Wait()
+			select {
+			case err := <-acknowledged:
+				if !errors.Is(err, failure) {
+					t.Fatalf("undelivered chunk acknowledgement = %v, want %v", err, failure)
+				}
+			default:
+				t.Fatal("chunk held during cancellation was not acknowledged")
+			}
+			for chunk := range stream.Chunks {
+				t.Fatalf("chunk forwarded after cancellation: %#v", chunk)
+			}
+		},
+	)
 }
 
 func TestHomeStreamScopeEndsAfterSourceWaitCancellationOnce(t *testing.T) {

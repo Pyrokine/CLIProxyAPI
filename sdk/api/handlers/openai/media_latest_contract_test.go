@@ -334,7 +334,8 @@ func TestImage26ResponsesSelectsAPIKeyAmongMixedCodexCredentials(t *testing.T) {
 						response.Body.String(), "API-key",
 					) {
 						t.Fatalf(
-							"missing API key response=%d calls=%d body=%s", response.Code, calls, response.Body.String(),
+							"missing API key response=%d calls=%d body=%s", response.Code, calls,
+							response.Body.String(),
 						)
 					}
 					return

@@ -68,7 +68,8 @@ func requestSpeedCases() []requestSpeedCase {
 		cases = append(
 			cases,
 			requestSpeedCase{
-				"tier_" + speed, FlatDetail{ResponseServiceTier: strings.ToUpper(speed)}, speed, "response_service_tier",
+				"tier_" + speed, FlatDetail{ResponseServiceTier: strings.ToUpper(speed)}, speed,
+				"response_service_tier",
 			},
 			requestSpeedCase{
 				"speed_" + speed, FlatDetail{Provider: "claude", ResponseSpeed: " \t" + strings.ToUpper(speed) + "\n"},

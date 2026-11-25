@@ -342,7 +342,8 @@ INSERT INTO events(fingerprint,ts_ns,model_id,failed,metadata) VALUES(CAST(print
 					var legacy int
 					if query := strings.TrimSpace(test.request); query != "" {
 						if err := store.db.QueryRow(
-							"SELECT EXISTS(SELECT 1 FROM events WHERE "+requestLogIDSQLExpression+" = ? LIMIT 1)", query,
+							"SELECT EXISTS(SELECT 1 FROM events WHERE "+requestLogIDSQLExpression+" = ? LIMIT 1)",
+							query,
 						).Scan(&legacy); err != nil {
 							t.Fatal(err)
 						}

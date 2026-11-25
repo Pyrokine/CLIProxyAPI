@@ -20,11 +20,13 @@ const catalogLookupFixture = `{"claude":[{
 func preserveLookupTestCatalog(t *testing.T) {
 	t.Helper()
 	original := getModels()
-	t.Cleanup(func() {
-		modelsCatalogStore.mu.Lock()
-		modelsCatalogStore.data = original
-		modelsCatalogStore.mu.Unlock()
-	})
+	t.Cleanup(
+		func() {
+			modelsCatalogStore.mu.Lock()
+			modelsCatalogStore.data = original
+			modelsCatalogStore.mu.Unlock()
+		},
+	)
 }
 
 func mutateLookupTestModel(model *ModelInfo) {
@@ -68,25 +70,29 @@ func TestCatalogQueriesObserveRefreshAndDetachMetadata(t *testing.T) {
 			get  func() *ModelInfo
 		}{
 			{"list", func() *ModelInfo { return GetClaudeModels()[0] }},
-			{"channel", func() *ModelInfo {
-				return LookupStaticModelInfoByChannel(" registry-lookup-fixture ", " CLAUDE ")
-			}},
+			{
+				"channel", func() *ModelInfo {
+					return LookupStaticModelInfoByChannel(" registry-lookup-fixture ", " CLAUDE ")
+				},
+			},
 			{"global", func() *ModelInfo { return LookupStaticModelInfo(" registry-lookup-fixture ") }},
 			{"registry", func() *ModelInfo { return LookupModelInfo("registry-lookup-fixture", "claude") }},
 		} {
-			t.Run(version+"/"+lookup.name, func(t *testing.T) {
-				model := lookup.get()
-				if !reflect.DeepEqual(model, expected.Claude[0]) {
-					t.Fatalf("lookup = %+v, want %+v", model, expected.Claude[0])
-				}
-				mutateLookupTestModel(model)
-				if next := lookup.get(); !reflect.DeepEqual(next, expected.Claude[0]) {
-					t.Fatalf("returned metadata changed next lookup: %+v", next)
-				}
-				if !reflect.DeepEqual(getModels().Claude, expected.Claude) {
-					t.Fatal("returned metadata changed the active catalog")
-				}
-			})
+			t.Run(
+				version+"/"+lookup.name, func(t *testing.T) {
+					model := lookup.get()
+					if !reflect.DeepEqual(model, expected.Claude[0]) {
+						t.Fatalf("lookup = %+v, want %+v", model, expected.Claude[0])
+					}
+					mutateLookupTestModel(model)
+					if next := lookup.get(); !reflect.DeepEqual(next, expected.Claude[0]) {
+						t.Fatalf("returned metadata changed next lookup: %+v", next)
+					}
+					if !reflect.DeepEqual(getModels().Claude, expected.Claude) {
+						t.Fatal("returned metadata changed the active catalog")
+					}
+				},
+			)
 		}
 	}
 	if err := loadModelsFromBytes([]byte(`{"claude":[{"id":"replacement-model"}]}`), "lookup test"); err != nil {
@@ -133,22 +139,24 @@ func TestCatalogFallbackAndEmbeddedQueriesDetachMetadata(t *testing.T) {
 		{"x-ai", expected.XAI}, {"grok", expected.XAI},
 		{"devin", expected.Devin}, {"meta", expected.Meta}, {"muse", expected.Meta},
 	} {
-		t.Run(section.channel, func(t *testing.T) {
-			if len(section.models) == 0 {
-				if got := GetEmbeddedStaticModelDefinitionsByChannel(section.channel); got != nil {
-					t.Fatalf("empty embedded section = %+v, want nil", got)
+		t.Run(
+			section.channel, func(t *testing.T) {
+				if len(section.models) == 0 {
+					if got := GetEmbeddedStaticModelDefinitionsByChannel(section.channel); got != nil {
+						t.Fatalf("empty embedded section = %+v, want nil", got)
+					}
+					return
 				}
-				return
-			}
-			want := section.models[0]
-			for range 2 {
-				got := findModelByID(GetEmbeddedStaticModelDefinitionsByChannel(section.channel), want.ID)
-				if !reflect.DeepEqual(got, want) {
-					t.Fatalf("embedded model = %+v, want %+v", got, want)
+				want := section.models[0]
+				for range 2 {
+					got := findModelByID(GetEmbeddedStaticModelDefinitionsByChannel(section.channel), want.ID)
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("embedded model = %+v, want %+v", got, want)
+					}
+					mutateLookupTestModel(got)
 				}
-				mutateLookupTestModel(got)
-			}
-		})
+			},
+		)
 	}
 	for channel, models := range expected.Legacy {
 		want := models[0]
@@ -247,35 +255,39 @@ func TestCatalogQueriesDuringConcurrentRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	var workers sync.WaitGroup
-	workers.Go(func() {
-		for range 20 {
-			for _, data := range [][]byte{first, second} {
-				if err := loadModelsFromBytes(data, "concurrent lookup test"); err != nil {
-					t.Error(err)
-					return
+	workers.Go(
+		func() {
+			for range 20 {
+				for _, data := range [][]byte{first, second} {
+					if err := loadModelsFromBytes(data, "concurrent lookup test"); err != nil {
+						t.Error(err)
+						return
+					}
 				}
 			}
-		}
-	})
+		},
+	)
 	for range 4 {
-		workers.Go(func() {
-			for range 10 {
-				model := LookupStaticModelInfo("registry-lookup-fixture")
-				if model == nil || model.ID != "registry-lookup-fixture" ||
-					(model.DisplayName != "first" && model.DisplayName != "second") ||
-					model.Thinking == nil || model.Thinking.Levels[0] != "high" {
-					t.Errorf("concurrent model = %+v", model)
-					return
+		workers.Go(
+			func() {
+				for range 10 {
+					model := LookupStaticModelInfo("registry-lookup-fixture")
+					if model == nil || model.ID != "registry-lookup-fixture" ||
+						(model.DisplayName != "first" && model.DisplayName != "second") ||
+						model.Thinking == nil || model.Thinking.Levels[0] != "high" {
+						t.Errorf("concurrent model = %+v", model)
+						return
+					}
+					mutateLookupTestModel(model)
+					embedded := GetEmbeddedStaticModelDefinitionsByChannel("claude")
+					if len(embedded) == 0 || embedded[0] == nil || embedded[0].ID == "mutated" {
+						t.Error("concurrent embedded metadata changed")
+						return
+					}
+					mutateLookupTestModel(embedded[0])
 				}
-				mutateLookupTestModel(model)
-				embedded := GetEmbeddedStaticModelDefinitionsByChannel("claude")
-				if len(embedded) == 0 || embedded[0] == nil || embedded[0].ID == "mutated" {
-					t.Error("concurrent embedded metadata changed")
-					return
-				}
-				mutateLookupTestModel(embedded[0])
-			}
-		})
+			},
+		)
 	}
 	workers.Wait()
 }
@@ -288,14 +300,16 @@ func BenchmarkCatalogModelLists(b *testing.B) {
 		{"dynamic", GetClaudeModels},
 		{"embedded", func() []*ModelInfo { return GetEmbeddedStaticModelDefinitionsByChannel("claude") }},
 	} {
-		b.Run(test.name, func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				if models := test.get(); len(models) == 0 {
-					b.Fatal("model list is empty")
+		b.Run(
+			test.name, func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					if models := test.get(); len(models) == 0 {
+						b.Fatal("model list is empty")
+					}
 				}
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -303,14 +317,16 @@ func BenchmarkStaticModelLookup(b *testing.B) {
 	for _, id := range []string{
 		"claude-opus-5-5", "gpt-6.1-sol", "gpt-5.3-codex-spark", "muse-spark-1.3", "unknown-registry-lookup",
 	} {
-		b.Run(id, func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				got := LookupStaticModelInfo(id)
-				if (got != nil) != (id != "unknown-registry-lookup") {
-					b.Fatalf("lookup %s = %+v", id, got)
+		b.Run(
+			id, func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					got := LookupStaticModelInfo(id)
+					if (got != nil) != (id != "unknown-registry-lookup") {
+						b.Fatalf("lookup %s = %+v", id, got)
+					}
 				}
-			}
-		})
+			},
+		)
 	}
 }

@@ -119,14 +119,16 @@ func SetModelRefreshCallback(cb ModelRefreshCallback) {
 }
 
 // embeddedModelsCatalog returns shared read-only metadata; callers clone before modifying it.
-var embeddedModelsCatalog = sync.OnceValue(func() *staticModelsJSON {
-	var parsed staticModelsJSON
-	if err := json.Unmarshal(embeddedModelsJSON, &parsed); err != nil {
-		log.Warnf("registry: failed to parse embedded model catalog: %v", err)
-		return nil
-	}
-	return &parsed
-})
+var embeddedModelsCatalog = sync.OnceValue(
+	func() *staticModelsJSON {
+		var parsed staticModelsJSON
+		if err := json.Unmarshal(embeddedModelsJSON, &parsed); err != nil {
+			log.Warnf("registry: failed to parse embedded model catalog: %v", err)
+			return nil
+		}
+		return &parsed
+	},
+)
 
 func init() {
 	// Load embedded data as fallback on startup.

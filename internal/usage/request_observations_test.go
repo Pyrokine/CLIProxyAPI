@@ -44,7 +44,9 @@ func TestRequestObservationsCacheWritePersistence(t *testing.T) {
 		detail := FlatDetail{
 			Timestamp: base.Add(time.Duration(index) * time.Second), Model: "synthetic-model", Provider: "openai",
 			CacheWriteReported: flag,
-			Tokens:             tokenStats{InputTokens: 10, CacheWriteTokens: quantity, CachedTokens: quantity, TotalTokens: 10},
+			Tokens: tokenStats{
+				InputTokens: 10, CacheWriteTokens: quantity, CachedTokens: quantity, TotalTokens: 10,
+			},
 		}
 		tx, err := store.db.BeginTx(ctx, nil)
 		if err != nil {

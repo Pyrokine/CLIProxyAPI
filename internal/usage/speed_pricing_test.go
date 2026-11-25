@@ -139,7 +139,8 @@ func TestSpeedPricingUsesActualResponseOnly(t *testing.T) {
 		},
 		{
 			name: "claude requested fast returned standard", provider: "claude", requestSpeed: "fast",
-			responseSpeed: "standard", speed: "standard", source: "response_speed", cost: 30, status: costStatusComplete,
+			responseSpeed: "standard", speed: "standard", source: "response_speed", cost: 30,
+			status: costStatusComplete,
 		},
 		{
 			name: "requested speed is not evidence", provider: "claude", requestSpeed: "fast", responseTier: "priority",
@@ -854,7 +855,8 @@ func TestSpeedPricingCatalogSnapshotAndRevision(t *testing.T) {
 					},
 				},
 			},
-		}, OAuthModelAlias: map[string][]config.OAuthModelAlias{"openai": {{Name: "speed-model", Alias: "speed-alias"}}},
+		},
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{"openai": {{Name: "speed-model", Alias: "speed-alias"}}},
 	}
 	fn := detailedPriceFuncFromCatalog(catalog)
 	revision := catalogPriceRevision(catalog)
