@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -36,7 +37,31 @@ const (
 	accountProbeOutdated     = "outdated"
 
 	accountInspectionProbeRevision = "quota-v1"
+	maxAccountInspectionInteger    = int64(1<<53 - 1)
 )
+
+var (
+	errInspectionRunning          = errors.New("account inspection already running")
+	errInspectionAccountNotFound  = errors.New("account not found")
+	errInspectionAccountAmbiguous = errors.New("account identifier matches more than one credential")
+	errInspectionProviderExcluded = errors.New("account provider is excluded from the inspection schedule")
+)
+
+type accountInspectionTarget struct {
+	ID        string `json:"id"`
+	FileName  string `json:"file_name"`
+	AuthIndex string `json:"auth_index"`
+}
+
+func (target accountInspectionTarget) matches(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	auth.EnsureIndex()
+	return (target.ID == "" || target.ID == strings.TrimSpace(auth.ID)) &&
+		(target.FileName == "" || target.FileName == strings.TrimSpace(auth.FileName)) &&
+		(target.AuthIndex == "" || target.AuthIndex == strings.TrimSpace(auth.Index))
+}
 
 type accountInspectionSchedule struct {
 	Enabled         bool     `json:"enabled"`
@@ -139,6 +164,7 @@ type accountInspectionStatusResponse struct {
 type accountInspectionService struct {
 	handler        *Handler
 	mu             sync.Mutex
+	persistMu      sync.Mutex
 	schedule       accountInspectionSchedule
 	status         string
 	currentRun     *accountInspectionRun
@@ -287,11 +313,16 @@ func (s *accountInspectionService) close() {
 }
 
 func (s *accountInspectionService) persist() error {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	return s.saveSnapshot(s.persistenceSnapshot())
+}
+
+func (s *accountInspectionService) saveSnapshot(state accountInspectionPersistedState) error {
 	store := s.stateStore()
 	if store == nil {
 		return nil
 	}
-	state := s.persistenceSnapshot()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := store.saveAccountInspection(ctx, state); err != nil {
@@ -304,6 +335,10 @@ func (s *accountInspectionService) persist() error {
 func (s *accountInspectionService) persistenceSnapshot() accountInspectionPersistedState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.persistenceSnapshotLocked()
+}
+
+func (s *accountInspectionService) persistenceSnapshotLocked() accountInspectionPersistedState {
 	return accountInspectionPersistedState{
 		Schedule:   cloneInspectionSchedule(s.schedule),
 		Status:     s.status,
@@ -335,7 +370,6 @@ func (h *Handler) PutAccountInspectionSchedule(c *gin.Context) {
 	schedule, err := service.updateSchedule(req)
 	if err != nil {
 		if _, persisted := errors.AsType[*configPersistenceError](err); persisted {
-			RecordMutationEffect(c.Request.Context(), "configuration.runtime_applied", "configuration")
 			failMutation(c.Request.Context())
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "failed to save account inspection schedule"})
 			return
@@ -376,37 +410,41 @@ func (h *Handler) GetAccountInspectionLogs(c *gin.Context) {
 }
 
 func (h *Handler) PostAccountInspectionRun(c *gin.Context) {
-	if run, ok := h.inspectionService().runAsync("manual", ""); ok {
-		RecordMutationEffect(c.Request.Context(), "task.queued", "task")
-		CompleteMutation(c.Request.Context())
-		c.JSON(http.StatusAccepted, run)
-		return
-	}
-	c.JSON(http.StatusConflict, gin.H{"error": "account inspection already running"})
+	h.postAccountInspectionRun(c, nil)
 }
 
 func (h *Handler) PostAccountInspectionInspectOne(c *gin.Context) {
-	var req struct {
-		ID        string `json:"id"`
-		FileName  string `json:"file_name"`
-		AuthIndex string `json:"auth_index"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var target accountInspectionTarget
+	if err := c.ShouldBindJSON(&target); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
-	target := firstNonEmpty(req.ID, req.FileName, req.AuthIndex)
-	if target == "" {
+	target.ID = strings.TrimSpace(target.ID)
+	target.FileName = strings.TrimSpace(target.FileName)
+	target.AuthIndex = strings.TrimSpace(target.AuthIndex)
+	if target == (accountInspectionTarget{}) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing account identifier"})
 		return
 	}
-	if run, ok := h.inspectionService().runAsync("manual", target); ok {
-		RecordMutationEffect(c.Request.Context(), "task.queued", "task")
-		CompleteMutation(c.Request.Context())
-		c.JSON(http.StatusAccepted, run)
+	h.postAccountInspectionRun(c, &target)
+}
+
+func (h *Handler) postAccountInspectionRun(c *gin.Context, target *accountInspectionTarget) {
+	run, err := h.inspectionService().runAsync(context.Background(), "manual", target)
+	if err != nil {
+		status := http.StatusConflict
+		switch err {
+		case errInspectionAccountNotFound:
+			status = http.StatusNotFound
+		case errInspectionProviderExcluded:
+			status = http.StatusUnprocessableEntity
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusConflict, gin.H{"error": "account inspection already running"})
+	RecordMutationEffect(c.Request.Context(), "task.queued", "task")
+	CompleteMutation(c.Request.Context())
+	c.JSON(http.StatusAccepted, run)
 }
 
 func (h *Handler) PostAccountInspectionStop(c *gin.Context) {
@@ -477,7 +515,11 @@ func (s *accountInspectionService) scheduleSnapshot() accountInspectionSchedule 
 }
 
 func (s *accountInspectionService) updateSchedule(req accountInspectionSchedule) (accountInspectionSchedule, error) {
-	current := s.scheduleSnapshot()
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.schedule
 	if req.IntervalSeconds == 0 {
 		req.IntervalSeconds = current.IntervalSeconds
 	}
@@ -490,23 +532,39 @@ func (s *accountInspectionService) updateSchedule(req accountInspectionSchedule)
 	if req.RetentionRuns == 0 {
 		req.RetentionRuns = current.RetentionRuns
 	}
-	if req.IntervalSeconds < 60 {
-		return accountInspectionSchedule{}, fmt.Errorf("interval_seconds must be at least 60")
-	}
-	if req.MaxConcurrency < 1 {
-		return accountInspectionSchedule{}, fmt.Errorf("max_concurrency must be at least 1")
-	}
-	if req.TimeoutSeconds < 1 {
-		return accountInspectionSchedule{}, fmt.Errorf("timeout_seconds must be at least 1")
-	}
-	if req.RetentionRuns < 1 {
-		return accountInspectionSchedule{}, fmt.Errorf("retention_runs must be at least 1")
+	for _, field := range []struct {
+		name       string
+		value, min int
+		max        int64
+	}{
+		{"interval_seconds", req.IntervalSeconds, 60, quota.MaxRefreshIntervalSeconds},
+		{"max_concurrency", req.MaxConcurrency, 1, maxAccountInspectionInteger},
+		{"timeout_seconds", req.TimeoutSeconds, 1, quota.MaxRefreshIntervalSeconds},
+		{"retention_runs", req.RetentionRuns, 1, maxAccountInspectionInteger},
+	} {
+		if field.value < field.min || int64(field.value) > field.max {
+			return accountInspectionSchedule{}, fmt.Errorf(
+				"%s must be between %d and %d", field.name, field.min, field.max,
+			)
+		}
 	}
 	req.Providers = normalizeInspectionProviders(req.Providers)
 
-	s.mu.Lock()
+	state := s.persistenceSnapshotLocked()
+	state.Schedule = req
+	state.UpdatedAt = time.Now().UTC()
+	state.Logs = appendInspectionLog(
+		state.Logs, "info",
+		fmt.Sprintf("account inspection schedule updated enabled=%t interval=%ds", req.Enabled, req.IntervalSeconds),
+	)
+	if err := s.saveSnapshot(state); err != nil {
+		return cloneInspectionSchedule(current), &configPersistenceError{
+			userMessage: "failed to save account inspection schedule", err: err,
+		}
+	}
 	s.schedule = req
-	s.updatedAt = time.Now().UTC()
+	s.updatedAt = state.UpdatedAt
+	s.logs = state.Logs
 	if s.scheduleCancel != nil {
 		s.scheduleCancel()
 		s.scheduleCancel = nil
@@ -516,23 +574,62 @@ func (s *accountInspectionService) updateSchedule(req accountInspectionSchedule)
 		s.scheduleCancel = cancel
 		go s.scheduleLoop(ctx, req.IntervalSeconds)
 	}
-	s.addLogLocked(
-		"info",
-		fmt.Sprintf("account inspection schedule updated enabled=%t interval=%ds", req.Enabled, req.IntervalSeconds),
-	)
-	out := cloneInspectionSchedule(s.schedule)
-	s.mu.Unlock()
-	if err := s.persist(); err != nil {
-		return out, &configPersistenceError{userMessage: "failed to save account inspection schedule", err: err}
-	}
-	return out, nil
+	return cloneInspectionSchedule(s.schedule), nil
 }
 
-func (s *accountInspectionService) runAsync(trigger string, target string) (*accountInspectionRun, bool) {
+func (s *accountInspectionService) resolveTargetLocked(target accountInspectionTarget) (
+	*accountInspectionTarget,
+	error,
+) {
+	if s.handler == nil || s.handler.authManager == nil {
+		return nil, errInspectionAccountNotFound
+	}
+	var selected *coreauth.Auth
+	if target.ID != "" {
+		auth, _ := s.handler.authManager.GetByID(target.ID)
+		if target.matches(auth) {
+			selected = auth
+		}
+	} else {
+		for _, auth := range s.handler.authManager.List() {
+			if target.matches(auth) {
+				if selected != nil {
+					return nil, errInspectionAccountAmbiguous
+				}
+				selected = auth
+			}
+		}
+	}
+	if selected == nil {
+		return nil, errInspectionAccountNotFound
+	}
+	if !inspectionProviderAllowed(s.schedule, selected.Provider) {
+		return nil, errInspectionProviderExcluded
+	}
+	return &accountInspectionTarget{ID: selected.ID, FileName: selected.FileName, AuthIndex: selected.Index}, nil
+}
+
+func (s *accountInspectionService) runAsync(
+	triggerCtx context.Context,
+	trigger string,
+	target *accountInspectionTarget,
+) (*accountInspectionRun, error) {
 	s.mu.Lock()
+	if err := triggerCtx.Err(); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	if s.status == accountInspectionStatusRunning {
 		s.mu.Unlock()
-		return nil, false
+		return nil, errInspectionRunning
+	}
+	if target != nil {
+		var err error
+		target, err = s.resolveTargetLocked(*target)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	run := &accountInspectionRun{
@@ -549,8 +646,11 @@ func (s *accountInspectionService) runAsync(trigger string, target string) (*acc
 	s.mu.Unlock()
 	_ = s.persist()
 
-	go s.execute(ctx, run, target)
-	return out, true
+	go func() {
+		defer cancel()
+		s.execute(ctx, run, target)
+	}()
+	return out, nil
 }
 
 func (s *accountInspectionService) stop() bool {
@@ -574,77 +674,98 @@ func (s *accountInspectionService) scheduleLoop(ctx context.Context, intervalSec
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.runAsync("schedule", "")
+			_, _ = s.runAsync(ctx, "schedule", nil)
 		}
 	}
 }
 
-func (s *accountInspectionService) timeout() time.Duration {
-	s.mu.Lock()
-	seconds := s.schedule.TimeoutSeconds
-	s.mu.Unlock()
-	if seconds <= 0 {
-		return 0
-	}
-	return time.Duration(seconds) * time.Second
-}
+func (s *accountInspectionService) execute(
+	ctx context.Context,
+	run *accountInspectionRun,
+	target *accountInspectionTarget,
+) {
+	timeout := time.Duration(s.scheduleSnapshot().TimeoutSeconds) * time.Second
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-func (s *accountInspectionService) maxConcurrency() int {
-	s.mu.Lock()
-	limit := s.schedule.MaxConcurrency
-	s.mu.Unlock()
-	if limit < 1 {
-		return 1
+	var results []accountInspectionResult
+	if target == nil {
+		results = s.inspectAccounts(ctx, "")
+	} else if auth, ok := s.handler.authManager.GetByID(target.ID); ok && target.matches(auth) {
+		results = s.inspectAuths(ctx, []*coreauth.Auth{auth}, true)
 	}
-	return limit
-}
-
-func (s *accountInspectionService) execute(ctx context.Context, run *accountInspectionRun, target string) {
-	started := run.StartedAt
-	if timeout := s.timeout(); timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	results := s.inspectAccounts(ctx, target)
 	ended := time.Now().UTC()
-	status := accountInspectionStatusCompleted
-	if ctx.Err() != nil {
-		status = accountInspectionStatusStopped
-	}
-
 	runCopy := *run
-	runCopy.Status = status
+	runCopy.Status = accountInspectionStatusCompleted
 	runCopy.EndedAt = &ended
-	runCopy.Duration = ended.Sub(started).Milliseconds()
+	runCopy.Duration = ended.Sub(run.StartedAt).Milliseconds()
 	runCopy.Checked = len(results)
 	runCopy.Summary = summarizeInspectionResults(results)
 
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	s.mu.Lock()
-	if target == "" {
-		s.results = results
+	defer s.mu.Unlock()
+	if s.currentRun != run {
+		return
+	}
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		runCopy.Error = "account inspection timed out"
+	case ctx.Err() != nil:
+		runCopy.Error = "account inspection stopped by request"
+	case target != nil && len(results) == 0:
+		runCopy.Error = "account no longer matches the inspection target or schedule"
+	}
+	state := s.persistenceSnapshotLocked()
+	if runCopy.Error != "" {
+		runCopy.Status = accountInspectionStatusStopped
+		state.Logs = appendInspectionLog(state.Logs, "warn", runCopy.Error)
+	}
+	if target == nil && runCopy.Status == accountInspectionStatusCompleted {
+		state.Results = results
 	} else {
-		s.results = mergeInspectionResults(s.results, results)
+		state.Results = mergeInspectionResults(state.Results, results)
 	}
-	s.currentRun = nil
-	s.lastRun = &runCopy
-	s.runs = append(s.runs, runCopy)
-	if retention := s.schedule.RetentionRuns; retention > 0 && len(s.runs) > retention {
-		s.runs = append([]accountInspectionRun(nil), s.runs[len(s.runs)-retention:]...)
+	state.CurrentRun = nil
+	state.LastRun = &runCopy
+	state.Runs = append(state.Runs, runCopy)
+	if retention := s.schedule.RetentionRuns; retention > 0 && len(state.Runs) > retention {
+		state.Runs = state.Runs[len(state.Runs)-retention:]
 	}
-	s.status = status
-	s.cancel = nil
-	s.updatedAt = ended
-	s.addLogLocked("info", fmt.Sprintf("account inspection %s checked=%d", status, len(results)))
-	s.mu.Unlock()
-	_ = s.persist()
+	state.Status = runCopy.Status
+	state.UpdatedAt = ended
+	state.Logs = appendInspectionLog(
+		state.Logs, "info", fmt.Sprintf("account inspection %s checked=%d", runCopy.Status, len(results)),
+	)
+	if err := s.saveSnapshot(state); err != nil {
+		runCopy.Status = accountInspectionStatusStopped
+		runCopy.Error = "failed to save account inspection results"
+		state.Status = runCopy.Status
+		state.Runs[len(state.Runs)-1] = runCopy
+		state.Results = s.results
+		state.Logs = appendInspectionLog(s.logs, "error", runCopy.Error)
+	}
+	s.results, s.currentRun, s.lastRun, s.runs = state.Results, state.CurrentRun, state.LastRun, state.Runs
+	s.status, s.cancel, s.updatedAt, s.logs = state.Status, nil, state.UpdatedAt, state.Logs
 }
 
 func (s *accountInspectionService) inspectAccounts(ctx context.Context, target string) []accountInspectionResult {
 	if s.handler == nil || s.handler.authManager == nil {
 		return []accountInspectionResult{}
 	}
-	auths := s.handler.authManager.List()
+	if target != "" {
+		return s.inspectAuths(ctx, []*coreauth.Auth{s.handler.findInspectionAuth(target)}, true)
+	}
+	return s.inspectAuths(ctx, s.handler.authManager.List(), false)
+}
+
+func (s *accountInspectionService) inspectAuths(
+	ctx context.Context,
+	auths []*coreauth.Auth,
+	explicit bool,
+) []accountInspectionResult {
+	schedule := s.scheduleSnapshot()
 	quotaStatus := quota.StatusResponse{Credentials: map[string]*quota.Entry{}}
 	probeTargets := make(map[string]quota.RefreshTarget)
 	if s.handler.quotaScheduler != nil {
@@ -654,23 +775,16 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 			probeTargets[inspectionProbeBindingKey(probeTarget.FileName, probeTarget.AuthIndex)] = probeTarget
 		}
 	}
-	providerSet := s.providerSet()
 	candidates := make([]accountInspectionCandidate, 0, len(auths))
 	for _, auth := range auths {
 		if ctx.Err() != nil {
 			break
 		}
-		if auth == nil {
+		if auth == nil || !inspectionProviderAllowed(schedule, auth.Provider) {
 			continue
 		}
 		auth.EnsureIndex()
-		if target != "" && !inspectionAuthMatches(auth, target) {
-			continue
-		}
 		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-		if len(providerSet) > 0 && !providerSet[provider] {
-			continue
-		}
 		probeTarget, hasProbeTarget := probeTargets[inspectionProbeBindingKey(auth.FileName, auth.Index)]
 		entry := quotaStatus.Credentials[probeTarget.EntryKey]
 		if entry == nil {
@@ -681,7 +795,7 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 		if entry == nil {
 			entry = quotaStatus.Credentials[auth.FileName]
 		}
-		if target == "" && inspectionAuthRequiresExplicitProbe(auth, entry) {
+		if !explicit && inspectionAuthRequiresExplicitProbe(auth, entry) {
 			continue
 		}
 		candidates = append(
@@ -697,7 +811,7 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 		return []accountInspectionResult{}
 	}
 	results := make([]accountInspectionResult, 0, len(candidates))
-	maxConcurrency := min(s.maxConcurrency(), len(candidates))
+	maxConcurrency := min(schedule.MaxConcurrency, len(candidates))
 	sem := make(chan struct{}, maxConcurrency)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -714,6 +828,9 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 				return
 			}
 			result := s.inspectAccount(ctx, item)
+			if ctx.Err() != nil {
+				return
+			}
 			s.addLog("info", "checked "+result.Account+" result="+result.Status+" reason="+result.Reason)
 			mu.Lock()
 			results = append(results, result)
@@ -768,18 +885,10 @@ func (s *accountInspectionService) inspectAccount(
 	return result
 }
 
-func (s *accountInspectionService) providerSet() map[string]bool {
-	s.mu.Lock()
-	providers := append([]string(nil), s.schedule.Providers...)
-	s.mu.Unlock()
-	if len(providers) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(providers))
-	for _, provider := range providers {
-		out[strings.ToLower(strings.TrimSpace(provider))] = true
-	}
-	return out
+func inspectionProviderAllowed(schedule accountInspectionSchedule, provider string) bool {
+	return len(schedule.Providers) == 0 || slices.Contains(
+		schedule.Providers, strings.ToLower(strings.TrimSpace(provider)),
+	)
 }
 
 func (s *accountInspectionService) resultsSnapshot(
@@ -838,11 +947,17 @@ func (s *accountInspectionService) addLog(level string, message string) {
 }
 
 func (s *accountInspectionService) addLogLocked(level string, message string) {
-	message = sanitizeInspectionText(message)
-	s.logs = append(s.logs, accountInspectionLogEntry{Time: time.Now().UTC(), Level: level, Message: message})
-	if len(s.logs) > 500 {
-		s.logs = append([]accountInspectionLogEntry(nil), s.logs[len(s.logs)-500:]...)
+	s.logs = appendInspectionLog(s.logs, level, message)
+}
+
+func appendInspectionLog(logs []accountInspectionLogEntry, level string, message string) []accountInspectionLogEntry {
+	logs = append(
+		logs, accountInspectionLogEntry{Time: time.Now().UTC(), Level: level, Message: sanitizeInspectionText(message)},
+	)
+	if len(logs) > 500 {
+		return append([]accountInspectionLogEntry(nil), logs[len(logs)-500:]...)
 	}
+	return logs
 }
 
 func (s *accountInspectionService) refreshSummaryLocked() accountInspectionRefreshSummary {
@@ -1204,16 +1319,20 @@ func cloneInspectionSchedule(src accountInspectionSchedule) accountInspectionSch
 
 func normalizePersistedInspectionSchedule(src accountInspectionSchedule) accountInspectionSchedule {
 	defaults := defaultAccountInspectionSchedule()
-	if src.IntervalSeconds < 60 {
+	if src.IntervalSeconds < 60 || int64(src.IntervalSeconds) > quota.MaxRefreshIntervalSeconds {
+		log.Warn("invalid saved account inspection interval; using the default")
 		src.IntervalSeconds = defaults.IntervalSeconds
 	}
-	if src.MaxConcurrency < 1 {
+	if src.MaxConcurrency < 1 || int64(src.MaxConcurrency) > maxAccountInspectionInteger {
+		log.Warn("invalid saved account inspection concurrency; using the default")
 		src.MaxConcurrency = defaults.MaxConcurrency
 	}
-	if src.TimeoutSeconds < 1 {
+	if src.TimeoutSeconds < 1 || int64(src.TimeoutSeconds) > quota.MaxRefreshIntervalSeconds {
+		log.Warn("invalid saved account inspection timeout; using the default")
 		src.TimeoutSeconds = defaults.TimeoutSeconds
 	}
-	if src.RetentionRuns < 1 {
+	if src.RetentionRuns < 1 || int64(src.RetentionRuns) > maxAccountInspectionInteger {
+		log.Warn("invalid saved account inspection retention; using the default")
 		src.RetentionRuns = defaults.RetentionRuns
 	}
 	src.Providers = normalizeInspectionProviders(src.Providers)

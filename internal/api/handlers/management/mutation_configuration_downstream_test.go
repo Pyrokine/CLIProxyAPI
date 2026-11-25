@@ -40,7 +40,7 @@ func TestMutationInspectionScheduleAcknowledgesPersistence(t *testing.T) {
 				kinds := []string{"configuration.runtime_applied", "configuration.persisted"}
 				switch mode {
 				case "persistence_failed":
-					status, outcome, kinds = 503, "partial", kinds[:1]
+					status, outcome, kinds = 503, "uncertain", nil
 				case "standalone":
 					kinds = kinds[:1]
 				case "validation":

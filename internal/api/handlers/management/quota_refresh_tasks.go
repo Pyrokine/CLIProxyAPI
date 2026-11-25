@@ -616,13 +616,16 @@ func (s *quotaRefreshTaskService) finishTargetFromRuntimeCause(taskID string, ta
 }
 
 func (s *quotaRefreshTaskService) finishTask(taskID string) {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	s.mu.Lock()
-	task := s.tasks[taskID]
+	current := s.tasks[taskID]
 	runtime := s.runtimes[taskID]
-	if task == nil || runtime == nil {
+	if current == nil || runtime == nil {
 		s.mu.Unlock()
 		return
 	}
+	task := cloneQuotaRefreshTask(current)
 	cause := context.Cause(runtime.ctx)
 	now := time.Now().UTC()
 	task.Summary = summarizeQuotaRefreshTaskTargets(task.Targets)
@@ -646,11 +649,21 @@ func (s *quotaRefreshTaskService) finishTask(taskID string) {
 		runtime.resumeCh = nil
 	}
 	delete(s.runtimes, taskID)
+	state := s.persistenceSnapshotLocked(task)
 	s.mu.Unlock()
 	runtime.cancel(context.Canceled)
-	if err := s.persistState(); err != nil {
-		s.failTaskPersistence(taskID, err)
+
+	// Readers keep the active snapshot until the terminal write completes.
+	err := s.saveState(state)
+	if err != nil {
+		markQuotaRefreshTaskPersistenceFailure(task, err, now)
 	}
+	s.mu.Lock()
+	s.recordPersistenceErrorLocked(err)
+	if s.tasks[taskID] == current {
+		s.tasks[taskID] = task
+	}
+	s.mu.Unlock()
 }
 
 func terminalQuotaRefreshTaskStatus(summary quotaRefreshTaskSummary) (string, string) {
@@ -679,17 +692,24 @@ func (s *quotaRefreshTaskService) persistOrFailTask(taskID string) bool {
 }
 
 func (s *quotaRefreshTaskService) failTaskPersistence(taskID string, persistenceErr error) {
-	if persistenceErr == nil {
-		return
-	}
 	s.mu.Lock()
 	task := s.tasks[taskID]
 	runtime := s.runtimes[taskID]
-	if task == nil {
+	if task == nil || runtime == nil {
 		s.mu.Unlock()
 		return
 	}
-	now := time.Now().UTC()
+	markQuotaRefreshTaskPersistenceFailure(task, persistenceErr, time.Now().UTC())
+	runtime.cancel(errQuotaRefreshTaskPersistence)
+	if runtime.resumeCh != nil {
+		close(runtime.resumeCh)
+		runtime.resumeCh = nil
+	}
+	s.mu.Unlock()
+	_ = s.persistState()
+}
+
+func markQuotaRefreshTaskPersistenceFailure(task *quotaRefreshTask, persistenceErr error, now time.Time) {
 	task.PersistenceError = persistenceErr.Error()
 	task.Error = errQuotaRefreshTaskPersistence.Error()
 	task.Status = quotaRefreshTaskStatusInconclusive
@@ -704,46 +724,44 @@ func (s *quotaRefreshTaskService) failTaskPersistence(taskID string, persistence
 		target.CompletedAt = cloneQuotaRefreshTaskTime(&now)
 	}
 	task.Summary = summarizeQuotaRefreshTaskTargets(task.Targets)
-	if runtime != nil {
-		runtime.cancel(errQuotaRefreshTaskPersistence)
-		if runtime.resumeCh != nil {
-			close(runtime.resumeCh)
-			runtime.resumeCh = nil
-		}
-	}
-	s.mu.Unlock()
-	_ = s.persistState()
 }
 
 func (s *quotaRefreshTaskService) persistState() error {
-	store := s.stateStore()
-	if store == nil {
-		return errQuotaRefreshTaskPersistenceUnavailable
-	}
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
-	state := s.persistenceSnapshot()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := store.saveQuotaRefreshTasks(ctx, state)
 	s.mu.Lock()
-	if err != nil {
-		s.persistenceError = err.Error()
-	} else {
-		s.persistenceError = ""
-	}
+	state := s.persistenceSnapshotLocked(nil)
+	s.mu.Unlock()
+	err := s.saveState(state)
+	s.mu.Lock()
+	s.recordPersistenceErrorLocked(err)
 	s.mu.Unlock()
 	return err
 }
 
-func (s *quotaRefreshTaskService) persistenceSnapshot() quotaRefreshTasksPersistedState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *quotaRefreshTaskService) saveState(state quotaRefreshTasksPersistedState) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.stateStore().saveQuotaRefreshTasks(ctx, state)
+}
+
+func (s *quotaRefreshTaskService) recordPersistenceErrorLocked(err error) {
+	s.persistenceError = ""
+	if err != nil {
+		s.persistenceError = err.Error()
+	}
+}
+
+func (s *quotaRefreshTaskService) persistenceSnapshotLocked(completed *quotaRefreshTask) quotaRefreshTasksPersistedState {
 	state := quotaRefreshTasksPersistedState{
 		Tasks:     make([]quotaRefreshTask, 0, len(s.order)),
 		UpdatedAt: time.Now().UTC(),
 	}
 	for _, taskID := range s.order {
+		if completed != nil && taskID == completed.ID {
+			state.Tasks = append(state.Tasks, *completed)
+			continue
+		}
 		task := cloneQuotaRefreshTask(s.tasks[taskID])
 		if task != nil {
 			state.Tasks = append(state.Tasks, *task)
