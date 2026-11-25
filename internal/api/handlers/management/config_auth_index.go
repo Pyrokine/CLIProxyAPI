@@ -49,31 +49,37 @@ func (views configAuthIndexViews) response() configAuthIndexResponse {
 type geminiKeyWithAuthIndex struct {
 	config.GeminiKey
 	AuthIndex string `json:"auth-index,omitempty"`
+	AliasRef  string `json:"alias-ref,omitempty"`
 }
 
 type claudeKeyWithAuthIndex struct {
 	config.ClaudeKey
 	AuthIndex string `json:"auth-index,omitempty"`
+	AliasRef  string `json:"alias-ref,omitempty"`
 }
 
 type codexKeyWithAuthIndex struct {
 	config.CodexKey
 	AuthIndex string `json:"auth-index,omitempty"`
+	AliasRef  string `json:"alias-ref,omitempty"`
 }
 
 type xaiKeyWithAuthIndex struct {
 	config.XAIKey
 	AuthIndex string `json:"auth-index,omitempty"`
+	AliasRef  string `json:"alias-ref,omitempty"`
 }
 
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
+	AliasRef  string `json:"alias-ref,omitempty"`
 }
 
 type openAICompatibilityAPIKeyWithAuthIndex struct {
 	config.OpenAICompatibilityAPIKey
 	AuthIndex string `json:"auth-index,omitempty"`
+	AliasRef  string `json:"alias-ref,omitempty"`
 }
 
 type openAICompatibilityWithAuthIndex struct {
@@ -260,6 +266,7 @@ func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 		out[i] = geminiKeyWithAuthIndex{
 			GeminiKey: cfg.GeminiKey[i],
 			AuthIndex: views.gemini[i],
+			AliasRef:  providerKeyAliasReference(cfg.GeminiKey[i].APIKey),
 		}
 	}
 	return out
@@ -276,6 +283,7 @@ func (h *Handler) interactionsKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 		out[i] = geminiKeyWithAuthIndex{
 			GeminiKey: cfg.InteractionsKey[i],
 			AuthIndex: views.interactions[i],
+			AliasRef:  providerKeyAliasReference(cfg.InteractionsKey[i].APIKey),
 		}
 	}
 	return out
@@ -292,6 +300,7 @@ func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 		out[i] = claudeKeyWithAuthIndex{
 			ClaudeKey: cfg.ClaudeKey[i],
 			AuthIndex: views.claude[i],
+			AliasRef:  providerKeyAliasReference(cfg.ClaudeKey[i].APIKey),
 		}
 	}
 	return out
@@ -308,6 +317,7 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 		out[i] = codexKeyWithAuthIndex{
 			CodexKey:  cfg.CodexKey[i],
 			AuthIndex: views.codex[i],
+			AliasRef:  providerKeyAliasReference(cfg.CodexKey[i].APIKey),
 		}
 	}
 	return out
@@ -324,6 +334,7 @@ func (h *Handler) metaKeysWithAuthIndex() []codexKeyWithAuthIndex {
 		out[i] = codexKeyWithAuthIndex{
 			CodexKey:  cfg.MetaKey[i],
 			AuthIndex: views.meta[i],
+			AliasRef:  providerKeyAliasReference(cfg.MetaKey[i].APIKey),
 		}
 	}
 	return out
@@ -340,6 +351,7 @@ func (h *Handler) xaiKeysWithAuthIndex() []xaiKeyWithAuthIndex {
 		out[i] = xaiKeyWithAuthIndex{
 			XAIKey:    cfg.XAIKey[i],
 			AuthIndex: views.xai[i],
+			AliasRef:  providerKeyAliasReference(cfg.XAIKey[i].APIKey),
 		}
 	}
 	return out
@@ -356,6 +368,7 @@ func (h *Handler) vertexCompatKeysWithAuthIndex() []vertexCompatKeyWithAuthIndex
 		out[i] = vertexCompatKeyWithAuthIndex{
 			VertexCompatKey: cfg.VertexCompatAPIKey[i],
 			AuthIndex:       views.vertex[i],
+			AliasRef:        providerKeyAliasReference(cfg.VertexCompatAPIKey[i].APIKey),
 		}
 	}
 	return out
@@ -396,6 +409,7 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 				response.APIKeyEntries[j] = openAICompatibilityAPIKeyWithAuthIndex{
 					OpenAICompatibilityAPIKey: entry.APIKeyEntries[j],
 					AuthIndex:                 authIndex,
+					AliasRef:                  providerKeyAliasReference(entry.APIKeyEntries[j].APIKey),
 				}
 			}
 		}

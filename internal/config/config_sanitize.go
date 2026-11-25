@@ -10,6 +10,35 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// ConfiguredProviderKeyRows returns the credential key values in config order, including disabled providers.
+func (cfg *Config) ConfiguredProviderKeyRows() map[string][][]string {
+	rows := map[string][][]string{
+		"gemini-api-key":       singleProviderKeyRows(cfg.GeminiKey),
+		"interactions-api-key": singleProviderKeyRows(cfg.InteractionsKey),
+		"claude-api-key":       singleProviderKeyRows(cfg.ClaudeKey),
+		"codex-api-key":        singleProviderKeyRows(cfg.CodexKey),
+		"meta-api-key":         singleProviderKeyRows(cfg.MetaKey),
+		"xai-api-key":          singleProviderKeyRows(cfg.XAIKey),
+		"vertex-api-key":       singleProviderKeyRows(cfg.VertexCompatAPIKey),
+	}
+	compatibility := make([][]string, len(cfg.OpenAICompatibility))
+	for i, provider := range cfg.OpenAICompatibility {
+		for _, entry := range provider.APIKeyEntries {
+			compatibility[i] = append(compatibility[i], entry.APIKey)
+		}
+	}
+	rows["openai-compatibility"] = compatibility
+	return rows
+}
+
+func singleProviderKeyRows[T interface{ GetAPIKey() string }](rows []T) [][]string {
+	keys := make([][]string, len(rows))
+	for i, row := range rows {
+		keys[i] = []string{row.GetAPIKey()}
+	}
+	return keys
+}
+
 // sanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
 func (cfg *Config) sanitizePayloadRules() {
 	if cfg == nil {

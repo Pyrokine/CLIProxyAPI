@@ -33,6 +33,7 @@ type structListResource[T any] struct {
 	stableMatchIndex         func(h *Handler, cfg *config.Config, value string) int
 	postMatchSecondary       bool // include secondary match key when detecting duplicate POST entries
 	postEntryEqual           func(left, right *T) bool
+	rejectPatchDuplicates    bool // reject edits that sanitizing the list would collapse
 	reconcilePut             func(entry *T, existing []T)
 	reconcilePatch           func(entry *T, existing *T, raw json.RawMessage) error
 	trimMatch                bool                // whether to TrimSpace match values in Delete
@@ -226,6 +227,7 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 	matchValue, hasMatch := deleteStructEntryMatch(c, r)
 	secondaryValue, hasSecondary := deleteStructEntrySecondaryMatch(c, r)
 	indexValue, hasIndex := deleteStructEntryIndex(c)
+	var entryRef *string
 
 	if !hasMatch && !hasIndex && c.Request.Body != nil && c.Request.ContentLength != 0 {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
@@ -254,10 +256,19 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 				indexValue = value
 				hasIndex = true
 			}
+			if raw, ok := body["entry-ref"]; ok && r.stableMatchIndex != nil {
+				var value string
+				if err = json.Unmarshal(raw, &value); err != nil || strings.TrimSpace(value) == "" {
+					rejectMutation(mutationRequestContext(c))
+					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential entry reference"})
+					return
+				}
+				entryRef = &value
+			}
 		}
 	}
 
-	if !hasMatch && !hasIndex {
+	if !hasMatch && !hasIndex && entryRef == nil {
 		rejectMutation(mutationRequestContext(c))
 		c.JSON(400, gin.H{"error": fmt.Sprintf("missing %s or index", r.matchQueryParam)})
 		return
@@ -265,7 +276,25 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 	if _, ok := h.mutateConfig(
 		c, func(next *config.Config) error {
 			list := r.getList(next)
-			if hasMatch {
+			if entryRef != nil {
+				index := -1
+				for i := range list {
+					if providerEntryReference(r.configKey, &list[i]) == *entryRef {
+						if index != -1 {
+							return newConfigMutationError(
+								http.StatusConflict, "multiple credentials match the selected entry",
+							)
+						}
+						index = i
+					}
+				}
+				if index == -1 {
+					return newConfigMutationError(
+						http.StatusConflict, "credential has changed; refresh before deleting",
+					)
+				}
+				indexValue = index
+			} else if hasMatch {
 				resolvedMatch := matchValue
 				resolvedSecondary := secondaryValue
 				if r.trimMatch {
@@ -386,8 +415,9 @@ func patchStructEntry[T any](
 	}
 
 	var envelope struct {
-		Index *int            `json:"index"`
-		Value json.RawMessage `json:"value"`
+		Index     *int            `json:"index"`
+		Value     json.RawMessage `json:"value"`
+		KeepEntry bool            `json:"keep-entry"`
 	}
 	if err = json.Unmarshal(data, &envelope); err != nil || len(envelope.Value) == 0 {
 		rejectMutation(mutationRequestContext(c))
@@ -467,6 +497,9 @@ func patchStructEntry[T any](
 			entry := list[targetIndex]
 			if errApply := apply(&entry, envelope.Value); errApply != nil {
 				if errors.Is(errApply, errEntryDeleted) {
+					if envelope.KeepEntry {
+						return newConfigMutationError(http.StatusBadRequest, "required credential field is empty")
+					}
 					list = append(list[:targetIndex], list[targetIndex+1:]...)
 					r.setList(next, list)
 					r.sanitize(next)
@@ -493,6 +526,10 @@ func patchStructEntry[T any](
 				if errValidate := r.validate(&entry, &list[targetIndex]); errValidate != nil {
 					return errValidate
 				}
+			}
+			if r.rejectPatchDuplicates && (structEntryExists(entry, list[:targetIndex], r) ||
+				structEntryExists(entry, list[targetIndex+1:], r)) {
+				return newConfigMutationError(http.StatusConflict, "item already exists")
 			}
 			list[targetIndex] = entry
 			r.setList(next, list)
@@ -527,10 +564,11 @@ var geminiKeyResource = structListResource[config.GeminiKey]{
 		}
 		return -1
 	},
-	postEntryEqual:     geminiKeyRouteEqual,
-	trimMatch:          true,
-	trimSecondaryMatch: true,
-	strictDelete:       true,
+	postEntryEqual:        geminiKeyRouteEqual,
+	rejectPatchDuplicates: true,
+	trimMatch:             true,
+	trimSecondaryMatch:    true,
+	strictDelete:          true,
 }
 
 var interactionsKeyResource = structListResource[config.GeminiKey]{
@@ -553,10 +591,11 @@ var interactionsKeyResource = structListResource[config.GeminiKey]{
 		}
 		return -1
 	},
-	postEntryEqual:     geminiKeyRouteEqual,
-	trimMatch:          true,
-	trimSecondaryMatch: true,
-	strictDelete:       true,
+	postEntryEqual:        geminiKeyRouteEqual,
+	rejectPatchDuplicates: true,
+	trimMatch:             true,
+	trimSecondaryMatch:    true,
+	strictDelete:          true,
 }
 
 var claudeKeyResource = structListResource[config.ClaudeKey]{
@@ -688,9 +727,10 @@ var vertexCompatKeyResource = structListResource[config.VertexCompatKey]{
 		}
 		return -1
 	},
-	postMatchSecondary: true,
-	trimMatch:          true,
-	trimSecondaryMatch: true,
+	postMatchSecondary:    true,
+	rejectPatchDuplicates: true,
+	trimMatch:             true,
+	trimSecondaryMatch:    true,
 }
 
 var codexKeyResource = structListResource[config.CodexKey]{

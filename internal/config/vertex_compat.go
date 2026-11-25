@@ -98,7 +98,7 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 		return
 	}
 
-	seen := make(map[string]struct{}, len(cfg.VertexCompatAPIKey))
+	seen := make(map[[2]string]struct{}, len(cfg.VertexCompatAPIKey))
 	out := cfg.VertexCompatAPIKey[:0]
 	for i := range cfg.VertexCompatAPIKey {
 		entry := cfg.VertexCompatAPIKey[i]
@@ -112,19 +112,21 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 
-		// Sanitize models: remove entries without valid alias
 		sanitizedModels := make([]VertexCompatModel, 0, len(entry.Models))
 		for _, model := range entry.Models {
-			model.Alias = strings.TrimSpace(model.Alias)
 			model.Name = strings.TrimSpace(model.Name)
-			if model.Alias != "" && model.Name != "" {
-				sanitizedModels = append(sanitizedModels, model)
+			if model.Name == "" {
+				continue
 			}
+			model.Alias = strings.TrimSpace(model.Alias)
+			if model.Alias == "" {
+				model.Alias = model.Name
+			}
+			sanitizedModels = append(sanitizedModels, model)
 		}
 		entry.Models = sanitizedModels
 
-		// Use API key + base URL as uniqueness key
-		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		uniqueKey := [2]string{entry.APIKey, entry.BaseURL}
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}

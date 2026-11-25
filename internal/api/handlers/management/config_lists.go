@@ -558,7 +558,21 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 // api-key-aliases
 
 func (h *Handler) GetAPIKeyAliases(c *gin.Context) {
-	writeRedactedJSON(c, 200, gin.H{"api-key-aliases": h.apiKeyAliasesSnapshot()})
+	aliases := h.apiKeyAliasesSnapshot()
+	if c.Query("by") == "credential-ref" {
+		byRef := make(map[string]string, len(aliases))
+		for key, alias := range aliases {
+			if key != strings.TrimSpace(key) {
+				continue
+			}
+			if reference := providerKeyAliasReference(key); reference != "" {
+				byRef[reference] = alias
+			}
+		}
+		writeRedactedJSON(c, http.StatusOK, gin.H{"aliases-by-ref": byRef})
+		return
+	}
+	writeRedactedJSON(c, http.StatusOK, gin.H{"api-key-aliases": aliases})
 }
 
 func configAPIKeyAliases(cfg *config.Config) map[string]string {
@@ -630,22 +644,32 @@ func (h *Handler) PutAPIKeyAliases(c *gin.Context) {
 
 func (h *Handler) PatchAPIKeyAlias(c *gin.Context) {
 	var body struct {
-		Key   string `json:"key"`
-		Alias string `json:"alias"`
+		Key    string `json:"key"`
+		KeyRef string `json:"key-ref"`
+		Alias  string `json:"alias"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Key == "" {
+	if err := c.ShouldBindJSON(&body); err != nil || (body.Key == "") == (body.KeyRef == "") {
 		rejectMutation(mutationRequestContext(c))
-		c.JSON(400, gin.H{"error": "invalid body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "send one key or key reference"})
 		return
 	}
 	if _, ok := h.mutateConfig(
 		c, func(next *config.Config) error {
-			resolvedKey, errResolve := resolveSubmittedAPIKey(body.Key, aliasKeyCandidates(next.APIKeyAliases))
-			if errResolve != nil {
-				return errResolve
-			}
-			if errValidate := validateAPIKey(resolvedKey); errValidate != nil {
-				return errValidate
+			var resolvedKey string
+			if body.KeyRef != "" {
+				resolvedKey = resolveProviderKeyAliasReference(next, body.KeyRef)
+				if resolvedKey == "" {
+					return newConfigMutationError(http.StatusConflict, "credential has changed; refresh and retry")
+				}
+			} else {
+				var errResolve error
+				resolvedKey, errResolve = resolveSubmittedAPIKey(body.Key, aliasKeyCandidates(next.APIKeyAliases))
+				if errResolve != nil {
+					return errResolve
+				}
+				if errValidate := validateAPIKey(resolvedKey); errValidate != nil {
+					return errValidate
+				}
 			}
 			if body.Alias == "" {
 				delete(next.APIKeyAliases, resolvedKey)
@@ -926,6 +950,7 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 				Weight         json.RawMessage             `json:"weight"`
 				Prefix         *string                     `json:"prefix"`
 				BaseURL        *string                     `json:"base-url"`
+				ClearBaseURL   bool                        `json:"clear-base-url"`
 				ProxyURL       *string                     `json:"proxy-url"`
 				Headers        *map[string]string          `json:"headers"`
 				Models         *[]config.VertexCompatModel `json:"models"`
@@ -948,7 +973,14 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 				return err
 			}
 			setTrimmed(p.Prefix, &entry.Prefix)
-			if err := setRequiredBaseURL(p.BaseURL, &entry.BaseURL); err != nil {
+			if p.ClearBaseURL {
+				if p.BaseURL != nil {
+					return newConfigMutationError(
+						http.StatusBadRequest, "base-url and clear-base-url cannot both be set",
+					)
+				}
+				entry.BaseURL = ""
+			} else if err := setRequiredBaseURL(p.BaseURL, &entry.BaseURL); err != nil {
 				return err
 			}
 			setTrimmed(p.ProxyURL, &entry.ProxyURL)
@@ -1683,9 +1715,6 @@ func normalizeModels[T any](
 // keepEither keeps models where at least one of Name/Alias is non-empty.
 func keepEither(name, alias string) bool { return name != "" || alias != "" }
 
-// keepBoth keeps models where both Name and Alias are non-empty.
-func keepBoth(name, alias string) bool { return name != "" && alias != "" }
-
 func normalizeClaudeKey(entry *config.ClaudeKey) {
 	if entry == nil {
 		return
@@ -1749,11 +1778,6 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
-	entry.Models = normalizeModels(
-		entry.Models, func(m *config.VertexCompatModel) (*string, *string) {
-			return &m.Name, &m.Alias
-		}, keepBoth,
-	)
 }
 
 func sanitizedOAuthRequestScopedErrors(

@@ -502,13 +502,14 @@ redis-usage-queue-retention-seconds: 60
 #         alias: "provider-image"
 #         image: true # Route this alias through /v1/images/generations and /v1/images/edits.
 
-# Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
+# Vertex-compatible API keys
 # vertex-api-key:
-#   - api-key: "vk-123..."                        # x-goog-api-key header
-#     prefix: "test"                # optional: require calls like "test/vertex-pro"
-#                                    # to target this credential
-#     request-retry: 3               # optional: 0 disables retries; omit or set < 0 to use the global value
-#     base-url: "https://example.com/api"         # e.g. https://zenmux.ai/api
+#   - api-key: "<provider-api-key>" # x-goog-api-key header
+#     prefix: "test" # Optional: require calls like "test/vertex-pro" to target this credential.
+#     request-retry: null # Inherit the global retry count.
+#     disable-cooling: null # Inherit global cooldown scheduling.
+#     interactions: false # Omission also uses the regular Vertex route.
+#     base-url: "" # Empty uses the built-in Vertex endpoint.
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -520,6 +521,7 @@ redis-usage-queue-retention-seconds: 60
 #           levels: ["high", "medium", "low", "none", "auto"]
 #       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
+#     excluded-models: [] # No per-credential exclusions by default.
 
 # OAuth model name aliases configured globally per channel
 # These aliases rename model IDs for both model listing and request routing.

@@ -286,7 +286,16 @@ func ValidateConfig(cfg *Config) []string {
 	if len(cfg.APIKeyAliases) > 0 {
 		apiKeySet := make(map[string]struct{}, len(cfg.APIKeys))
 		for _, key := range cfg.APIKeys {
-			apiKeySet[key] = struct{}{}
+			apiKeySet[strings.TrimSpace(key)] = struct{}{}
+		}
+		for _, rows := range cfg.ConfiguredProviderKeyRows() {
+			for _, row := range rows {
+				for _, key := range row {
+					if key := strings.TrimSpace(key); key != "" {
+						apiKeySet[key] = struct{}{}
+					}
+				}
+			}
 		}
 		aliasValues := make(map[string]bool, len(cfg.APIKeyAliases))
 		for key, alias := range cfg.APIKeyAliases {

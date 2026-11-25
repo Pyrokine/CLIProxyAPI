@@ -128,8 +128,8 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	}
 
 	authIndexes := h.buildConfigAuthIndexViews(cfg).response()
-	writeRedactedJSON(
-		c, 200, configResponse{
+	payload, err := redactedManagementPayload(
+		configResponse{
 			Config:      cfg,
 			AuthIndexes: authIndexes,
 			RemoteManagement: remoteManagementConfigResponse{
@@ -146,6 +146,13 @@ func (h *Handler) GetConfig(c *gin.Context) {
 			},
 		},
 	)
+	response, ok := payload.(map[string]any)
+	if err != nil || !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to redact management response"})
+		return
+	}
+	addProviderKeyAliasReferences(response, cfg)
+	c.JSON(http.StatusOK, response)
 }
 
 type releaseInfo struct {

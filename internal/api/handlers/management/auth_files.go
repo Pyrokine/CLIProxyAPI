@@ -421,20 +421,38 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		return
 	}
 
-	// Try to find auth ID via authManager
-	var authID string
-	if h.authManager != nil {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
-				authID = auth.ID
-				break
+	authID := name
+	if authIndex, provided := c.GetQuery("auth_index"); provided {
+		if strings.TrimSpace(authIndex) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index must not be empty"})
+			return
+		}
+		auth, found := h.lookupAuthFile(name, authIndex)
+		if !found {
+			c.JSON(http.StatusConflict, gin.H{"error": "credential identity has changed; refresh and select it again"})
+			return
+		}
+		authID = auth.ID
+	} else if h.authManager != nil {
+		if _, explicitID := h.authManager.GetByID(name); !explicitID {
+			var fileID string
+			for _, auth := range h.authManager.List() {
+				if auth.FileName != name {
+					continue
+				}
+				if fileID != "" {
+					c.JSON(
+						http.StatusConflict,
+						gin.H{"error": "multiple credentials use this name; auth_index is required"},
+					)
+					return
+				}
+				fileID = auth.ID
+			}
+			if fileID != "" {
+				authID = fileID
 			}
 		}
-	}
-
-	if authID == "" {
-		authID = name // fallback to filename as ID
 	}
 
 	// Get models from registry
