@@ -10,15 +10,32 @@ const modelQuotaCooldownDuration = 5 * time.Minute
 
 // ModelAvailability describes the configured and currently usable runtime clients for one model.
 type ModelAvailability struct {
-	ModelID              string     `json:"model_id"`
-	Info                 *ModelInfo `json:"model_info,omitempty"`
-	ConfiguredClients    int        `json:"configured_clients"`
-	AvailableClients     int        `json:"available_clients"`
-	QuotaCooldownClients int        `json:"quota_cooldown_clients"`
-	SuspendedClients     int        `json:"suspended_clients"`
-	ConfiguredProviders  []string   `json:"configured_providers,omitempty"`
-	AvailableProviders   []string   `json:"available_providers,omitempty"`
-	PreferredProvider    string     `json:"preferred_provider,omitempty"`
+	ModelID              string                    `json:"model_id"`
+	Info                 *ModelInfo                `json:"model_info,omitempty"`
+	ConfiguredClients    int                       `json:"configured_clients"`
+	AvailableClients     int                       `json:"available_clients"`
+	QuotaCooldownClients int                       `json:"quota_cooldown_clients"`
+	SuspendedClients     int                       `json:"suspended_clients"`
+	ConfiguredProviders  []string                  `json:"configured_providers,omitempty"`
+	AvailableProviders   []string                  `json:"available_providers,omitempty"`
+	PreferredProvider    string                    `json:"preferred_provider,omitempty"`
+	Clients              []ModelAvailabilityClient `json:"-"`
+}
+
+type ModelClientState uint8
+
+const (
+	ModelClientSuspended ModelClientState = iota
+	ModelClientQuotaCooldown
+	ModelClientAvailable
+)
+
+// ModelAvailabilityClient identifies a credential's registration before public IDs are grouped in the catalog.
+type ModelAvailabilityClient struct {
+	ID          string
+	Provider    string
+	CatalogName string
+	State       ModelClientState
 }
 
 type modelAvailabilityState struct {
@@ -60,7 +77,8 @@ func (r *ModelRegistry) GetModelAvailabilitySnapshot() []ModelAvailability {
 		for _, modelID := range modelIDs {
 			key := modelAvailabilityKey(modelID)
 			state := states[key]
-			if state == nil {
+			registration := r.models[modelID]
+			if state == nil || registration == nil {
 				continue
 			}
 			if _, exists := seen[key]; exists {
@@ -73,25 +91,29 @@ func (r *ModelRegistry) GetModelAvailabilitySnapshot() []ModelAvailability {
 				state.configuredProvider[provider]++
 			}
 
-			reason := strings.TrimSpace(state.registration.SuspendedClients[clientID])
-			if reason != "" && !strings.EqualFold(reason, "quota") {
+			client := ModelAvailabilityClient{ID: clientID, Provider: provider}
+			if info := r.clientModelInfos[clientID][modelID]; info != nil {
+				client.CatalogName = info.CatalogName
+			}
+			reason := strings.TrimSpace(registration.SuspendedClients[clientID])
+			quotaTime := registration.QuotaExceededClients[clientID]
+			switch {
+			case reason != "" && !strings.EqualFold(reason, "quota"):
+				client.State = ModelClientSuspended
 				state.availability.SuspendedClients++
-				continue
-			}
-			quotaCooldown := strings.EqualFold(reason, "quota")
-			if quotaTime := state.registration.QuotaExceededClients[clientID]; quotaTime != nil &&
-				now.Sub(*quotaTime) < modelQuotaCooldownDuration {
-				quotaCooldown = true
-			}
-			if quotaCooldown {
+			case strings.EqualFold(
+				reason, "quota",
+			) || quotaTime != nil && now.Sub(*quotaTime) < modelQuotaCooldownDuration:
+				client.State = ModelClientQuotaCooldown
 				state.availability.QuotaCooldownClients++
-				continue
+			default:
+				client.State = ModelClientAvailable
+				state.availability.AvailableClients++
+				if provider != "" {
+					state.availableProvider[provider]++
+				}
 			}
-
-			state.availability.AvailableClients++
-			if provider != "" {
-				state.availableProvider[provider]++
-			}
+			state.availability.Clients = append(state.availability.Clients, client)
 		}
 	}
 

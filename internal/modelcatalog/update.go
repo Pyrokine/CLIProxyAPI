@@ -1,10 +1,14 @@
 package modelcatalog
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
 type fieldChange struct {
@@ -25,6 +29,7 @@ type defaultUpdateChange struct {
 type DefaultUpdatePreview struct {
 	CurrentDefaultsVersion string                `json:"current_defaults_version"`
 	LatestDefaultsVersion  string                `json:"latest_defaults_version"`
+	Revision               string                `json:"revision"`
 	Changes                []defaultUpdateChange `json:"changes"`
 }
 
@@ -39,18 +44,43 @@ type ApplyResult struct {
 	Applied    int    `json:"applied"`
 }
 
-func PreviewDefaultUpdate(configPath string) (DefaultUpdatePreview, error) {
-	current, err := LoadOrInit(configPath, nil)
+func PreviewDefaultUpdate(configPath string, cfg ...*config.Config) (DefaultUpdatePreview, error) {
+	var snapshot *config.Config
+	if len(cfg) > 0 {
+		snapshot = cfg[0]
+	}
+	current, err := LoadOrInit(configPath, snapshot)
 	if err != nil {
 		return DefaultUpdatePreview{}, err
 	}
 	defaults := DefaultFile()
-	changes := diffDefaults(current, defaults)
+	revision, err := defaultUpdateRevision(current, defaults)
+	if err != nil {
+		return DefaultUpdatePreview{}, err
+	}
 	return DefaultUpdatePreview{
 		CurrentDefaultsVersion: current.DefaultsVersion,
 		LatestDefaultsVersion:  defaults.DefaultsVersion,
-		Changes:                changes,
+		Revision:               revision,
+		Changes:                diffDefaults(current, defaults),
 	}, nil
+}
+
+func DefaultUpdateRevision(current File) (string, error) {
+	return defaultUpdateRevision(current, DefaultFile())
+}
+
+func defaultUpdateRevision(current, defaults File) (string, error) {
+	data, err := json.Marshal(
+		struct {
+			Catalog  File
+			Baseline File
+		}{current, defaults},
+	)
+	if err != nil {
+		return "", fmt.Errorf("encode model catalog revision: %w", err)
+	}
+	return fmt.Sprintf(`"%x"`, sha256.Sum256(data)), nil
 }
 
 func applyDefaultUpdate(configPath string, decisions []ApplyDecision) (ApplyResult, error) {
@@ -143,23 +173,21 @@ func diffDefaults(current, defaults File) []defaultUpdateChange {
 	for _, defaultModel := range defaults.Models {
 		name := defaultModel.Name
 		key := modelKey(name)
-		if _, wasRemoved := removed[key]; wasRemoved {
-			modelCopy := defaultModel
+		currentModel, exists := current.Find(name)
+		if _, wasRemoved := removed[key]; wasRemoved || !exists {
+			id, changeType := "new:"+key, "new_default"
+			if wasRemoved {
+				id, changeType = "restore:"+key, "restore_removed_default"
+			}
+			if exists {
+				defaultModel.Enabled, defaultModel.Speed = currentModel.Enabled, currentModel.Speed
+			}
+			fields := make(map[string]fieldChange)
+			appendPriceFieldChange(fields, current, defaults, name)
 			changes = append(
 				changes, defaultUpdateChange{
-					ID:      "restore:" + key,
-					Name:    name,
-					Type:    "restore_removed_default",
-					Default: &modelCopy,
+					ID: id, Name: name, Type: changeType, Current: currentModel, Default: &defaultModel, Fields: fields,
 				},
-			)
-			continue
-		}
-		currentModel, ok := current.Find(name)
-		if !ok {
-			modelCopy := defaultModel
-			changes = append(
-				changes, defaultUpdateChange{ID: "new:" + key, Name: name, Type: "new_default", Default: &modelCopy},
 			)
 			continue
 		}
@@ -259,7 +287,7 @@ func changedDefaultFields(current, defaults Model) map[string]fieldChange {
 func appendPriceFieldChange(fields map[string]fieldChange, current, defaults File, name string) {
 	currentPrice, hasCurrent := current.Price(name)
 	defaultPrice, hasDefault := defaults.Price(name)
-	if hasCurrent == hasDefault && (!hasCurrent || reflect.DeepEqual(currentPrice, defaultPrice)) {
+	if hasCurrent == hasDefault && (!hasCurrent || currentPrice.Equal(defaultPrice)) {
 		return
 	}
 	var currentValue, defaultValue any

@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"reflect"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
+	"gopkg.in/yaml.v3"
 )
 
 type configYAMLCatalogTransaction struct {
@@ -16,6 +18,7 @@ type configYAMLCatalogTransaction struct {
 	previousConfig *config.Config
 	previousYAML   []byte
 	previousExists bool
+	writesCatalog  bool
 	rollbackUsage  func() error
 }
 
@@ -24,6 +27,7 @@ func (h *Handler) prepareConfigYAMLCatalog(
 	next *config.Config,
 	previous []byte,
 	exists bool,
+	conditional bool,
 ) (*configYAMLCatalogTransaction, error) {
 	document, err := decodeConfigYAML(body)
 	if err != nil {
@@ -36,16 +40,26 @@ func (h *Handler) prepareConfigYAMLCatalog(
 	if err != nil || aliases == nil {
 		return nil, err
 	}
+	replaceAliases := true
+	if conditional && exists {
+		unchanged, err := unchangedYAMLOAuthAliases(previous, aliases)
+		if err != nil {
+			return nil, err
+		}
+		replaceAliases = !unchanged
+	}
 	previousConfig, err := config.Clone(h.cfg)
 	if err != nil {
 		return nil, err
 	}
-	transaction, err := modelcatalog.PrepareUpdate(
-		h.configFilePath, h.cfg, false, func(doc *modelcatalog.File) error {
+	var mutate func(*modelcatalog.File) error
+	if replaceAliases {
+		mutate = func(doc *modelcatalog.File) error {
 			modelcatalog.ReplaceOAuthModelAlias(doc, next.OAuthModelAlias)
 			return nil
-		},
-	)
+		}
+	}
+	transaction, err := modelcatalog.PrepareUpdate(h.configFilePath, h.cfg, false, mutate)
 	if err != nil {
 		return nil, err
 	}
@@ -56,8 +70,27 @@ func (h *Handler) prepareConfigYAMLCatalog(
 	next.OAuthModelAlias = candidate.ToOAuthModelAlias()
 	return &configYAMLCatalogTransaction{
 		transaction: transaction, previousConfig: previousConfig, previousYAML: append([]byte(nil), previous...),
-		previousExists: exists,
+		previousExists: exists, writesCatalog: replaceAliases,
 	}, nil
+}
+
+func unchangedYAMLOAuthAliases(previous []byte, aliases *yaml.Node) (bool, error) {
+	document, err := decodeConfigYAML(previous)
+	if err != nil || len(document.Content) == 0 {
+		return false, err
+	}
+	before, _, err := yamlEffectiveMappingValue(document.Content[0], "oauth-model-alias", nil)
+	if err != nil || before == nil {
+		return false, err
+	}
+	var previousValue, nextValue any
+	if err = before.Decode(&previousValue); err != nil {
+		return false, err
+	}
+	if err = aliases.Decode(&nextValue); err != nil {
+		return false, err
+	}
+	return reflect.DeepEqual(previousValue, nextValue), nil
 }
 
 func (h *Handler) commitConfigYAMLCatalog(
@@ -92,7 +125,9 @@ func (h *Handler) commitConfigYAMLCatalog(
 		failMutation(ctx)
 		return err
 	}
-	RecordMutationEffect(ctx, "model.persisted", "model")
+	if prepared.writesCatalog {
+		RecordMutationEffect(ctx, "model.persisted", "model")
+	}
 	RecordMutationEffect(ctx, "model.published", "model")
 	return nil
 }

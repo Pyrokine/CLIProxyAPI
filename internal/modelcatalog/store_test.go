@@ -1,6 +1,7 @@
 package modelcatalog
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -821,6 +822,36 @@ func TestPreparedUpdateDoesNotPublishBeforeFileCommit(t *testing.T) {
 	}
 	if _, ok := current.Find("candidate-model"); !ok {
 		t.Fatalf("candidate missing after commit: %#v", current.Models)
+	}
+}
+
+func TestPreparedCatalogSnapshotPreservesConcurrentFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(path, File{Models: []Model{{Name: "base-model", Enabled: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := PrepareUpdate(path, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	data, err := os.ReadFile(Path(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := append(data, '\n')
+	if err = os.WriteFile(Path(path), external, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = transaction.CommitFiles(); err == nil {
+		t.Fatal("snapshot accepted a concurrent file change")
+	}
+	if err = transaction.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if actual, err := os.ReadFile(Path(path)); err != nil || !bytes.Equal(actual, external) {
+		t.Fatalf("snapshot rollback replaced the concurrent file: %v", err)
 	}
 }
 

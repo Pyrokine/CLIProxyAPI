@@ -583,6 +583,39 @@ func validateLegacyModelAliases(index int, model Model) error {
 	return nil
 }
 
+func ValidateOAuthModelAliasChanges(channels map[string][]config.OAuthModelAlias) error {
+	if err := validateOAuthAliases(channels, nil); err != nil {
+		return err
+	}
+	for channel, aliases := range channels {
+		if aliases == nil {
+			return fmt.Errorf("OAuth model alias channel %q requires an array", channel)
+		}
+		edges := make(map[string]string, len(aliases))
+		for _, alias := range aliases {
+			edges[modelKey(alias.Alias)] = modelKey(alias.Name)
+		}
+		resolved := make(map[string]bool, len(edges))
+		for alias := range edges {
+			var path []string
+			for target := alias; edges[target] != ""; target = edges[target] {
+				if complete, seen := resolved[target]; seen {
+					if !complete {
+						return fmt.Errorf("OAuth model alias channel %q contains a cycle", channel)
+					}
+					break
+				}
+				resolved[target] = false
+				path = append(path, target)
+			}
+			for _, target := range path {
+				resolved[target] = true
+			}
+		}
+	}
+	return nil
+}
+
 func validateOAuthAliases(
 	aliasesByChannel map[string][]config.OAuthModelAlias,
 	models map[string]struct{},
@@ -607,7 +640,7 @@ func validateOAuthAliases(
 			if nameKey == aliasKey {
 				return fmt.Errorf("oauth_model_alias[%q][%d] alias must differ from name", channel, index)
 			}
-			if _, exists := models[nameKey]; !exists {
+			if _, exists := models[nameKey]; models != nil && !exists {
 				return fmt.Errorf("oauth_model_alias[%q][%d] references unknown model %q", channel, index, alias.Name)
 			}
 			if _, exists := seenAliases[aliasKey]; exists {

@@ -1,7 +1,9 @@
 package management
 
 import (
+	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -9,6 +11,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	internalUsage "github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
@@ -38,6 +41,7 @@ type modelCatalogRow struct {
 	RuntimeAvailableClients   int              `json:"runtime_available_clients,omitempty"`
 	RuntimeQuotaCooldown      int              `json:"runtime_quota_cooldown_clients,omitempty"`
 	RuntimeSuspended          int              `json:"runtime_suspended_clients,omitempty"`
+	RuntimeAmbiguousAliases   []string         `json:"runtime_ambiguous_aliases,omitempty"`
 	Requestable               bool             `json:"requestable"`
 	NotRequestableReason      string           `json:"not_requestable_reason,omitempty"`
 	Aliases                   []string         `json:"aliases,omitempty"`
@@ -57,6 +61,7 @@ type modelCatalogPatchRequest struct {
 	Enabled          *bool            `json:"enabled"`
 	Speed            *string          `json:"speed"`
 	Aliases          *[]string        `json:"aliases"`
+	AliasChannel     *string          `json:"alias_channel"`
 	Price            *modelPriceEntry `json:"price"`
 	ClearPrice       *bool            `json:"clear_price"`
 	RecalculateCosts *bool            `json:"recalculate_costs"`
@@ -146,46 +151,56 @@ func (h *Handler) PatchModelCatalogModel(c *gin.Context) {
 			return
 		}
 	}
+	if body.AliasChannel != nil && body.Aliases == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "alias_channel requires aliases"})
+		return
+	}
+	priceChanged := false
 	result, ok := h.mutateModelCatalog(
 		c,
 		modelCatalogMutationOptions{},
 		func(doc *modelcatalog.File) error {
-			priceOnly := body.RecalculateCosts != nil && !*body.RecalculateCosts &&
+			priceRequested := body.Price != nil || body.ClearPrice != nil && *body.ClearPrice
+			priceOnly := body.RecalculateCosts != nil && !*body.RecalculateCosts && priceRequested &&
 				body.Provider == nil && body.Channel == nil && body.Group == nil && body.DisplayName == nil &&
 				body.DisplayNameKebab == nil && body.Enabled == nil && body.Speed == nil && body.Aliases == nil
-			if priceOnly && (body.Price != nil || body.ClearPrice != nil && *body.ClearPrice) {
+			if !priceOnly {
+				model := doc.EnsureModel(body.Name, true)
+				applyModelCatalogPatch(model, body)
+				if !config.ModelSpeedAllowed(model.Name, model.Channel, model.Speed) {
+					return newConfigMutationError(http.StatusBadRequest, "unsupported model speed")
+				}
+				if body.Aliases != nil {
+					if err := modelcatalog.ReplaceModelAliases(
+						doc, model.Name, *body.Aliases, body.AliasChannel,
+					); err != nil {
+						rejectMutation(mutationRequestContext(c))
+						return newConfigMutationError(http.StatusBadRequest, err.Error())
+					}
+				}
+			}
+			if priceRequested {
+				before, hadPrice := doc.Price(body.Name)
 				if body.Price != nil {
 					doc.SetPrice(body.Name, *body.Price)
 				}
 				if body.ClearPrice != nil && *body.ClearPrice {
 					doc.DeletePrice(body.Name)
 				}
-				return nil
-			}
-			model := doc.EnsureModel(body.Name, true)
-			applyModelCatalogPatch(doc, model, body)
-			if !config.ModelSpeedAllowed(model.Name, model.Channel, model.Speed) {
-				return newConfigMutationError(http.StatusBadRequest, "unsupported model speed")
-			}
-			if body.Aliases != nil {
-				modelcatalog.ReplaceModelAliases(doc, body.Name, *body.Aliases)
+				after, hasPrice := doc.Price(body.Name)
+				priceChanged = hadPrice != hasPrice || (hadPrice && !before.Equal(after))
 			}
 			return nil
 		},
 	)
-	recalculate := body.Price != nil || (body.ClearPrice != nil && *body.ClearPrice)
-	if body.RecalculateCosts != nil && !*body.RecalculateCosts {
-		recalculate = false
-	}
-	recalculationPending := false
-	if result.config != nil {
-		recalculationPending = h.refreshModelPricing(recalculate)
-	}
 	if !ok {
 		return
 	}
 	response := h.modelCatalogResponse(result.config, result.doc)
-	response.RecalculationPending = recalculationPending
+	response.RecalculationPending = h.refreshModelPricing(
+		priceChanged &&
+			(body.RecalculateCosts == nil || *body.RecalculateCosts),
+	)
 	c.JSON(http.StatusOK, response)
 }
 
@@ -215,12 +230,13 @@ func (h *Handler) DeleteModelCatalogModel(c *gin.Context) {
 }
 
 func (h *Handler) GetModelCatalogDefaultUpdate(c *gin.Context) {
-	preview, err := modelcatalog.PreviewDefaultUpdate(h.configFilePath)
+	preview, err := modelcatalog.PreviewDefaultUpdate(h.configFilePath, h.configSnapshot())
 	if err != nil {
 		log.Warnf("model-catalog: failed to build default update preview: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build default update preview"})
 		return
 	}
+	c.Header("ETag", preview.Revision)
 	c.JSON(http.StatusOK, preview)
 }
 
@@ -232,30 +248,77 @@ func (h *Handler) ApplyModelCatalogDefaultUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
-	applied := 0
-	result, ok := h.mutateModelCatalog(
-		c,
-		modelCatalogMutationOptions{backup: true},
-		func(doc *modelcatalog.File) error {
-			var err error
-			applied, err = modelcatalog.ApplyDefaultDecisions(doc, body.Decisions)
+	ifMatch := strings.TrimSpace(c.GetHeader("If-Match"))
+	checkRevision := func(doc modelcatalog.File) error {
+		if ifMatch == "" {
+			return nil
+		}
+		revision, err := modelcatalog.DefaultUpdateRevision(doc)
+		if err != nil {
 			return err
-		},
-	)
-	recalculationPending := false
-	if result.config != nil {
-		recalculationPending = h.refreshModelPricing(true)
+		}
+		if ifMatch != revision {
+			rejectMutation(mutationRequestContext(c))
+			return newConfigMutationError(
+				http.StatusPreconditionFailed, "model catalog changed; reload the default update preview",
+			)
+		}
+		return nil
 	}
-	if !ok {
-		return
+
+	applied := 0
+	applyResult := modelcatalog.ApplyResult{Status: "ok"}
+	var catalog modelCatalogResponse
+	if defaultUpdateKeepsCatalog(body.Decisions) {
+		cfg := h.configSnapshot()
+		doc, err := modelcatalog.LoadOrInit(h.configFilePath, cfg)
+		if err == nil {
+			err = checkRevision(doc)
+		}
+		if err != nil {
+			respondModelCatalogMutationError(c, err)
+			return
+		}
+		catalog = h.modelCatalogResponse(cfg, doc)
+	} else {
+		priceChanged := false
+		result, ok := h.mutateModelCatalog(
+			c,
+			modelCatalogMutationOptions{backup: true},
+			func(doc *modelcatalog.File) error {
+				if err := checkRevision(*doc); err != nil {
+					return err
+				}
+				prices := make(map[string]modelcatalog.Price, len(body.Decisions))
+				for _, decision := range body.Decisions {
+					if price, ok := doc.Price(decision.Name); ok {
+						prices[decision.Name] = price
+					}
+				}
+				var err error
+				applied, err = modelcatalog.ApplyDefaultDecisions(doc, body.Decisions)
+				if err != nil {
+					return err
+				}
+				for _, decision := range body.Decisions {
+					before, hadPrice := prices[decision.Name]
+					after, hasPrice := doc.Price(decision.Name)
+					if hadPrice != hasPrice || (hadPrice && !before.Equal(after)) {
+						priceChanged = true
+						break
+					}
+				}
+				return nil
+			},
+		)
+		if !ok {
+			return
+		}
+		applyResult.BackupPath = result.backupPath
+		applyResult.Applied = applied
+		catalog = h.modelCatalogResponse(result.config, result.doc)
+		catalog.RecalculationPending = h.refreshModelPricing(priceChanged)
 	}
-	applyResult := modelcatalog.ApplyResult{
-		Status:     "ok",
-		BackupPath: result.backupPath,
-		Applied:    applied,
-	}
-	catalog := h.modelCatalogResponse(result.config, result.doc)
-	catalog.RecalculationPending = recalculationPending
 	c.JSON(
 		http.StatusOK,
 		gin.H{
@@ -265,10 +328,21 @@ func (h *Handler) ApplyModelCatalogDefaultUpdate(c *gin.Context) {
 	)
 }
 
-func applyModelCatalogPatch(doc *modelcatalog.File, model *modelcatalog.Model, body modelCatalogPatchRequest) {
-	if doc == nil || model == nil {
-		return
+func defaultUpdateKeepsCatalog(decisions []modelcatalog.ApplyDecision) bool {
+	for _, decision := range decisions {
+		if strings.TrimSpace(strings.TrimPrefix(decision.Name, "models/")) == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(decision.Action)) {
+		case "keep_current", "skip", "":
+		default:
+			return false
+		}
 	}
+	return true
+}
+
+func applyModelCatalogPatch(model *modelcatalog.Model, body modelCatalogPatchRequest) {
 	if body.Provider != nil {
 		model.Provider = strings.TrimSpace(*body.Provider)
 	}
@@ -290,12 +364,6 @@ func applyModelCatalogPatch(doc *modelcatalog.File, model *modelcatalog.Model, b
 	if body.Speed != nil {
 		model.Speed = strings.ToLower(strings.TrimSpace(*body.Speed))
 	}
-	if body.Price != nil {
-		doc.SetPrice(model.Name, *body.Price)
-	}
-	if body.ClearPrice != nil && *body.ClearPrice {
-		doc.DeletePrice(model.Name)
-	}
 }
 
 func (h *Handler) modelCatalogResponse(
@@ -303,73 +371,47 @@ func (h *Handler) modelCatalogResponse(
 	doc modelcatalog.File,
 ) modelCatalogResponse {
 	doc.Models = append([]modelcatalog.Model(nil), doc.Models...)
-	aliasesByModel := make(map[string][]string, len(doc.Models))
-	seenAliases := make(map[string]map[string]struct{}, len(doc.Models))
-	catalogNameByCandidate := make(map[string]string, len(doc.Models))
-	appendAlias := func(name, alias string) {
-		nameKey := modelCatalogResponseKey(name)
-		alias = strings.TrimSpace(strings.TrimPrefix(alias, "models/"))
-		aliasKey := modelCatalogResponseKey(alias)
-		if nameKey == "" || aliasKey == "" || nameKey == aliasKey {
-			return
-		}
-		if seenAliases[nameKey] == nil {
-			seenAliases[nameKey] = make(map[string]struct{})
-		}
-		if _, exists := seenAliases[nameKey][aliasKey]; exists {
-			return
-		}
-		seenAliases[nameKey][aliasKey] = struct{}{}
-		aliasesByModel[nameKey] = append(aliasesByModel[nameKey], alias)
-		catalogNameByCandidate[aliasKey] = nameKey
-	}
+	aliasesByModel := make(map[string]map[string]string, len(doc.Models))
+	aliasScopesByModel := make(map[string]map[string][]string)
+	catalogNames := make(map[string]struct{}, len(doc.Models))
 	for _, model := range doc.Models {
-		nameKey := modelCatalogResponseKey(model.Name)
-		catalogNameByCandidate[nameKey] = nameKey
+		name := modelCatalogResponseKey(model.Name)
+		catalogNames[name] = struct{}{}
+		aliasesByModel[name] = make(map[string]string)
 		for _, alias := range model.Aliases {
-			appendAlias(model.Name, alias)
+			aliasesByModel[name][modelCatalogResponseKey(alias)] = alias
 		}
 	}
-	for _, entries := range doc.OAuthModelAlias {
-		for _, entry := range entries {
-			nameKey := modelCatalogResponseKey(entry.Name)
-			catalogNameByCandidate[nameKey] = nameKey
-			appendAlias(entry.Name, entry.Alias)
-		}
-	}
-	for name := range aliasesByModel {
-		sort.Strings(aliasesByModel[name])
-	}
-
-	availabilityByModel := make(map[string]registry.ModelAvailability)
-	runtimeOnly := make(map[string]bool)
-	for _, availability := range registry.GetGlobalRegistry().GetModelAvailabilitySnapshot() {
-		candidateKey := modelCatalogResponseKey(availability.ModelID)
-		nameKey := catalogNameByCandidate[candidateKey]
-		if nameKey == "" {
-			displayName := ""
-			if availability.Info != nil {
-				displayName = availability.Info.DisplayName
-			}
-			model := doc.EnsureRuntimeModel(availability.ModelID, availability.PreferredProvider, displayName)
-			if model == nil {
+	ownersByAlias := make(map[string]map[string]string)
+	oauthAliases := doc.ToOAuthModelAlias()
+	for _, channel := range slices.Sorted(maps.Keys(oauthAliases)) {
+		for _, entry := range oauthAliases[channel] {
+			name, alias := modelCatalogResponseKey(entry.Name), modelCatalogResponseKey(entry.Alias)
+			if _, exists := catalogNames[name]; !exists || alias == "" || alias == name {
 				continue
 			}
-			nameKey = modelCatalogResponseKey(model.Name)
-			catalogNameByCandidate[nameKey] = nameKey
-			runtimeOnly[nameKey] = true
+			aliasesByModel[name][alias] = entry.Alias
+			if aliasScopesByModel[name] == nil {
+				aliasScopesByModel[name] = make(map[string][]string)
+			}
+			aliasScopesByModel[name][channel] = append(aliasScopesByModel[name][channel], entry.Alias)
+			if ownersByAlias[alias] == nil {
+				ownersByAlias[alias] = make(map[string]string)
+			}
+			ownersByAlias[alias][channel] = name
 		}
-		availabilityByModel[nameKey] = mergeModelAvailability(availabilityByModel[nameKey], availability)
 	}
+	runtimeModels := projectCatalogRuntime(&doc, catalogNames, ownersByAlias)
 
 	rows := make([]modelCatalogRow, 0, len(doc.Models))
 	for _, model := range doc.Models {
 		nameKey := modelCatalogResponseKey(model.Name)
-		availability := availabilityByModel[nameKey]
+		runtime := runtimeModels[nameKey]
+		availability := runtime.availability()
 		runtimeAvailable := availability.AvailableClients > 0
 		apiKeyBlocked := apiKeyBlockedCount(cfg, model.Name)
 		credentialExcluded := h.credentialExcludedCount(
-			model, aliasesByModel[nameKey], availability.ConfiguredProviders,
+			model, aliasScopesByModel[nameKey], availability.ConfiguredProviders,
 		)
 		credentialConfigured := availability.ConfiguredClients + credentialExcluded
 		accessRestricted := apiKeyRuleCount(cfg) > 0 && apiKeyBlocked >= apiKeyRuleCount(cfg)
@@ -380,6 +422,8 @@ func (h *Handler) modelCatalogResponse(
 			reason = "disabled"
 		case accessRestricted:
 			reason = "access_restricted"
+		case !runtimeAvailable && len(runtime.ambiguousAliases) > 0:
+			reason = "ambiguous_alias"
 		case availability.ConfiguredClients == 0 && credentialExcluded > 0:
 			reason = "credentials_excluded"
 		case availability.ConfiguredClients == 0:
@@ -403,16 +447,17 @@ func (h *Handler) modelCatalogResponse(
 			Speed:                     model.Speed,
 			SpeedOptions:              config.ModelSpeedOptions(model.Name, model.Channel),
 			RuntimeAvailable:          runtimeAvailable,
-			RuntimeOnly:               runtimeOnly[nameKey],
+			RuntimeOnly:               runtime.runtimeOnly,
 			RuntimeProviders:          availability.ConfiguredProviders,
 			RuntimeAvailableProviders: availability.AvailableProviders,
 			RuntimeConfiguredClients:  availability.ConfiguredClients,
 			RuntimeAvailableClients:   availability.AvailableClients,
 			RuntimeQuotaCooldown:      availability.QuotaCooldownClients,
 			RuntimeSuspended:          availability.SuspendedClients,
+			RuntimeAmbiguousAliases:   slices.Sorted(maps.Keys(runtime.ambiguousAliases)),
 			Requestable:               requestable,
 			NotRequestableReason:      reason,
-			Aliases:                   aliasesByModel[nameKey],
+			Aliases:                   slices.Sorted(maps.Values(aliasesByModel[nameKey])),
 			APIKeyBlockedCount:        apiKeyBlocked,
 			CredentialExcludedCount:   credentialExcluded,
 			CredentialConfiguredCount: credentialConfigured,
@@ -460,40 +505,108 @@ func modelCatalogResponseKey(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
-func mergeModelAvailability(left, right registry.ModelAvailability) registry.ModelAvailability {
-	if left.ModelID == "" {
-		return right
-	}
-	left.ConfiguredClients += right.ConfiguredClients
-	left.AvailableClients += right.AvailableClients
-	left.QuotaCooldownClients += right.QuotaCooldownClients
-	left.SuspendedClients += right.SuspendedClients
-	left.ConfiguredProviders = mergeCatalogStrings(left.ConfiguredProviders, right.ConfiguredProviders)
-	left.AvailableProviders = mergeCatalogStrings(left.AvailableProviders, right.AvailableProviders)
-	if left.PreferredProvider == "" || left.AvailableClients == right.AvailableClients {
-		left.PreferredProvider = right.PreferredProvider
-		left.Info = right.Info
-	}
-	return left
+type catalogRuntimeModel struct {
+	clients          map[string]registry.ModelAvailabilityClient
+	ambiguousAliases map[string]struct{}
+	runtimeOnly      bool
 }
 
-func mergeCatalogStrings(left, right []string) []string {
-	seen := make(map[string]struct{}, len(left)+len(right))
-	merged := make([]string, 0, len(left)+len(right))
-	for _, values := range [][]string{left, right} {
-		for _, value := range values {
-			key := strings.ToLower(strings.TrimSpace(value))
-			if key == "" {
+func projectCatalogRuntime(
+	doc *modelcatalog.File, catalogNames map[string]struct{}, ownersByAlias map[string]map[string]string,
+) map[string]catalogRuntimeModel {
+	models := make(map[string]catalogRuntimeModel)
+	addClient := func(name string, client registry.ModelAvailabilityClient, runtimeOnly bool) {
+		model := models[name]
+		if model.clients == nil {
+			model.clients = make(map[string]registry.ModelAvailabilityClient)
+		}
+		// A fork can register both the original and aliases on the same credential.
+		if previous, exists := model.clients[client.ID]; !exists || previous.State < client.State {
+			model.clients[client.ID] = client
+		}
+		model.runtimeOnly = runtimeOnly
+		models[name] = model
+	}
+	markAmbiguous := func(name, alias string) {
+		model := models[name]
+		if model.ambiguousAliases == nil {
+			model.ambiguousAliases = make(map[string]struct{})
+		}
+		model.ambiguousAliases[alias] = struct{}{}
+		models[name] = model
+	}
+	for _, availability := range registry.GetGlobalRegistry().GetModelAvailabilitySnapshot() {
+		public := modelCatalogResponseKey(availability.ModelID)
+		owners := ownersByAlias[public]
+		_, direct := catalogNames[public]
+		var discovered *modelcatalog.Model
+		for _, client := range availability.Clients {
+			registeredName := modelCatalogResponseKey(client.CatalogName)
+			if _, known := catalogNames[registeredName]; registeredName != "" && known {
+				addClient(registeredName, client, false)
 				continue
 			}
-			if _, exists := seen[key]; exists {
+			owner := owners[client.Provider]
+			switch {
+			case registeredName != "" && direct:
+				markAmbiguous(public, availability.ModelID)
+				continue
+			case registeredName == "" && owner != "" && !direct:
+				addClient(owner, client, false)
+				continue
+			case registeredName == "" && direct && owner == "" && (client.Provider != "" || len(owners) == 0):
+				addClient(public, client, false)
+				continue
+			case registeredName == "" && len(owners) > 0:
+				if direct {
+					markAmbiguous(public, availability.ModelID)
+				}
+				if owner != "" {
+					markAmbiguous(owner, availability.ModelID)
+				} else {
+					for _, possible := range owners {
+						markAmbiguous(possible, availability.ModelID)
+					}
+				}
 				continue
 			}
-			seen[key] = struct{}{}
-			merged = append(merged, value)
+			if discovered == nil {
+				displayName := ""
+				if availability.Info != nil {
+					displayName = availability.Info.DisplayName
+				}
+				discovered = doc.EnsureRuntimeModel(availability.ModelID, availability.PreferredProvider, displayName)
+			}
+			if discovered != nil {
+				addClient(modelCatalogResponseKey(discovered.Name), client, true)
+			}
 		}
 	}
-	return merged
+	return models
+}
+
+func (r catalogRuntimeModel) availability() registry.ModelAvailability {
+	availability := registry.ModelAvailability{ConfiguredClients: len(r.clients)}
+	providers, availableProviders := make(map[string]struct{}), make(map[string]struct{})
+	for _, client := range r.clients {
+		if client.Provider != "" {
+			providers[client.Provider] = struct{}{}
+		}
+		switch client.State {
+		case registry.ModelClientAvailable:
+			availability.AvailableClients++
+			if client.Provider != "" {
+				availableProviders[client.Provider] = struct{}{}
+			}
+		case registry.ModelClientQuotaCooldown:
+			availability.QuotaCooldownClients++
+		case registry.ModelClientSuspended:
+			availability.SuspendedClients++
+		}
+	}
+	availability.ConfiguredProviders = slices.Sorted(maps.Keys(providers))
+	availability.AvailableProviders = slices.Sorted(maps.Keys(availableProviders))
+	return availability
 }
 
 func (h *Handler) refreshModelPricing(recalculate bool) bool {
@@ -533,7 +646,7 @@ func apiKeyRuleCount(cfg *config.Config) int {
 
 func (h *Handler) credentialExcludedCount(
 	model modelcatalog.Model,
-	aliases []string,
+	aliasesByChannel map[string][]string,
 	runtimeProviders []string,
 ) int {
 	if h == nil || h.authManager == nil {
@@ -548,12 +661,16 @@ func (h *Handler) credentialExcludedCount(
 	if channel := strings.ToLower(strings.TrimSpace(model.Channel)); channel != "" && channel != "other" {
 		providers[channel] = struct{}{}
 	}
-	candidates := append([]string{model.Name}, aliases...)
+	for channel := range aliasesByChannel {
+		providers[channel] = struct{}{}
+	}
 	count := 0
 	for _, auth := range h.authManager.List() {
 		if auth == nil || auth.Disabled || !catalogCredentialProviderMatches(auth.Provider, providers) {
 			continue
 		}
+		channel := coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())
+		candidates := append([]string{model.Name}, aliasesByChannel[channel]...)
 		patterns := authFileExcludedModels(auth)
 		if auth.Attributes != nil {
 			patterns = append(patterns, strings.Split(auth.Attributes["excluded_models"], ",")...)

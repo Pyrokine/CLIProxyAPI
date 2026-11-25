@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
@@ -47,6 +48,7 @@ type UpdateTransaction struct {
 	rollbackCurrent  fileSnapshot
 	previousSnapshot fileSnapshot
 	rollbackPrevious fileSnapshot
+	readOnly         bool
 	filesCommitted   bool
 	finished         bool
 	releaseWriter    func()
@@ -197,6 +199,7 @@ func Save(configPath string, doc File) error {
 	return commitReplacementUnlocked(filePath, candidateData, current, previous)
 }
 
+// PrepareUpdate with a nil mutation reserves the current snapshot without replacing catalog files.
 func PrepareUpdate(
 	configPath string,
 	cfg *config.Config,
@@ -238,20 +241,21 @@ func PrepareUpdate(
 	if err != nil {
 		return nil, fmt.Errorf("copy candidate model catalog: %w", err)
 	}
+	var candidatePath string
 	if mutate != nil {
 		if err = mutate(&doc); err != nil {
 			return nil, err
 		}
+		candidateData, err := marshalFile(doc)
+		if err != nil {
+			return nil, err
+		}
+		candidatePath, err = writeTempFileUnlocked(filePath, candidateData)
+		if err != nil {
+			return nil, err
+		}
 	}
 	doc.LoadMetadata = loadMetadata{Source: LoadSourceCurrent}
-	candidateData, err := marshalFile(doc)
-	if err != nil {
-		return nil, err
-	}
-	candidatePath, err := writeTempFileUnlocked(filePath, candidateData)
-	if err != nil {
-		return nil, err
-	}
 	backupPath := ""
 	if backup {
 		backupPath, err = writeBackupUnlocked(filePath, loaded.current.data)
@@ -272,6 +276,7 @@ func PrepareUpdate(
 		rollbackCurrent:  loaded.rollbackCurrent,
 		previousSnapshot: previous,
 		rollbackPrevious: rollbackPrevious,
+		readOnly:         mutate == nil,
 		releaseWriter:    releaseWriter,
 	}, nil
 }
@@ -348,6 +353,10 @@ func (t *UpdateTransaction) CommitFiles() error {
 	if err := snapshotMatchesUnlocked(t.previousPath, t.previousSnapshot); err != nil {
 		return fmt.Errorf("previous model catalog changed during transaction: %w", err)
 	}
+	if t.readOnly {
+		t.filesCommitted = true
+		return nil
+	}
 	if err := writeBytesAtomic(t.previousPath, t.stableCurrent.data); err != nil {
 		return fmt.Errorf("save previous model catalog: %w", err)
 	}
@@ -397,14 +406,14 @@ func (t *UpdateTransaction) Rollback() error {
 
 	storeMu.Lock()
 	var errs []error
-	if t.filesCommitted {
+	if t.filesCommitted && !t.readOnly {
 		if err := restoreSnapshotUnlocked(t.filePath, t.rollbackCurrent); err != nil {
 			errs = append(errs, fmt.Errorf("restore current model catalog: %w", err))
 		}
 		if err := restoreSnapshotUnlocked(t.previousPath, t.rollbackPrevious); err != nil {
 			errs = append(errs, fmt.Errorf("restore previous model catalog: %w", err))
 		}
-	} else {
+	} else if !t.readOnly || !t.rollbackCurrent.exists {
 		if err := snapshotMatchesUnlocked(t.filePath, t.stableCurrent); err == nil {
 			if err = restoreSnapshotUnlocked(t.filePath, t.rollbackCurrent); err != nil {
 				errs = append(errs, fmt.Errorf("restore current model catalog: %w", err))
@@ -945,39 +954,103 @@ func ReplaceOAuthModelAlias(doc *File, aliases map[string][]config.OAuthModelAli
 	doc.Sanitize()
 }
 
-func ReplaceModelAliases(doc *File, name string, aliases []string) {
-	if doc == nil {
-		return
-	}
+// ReplaceModelAliases keeps the full rule for each retained alias. Explicit channel
+// requests target that channel only; the flat legacy form still spans all channels.
+func ReplaceModelAliases(doc *File, name string, aliases []string, channel *string) error {
 	model, ok := doc.Find(name)
 	if !ok {
-		return
+		return fmt.Errorf("model catalog entry not found")
 	}
-	key := modelKey(model.Name)
-	for channel, entries := range doc.OAuthModelAlias {
-		kept := entries[:0]
-		for _, entry := range entries {
-			if modelKey(entry.Name) != key {
-				kept = append(kept, entry)
-			}
+	var channels []string
+	if model.Channel != "" {
+		channels = oauthAliasChannelsForModel(model.Provider, model.Channel)
+	}
+	if channel != nil {
+		value := strings.ToLower(strings.TrimSpace(*channel))
+		if value == "" || value == "other" || value == "gemini" || value == "openai-compatibility" || strings.IndexFunc(
+			value, unicode.IsSpace,
+		) >= 0 {
+			return fmt.Errorf("select an OAuth channel for model aliases")
 		}
-		if len(kept) == 0 {
-			delete(doc.OAuthModelAlias, channel)
+		channels = []string{value}
+	}
+
+	wanted := make(map[string]string, len(aliases))
+	key := modelKey(model.Name)
+	for _, alias := range aliases {
+		alias = normalizeModelName(alias)
+		aliasKey := modelKey(alias)
+		if aliasKey == "" || aliasKey == key {
+			return fmt.Errorf("model alias must be non-empty and differ from the model name")
+		}
+		wanted[aliasKey] = alias
+	}
+	updated := doc.ToOAuthModelAlias()
+	if updated == nil {
+		updated = make(map[string][]config.OAuthModelAlias)
+	}
+	retained := make(map[string]bool, len(wanted))
+	changed := make(map[string][]config.OAuthModelAlias)
+	for scope, entries := range updated {
+		if channel != nil && scope != channels[0] {
 			continue
 		}
-		doc.OAuthModelAlias[channel] = kept
+		kept := make([]config.OAuthModelAlias, 0, len(entries))
+		for _, entry := range entries {
+			aliasKey := modelKey(entry.Alias)
+			if modelKey(entry.Name) == key {
+				if _, keep := wanted[aliasKey]; !keep {
+					continue
+				}
+				retained[aliasKey] = true
+			}
+			kept = append(kept, entry)
+		}
+		if len(kept) != len(entries) {
+			updated[scope] = kept
+			changed[scope] = kept
+		}
 	}
-	model.Aliases = append([]string(nil), aliases...)
-	model.ForceMappedAliases = nil
+	for _, alias := range uniqueStrings(aliases) {
+		if retained[modelKey(alias)] {
+			continue
+		}
+		if len(channels) == 0 {
+			return fmt.Errorf("select an OAuth channel for model aliases")
+		}
+		for _, scope := range channels {
+			updated[scope] = append(
+				updated[scope], config.OAuthModelAlias{
+					Name: model.Name, Alias: wanted[modelKey(alias)], Fork: true,
+				},
+			)
+			changed[scope] = updated[scope]
+		}
+		retained[modelKey(alias)] = true
+	}
+	if err := ValidateOAuthModelAliasChanges(changed); err != nil {
+		return err
+	}
+	doc.OAuthModelAlias = updated
+	for i := range doc.Models {
+		doc.Models[i].Aliases, doc.Models[i].ForceMappedAliases = nil, nil
+	}
 	doc.Sanitize()
+	return nil
 }
 
 func ReplaceOAuthModelAliasChannel(doc *File, channel string, aliases []config.OAuthModelAlias) {
+	ReplaceOAuthModelAliasChannels(doc, map[string][]config.OAuthModelAlias{channel: aliases})
+}
+
+func ReplaceOAuthModelAliasChannels(doc *File, channels map[string][]config.OAuthModelAlias) {
 	if doc == nil {
 		return
 	}
-	deleteOAuthModelAliasChannel(doc, channel)
-	ApplyOAuthModelAlias(doc, map[string][]config.OAuthModelAlias{channel: aliases})
+	for channel := range channels {
+		deleteOAuthModelAliasChannel(doc, channel)
+	}
+	ApplyOAuthModelAlias(doc, channels)
 	doc.Sanitize()
 }
 

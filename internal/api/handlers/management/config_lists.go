@@ -1,6 +1,8 @@
 package management
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -1228,20 +1230,38 @@ func (h *Handler) GetOAuthModelAlias(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
 		return
 	}
-	c.JSON(200, gin.H{"oauth-model-alias": doc.ToOAuthModelAlias()})
+	aliases := doc.ToOAuthModelAlias()
+	c.Header("ETag", oauthModelAliasETag(aliases))
+	c.JSON(http.StatusOK, gin.H{"oauth-model-alias": aliases})
 }
 
-func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
-	entries, ok := parseBody[map[string][]config.OAuthModelAlias](c)
-	if !ok {
+func oauthModelAliasETag(aliases map[string][]config.OAuthModelAlias) string {
+	data, _ := json.Marshal(aliases)
+	return fmt.Sprintf(`"%x"`, sha256.Sum256(data))
+}
+
+func (h *Handler) mutateOAuthModelAlias(
+	c *gin.Context,
+	catalogOnly bool,
+	mutate func(*modelcatalog.File) error,
+) {
+	ifMatch := strings.TrimSpace(c.GetHeader("If-Match"))
+	if catalogOnly && ifMatch == "" {
+		rejectMutation(mutationRequestContext(c))
+		c.JSON(http.StatusPreconditionRequired, gin.H{"error": "an OAuth model alias revision is required"})
 		return
 	}
-	_, ok = h.mutateModelCatalog(
+	_, ok := h.mutateModelCatalog(
 		c,
-		modelCatalogMutationOptions{},
+		modelCatalogMutationOptions{catalogOnly: catalogOnly},
 		func(doc *modelcatalog.File) error {
-			modelcatalog.ReplaceOAuthModelAlias(doc, sanitizedOAuthModelAlias(entries))
-			return nil
+			if ifMatch != "" && ifMatch != oauthModelAliasETag(doc.ToOAuthModelAlias()) {
+				rejectMutation(mutationRequestContext(c))
+				return newConfigMutationError(
+					http.StatusPreconditionFailed, "OAuth model aliases changed; reload before saving",
+				)
+			}
+			return mutate(doc)
 		},
 	)
 	if ok {
@@ -1249,15 +1269,50 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 	}
 }
 
+func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
+	entries, ok := parseBody[map[string][]config.OAuthModelAlias](c)
+	if !ok {
+		return
+	}
+	h.mutateOAuthModelAlias(
+		c, false, func(doc *modelcatalog.File) error {
+			modelcatalog.ReplaceOAuthModelAlias(doc, entries)
+			return nil
+		},
+	)
+}
+
 func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
-	var body struct {
+	body, ok := parseBody[struct {
 		Provider *string                  `json:"provider"`
 		Channel  *string                  `json:"channel"`
 		Aliases  []config.OAuthModelAlias `json:"aliases"`
+		Channels json.RawMessage          `json:"channels"`
+	}](c)
+	if !ok {
+		return
 	}
-	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
-		rejectMutation(mutationRequestContext(c))
-		c.JSON(400, gin.H{"error": "invalid body"})
+	if len(body.Channels) > 0 {
+		var channels map[string][]config.OAuthModelAlias
+		decoder := json.NewDecoder(bytes.NewReader(body.Channels))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&channels); err != nil || len(channels) == 0 ||
+			body.Provider != nil || body.Channel != nil || body.Aliases != nil {
+			rejectMutation(mutationRequestContext(c))
+			c.JSON(http.StatusBadRequest, gin.H{"error": "send a non-empty OAuth alias channel patch"})
+			return
+		}
+		if err := modelcatalog.ValidateOAuthModelAliasChanges(channels); err != nil {
+			rejectMutation(mutationRequestContext(c))
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			return
+		}
+		h.mutateOAuthModelAlias(
+			c, true, func(doc *modelcatalog.File) error {
+				modelcatalog.ReplaceOAuthModelAliasChannels(doc, channels)
+				return nil
+			},
+		)
 		return
 	}
 	channelRaw := ""
@@ -1272,24 +1327,26 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid channel"})
 		return
 	}
-	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
-	_, ok := h.mutateModelCatalog(
-		c,
-		modelCatalogMutationOptions{},
-		func(doc *modelcatalog.File) error {
-			if len(normalizedMap[channel]) == 0 {
+	if len(body.Aliases) > 0 {
+		changes := map[string][]config.OAuthModelAlias{channel: body.Aliases}
+		if err := modelcatalog.ValidateOAuthModelAliasChanges(changes); err != nil {
+			rejectMutation(mutationRequestContext(c))
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	h.mutateOAuthModelAlias(
+		c, false, func(doc *modelcatalog.File) error {
+			if len(body.Aliases) == 0 {
 				if !modelcatalog.DeleteOAuthModelAliasChannel(doc, channel) {
 					return newConfigMutationError(http.StatusNotFound, "channel not found")
 				}
 				return nil
 			}
-			modelcatalog.ReplaceOAuthModelAliasChannel(doc, channel, normalizedMap[channel])
+			modelcatalog.ReplaceOAuthModelAliasChannel(doc, channel, body.Aliases)
 			return nil
 		},
 	)
-	if ok {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	}
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
@@ -1302,19 +1359,14 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
-	_, ok := h.mutateModelCatalog(
-		c,
-		modelCatalogMutationOptions{},
-		func(doc *modelcatalog.File) error {
+	h.mutateOAuthModelAlias(
+		c, false, func(doc *modelcatalog.File) error {
 			if !modelcatalog.DeleteOAuthModelAliasChannel(doc, channel) {
 				return newConfigMutationError(http.StatusNotFound, "channel not found")
 			}
 			return nil
 		},
 	)
-	if ok {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	}
 }
 
 // codex-api-key: []CodexKey
@@ -1802,26 +1854,4 @@ func sanitizedOAuthRequestScopedErrors(
 		return nil
 	}
 	return cfg.OAuthRequestScopedErrors
-}
-
-func sanitizedOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[string][]config.OAuthModelAlias {
-	if len(entries) == 0 {
-		return nil
-	}
-	copied := make(map[string][]config.OAuthModelAlias, len(entries))
-	for channel, aliases := range entries {
-		if len(aliases) == 0 {
-			continue
-		}
-		copied[channel] = append([]config.OAuthModelAlias(nil), aliases...)
-	}
-	if len(copied) == 0 {
-		return nil
-	}
-	cfg := config.Config{OAuthModelAlias: copied}
-	cfg.SanitizeOAuthModelAlias()
-	if len(cfg.OAuthModelAlias) == 0 {
-		return nil
-	}
-	return cfg.OAuthModelAlias
 }

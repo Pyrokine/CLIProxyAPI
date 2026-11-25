@@ -787,8 +787,9 @@ func (h *Handler) commitConfigYAMLLocked(
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to secure config"})
 		return ConfigCommit{}, nil, false
 	}
-	persistedData = config.NormalizeCommentIndentation(persistedData)
-	catalog, errCatalog := h.prepareConfigYAMLCatalog(body, newCfg, current, currentExists)
+	catalog, errCatalog := h.prepareConfigYAMLCatalog(
+		body, newCfg, current, currentExists, ifMatch != "" && ifMatch != "*",
+	)
 	if errCatalog != nil {
 		respondModelCatalogMutationError(c, errCatalog)
 		return ConfigCommit{}, nil, false

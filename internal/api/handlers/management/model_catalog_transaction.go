@@ -14,7 +14,8 @@ import (
 )
 
 type modelCatalogMutationOptions struct {
-	backup bool
+	backup      bool
+	catalogOnly bool
 }
 
 type modelCatalogMutationResult struct {
@@ -76,15 +77,21 @@ func (h *Handler) mutateModelCatalog(
 	previousConfig.OAuthModelAlias = baseDoc.ToOAuthModelAlias()
 	next.ModelCatalog.Models = doc.ToModelCatalogModels()
 	next.OAuthModelAlias = doc.ToOAuthModelAlias()
-	persistedHash, err := h.persistConfigCandidate(next)
-	if err != nil {
-		h.mu.Unlock()
-		rollbackErr := transaction.Rollback()
-		respondModelCatalogMutationError(c, errors.Join(err, rollbackErr))
-		return modelCatalogMutationResult{}, false
-	}
-	if persistedHash != "" {
-		RecordMutationEffect(mutationRequestContext(c), "configuration.persisted", "configuration")
+	var persistedHash string
+	var restoreConfig []func() (string, error)
+	if options.catalogOnly {
+		restoreConfig = append(restoreConfig, func() (string, error) { return "", nil })
+	} else {
+		persistedHash, err = h.persistConfigCandidate(next)
+		if err != nil {
+			h.mu.Unlock()
+			rollbackErr := transaction.Rollback()
+			respondModelCatalogMutationError(c, errors.Join(err, rollbackErr))
+			return modelCatalogMutationResult{}, false
+		}
+		if persistedHash != "" {
+			RecordMutationEffect(mutationRequestContext(c), "configuration.persisted", "configuration")
+		}
 	}
 	commit, callback := h.publishConfigLocked(next, persistedHash)
 	RecordMutationEffect(mutationRequestContext(c), "configuration.published", "configuration")
@@ -103,6 +110,7 @@ func (h *Handler) mutateModelCatalog(
 		baseDoc,
 		previousConfig,
 		transaction,
+		restoreConfig...,
 	); err != nil {
 		failMutation(ctx)
 		log.WithError(err).WithField("generation", commit.Generation).

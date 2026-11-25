@@ -507,6 +507,149 @@ func TestOAuthModelAliasManagementRoundTripPreservesDisplayName(t *testing.T) {
 	}
 }
 
+func TestOAuthModelAliasScopedPatchReadsAndWritesOnlyCurrentCatalog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := []byte("# Unrelated source formatting\nport: 8318\n")
+	if err := os.WriteFile(path, yaml, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc := modelcatalog.File{}
+	modelcatalog.ApplyOAuthModelAlias(
+		&doc, map[string][]config.OAuthModelAlias{
+			"codex":          {{Name: "codex-model", Alias: "shared", Fork: true}},
+			"claude":         {{Name: "claude-model", Alias: "shared"}},
+			"future-channel": {{Name: "future-model", Alias: "future-alias"}},
+		},
+	)
+	if err := modelcatalog.Save(path, doc); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: &config.Config{Port: 8317}, configFilePath: path}
+	var published []ConfigCommit
+	h.configCommitted = func(_ context.Context, commit ConfigCommit) error {
+		published = append(published, commit)
+		return nil
+	}
+	t.Cleanup(func() { config.SetRuntimeModelCatalog(nil) })
+	engine := gin.New()
+	engine.GET("/v0/management/oauth-model-alias", h.GetOAuthModelAlias)
+	engine.PATCH("/v0/management/oauth-model-alias", h.PatchOAuthModelAlias)
+	request := func(method, body, etag string, status int) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, "/v0/management/oauth-model-alias", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("If-Match", etag)
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, req)
+		if w.Code != status {
+			t.Fatalf("%s response = %d, want %d; %s", method, w.Code, status, w.Body.String())
+		}
+		return w
+	}
+	readFile := func(file string) []byte {
+		t.Helper()
+		value, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	original := request(http.MethodGet, "", "", http.StatusOK)
+	etag := original.Header().Get("ETag")
+	if etag == "" || !strings.Contains(original.Body.String(), `"alias":"shared"`) {
+		t.Fatalf("alias readback returned %q with ETag %q", original.Body.String(), etag)
+	}
+	patch := `{"channels":{"codex":[{"name":"codex-model","alias":"updated","display-name":"Display label","fork":true,"force-mapping":true}],"claude":[]}}`
+	before := readFile(modelcatalog.Path(path))
+	request(http.MethodPatch, patch, "", http.StatusPreconditionRequired)
+	for _, body := range []string{
+		`{"channels":{"codex":null}}`,
+		`{"channels":{"codex":[{"name":"","alias":"public"}],"claude":[]}}`,
+		`{"channels":{"codex":[{"name":"first","alias":"second"},{"name":"second","alias":"first"}]}}`,
+		`{"channels":{"codex":[{"name":"first","alias":"public"},{"name":"second","alias":"Public"}]}}`,
+	} {
+		request(http.MethodPatch, body, etag, http.StatusUnprocessableEntity)
+	}
+	request(
+		http.MethodPatch, `{"channels":{"codex":[{"name":"first","alias":"public","future":true}]}}`, etag,
+		http.StatusBadRequest,
+	)
+	if !bytes.Equal(before, readFile(modelcatalog.Path(path))) || len(published) != 0 {
+		t.Fatal("rejected edits changed the catalog or runtime")
+	}
+
+	modelcatalog.ReplaceOAuthModelAliasChannel(
+		&doc, "future-channel", []config.OAuthModelAlias{
+			{Name: "future-model", Alias: "concurrent-alias"},
+		},
+	)
+	if err := modelcatalog.Save(path, doc); err != nil {
+		t.Fatal(err)
+	}
+	external := readFile(modelcatalog.Path(path))
+	request(http.MethodPatch, patch, etag, http.StatusPreconditionFailed)
+	if !bytes.Equal(external, readFile(modelcatalog.Path(path))) || len(published) != 0 {
+		t.Fatal("stale write changed the concurrent catalog or runtime")
+	}
+	etag = request(http.MethodGet, "", "", http.StatusOK).Header().Get("ETag")
+	if _, err := modelcatalog.ReplacePrices(
+		path, map[string]modelcatalog.Price{"price-only": {Prompt: 3}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	request(http.MethodPatch, patch, etag, http.StatusOK)
+	readback := request(http.MethodGet, "", "", http.StatusOK)
+	var payload struct {
+		Aliases map[string][]config.OAuthModelAlias `json:"oauth-model-alias"`
+	}
+	if err := json.Unmarshal(readback.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	want := config.OAuthModelAlias{
+		Name: "codex-model", Alias: "updated", DisplayName: "Display label", Fork: true, ForceMapping: true,
+	}
+	if entries := payload.Aliases["codex"]; len(entries) != 1 || entries[0] != want ||
+		len(payload.Aliases["claude"]) != 0 || payload.Aliases["future-channel"][0].Alias != "concurrent-alias" ||
+		readback.Header().Get("ETag") == etag {
+		t.Fatalf("readback did not retain source, metadata and sibling channel: %#v", payload.Aliases)
+	}
+	if len(published) != 1 || !published[0].ModelCatalogPrepared || published[0].ConfigFileHash != "" ||
+		published[0].Config.OAuthModelAlias["codex"][0] != want || !bytes.Equal(yaml, readFile(path)) {
+		t.Fatal("alias patch did not publish the catalog without changing YAML")
+	}
+	reloaded, err := modelcatalog.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	price, ok := reloaded.Price("price-only")
+	if !ok || price.Prompt != 3 || reloaded.OAuthModelAlias["codex"][0] != want {
+		t.Fatal("catalog save lost aliases or concurrent pricing")
+	}
+	if _, exists := reloaded.Find("price-only"); exists {
+		t.Fatal("price-only record created a model")
+	}
+
+	h.modelCatalogRuntimeSync = func(cfg *config.Config) error {
+		if cfg.OAuthModelAlias["codex"][0].Alias == "failed" {
+			return errors.New("synthetic alias publication failure")
+		}
+		return nil
+	}
+	before = readFile(modelcatalog.Path(path))
+	previous := readFile(modelcatalog.PreviousPath(path))
+	request(
+		http.MethodPatch, strings.Replace(patch, `"updated"`, `"failed"`, 1), readback.Header().Get("ETag"),
+		http.StatusServiceUnavailable,
+	)
+	if !bytes.Equal(before, readFile(modelcatalog.Path(path))) || !bytes.Equal(
+		previous, readFile(modelcatalog.PreviousPath(path)),
+	) ||
+		!bytes.Equal(yaml, readFile(path)) || h.configSnapshot().OAuthModelAlias["codex"][0] != want {
+		t.Fatal("runtime failure did not restore the prior catalog without changing YAML")
+	}
+}
+
 func TestPutModelCatalogPreservesStoredOAuthAliasSemantics(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")

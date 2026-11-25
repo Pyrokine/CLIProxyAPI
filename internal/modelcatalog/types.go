@@ -116,36 +116,38 @@ type CoverageGap struct {
 }
 
 type Price struct {
-	Prompt            float64           `json:"prompt,omitempty"`
-	Completion        float64           `json:"completion,omitempty"`
-	Cache             float64           `json:"cache,omitempty"`
-	CacheRead         *float64          `json:"cache_read,omitempty"`
-	CacheWrite        *float64          `json:"cache_write,omitempty"`
-	CacheWrite5m      *float64          `json:"cache_write_5m,omitempty"`
-	CacheWrite1h      *float64          `json:"cache_write_1h,omitempty"`
-	CacheWrite30m     *float64          `json:"cache_write_30m,omitempty"`
-	CacheWrite12h     *float64          `json:"cache_write_12h,omitempty"`
-	UTCRateBands      []utcPriceBand    `json:"utc_rate_bands,omitempty"`
-	SpeedRates        []SpeedRate       `json:"speed_rates,omitempty"`
-	ConditionalRates  []ConditionalRate `json:"conditional_rates,omitempty"`
-	ModalityRates     []ModalityRate    `json:"modality_rates,omitempty"`
-	ChargeRates       []ChargeRate      `json:"charge_rates,omitempty"`
-	RequestScoped     bool              `json:"request_scoped,omitempty"`
-	CoverageGaps      []CoverageGap     `json:"coverage_gaps,omitempty"`
-	Status            PriceStatus       `json:"status,omitempty"`
-	AutoApply         bool              `json:"auto_apply,omitempty"`
-	Currency          string            `json:"currency,omitempty"`
-	Source            string            `json:"source,omitempty"`
-	CheckedAt         string            `json:"checked_at,omitempty"`
-	EffectiveFrom     string            `json:"effective_from,omitempty"`
-	EffectiveUntil    string            `json:"effective_until,omitempty"`
-	Region            string            `json:"region,omitempty"`
-	ServiceTier       string            `json:"service_tier,omitempty"`
-	UnpricedReason    string            `json:"unpriced_reason,omitempty"`
-	Limitations       []string          `json:"limitations,omitempty"`
-	promptPresent     bool
-	completionPresent bool
-	cachePresent      bool
+	Prompt               float64           `json:"prompt,omitempty"`
+	Completion           float64           `json:"completion,omitempty"`
+	Cache                float64           `json:"cache,omitempty"`
+	CacheRead            *float64          `json:"cache_read,omitempty"`
+	CacheWrite           *float64          `json:"cache_write,omitempty"`
+	CacheWrite5m         *float64          `json:"cache_write_5m,omitempty"`
+	CacheWrite1h         *float64          `json:"cache_write_1h,omitempty"`
+	CacheWrite30m        *float64          `json:"cache_write_30m,omitempty"`
+	CacheWrite12h        *float64          `json:"cache_write_12h,omitempty"`
+	UTCRateBands         []utcPriceBand    `json:"utc_rate_bands,omitempty"`
+	SpeedRates           []SpeedRate       `json:"speed_rates,omitempty"`
+	ConditionalRates     []ConditionalRate `json:"conditional_rates,omitempty"`
+	ModalityRates        []ModalityRate    `json:"modality_rates,omitempty"`
+	ChargeRates          []ChargeRate      `json:"charge_rates,omitempty"`
+	RequestScoped        bool              `json:"request_scoped,omitempty"`
+	CoverageGaps         []CoverageGap     `json:"coverage_gaps,omitempty"`
+	Status               PriceStatus       `json:"status,omitempty"`
+	AutoApply            bool              `json:"auto_apply,omitempty"`
+	Currency             string            `json:"currency,omitempty"`
+	Source               string            `json:"source,omitempty"`
+	CheckedAt            string            `json:"checked_at,omitempty"`
+	EffectiveFrom        string            `json:"effective_from,omitempty"`
+	EffectiveUntil       string            `json:"effective_until,omitempty"`
+	Region               string            `json:"region,omitempty"`
+	ServiceTier          string            `json:"service_tier,omitempty"`
+	UnpricedReason       string            `json:"unpriced_reason,omitempty"`
+	Limitations          []string          `json:"limitations,omitempty"`
+	promptPresent        bool
+	completionPresent    bool
+	cachePresent         bool
+	requestScopedPresent bool
+	autoApplyPresent     bool
 }
 
 type Model struct {

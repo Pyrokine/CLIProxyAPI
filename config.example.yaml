@@ -523,8 +523,9 @@ redis-usage-queue-retention-seconds: 60
 #         alias: "vertex-pro"
 #     excluded-models: [] # No per-credential exclusions by default.
 
-# OAuth model name aliases configured globally per channel
-# These aliases rename model IDs for both model listing and request routing.
+# The Models page stores the catalog, OAuth aliases, and prices in models.json.
+# model-catalog.models is a legacy import path. Keep it unset for a catalog managed in models.json.
+# The OAuth alias YAML below is an import format; it renames model IDs for listing and routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi, xai, meta.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key,
 # openai-compatibility and vertex-api-key.

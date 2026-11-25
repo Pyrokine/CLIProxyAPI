@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -18,7 +19,8 @@ import (
 
 func TestConfigYAMLCatalogReplacementUsesPreparedTransaction(t *testing.T) {
 	for _, mode := range []string{
-		"replace", "empty", "null", "absent", "callback-failure", "runtime-failure", "catalog-publication-failure",
+		"replace", "unchanged-conditional", "unchanged-replay", "empty", "null", "absent",
+		"callback-failure", "runtime-failure", "catalog-publication-failure",
 	} {
 		t.Run(
 			mode, func(t *testing.T) {
@@ -26,6 +28,13 @@ func TestConfigYAMLCatalogReplacementUsesPreparedTransaction(t *testing.T) {
 				root := t.TempDir()
 				path := filepath.Join(root, "config.yaml")
 				original := []byte("# retain original formatting\nport: 8317\ndebug: false\n")
+				aliasBlock := "oauth-model-alias: {claude: [{name: catalog-model, alias: fresh-alias, force-mapping: true}]}\n"
+				switch mode {
+				case "replace":
+					original = append(original, strings.Replace(aliasBlock, "fresh-alias", "legacy-yaml-alias", 1)...)
+				case "unchanged-conditional", "unchanged-replay":
+					original = append(original, aliasBlock...)
+				}
 				if err := os.WriteFile(path, original, 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -48,6 +57,13 @@ func TestConfigYAMLCatalogReplacementUsesPreparedTransaction(t *testing.T) {
 				before, err := os.ReadFile(modelcatalog.Path(path))
 				if err != nil {
 					t.Fatal(err)
+				}
+				var previousCatalog []byte
+				if mode == "unchanged-conditional" {
+					previousCatalog = append(append([]byte(nil), before...), '\n')
+					if err = os.WriteFile(modelcatalog.PreviousPath(path), previousCatalog, 0o600); err != nil {
+						t.Fatal(err)
+					}
 				}
 				cfg := &config.Config{Port: 8317, OAuthModelAlias: doc.ToOAuthModelAlias()}
 				h := &Handler{cfg: cfg, configFilePath: path}
@@ -93,15 +109,22 @@ func TestConfigYAMLCatalogReplacementUsesPreparedTransaction(t *testing.T) {
 				case "absent":
 					body = "port: 8318\n"
 				}
-				recorder := httptest.NewRecorder()
-				c, _ := gin.CreateTestContext(recorder)
-				c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", strings.NewReader(body))
-				key, err := h.configYAMLRedactionKey()
-				if err != nil {
-					t.Fatal(err)
+				const route = "/v0/management/config.yaml"
+				engine := gin.New()
+				engine.GET(route, h.GetConfigYAML)
+				engine.PUT(route, h.PutConfigYAML)
+				loadedYaml := httptest.NewRecorder()
+				engine.ServeHTTP(loadedYaml, httptest.NewRequest(http.MethodGet, route, nil))
+				etag := loadedYaml.Header().Get("ETag")
+				if loadedYaml.Code != http.StatusOK || etag == "" {
+					t.Fatalf("GET YAML status=%d etag=%q body=%s", loadedYaml.Code, etag, loadedYaml.Body.String())
 				}
-				c.Request.Header.Set("If-Match", configYAMLETag(original, key))
-				h.PutConfigYAML(c)
+				request := httptest.NewRequest(http.MethodPut, route, strings.NewReader(body))
+				if mode != "unchanged-replay" {
+					request.Header.Set("If-Match", etag)
+				}
+				recorder := httptest.NewRecorder()
+				engine.ServeHTTP(recorder, request)
 				failure := strings.HasSuffix(mode, "failure")
 				wantStatus := 200
 				if failure {
@@ -142,6 +165,18 @@ func TestConfigYAMLCatalogReplacementUsesPreparedTransaction(t *testing.T) {
 					t.Fatal("YAML aliases replaced authoritative catalog model data")
 				}
 				aliases := loaded.ToOAuthModelAlias()
+				if mode == "unchanged-conditional" {
+					actualPrevious, err := os.ReadFile(modelcatalog.PreviousPath(path))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(before, after) || !bytes.Equal(previousCatalog, actualPrevious) ||
+						!reflect.DeepEqual(aliases, h.configSnapshot().OAuthModelAlias) ||
+						h.configSnapshot().Port != 8318 || !bytes.Contains(stored, []byte("alias: fresh-alias")) {
+						t.Fatal("conditional YAML save must keep source, current catalog and recovery snapshot")
+					}
+					return
+				}
 				if mode == "absent" {
 					if !bytes.Equal(before, after) || len(h.configSnapshot().OAuthModelAlias) == 0 {
 						t.Fatal("omitted YAML aliases erased authoritative catalog aliases")
