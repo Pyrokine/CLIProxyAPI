@@ -74,6 +74,9 @@ func (h *Handler) GetPluginConfig(c *gin.Context) {
 }
 
 func redactedPluginConfigs(snapshot *config.Config) (map[string]config.PluginInstanceConfig, error) {
+	if len(snapshot.Plugins.Configs) == 0 {
+		return nil, nil
+	}
 	snapshot.NormalizePluginsConfig()
 	data, err := yaml.Marshal(snapshot)
 	if err != nil {
@@ -83,7 +86,12 @@ func redactedPluginConfigs(snapshot *config.Config) (map[string]config.PluginIns
 	if err != nil {
 		return nil, err
 	}
-	var redacted config.Config
+	// Redact the full document for shared aliases, then decode only the plugin configs.
+	var redacted struct {
+		Plugins struct {
+			Configs map[string]config.PluginInstanceConfig `yaml:"configs"`
+		} `yaml:"plugins"`
+	}
 	if err := yaml.Unmarshal(data, &redacted); err != nil {
 		return nil, err
 	}
@@ -149,7 +157,7 @@ func yamlNodeToJSONValue(node *yaml.Node) (any, error) {
 		case yaml.AliasNode:
 			return convert(node.Alias)
 		case yaml.ScalarNode:
-			if node.Tag == "!!float" && json.Valid([]byte(node.Value)) {
+			if (node.Tag == "!!float" || node.Tag == "!!int") && json.Valid([]byte(node.Value)) {
 				return json.Number(node.Value), nil
 			}
 			var value any

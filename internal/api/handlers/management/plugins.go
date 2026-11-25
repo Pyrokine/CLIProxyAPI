@@ -112,7 +112,9 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	}
 	pluginsDir = resolvedPluginsDir
 	entries := make(map[string]pluginListEntry)
-	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir)
+	files, errDiscover := pluginhost.DiscoverPluginFiles(
+		pluginsDir, pluginStoreDesiredVersions(snapshot.Plugins.Configs),
+	)
 	if errDiscover != nil {
 		c.JSON(
 			http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errDiscover.Error()},
@@ -378,9 +380,12 @@ func (h *Handler) mutatePluginConfig(
 		return false
 	}
 	if callback != nil {
+		ctx := mutationRequestContext(c)
 		if h.configCommitCurrent(commit) {
-			RecordMutationEffect(mutationRequestContext(c), "plugin.runtime_applied", "plugin")
-			CompleteMutation(mutationRequestContext(c))
+			RecordMutationEffect(ctx, "plugin.runtime_applied", "plugin")
+			CompleteMutation(ctx)
+		} else {
+			failMutation(ctx)
 		}
 		return true
 	}

@@ -20,6 +20,7 @@ func TestListPluginsUnconfiguredEntriesRemainDisabled(t *testing.T) {
 		discovered bool
 		registered bool
 	}{
+		{name: "empty"},
 		{name: "discovered", discovered: true},
 		{name: "registered", registered: true},
 		{name: "discovered and registered", discovered: true, registered: true},
@@ -39,7 +40,15 @@ func TestListPluginsUnconfiguredEntriesRemainDisabled(t *testing.T) {
 					if source.registered {
 						host.registered = []pluginhost.RegisteredPluginInfo{{ID: "alpha"}}
 					}
-					cfg := &config.Config{Plugins: config.PluginsConfig{Enabled: globallyEnabled, Dir: dir}}
+					cfg := &config.Config{
+						SDKConfig: config.SDKConfig{
+							APIKeys: []string{"synthetic-client"},
+							APIKeyRules: map[string]config.APIKeyRule{
+								"synthetic-client": {Limits: []config.APIKeyPolicyLimit{{Window: "1h", Tokens: 100}}},
+							},
+						},
+						Plugins: config.PluginsConfig{Enabled: globallyEnabled, Dir: dir},
+					}
 					h := &Handler{cfg: cfg, pluginHost: host}
 					recorder := httptest.NewRecorder()
 					c, _ := gin.CreateTestContext(recorder)
@@ -52,8 +61,19 @@ func TestListPluginsUnconfiguredEntriesRemainDisabled(t *testing.T) {
 					if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 						t.Fatal(err)
 					}
-					if response.PluginsEnabled != globallyEnabled || len(response.Plugins) != 1 {
+					wantCount := 0
+					if source.discovered || source.registered {
+						wantCount = 1
+					}
+					if response.PluginsEnabled != globallyEnabled || response.PluginsDir != dir ||
+						response.Plugins == nil || len(response.Plugins) != wantCount {
 						t.Fatalf("unexpected list response: %+v", response)
+					}
+					if len(cfg.Plugins.Configs) != 0 {
+						t.Fatal("listing created a plugin configuration")
+					}
+					if wantCount == 0 {
+						return
 					}
 					entry := response.Plugins[0]
 					if entry.ID != "alpha" || entry.Configured || entry.Enabled || entry.EffectiveEnabled {
@@ -61,9 +81,6 @@ func TestListPluginsUnconfiguredEntriesRemainDisabled(t *testing.T) {
 					}
 					if entry.Registered != source.registered || (entry.Path != "") != source.discovered {
 						t.Fatalf("plugin source metadata changed: %+v", entry)
-					}
-					if len(cfg.Plugins.Configs) != 0 {
-						t.Fatal("listing created a plugin configuration")
 					}
 				},
 			)

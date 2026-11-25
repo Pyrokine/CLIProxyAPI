@@ -43,6 +43,12 @@ store:
 	dir := t.TempDir()
 	h := newConfigListTestHandler(
 		t, &config.Config{
+			SDKConfig: config.SDKConfig{
+				APIKeys: []string{"synthetic-client"},
+				APIKeyRules: map[string]config.APIKeyRule{
+					"synthetic-client": {Limits: []config.APIKeyPolicyLimit{{Window: "1h", Tokens: 100}}},
+				},
+			},
 			Plugins: config.PluginsConfig{
 				Dir: dir, Configs: map[string]config.PluginInstanceConfig{
 					"alpha": item,
@@ -212,4 +218,29 @@ store:
 		)
 	}
 	group.Wait()
+}
+
+func TestPluginConfigReadsReportInvalidPriority(t *testing.T) {
+	var raw yaml.Node
+	if err := yaml.Unmarshal([]byte("priority: invalid\napi-key: synthetic-private-value\n"), &raw); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Dir: t.TempDir(), Configs: map[string]config.PluginInstanceConfig{"alpha": {Raw: *raw.Content[0]}},
+			},
+		},
+	}
+	engine := gin.New()
+	engine.GET("/plugins", h.ListPlugins)
+	engine.GET("/plugins/:id/config", h.GetPluginConfig)
+	for _, path := range []string{"/plugins", "/plugins/alpha/config"} {
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		const wantBody = `{"error":"plugin_config_encode_failed"}`
+		if recorder.Code != http.StatusInternalServerError || recorder.Body.String() != wantBody {
+			t.Fatalf("%s: status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
 }

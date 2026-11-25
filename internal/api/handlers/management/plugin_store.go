@@ -536,10 +536,10 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	}
 	commit, callback, errCommit := h.mutateConfigLocked(
 		mutationRequestContext(c), func(next *config.Config) error {
-			if errEnable := enablePluginConfig(next, id, manifest); errEnable != nil {
+			if errConfig := setPluginInstallConfig(next, id, manifest); errConfig != nil {
 				return newConfigMutationError(
 					http.StatusInternalServerError,
-					fmt.Sprintf("failed to enable installed plugin: %v", errEnable),
+					fmt.Sprintf("failed to configure installed plugin: %v", errConfig),
 				)
 			}
 			if coordinator.hasTransaction() {
@@ -569,14 +569,17 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		}
 		return
 	}
-	if errCommitArtifact := coordinator.commitArtifact(); errCommitArtifact != nil {
-		log.WithError(errCommitArtifact).WithField("plugin_id", id).Warn(
-			"pluginstore: failed to remove install transaction",
-		)
-	}
+	errCommitArtifact := coordinator.commitArtifact()
 	h.mu.Unlock()
 	coordinator.release()
 	runtimeCtx := context.WithoutCancel(c.Request.Context())
+	if errCommitArtifact != nil {
+		log.WithError(errCommitArtifact).WithField("plugin_id", id).Warn(
+			"pluginstore: failed to remove install transaction",
+		)
+	} else if !result.Skipped {
+		RecordMutationEffect(runtimeCtx, "plugin.published", "plugin")
+	}
 	if !h.notifyConfigCommittedContext(c, runtimeCtx, callback, commit) {
 		return
 	}
@@ -591,6 +594,21 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 			return
 		}
 	}
+	if errCommitArtifact != nil {
+		failMutation(runtimeCtx)
+		c.JSON(
+			http.StatusServiceUnavailable, gin.H{
+				"error": "plugin_install_finalize_failed", "restart_required": true,
+			},
+		)
+		return
+	}
+	if !h.configCommitCurrent(commit) {
+		failMutation(runtimeCtx)
+		c.JSON(http.StatusConflict, gin.H{"error": "plugin_install_superseded"})
+		return
+	}
+	CompleteMutation(runtimeCtx)
 	log.WithFields(
 		log.Fields{
 			"plugin_id":    result.ID,
@@ -831,43 +849,38 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		)
 		return
 	}
+	ctx := mutationRequestContext(c)
+	RecordMutationEffect(ctx, "plugin.deleted", "plugin")
+	response := gin.H{
+		"id":                 pluginStoreText(id),
+		"path":               pluginStoreText(path),
+		"file_deleted":       fileDeleted,
+		"configured_removed": configured,
+		"runtime_unloaded":   runtimeUnloaded,
+		"restart_required":   false,
+	}
 	if runtimeUnloadErr != nil || pluginBusy(host, id) {
-		c.JSON(
-			http.StatusConflict,
-			gin.H{
-				"error": "plugin_delete_requires_restart",
-				"message": errors.Join(
-					fmt.Errorf("plugin deletion committed but the loaded runtime could not be fully released"),
-					runtimeUnloadErr,
-				).Error(),
-				"restart_required": true,
-			},
-		)
+		failMutation(ctx)
+		response["error"] = "plugin_delete_requires_restart"
+		response["message"] = errors.Join(
+			fmt.Errorf("plugin deletion committed but the loaded runtime could not be fully released"),
+			runtimeUnloadErr,
+		).Error()
+		response["restart_required"] = true
+		c.JSON(http.StatusConflict, response)
 		return
 	}
 	if runtimeSyncErr != nil {
-		c.JSON(
-			http.StatusServiceUnavailable,
-			gin.H{
-				"error":            "plugin_runtime_sync_failed",
-				"message":          runtimeSyncErr.Error(),
-				"restart_required": false,
-			},
-		)
+		failMutation(ctx)
+		response["error"] = "plugin_runtime_sync_failed"
+		response["message"] = runtimeSyncErr.Error()
+		c.JSON(http.StatusServiceUnavailable, response)
 		return
 	}
 
-	c.JSON(
-		http.StatusOK, gin.H{
-			"status":             "deleted",
-			"id":                 pluginStoreText(id),
-			"path":               pluginStoreText(path),
-			"file_deleted":       fileDeleted,
-			"configured_removed": configured,
-			"runtime_unloaded":   runtimeUnloaded,
-			"restart_required":   false,
-		},
-	)
+	CompleteMutation(ctx)
+	response["status"] = "deleted"
+	c.JSON(http.StatusOK, response)
 }
 
 func pluginStoreDirectManifest(
@@ -1027,17 +1040,18 @@ func normalizePluginStoreRequestedVersion(version string) string {
 	return version
 }
 
-// enablePluginConfig sets plugins.configs.<id>.enabled and store while
-// preserving the rest of the plugin's raw configuration.
-func enablePluginConfig(cfg *config.Config, id string, storeManifest pluginstore.Manifest) error {
+// setPluginInstallConfig updates store metadata and enables only a new instance.
+func setPluginInstallConfig(cfg *config.Config, id string, storeManifest pluginstore.Manifest) error {
 	ensurePluginConfigMap(cfg)
-	_, current, _ := pluginConfigByID(cfg.Plugins.Configs, id)
+	_, current, configured := pluginConfigByID(cfg.Plugins.Configs, id)
 	node := pluginConfigNode(current)
 	storeNode, errStoreNode := pluginStoreManifestYAMLNode(storeManifest)
 	if errStoreNode != nil {
 		return errStoreNode
 	}
-	setYAMLMappingValue(node, "enabled", boolYAMLNode(true))
+	if !configured {
+		setYAMLMappingValue(node, "enabled", boolYAMLNode(true))
+	}
 	setYAMLMappingValue(node, "store", storeNode)
 	updated, errConfig := pluginInstanceConfigFromNode(node)
 	if errConfig != nil {

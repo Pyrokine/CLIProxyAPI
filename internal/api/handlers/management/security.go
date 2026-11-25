@@ -605,7 +605,7 @@ func (h *Handler) DeleteRateLimitBan(c *gin.Context) {
 	}
 
 	now := time.Now()
-	changed := false
+	changed, unbanned := false, false
 	h.attemptsMu.Lock()
 	if ai := h.failedAttempts[body.IP]; ai != nil {
 		changed = len(ai.failures) > 0 || ai.lastFailureFingerprint != "" || !ai.lastCountedFailureAt.IsZero()
@@ -617,7 +617,7 @@ func (h *Handler) DeleteRateLimitBan(c *gin.Context) {
 			ai.failures = ai.failures[:0]
 			ai.lastActivity = now
 			h.appendRateLimitEventLocked(rateLimitEventManualUnban, body.IP, now, bannedUntil, ai.banCount)
-			changed = true
+			changed, unbanned = true, true
 		}
 		ai.failures = ai.failures[:0]
 		ai.blockedUntil = time.Time{}
@@ -625,9 +625,30 @@ func (h *Handler) DeleteRateLimitBan(c *gin.Context) {
 		ai.lastFailureFingerprint = ""
 		ai.lastCountedFailureAt = time.Time{}
 	}
-	h.attemptsMu.Unlock()
-	if changed {
-		h.persistRateLimitState()
+	var snapshot rateLimitPersistedState
+	if changed && h.stateStore != nil {
+		snapshot = h.rateLimitStateSnapshotLocked(now)
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	h.attemptsMu.Unlock()
+
+	result := gin.H{"status": "ok", "unbanned": unbanned}
+	if changed {
+		ctx := mutationRequestContext(c)
+		RecordMutationEffect(ctx, "security.runtime_applied", "security")
+		if h.stateStore == nil {
+			result["persistence_pending"] = true
+			failMutation(ctx)
+		} else if err := h.saveRateLimitState(snapshot); err != nil {
+			h.rateLimitPersistenceAvailable.Store(false)
+			h.persistRateLimitState()
+			log.WithError(err).Warn("failed to save manual rate limit change; retrying")
+			result["persistence_pending"] = true
+			failMutation(ctx)
+		} else {
+			h.rateLimitPersistenceAvailable.Store(true)
+			RecordMutationEffect(ctx, "security.persisted", "security")
+			CompleteMutation(ctx)
+		}
+	}
+	c.JSON(http.StatusOK, result)
 }

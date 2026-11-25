@@ -79,7 +79,7 @@ func validMutationEffect(effect MutationEffect) bool {
 	}
 	if effect.Kind != "quota.consumed" {
 		switch parts[0] {
-		case "configuration", "credential", "task", "plugin", "model", "usage", "logging", "update":
+		case "configuration", "credential", "task", "plugin", "model", "usage", "logging", "update", "security":
 		default:
 			return false
 		}
