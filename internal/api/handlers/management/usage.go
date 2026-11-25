@@ -1,6 +1,7 @@
 package management
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,15 +10,20 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
-const usageBackupKeyHeader = "X-Usage-Backup-Key"
+const (
+	usageBackupKeyHeader       = "X-Usage-Backup-Key"
+	usageBackupKeyBase64Header = "X-Usage-Backup-Key-Base64"
+)
 
 type usageQueueRecord []byte
 
@@ -205,9 +211,8 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query usage export"})
 		return
 	}
-	secret := usageBackupSecret(c)
-	if secret == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "usage backup encryption key unavailable"})
+	secret, ok := usageBackupSecret(c, "usage backup encryption key unavailable")
+	if !ok {
 		return
 	}
 	exportedAt := time.Now().UTC()
@@ -244,26 +249,38 @@ func writeUsageBackupTooLarge(c *gin.Context) {
 	)
 }
 
-func usageBackupSecret(c *gin.Context) string {
-	if c == nil || c.Request == nil {
-		return ""
-	}
+func usageBackupSecret(c *gin.Context, missingError string) (string, bool) {
 	if secret := strings.TrimSpace(c.GetHeader(usageBackupKeyHeader)); secret != "" {
-		return secret
+		return secret, true
 	}
-	provided := strings.TrimSpace(c.GetHeader("Authorization"))
-	if provided != "" {
-		parts := strings.SplitN(provided, " ", 2)
-		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
-			return strings.TrimSpace(parts[1])
+	if encoded := strings.TrimSpace(c.GetHeader(usageBackupKeyBase64Header)); encoded != "" {
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		secret := strings.TrimSpace(string(decoded))
+		if err != nil || !utf8.Valid(decoded) || secret == "" {
+			rejectMutation(c.Request.Context())
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid usage backup password encoding"})
+			return "", false
 		}
-		return provided
+		return secret, true
 	}
-	return strings.TrimSpace(c.GetHeader("X-Management-Key"))
+	secret := strings.TrimSpace(c.GetHeader("Authorization"))
+	if secret != "" {
+		if prefix, value, ok := strings.Cut(secret, " "); ok && strings.EqualFold(prefix, "Bearer") {
+			secret = strings.TrimSpace(value)
+		}
+	} else {
+		secret = strings.TrimSpace(c.GetHeader("X-Management-Key"))
+	}
+	if secret == "" && missingError != "" {
+		rejectMutation(c.Request.Context())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": missingError, "code": "usage_backup_password_required"})
+		return "", false
+	}
+	return secret, true
 }
 
-// ImportUsageStatistics merges an encrypted v3 backup or any supported legacy
-// payload into SQLite. Encrypted backups require the key that created them.
+// ImportUsageStatistics merges a usage backup or supported legacy payload into
+// SQLite. Encrypted backups require the password or key that created them.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	if h == nil || h.usagePersister == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persister unavailable"})
@@ -292,12 +309,13 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	secret := usageBackupSecret(c)
+	missingError := ""
 	if usage.IsUsageBackup(data) {
-		if secret == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "usage backup decryption key unavailable"})
-			return
-		}
+		missingError = "usage backup decryption key unavailable"
+	}
+	secret, ok := usageBackupSecret(c, missingError)
+	if !ok {
+		return
 	}
 	result, err := h.usagePersister.ImportContextWithSecret(ctx, data, secret)
 	if err != nil {
@@ -512,7 +530,7 @@ func (h *Handler) TrimUsageStatistics(c *gin.Context) {
 		RecordMutationEffect(c.Request.Context(), "usage.deleted", "usage")
 	}
 	CompleteMutation(c.Request.Context())
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "deleted": deleted})
 }
 
 // TrimPreviewUsageStatistics returns a preview of what would be cleaned by Trim.
@@ -521,6 +539,19 @@ func (h *Handler) TrimPreviewUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persister unavailable"})
 		return
 	}
-	preview := h.usagePersister.TrimPreview()
+	ctx := c.Request.Context()
+	preview, err := h.usagePersister.TrimPreview(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if errors.Is(err, usage.ErrTrimPreviewUnavailable) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			return
+		}
+		log.WithError(err).Warn("failed to read usage trim preview")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query usage trim preview"})
+		return
+	}
 	c.JSON(http.StatusOK, preview)
 }

@@ -135,9 +135,13 @@ Use one of these methods:
 2. Stop writers before copying the complete SQLite file set
 3. Use SQLite online backup tooling that is compatible with the deployed environment
 
-Portable backups are authenticated and encrypted. Import normally uses the same management credential as export. When
-moving data between instances with different management credentials, provide the same dedicated `X-Usage-Backup-Key`
-value for export and import. Transfer it separately from the archive, then remove it from shell history and logs
+Portable backups are authenticated and encrypted. In the management panel, enter a backup password when you export
+and enter the same password when you import. This password also protects exported CSV and JSON request details
+
+API clients can send an ASCII password in `X-Usage-Backup-Key`, or send a UTF-8 password in standard Base64 in
+`X-Usage-Backup-Key-Base64`. When the client omits both headers, the server uses the management credential supplied
+with the request. For a backup created this way, enter the original management credential as the import password.
+Transfer the password separately from the archive and keep it out of shell history and logs
 
 Portable backup v4 preserves immutable request-time pricing receipts. The importer remains compatible with v3 archives,
 whose historical events have no request-time receipt. Import and historical repricing may update the current-catalog

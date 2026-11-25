@@ -1022,21 +1022,27 @@ type cleanPreviewFile struct {
 	SizeBytes int64  `json:"size_bytes"`
 }
 
+// ErrTrimPreviewUnavailable indicates that retention is configured but the store is not ready.
+var ErrTrimPreviewUnavailable = errors.New("usage database is not ready")
+
 // TrimPreview reports what Trim would delete without actually deleting it.
-func (p *Persister) TrimPreview() TrimPreviewResult {
+func (p *Persister) TrimPreview(ctx context.Context) (TrimPreviewResult, error) {
 	if p == nil {
-		return TrimPreviewResult{}
+		return TrimPreviewResult{}, ErrTrimPreviewUnavailable
 	}
 	p.mu.RLock()
 	s := p.store
 	retention := p.retention
 	p.mu.RUnlock()
-	if s == nil || s.db == nil || retention.Days <= 0 {
-		return TrimPreviewResult{}
+	if retention.Days <= 0 {
+		return TrimPreviewResult{}, nil
+	}
+	if s == nil || s.db == nil {
+		return TrimPreviewResult{}, ErrTrimPreviewUnavailable
 	}
 	cutoff := retentionCutoff(time.Now(), retention.Days).UnixNano()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	rows, err := s.db.QueryContext(
@@ -1046,8 +1052,7 @@ func (p *Persister) TrimPreview() TrimPreviewResult {
 		cutoff,
 	)
 	if err != nil {
-		log.Warnf("usage: trim preview: %v", err)
-		return TrimPreviewResult{}
+		return TrimPreviewResult{}, fmt.Errorf("query trim preview: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -1057,13 +1062,15 @@ func (p *Persister) TrimPreview() TrimPreviewResult {
 		var day string
 		var count int64
 		if err := rows.Scan(&day, &count); err != nil {
-			log.Warnf("usage: trim preview scan: %v", err)
-			continue
+			return TrimPreviewResult{}, fmt.Errorf("scan trim preview: %w", err)
 		}
 		// 256 bytes/row is a back-of-envelope estimate for the dashboard.
 		size := count * 256
 		details = append(details, cleanPreviewFile{Date: day, SizeBytes: size})
 		total += size
+	}
+	if err := rows.Err(); err != nil {
+		return TrimPreviewResult{}, fmt.Errorf("read trim preview rows: %w", err)
 	}
 
 	result := TrimPreviewResult{
@@ -1077,7 +1084,7 @@ func (p *Persister) TrimPreview() TrimPreviewResult {
 			Newest: details[len(details)-1].Date,
 		}
 	}
-	return result
+	return result, nil
 }
 
 // Retention returns the current retention configuration.

@@ -71,8 +71,8 @@ func TestRetentionCutoffHandlesExtremeDaysAndPreservesEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &Persister{store: store, retention: config.UsageRetention{Days: 132000}}
-	if preview := p.TrimPreview(); preview.FilesCount != 0 {
-		t.Fatalf("preview=%+v", preview)
+	if preview, err := p.TrimPreview(context.Background()); err != nil || preview.FilesCount != 0 {
+		t.Fatalf("preview=%+v err=%v", preview, err)
 	}
 	if err := p.Trim(); err != nil {
 		t.Fatal(err)
@@ -99,6 +99,9 @@ func TestTrimPropagatesSQLiteFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &Persister{store: store, retention: config.UsageRetention{Days: 1}}
+	if _, err := p.TrimPreview(t.Context()); err == nil {
+		t.Fatal("expected trim preview to report the SQLite failure")
+	}
 	if err := p.Trim(); err == nil {
 		t.Fatal("expected SQLite failure")
 	}

@@ -171,9 +171,13 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "event export requires the full view"})
 		return
 	}
-	if export && usageBackupSecret(c) == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "usage event export key unavailable"})
-		return
+	var secret string
+	if export {
+		var ok bool
+		secret, ok = usageBackupSecret(c, "usage event export key unavailable")
+		if !ok {
+			return
+		}
 	}
 
 	speed, errSpeed := usage.ParseRequestSpeedFilter(c.Query("speed"))
@@ -305,7 +309,7 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	}
 
 	if export {
-		if err := usage.PrepareUsageEventExport(events, usageBackupSecret(c)); err != nil {
+		if err := usage.PrepareUsageEventExport(events, secret); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to seal usage event export"})
 			return
 		}
